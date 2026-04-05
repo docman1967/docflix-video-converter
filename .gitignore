@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# App runtime files
+logs/
+preferences.json
+
+# Generated assets (derived from logo.png)
+logo_transparent.png
+
+# OS
+.DS_Store
+Thumbs.db
