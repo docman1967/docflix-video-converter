@@ -6,7 +6,7 @@ A batch video converter that encodes files to **H.265/HEVC** using `ffmpeg`, wit
 
 ## Screenshots
 
-> *Desktop GUI with file queue, settings panel, and log output.*
+![Docflix Video Converter](screenshot.png)
 
 ---
 
