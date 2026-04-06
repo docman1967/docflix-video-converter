@@ -501,6 +501,9 @@ class VideoConverter:
                 """Add subtitle stream arguments."""
                 sub_settings = settings.get('subtitle_settings', {})
                 if not sub_settings:
+                    # No per-file subtitle config — map ALL streams explicitly
+                    # so ffmpeg doesn't silently drop all but the first subtitle
+                    c.extend(['-map', '0:v?', '-map', '0:a?', '-map', '0:s?'])
                     c.extend(['-c:s', 'copy'])
                 else:
                     c.extend(['-map', '0:v?', '-map', '0:a?'])
