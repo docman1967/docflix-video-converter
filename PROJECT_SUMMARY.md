@@ -1,6 +1,6 @@
 # Video Converter — Project Summary
 
-**Last Updated:** 2026-04-06  
+**Last Updated:** 2026-04-06 (rev 2)  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/`  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -224,15 +224,16 @@ git push
 
 2. **Audio handling** — Default audio codec is AC3 (Dolby Digital) at 320k. Can be changed per-file via settings override or globally in Default Settings.
 
-3. **Subtitle handling** — The desktop GUI supports per-stream subtitle format control. Fixed bug where multiple subtitle streams (e.g. forced + full) were not all preserved correctly due to incorrect ffmpeg `-c:s` stream specifier usage.
+3. **Subtitle handling** — The desktop GUI supports per-stream subtitle format control. All subtitle streams are now correctly preserved in both the default conversion path and the per-file subtitle dialog path. Both bugs have been fixed and verified.
 
 ---
 
 ## Change Log
 
 ### 2026-04-06
-1. **Multi-subtitle stream bug fix** — Fixed ffmpeg command generation for files with more than one subtitle stream. Previously, only the first subtitle stream was correctly handled; subsequent streams had their codec specifier overwritten. Fixed by using per-output-stream specifiers (`-c:s:0`, `-c:s:1`, etc.) instead of a single `-c:s` flag.
-2. **✅ Clear Finished button** — Added to the control bar. Removes all successfully completed (`✅`) and skipped (`⏭️`) files from the queue, leaving failed (`❌`) and pending files for retry. Useful when re-running failed files with different settings (e.g. disabling HW Decode after a CUDA error).
+1. **Multi-subtitle stream bug fix (part 2)** — Fixed the default conversion path (no subtitle dialog used) dropping all but the first subtitle stream. Root cause: ffmpeg's default stream selection only picks one subtitle track unless explicitly told otherwise. Fixed by replacing `-c:s copy` with `-map 0:v? -map 0:a? -map 0:s? -c:s copy` so all subtitle streams are always preserved. The `?` suffix makes each map conditional so files with no subtitles are unaffected.
+2. **Multi-subtitle stream bug fix (part 1)** — Fixed ffmpeg command generation in the per-file subtitle dialog path for files with more than one subtitle stream. Previously, only the first subtitle stream was correctly handled; subsequent streams had their codec specifier overwritten. Fixed by using per-output-stream specifiers (`-c:s:0`, `-c:s:1`, etc.) instead of a single `-c:s` flag.
+3. **✅ Clear Finished button** — Added to the control bar. Removes all successfully completed (`✅`) and skipped (`⏭️`) files from the queue, leaving failed (`❌`) and pending files for retry. Useful when re-running failed files with different settings (e.g. disabling HW Decode after a CUDA error).
 
 ### 2026-04-05
 1. **Web GUI removed** — `video_converter_gui.html`, `video_converter_server.py`, and `launch_gui.sh` removed. The Tkinter desktop app is the sole interface going forward.
