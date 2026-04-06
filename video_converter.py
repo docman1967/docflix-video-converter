@@ -1269,6 +1269,9 @@ class VideoConverterApp:
         ttk.Button(control_frame, text="🗑️ Clear",
                   command=self.clear_files).pack(side='left', padx=2)
 
+        ttk.Button(control_frame, text="✅ Clear Finished",
+                  command=self.clear_finished).pack(side='left', padx=2)
+
         ttk.Separator(control_frame, orient='vertical').pack(side='left', fill='y', padx=6)
 
         ttk.Button(control_frame, text="⬆ Up",
@@ -2535,6 +2538,26 @@ class VideoConverterApp:
             self.file_tree.delete(item)
         self.files = []
         self.add_log("File list cleared.", 'INFO')
+
+    def clear_finished(self):
+        """Remove all successfully completed and skipped files from the queue."""
+        remove_indices = []
+        for i, item in enumerate(self.file_tree.get_children()):
+            status = self.file_tree.item(item, 'values')[4]
+            if status.startswith('✅') or status.startswith('⏭️'):
+                remove_indices.append(i)
+
+        if not remove_indices:
+            self.add_log("No finished files to clear.", 'INFO')
+            return
+
+        # Remove in reverse order so indices stay valid
+        items = self.file_tree.get_children()
+        for i in reversed(remove_indices):
+            self.file_tree.delete(items[i])
+            del self.files[i]
+
+        self.add_log(f"Cleared {len(remove_indices)} finished file(s) from queue.", 'INFO')
 
     def refresh_files(self):
         """Refresh file list from working directory.
