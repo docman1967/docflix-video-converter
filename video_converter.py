@@ -504,6 +504,7 @@ class VideoConverter:
                     c.extend(['-c:s', 'copy'])
                 else:
                     c.extend(['-map', '0:v?', '-map', '0:a?'])
+                    out_sub_idx = 0  # output subtitle stream counter
                     for stream_index, ss in sub_settings.items():
                         if not ss.get('keep', True):
                             continue
@@ -513,7 +514,8 @@ class VideoConverter:
                         if fmt == 'extract only':
                             fmt = 'copy'
                         c.extend(['-map', f"0:{stream_index}"])
-                        c.extend(['-c:s', fmt])
+                        c.extend([f'-c:s:{out_sub_idx}', fmt])
+                        out_sub_idx += 1
 
             # ── Log what we're about to do ──
             video_encoder_name = codec_info['gpu_encoder'] if encoder == 'gpu' else codec_info['cpu_encoder']
