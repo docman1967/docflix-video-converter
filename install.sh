@@ -34,7 +34,6 @@ APP_FILES=(
     "video_converter.py"
     "run_converter.sh"
     "logo.png"
-    "logo_transparent.png"
 )
 
 #───────────────────────────────────────────────────────────────────────────────
@@ -225,6 +224,31 @@ done
 # Ensure scripts are executable
 chmod +x "$INSTALL_DIR/run_converter.sh"
 chmod +x "$INSTALL_DIR/video_converter.py"
+
+# Generate logo_transparent.png from logo.png (removes white background)
+if python3 -c "from PIL import Image" &>/dev/null; then
+    info "Generating logo_transparent.png..."
+    python3 -W ignore -c "
+from PIL import Image
+from pathlib import Path
+install_dir = Path('$INSTALL_DIR')
+src = install_dir / 'logo.png'
+dst = install_dir / 'logo_transparent.png'
+img = Image.open(src).convert('RGBA')
+pixels = list(img.getdata())
+new_pixels = [(r, g, b, 0) if r > 200 and g > 200 and b > 200 else (r, g, b, a) for r, g, b, a in pixels]
+out = Image.new('RGBA', img.size)
+out.putdata(new_pixels)
+out.save(dst, 'PNG')
+"
+    if [[ -f "$INSTALL_DIR/logo_transparent.png" ]]; then
+        success "logo_transparent.png generated"
+    else
+        warn "logo_transparent.png generation failed — app will use emoji fallback"
+    fi
+else
+    warn "Pillow not available yet — logo_transparent.png will be generated on first run"
+fi
 
 #── 6. Install icon ────────────────────────────────────────────────────────────
 header "Installing icon..."
