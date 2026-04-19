@@ -1,6 +1,6 @@
 # Video Converter — Project Summary
 
-**Last Updated:** 2026-04-06 (rev 2)  
+**Last Updated:** 2026-04-06 (rev 3)  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/`  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -12,10 +12,10 @@
 
 | File | Size | Modified | Description |
 |------|------|----------|-------------|
-| `video_converter.py` | ~166 KB / 3,828 lines | 2026-04-06 | Primary Tkinter desktop GUI app |
+| `video_converter.py` | ~166 KB / 3,831 lines | 2026-04-06 | Primary Tkinter desktop GUI app |
 | `convert_videos.sh` | ~16 KB / 455 lines | 2026-03-28 | Standalone bash CLI batch converter |
 | `run_converter.sh` | ~2 KB / 57 lines | 2026-04-05 | Launcher for Tkinter desktop app |
-| `install.sh` | ~11 KB / 285 lines | 2026-04-05 | Installer / uninstaller |
+| `install.sh` | ~11 KB / 309 lines | 2026-04-06 | Installer / uninstaller |
 | `logo.png` | 136 KB | 2026-03-27 | Original app logo (RGB, 840×958) |
 | `logo_transparent.png` | 100 KB | 2026-04-05 | Background-stripped version used in title bar |
 | `screenshot.png` | — | 2026-04-06 | App screenshot (used in GitHub README) |
@@ -138,6 +138,16 @@ Installs the app to user-local directories — no `sudo` required.
 | `~/.local/share/applications/docflix.desktop` | System app menu entry |
 | `~/.local/bin/docflix` | Terminal launch command |
 
+**Steps performed by the installer:**
+1. Check all required source files are present
+2. Check and report missing system dependencies (`python3`, `tkinter`, `ffmpeg`, `pip3`)
+3. Install Python packages (`tkinterdnd2`, `Pillow`) via `pip install --user`
+4. Copy app files to `~/.local/share/docflix/`
+5. Generate `logo_transparent.png` from `logo.png` using Pillow
+6. Install icon to `~/.local/share/icons/`
+7. Create `.desktop` entry for system app menu
+8. Create `docflix` terminal command in `~/.local/bin/`
+
 ```bash
 ./install.sh             # Install or update
 ./install.sh --uninstall # Remove all installed files
@@ -231,7 +241,8 @@ git push
 ## Change Log
 
 ### 2026-04-06
-1. **Multi-subtitle stream bug fix (part 2)** — Fixed the default conversion path (no subtitle dialog used) dropping all but the first subtitle stream. Root cause: ffmpeg's default stream selection only picks one subtitle track unless explicitly told otherwise. Fixed by replacing `-c:s copy` with `-map 0:v? -map 0:a? -map 0:s? -c:s copy` so all subtitle streams are always preserved. The `?` suffix makes each map conditional so files with no subtitles are unaffected.
+1. **install.sh bug fix** — `logo_transparent.png` was listed as a required source file but is excluded from the GitHub repo (it's a generated file). Fresh clones from GitHub would fail at the source file check. Fixed by removing it from the required files list and adding a generation step to the installer that creates it from `logo.png` using Pillow. Falls back gracefully to the 🎬 emoji in the title bar if generation fails.
+2. **Multi-subtitle stream bug fix (part 2)** — Fixed the default conversion path (no subtitle dialog used) dropping all but the first subtitle stream. Root cause: ffmpeg's default stream selection only picks one subtitle track unless explicitly told otherwise. Fixed by replacing `-c:s copy` with `-map 0:v? -map 0:a? -map 0:s? -c:s copy` so all subtitle streams are always preserved. The `?` suffix makes each map conditional so files with no subtitles are unaffected.
 2. **Multi-subtitle stream bug fix (part 1)** — Fixed ffmpeg command generation in the per-file subtitle dialog path for files with more than one subtitle stream. Previously, only the first subtitle stream was correctly handled; subsequent streams had their codec specifier overwritten. Fixed by using per-output-stream specifiers (`-c:s:0`, `-c:s:1`, etc.) instead of a single `-c:s` flag.
 3. **✅ Clear Finished button** — Added to the control bar. Removes all successfully completed (`✅`) and skipped (`⏭️`) files from the queue, leaving failed (`❌`) and pending files for retry. Useful when re-running failed files with different settings (e.g. disabling HW Decode after a CUDA error).
 
