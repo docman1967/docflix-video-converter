@@ -3586,7 +3586,7 @@ class VideoConverterApp:
         # ── Filters menu ──
         filter_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Filters", menu=filter_menu)
-        filter_menu.add_command(label="Remove HI  [brackets] (parens) Speaker:",
+        filter_menu.add_command(label="Remove HI  [brackets] (parens)",
                                 command=lambda: apply_filter(filter_remove_hi, "Remove HI"))
         filter_menu.add_command(label="Remove Tags  <i> {\\an8}",
                                 command=lambda: apply_filter(filter_remove_tags, "Remove Tags"))
