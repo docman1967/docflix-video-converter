@@ -7,6 +7,7 @@ __pycache__/
 # App runtime files
 logs/
 preferences.json
+PROJECT_SUMMARY.md
 
 # Generated assets (derived from logo.png)
 logo_transparent.png
