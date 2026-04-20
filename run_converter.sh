@@ -45,7 +45,7 @@ echo "Log file: $LOG_FILE"
 echo ""
 
 # Launch in background; stdout and stderr both go to the log file
-nohup python3 "$SCRIPT_DIR/video_converter.py" >> "$LOG_FILE" 2>&1 &
+nohup python3 "$SCRIPT_DIR/video_converter.py" "$@" >> "$LOG_FILE" 2>&1 &
 APP_PID=$!
 
 echo "Running in background (PID $APP_PID)"

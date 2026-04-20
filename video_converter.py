@@ -6470,6 +6470,21 @@ def main():
     # Now show it — single, clean appearance on the right monitor
     root.deiconify()
 
+    # Add files passed as command-line arguments (e.g. from "Open with" in file manager)
+    if len(sys.argv) > 1:
+        added = 0
+        for arg in sys.argv[1:]:
+            p = Path(arg)
+            if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS:
+                added += app._add_file_to_list(str(p))
+            elif p.is_dir():
+                # If a directory is passed, set it as working dir and scan
+                app.working_dir = p
+                app.refresh_file_list()
+                break
+        if added:
+            app.add_log(f"Added {added} file(s) from command line", 'INFO')
+
     # Run
     root.mainloop()
 

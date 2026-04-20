@@ -263,13 +263,14 @@ cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
 Name=Docflix Video Converter
 Comment=Batch convert MKV videos to H.265/HEVC
-Exec=bash $INSTALL_DIR/run_converter.sh
+Exec=bash $INSTALL_DIR/run_converter.sh %F
 Path=$INSTALL_DIR
 Terminal=false
 Type=Application
 Icon=$ICON_FILE
 Categories=AudioVideo;Video;
 Keywords=video;convert;hevc;h265;mkv;ffmpeg;
+MimeType=video/x-matroska;video/mp4;video/x-msvideo;video/quicktime;video/x-ms-wmv;video/x-flv;video/webm;
 StartupNotify=false
 EOF
 
