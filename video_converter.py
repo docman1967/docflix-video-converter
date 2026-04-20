@@ -611,7 +611,7 @@ def filter_remove_tags(cues):
 BUILTIN_AD_PATTERNS = [
     r'subtitl(es|ed)\s+by\b.*',
     r'synced?\s*((&|and)\s*corrected)?\s+by\b.*',
-    r'caption(s|ed)\s+by\b.*',
+    r'caption(s|ed|ing)?\s+by\b.*',
     r'translated\s+by\b.*',
     r'corrections?\s+by\b.*',
     r'encoded\s+by\b.*',
@@ -644,7 +644,7 @@ def filter_remove_ads(cues, custom_patterns=None):
     url_pattern = re.compile(r'(?i)^\s*(?:https?://|www\.)\S+\s*$', re.MULTILINE)
     # Quick check to detect if a cue has any ad content
     ad_check_parts = [
-        r'(subtitl(es|ed)|synced?|caption|translated|corrections?|encoded|ripped)\s+by\b',
+        r'(subtitl(es|ed)|synced?|caption(s|ed|ing)?|translated|corrections?|encoded|ripped)\s+by\b',
         r'opensubtitles', r'addic7ed', r'subscene',
     ]
     if custom_patterns:
