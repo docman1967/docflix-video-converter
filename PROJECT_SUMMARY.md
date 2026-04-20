@@ -12,7 +12,7 @@
 
 | File | Size | Modified | Description |
 |------|------|----------|-------------|
-| `video_converter.py` | ~272 KB / 6,201 lines | 2026-04-20 | Primary Tkinter desktop GUI app |
+| `video_converter.py` | ~288 KB / 6,525 lines | 2026-04-20 | Primary Tkinter desktop GUI app |
 | `convert_videos.sh` | ~20 KB / 541 lines | 2026-04-19 | Standalone bash CLI batch converter |
 | `run_converter.sh` | ~2 KB / 57 lines | 2026-04-05 | Launcher for Tkinter desktop app |
 | `install.sh` | ~11 KB / 309 lines | 2026-04-06 | Installer / uninstaller |
@@ -76,9 +76,9 @@ The primary interface. Launched via `run_converter.sh`, the `docflix` terminal c
   - 📎 icon indicator on files with external subs attached
   - Folder scan prompts to attach matching subtitle files found alongside videos
 - **Internal subtitle** (🎞️) dialog — per-stream format control for subtitle tracks already in the source file (double-click a file to open)
-- **Subtitle editor** — full-featured text editor for internal subtitle streams:
+- **Subtitle editor** — full-featured text editor for internal streams and external subtitle files:
   - Direct inline text editing (double-click a cell)
-  - Filters: Remove HI `[brackets]` `(parens)`, Remove Tags, Remove Ads/Credits, Remove Speaker Labels, Remove Music Notes, Remove Duplicates, Merge Short Cues
+  - Filters menu: Remove HI (includes speaker labels), Remove Tags, Remove Ads/Credits, Remove Speaker Labels, Remove Music Notes, Remove Duplicates, Merge Short Cues, Fix ALL CAPS (with custom name support)
   - Custom ad pattern management (saved to preferences)
   - Search & Replace across all cues
   - Timing tools: offset (shift ±ms) and stretch (scale by factor)
@@ -89,7 +89,9 @@ The primary interface. Launched via `run_converter.sh`, the `docflix` terminal c
   - Video preview at selected cue timestamp (via ffplay)
   - Export edited subtitle as standalone `.srt` file
   - Right-click context menu (preview, split, join, delete)
+  - External subtitle editing via ✏️ button in External Subtitles dialog
   - Edited subtitles are automatically embedded during encoding
+- **"Open with" support** — app appears in file manager right-click menu for video files; also accepts files via command line (`docflix video.mkv`)
 - **Batch ETA** — real-time estimated time remaining for the entire batch, based on rolling average encoding speed weighted by file duration
 - **Estimated output size** calculation before conversion
 - **Media info** panel (shows codec, resolution, duration, streams)
@@ -349,25 +351,39 @@ git push
 ### 2026-04-20
 1. **NVENC hwaccel fix** — Removed `-hwaccel_output_format cuda` from the NVENC backend. Sources with mid-stream resolution changes (e.g. varying letterbox ratios) caused `scale_cuda` filter reinitialization failures ("Error reinitializing filters / Function not implemented"). Without `-hwaccel_output_format cuda`, frames pass through system memory between decode and encode; CUDA decoding and NVENC encoding are still hardware-accelerated with negligible performance difference.
 2. **Batch ETA** — Added real-time estimated time remaining for the entire batch during multi-file encoding. Uses rolling average encoding speed (video-seconds per wall-second) from completed files, weighted by remaining file durations. Displayed as "Batch: Xh Ym left" in the status bar. Self-corrects as files complete. Bootstraps from current file progress before the first file finishes.
-3. **Subtitle editor** — Full-featured inline text editor for internal subtitle streams. Accessed via ✏️ button in the Internal Subtitles dialog or by double-clicking a file. Features:
+3. **Subtitle editor** — Full-featured inline text editor for both internal subtitle streams and external subtitle files. Accessed via ✏️ button in the Internal/External Subtitles dialog or by double-clicking a file. Features:
    - SRT parser with round-trip read/write
    - Inline text editing (double-click cell, Ctrl+Enter to save)
-   - Filter menu: Remove HI, Remove Tags, Remove Ads/Credits, Remove Speaker Labels, Remove Music Notes, Remove Duplicates, Merge Short Cues
-   - Custom ad pattern management with regex support (saved to preferences)
+   - Menu bar with Filters, Edit, and Timing menus (replaced toolbar buttons)
+   - **Filters menu:**
+     - Remove HI — strips `[brackets]`, `(parentheses)`, and speaker labels (`Name:`) in one pass; handles multi-line brackets and unclosed brackets; cleans orphaned colons and leftover newlines
+     - Remove Tags — strips `<i>`, `</i>`, `{\an8}`, etc.
+     - Remove Ads/Credits — strips "Subtitled by...", site names, URLs (only when paired with other ad content); supports custom patterns saved to preferences
+     - Remove Speaker Labels — standalone filter for `Name:` labels; handles mixed case; avoids timestamps and single-char labels
+     - Remove Music Notes — removes cues containing only `♪`/`♫` symbols (keeps lyrics with text)
+     - Remove Duplicates — removes consecutive identical cues
+     - Merge Short Cues — combines sentence fragments with <1s gap
+     - Fix ALL CAPS — converts all-caps to sentence case with proper noun capitalization (days, months, countries, cities, holidays, abbreviations); custom character name support via dialog
+     - Manage Ad Patterns — view built-in patterns, add/remove custom patterns (saved to preferences)
    - Search & Replace across all cues
    - Timing tools: offset (shift ±ms) and stretch (scale by factor)
    - Split cue at midpoint / Join consecutive cues
    - Per-action Undo/Redo stack (Ctrl+Z / Ctrl+Y) with full reset
-   - Color-coded rows: yellow=modified, blue=HI, pink=tags, orange=long lines (>42 chars), green=search match
+   - Color-coded rows: yellow=modified, blue=HI, pink=tags, orange=long lines (>42 chars), green=search match; index-independent (survives row deletion)
    - Video preview at cue timestamp via ffplay (right-click or ▶ button)
    - Export edited subtitle as standalone `.srt` file
-   - Right-click context menu
-   - Edited subtitles automatically embedded during encoding (replaces original stream via additional ffmpeg input)
-4. **Double-click to open subtitles** — Double-clicking a file in the queue opens the Internal Subtitles dialog directly.
-5. **Notify moved to settings** — Sound notification controls (enable, sound selection, preview) moved from the main toolbar to Default Settings dialog to reduce main page clutter.
-6. **Scroll bleed-through fix** — Internal Subtitles dialog and subtitle editor now use local widget scroll bindings instead of `bind_all`, preventing mousewheel events from bleeding through to parent windows.
-7. **Speaker label removal improved** — Now handles mixed-case speaker names (e.g. `narrator:`, `mom:`) while avoiding false positives on timestamps (e.g. `2:30`, `12:00`) and single-character labels.
-8. **Ad removal improved** — URL-only lines (`www.*`) are only removed when paired with other ad content or when the cue contains nothing but a URL. Dialogue mentioning websites (e.g. "Go to www.fbi.gov") is preserved.
+   - Right-click context menu (preview, split, join, delete)
+   - External subtitle editing — ✏️ button in External Subtitles dialog; reads/writes directly to `.srt` files; converts other formats via ffmpeg
+   - Edited internal subtitles automatically embedded during encoding (replaces original stream via additional ffmpeg input)
+4. **Double-click to open subtitles** — Double-clicking a file in the queue opens the Internal Subtitles dialog directly. Uses `after_idle` scheduling with `grab_set` deferred to prevent empty window rendering.
+5. **"Open with" support** — App appears in the file manager's right-click "Open with" menu for video files. Desktop file includes `MimeType` for video MIME types and `%F` in Exec. Files passed as command-line arguments are auto-added to the queue on startup. Also works from terminal: `docflix /path/to/video.mkv`.
+6. **Notify moved to settings** — Sound notification controls (enable, sound selection, preview) moved from the main toolbar to Default Settings dialog to reduce main page clutter.
+7. **Scroll bleed-through fix** — Internal Subtitles dialog and subtitle editor now use local widget scroll bindings instead of `bind_all`, preventing mousewheel events from bleeding through to parent windows.
+8. **Speaker label removal improved** — Now handles mixed-case speaker names (e.g. `narrator:`, `mom:`) while avoiding false positives on timestamps (e.g. `2:30`, `12:00`) and single-character labels. Consumes trailing newlines after labels.
+9. **Ad removal improved** — URL-only lines (`www.*`) are only removed when paired with other ad content or when the cue contains nothing but a URL. Dialogue mentioning websites (e.g. "Go to www.fbi.gov") is preserved. Added `captioning` pattern variant.
+10. **HI removal improved** — Brackets and parentheses now match across newlines (`re.DOTALL`). Unclosed brackets at start of cue (e.g. `[Captioning sponsored\nby NICKELODEON`) are removed. Orphaned colons and newlines cleaned up after removal. Speaker labels included in HI filter for one-pass SDH cleanup.
+11. **External Subtitles dialog fix** — Increased dialog size and minimum height so Add Subtitle File, Save, and Cancel buttons are fully visible. Added proper `grab_set`/`wait_window` for modal behavior.
+12. **Version bumped to 1.2.0.**
 
 ### 2026-04-19
 1. **Multi-GPU support** — Replaced single NVIDIA-only GPU support with a pluggable backend system (`GPU_BACKENDS` dict). Now auto-detects and supports NVIDIA NVENC, Intel QSV, and AMD VAAPI. Each backend defines its own hwaccel flags, encoder names, presets, quality flags, and detection method. UI changed from CPU/GPU radio buttons to a dropdown combobox showing only detected backends. Backward compatible with old `encoder: 'gpu'` preference values. Version bumped to 1.1.0.
