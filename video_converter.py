@@ -449,6 +449,147 @@ def filter_remove_music_notes(cues):
     return result
 
 
+# ── Proper nouns for case conversion ──
+# Words that should always be capitalized after converting from ALL CAPS
+PROPER_NOUNS = {
+    # Days
+    'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+    # Months
+    'january', 'february', 'march', 'april', 'may', 'june',
+    'july', 'august', 'september', 'october', 'november', 'december',
+    # Holidays
+    'christmas', 'easter', 'halloween', 'thanksgiving', 'hanukkah',
+    'kwanzaa', 'valentines', "valentine's", 'ramadan', 'diwali',
+    'passover', 'new year', "new year's", "mother's", "father's",
+    # Countries (common)
+    'america', 'american', 'americans', 'england', 'english',
+    'france', 'french', 'germany', 'german', 'italy', 'italian',
+    'spain', 'spanish', 'china', 'chinese', 'japan', 'japanese',
+    'russia', 'russian', 'canada', 'canadian', 'mexico', 'mexican',
+    'australia', 'australian', 'india', 'indian', 'brazil', 'brazilian',
+    'korea', 'korean', 'ireland', 'irish', 'scotland', 'scottish',
+    'africa', 'african', 'europe', 'european', 'asia', 'asian',
+    'british', 'britain', 'uk', 'usa',
+    # US States (common in dialogue)
+    'california', 'texas', 'florida', 'new york', 'york', 'new jersey', 'jersey',
+    'massachusetts', 'virginia', 'carolina', 'georgia', 'ohio',
+    'michigan', 'illinois', 'pennsylvania', 'arizona', 'colorado',
+    'washington', 'oregon', 'nevada', 'hawaii', 'alaska',
+    'montana', 'connecticut', 'louisiana', 'tennessee', 'kentucky',
+    'minnesota', 'mississippi', 'alabama', 'oklahoma', 'wisconsin',
+    'maryland', 'missouri',
+    # Cities (common)
+    'london', 'paris', 'tokyo', 'beijing', 'moscow', 'berlin',
+    'rome', 'madrid', 'sydney', 'toronto', 'chicago', 'boston',
+    'miami', 'seattle', 'dallas', 'denver', 'atlanta', 'detroit',
+    'houston', 'phoenix', 'vegas', 'portland', 'hollywood',
+    'manhattan', 'brooklyn', 'queens', 'bronx', 'harlem',
+    # Common abbreviations / titles
+    'mr', 'mrs', 'ms', 'dr', 'jr', 'sr', 'st', 'mt',
+    'ave', 'blvd', 'dept', 'sgt', 'cpl', 'pvt', 'lt', 'capt',
+    'gen', 'col', 'cmdr', 'prof', 'rev', 'hon',
+    # Religious / cultural
+    'god', 'jesus', 'christ', 'bible', 'catholic', 'christian',
+    'muslim', 'islam', 'jewish', 'buddhist', 'hindu',
+    # Other proper nouns common in subtitles
+    'internet', 'facebook', 'google', 'twitter', 'instagram',
+    'youtube', 'netflix', 'amazon', 'apple', 'microsoft',
+    'fbi', 'cia', 'nsa', 'dea', 'atf', 'nypd', 'lapd',
+    'nasa', 'nato', 'un', 'eu',
+}
+
+
+def filter_fix_caps(cues, custom_names=None):
+    """Convert ALL CAPS subtitles to proper sentence case.
+
+    - Lowercases everything first
+    - Capitalizes first letter of each sentence/line
+    - Capitalizes standalone "I" and contractions (I'm, I'll, I've, I'd)
+    - Capitalizes known proper nouns (days, months, countries, etc.)
+    - Capitalizes custom names if provided
+
+    custom_names: optional set/list of additional words to capitalize
+    """
+    all_proper = set(PROPER_NOUNS)
+    if custom_names:
+        all_proper.update(w.lower() for w in custom_names)
+
+    # Build a regex that matches any proper noun as a whole word
+    # Sort by length descending so longer matches take priority
+    sorted_nouns = sorted(all_proper, key=len, reverse=True)
+    # Separate multi-word phrases from single words
+    phrases = [n for n in sorted_nouns if ' ' in n]
+    words = [n for n in sorted_nouns if ' ' not in n]
+
+    def fix_case(text):
+        # Only process lines that are mostly uppercase
+        alpha = re.sub(r'[^a-zA-Z]', '', text)
+        if not alpha:
+            return text
+        upper_ratio = sum(1 for c in alpha if c.isupper()) / len(alpha)
+        if upper_ratio < 0.6:
+            return text  # not all-caps, leave it alone
+
+        # Step 1: lowercase everything
+        text = text.lower()
+
+        # Step 2: capitalize first letter of each line
+        lines = text.split('\n')
+        capped_lines = []
+        for line in lines:
+            line = line.strip()
+            if line:
+                # Capitalize after leading dash/hyphen
+                line = re.sub(r'^(-\s*)', lambda m: m.group(1), line)
+                # Capitalize first real letter
+                line = re.sub(r'^(-\s*)?([a-z])',
+                              lambda m: (m.group(1) or '') + m.group(2).upper(), line)
+            capped_lines.append(line)
+        text = '\n'.join(capped_lines)
+
+        # Step 3: capitalize after sentence-ending punctuation (including after quotes)
+        text = re.sub(r'([.!?]["\'\u201d\u2019]?[\s]+)([a-z])',
+                      lambda m: m.group(1) + m.group(2).upper(), text)
+
+        # Step 4: capitalize standalone "I" and contractions
+        text = re.sub(r"\bi\b", "I", text)
+        text = re.sub(r"\bi'(m|ll|ve|d|s)\b", lambda m: "I'" + m.group(1), text)
+
+        # Step 5: capitalize multi-word proper noun phrases
+        for phrase in phrases:
+            pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+            text = pattern.sub(phrase.title(), text)
+
+        # Step 6: capitalize single-word proper nouns
+        # Abbreviations that should be ALL CAPS (not title case)
+        _ALLCAPS_ABBREVS = {
+            'fbi', 'cia', 'nsa', 'dea', 'atf', 'nypd', 'lapd',
+            'nasa', 'nato', 'un', 'eu', 'uk', 'usa', 'tv', 'dna',
+            'ceo', 'cfo', 'cto', 'phd', 'md', 'dj', 'pc', 'id',
+            'ok', 'ad', 'bc', 'ac', 'dc', 'hq',
+        }
+
+        def _cap_word(m):
+            word = m.group(0)
+            lower = word.lower()
+            # Check all-caps abbreviations first
+            if lower in _ALLCAPS_ABBREVS:
+                return lower.upper()
+            # Check proper nouns
+            if lower in all_proper:
+                return word.capitalize()
+            return word
+
+        text = re.sub(r'\b[a-zA-Z]+\b', _cap_word, text)
+
+        return text
+
+    result = []
+    for cue in cues:
+        result.append({**cue, 'text': fix_case(cue['text'])})
+    return result
+
+
 def filter_remove_tags(cues):
     """Remove HTML/formatting tags: <i>, </i>, <b>, <font ...>, {\\an8}, etc."""
     tag_patterns = [
@@ -3438,6 +3579,79 @@ class VideoConverterApp:
                                 command=lambda: apply_filter(filter_remove_duplicates, "Remove Duplicates"))
         filter_menu.add_command(label="Merge Short Cues",
                                 command=lambda: apply_filter(filter_merge_short, "Merge Short Cues"))
+        filter_menu.add_separator()
+
+        # ── Fix ALL CAPS ──
+        # Custom capitalize words stored on the app instance
+        if not hasattr(self, 'custom_cap_words'):
+            self.custom_cap_words = []
+
+        def apply_fix_caps():
+            apply_filter(lambda c: filter_fix_caps(c, self.custom_cap_words),
+                         "Fix ALL CAPS")
+
+        def show_fix_caps_dialog():
+            """Apply Fix Caps with option to add custom names first."""
+            cd = tk.Toplevel(editor)
+            cd.title("Fix ALL CAPS — Custom Names")
+            cd.geometry("420x380")
+            cd.transient(editor)
+            cd.grab_set()
+            self._center_on_main(cd)
+            cd.resizable(True, True)
+
+            ttk.Label(cd, text="Add character names and other proper nouns\n"
+                      "that should be capitalized after conversion.",
+                      justify='center', padding=(10, 10)).pack()
+
+            # Current custom words
+            lf = ttk.LabelFrame(cd, text="Custom Names (in addition to built-in list)",
+                                padding=8)
+            lf.pack(fill='both', expand=True, padx=10, pady=5)
+
+            word_list = tk.Listbox(lf, height=8, font=('Courier', 10))
+            word_list.pack(fill='both', expand=True)
+            for w in self.custom_cap_words:
+                word_list.insert('end', w)
+
+            add_frame = ttk.Frame(lf)
+            add_frame.pack(fill='x', pady=(4, 0))
+            new_word_var = tk.StringVar()
+            word_entry = ttk.Entry(add_frame, textvariable=new_word_var)
+            word_entry.pack(side='left', fill='x', expand=True, padx=(0, 4))
+            word_entry.focus_set()
+
+            def add_word():
+                word = new_word_var.get().strip()
+                if not word:
+                    return
+                if word.lower() not in [w.lower() for w in self.custom_cap_words]:
+                    self.custom_cap_words.append(word)
+                    word_list.insert('end', word)
+                new_word_var.set('')
+
+            def remove_word():
+                sel = word_list.curselection()
+                if sel:
+                    self.custom_cap_words.pop(sel[0])
+                    word_list.delete(sel[0])
+
+            ttk.Button(add_frame, text="Add", command=add_word).pack(side='right')
+            word_entry.bind('<Return>', lambda e: add_word())
+
+            ttk.Label(lf, text="Tip: Add character names like 'John', 'Sarah', 'Dr. House'",
+                      font=('Helvetica', 8), foreground='gray').pack(anchor='w')
+
+            btn_frame = ttk.Frame(cd, padding=(10, 8, 10, 10))
+            btn_frame.pack(fill='x')
+            ttk.Button(btn_frame, text="Remove Selected", command=remove_word).pack(side='left')
+            ttk.Button(btn_frame, text="Apply Fix Caps",
+                       command=lambda: (cd.destroy(), apply_fix_caps())).pack(side='right')
+            ttk.Button(btn_frame, text="Cancel", command=cd.destroy).pack(side='right', padx=4)
+
+        filter_menu.add_command(label="Fix ALL CAPS", command=apply_fix_caps)
+        filter_menu.add_command(label="Fix ALL CAPS + Add Names...",
+                                command=show_fix_caps_dialog)
         filter_menu.add_separator()
 
         def show_ad_patterns_dialog():
