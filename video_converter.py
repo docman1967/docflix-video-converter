@@ -2458,12 +2458,11 @@ class VideoConverterApp:
 
         dlg = tk.Toplevel(self.root)
         dlg.title(f"External Subtitles — {os.path.basename(file_info['name'])}")
-        dlg.geometry("820x420")
+        dlg.geometry("820x500")
         dlg.transient(self.root)
-        dlg.grab_set()
         self._center_on_main(dlg)
         dlg.resizable(True, True)
-        dlg.minsize(700, 300)
+        dlg.minsize(700, 420)
 
         # Working copy of external subs
         subs = [dict(s) for s in file_info.get('external_subs', [])]
@@ -2693,6 +2692,9 @@ class VideoConverterApp:
         ttk.Button(btn_frame, text="Save", command=_on_save).pack(side='right')
 
         _rebuild_list()
+        dlg.update_idletasks()
+        dlg.grab_set()
+        dlg.wait_window()
 
     def show_override_dialog(self):
         """Show a per-file settings override dialog."""
