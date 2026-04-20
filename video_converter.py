@@ -420,8 +420,9 @@ def write_srt(cues):
 def filter_remove_hi(cues):
     """Remove hearing-impaired annotations: [text], (text), ♪ text ♪"""
     hi_patterns = [
-        re.compile(r'\[.*?\]'),           # [music playing]
-        re.compile(r'\(.*?\)'),           # (laughing)
+        re.compile(r'\[.*?\]', re.DOTALL),          # [music playing] — including multi-line
+        re.compile(r'^\[(?!.*\]).*', re.DOTALL),    # unclosed [ at start — remove entire cue text
+        re.compile(r'\(.*?\)', re.DOTALL),          # (laughing) — including multi-line
     ]
     result = []
     for cue in cues:
