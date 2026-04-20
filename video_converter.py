@@ -418,24 +418,43 @@ def write_srt(cues):
 
 
 def filter_remove_hi(cues):
-    """Remove hearing-impaired annotations: [text], (text), ♪ text ♪"""
+    """Remove hearing-impaired annotations and speaker labels.
+
+    Removes: [brackets], (parentheses), and speaker labels (Name:).
+    """
     hi_patterns = [
         re.compile(r'\[.*?\]', re.DOTALL),          # [music playing] — including multi-line
         re.compile(r'^\[(?!.*\]).*', re.DOTALL),    # unclosed [ at start — remove entire cue text
         re.compile(r'\(.*?\)', re.DOTALL),          # (laughing) — including multi-line
     ]
+    # Speaker label pattern (same as filter_remove_speaker_labels)
+    speaker_pattern = re.compile(r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}:\s*\n?', re.MULTILINE)
+
+    def _speaker_replace(m):
+        label = m.group(0).lstrip('- ')
+        name_part = label.split(':')[0].strip()
+        if re.match(r'^\d+$', name_part):
+            return m.group(0)
+        if re.search(r'\d$', name_part):
+            return m.group(0)
+        if len(name_part) <= 1:
+            return m.group(0)
+        return m.group(1)
+
     result = []
     for cue in cues:
         text = cue['text']
         for pat in hi_patterns:
             text = pat.sub('', text)
+        # Remove speaker labels
+        text = speaker_pattern.sub(_speaker_replace, text)
         # Clean up orphaned colons left after HI removal (e.g. "(gasps): " → ": ")
         text = re.sub(r'^\s*:\s*', '', text, flags=re.MULTILINE)
         text = re.sub(r'\n\s*:\s*', '\n', text)
         # Clean up leftover whitespace and blank lines
         text = re.sub(r'^\s*-?\s*$', '', text, flags=re.MULTILINE)
         text = re.sub(r'\n{2,}', '\n', text)
-        text = re.sub(r'^\n+', '', text)  # strip leading newlines
+        text = re.sub(r'^\n+', '', text)
         text = text.strip()
         if text:
             result.append({**cue, 'text': text})
@@ -3567,7 +3586,7 @@ class VideoConverterApp:
         # ── Filters menu ──
         filter_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Filters", menu=filter_menu)
-        filter_menu.add_command(label="Remove HI  [brackets] (parens)",
+        filter_menu.add_command(label="Remove HI  [brackets] (parens) Speaker:",
                                 command=lambda: apply_filter(filter_remove_hi, "Remove HI"))
         filter_menu.add_command(label="Remove Tags  <i> {\\an8}",
                                 command=lambda: apply_filter(filter_remove_tags, "Remove Tags"))
