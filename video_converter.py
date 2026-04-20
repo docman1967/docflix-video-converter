@@ -2335,7 +2335,7 @@ class VideoConverterApp:
 
             # Filename column stretches; others are fixed width on the right
             inner.columnconfigure(0, weight=1)
-            for c in range(1, 6):
+            for c in range(1, 7):
                 inner.columnconfigure(c, weight=0)
 
             if not subs:
@@ -2355,10 +2355,11 @@ class VideoConverterApp:
             ttk.Label(inner, text="Default",    font=hdr_font, anchor='center').grid(row=0, column=3, sticky='e', **pad)
             ttk.Label(inner, text="Forced",     font=hdr_font, anchor='center').grid(row=0, column=4, sticky='e', **pad)
             ttk.Label(inner, text="",           font=hdr_font).grid(row=0, column=5, **pad)
+            ttk.Label(inner, text="",           font=hdr_font).grid(row=0, column=6, **pad)
 
             # Separator under headers
             ttk.Separator(inner, orient='horizontal').grid(
-                row=1, column=0, columnspan=6, sticky='ew', pady=(0, 4))
+                row=1, column=0, columnspan=7, sticky='ew', pady=(0, 4))
 
             # ── Subtitle rows ──
             for i, sub in enumerate(subs):
@@ -2410,9 +2411,21 @@ class VideoConverterApp:
                     subs[idx]['forced'] = var.get()
                 forced_var.trace_add('write', lambda *a, idx=i, var=forced_var: _on_forced(idx, var))
 
+                # Edit button (text-based subs only)
+                _BITMAP_FMTS = {'hdmv_pgs_subtitle', 'dvd_subtitle', 'sup', 'sub', 'idx'}
+                sub_ext = Path(sub['path']).suffix.lower().lstrip('.')
+                if sub_ext not in _BITMAP_FMTS and sub.get('format') not in _BITMAP_FMTS:
+                    ttk.Button(inner, text="✏️", width=3,
+                               command=lambda s=sub: (
+                                   dlg.grab_release(),
+                                   self.show_subtitle_editor(filepath, None, file_info,
+                                                             external_sub_path=s['path']),
+                                   dlg.grab_set() if dlg.winfo_exists() else None
+                               )).grid(row=r, column=5, sticky='e', **rpad)
+
                 # Remove button
-                ttk.Button(inner, text="✖ Remove", width=8,
-                           command=lambda idx=i: _remove_sub(idx)).grid(row=r, column=5, sticky='e', **rpad)
+                ttk.Button(inner, text="✖", width=3,
+                           command=lambda idx=i: _remove_sub(idx)).grid(row=r, column=6, sticky='e', **rpad)
 
             _update_warning()
 
@@ -2991,8 +3004,12 @@ class VideoConverterApp:
         dlg.grab_set()
         dlg.wait_window()
 
-    def show_subtitle_editor(self, filepath, stream_index, file_info):
-        """Show subtitle text editor for a specific subtitle stream.
+    def show_subtitle_editor(self, filepath, stream_index, file_info,
+                                external_sub_path=None):
+        """Show subtitle text editor for a subtitle stream or external file.
+
+        For internal streams: extracts from filepath using stream_index.
+        For external files: pass external_sub_path (stream_index is ignored).
 
         Full-featured editor with filters, search/replace, timing tools,
         undo/redo, duplicate detection, video preview, and export.
@@ -3000,32 +3017,66 @@ class VideoConverterApp:
         import tempfile
         import copy
 
-        # Extract subtitle to temp SRT
-        tmp_srt = tempfile.NamedTemporaryFile(suffix='.srt', delete=False, mode='w',
-                                               encoding='utf-8')
-        tmp_srt.close()
-        cmd = ['ffmpeg', '-y', '-i', filepath, '-map', f'0:{stream_index}',
-               '-c:s', 'srt', tmp_srt.name]
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            if result.returncode != 0:
-                self.add_log(f"Failed to extract subtitle #{stream_index} for editing: "
-                             f"{result.stderr[-200:]}", 'ERROR')
+        is_external = external_sub_path is not None
+
+        if is_external:
+            # Read external subtitle file directly
+            sub_path = external_sub_path
+            ext = Path(sub_path).suffix.lower()
+            if ext in ('.srt',):
+                # Already SRT — read directly
+                try:
+                    with open(sub_path, 'r', encoding='utf-8', errors='replace') as f:
+                        srt_text = f.read()
+                except Exception as e:
+                    self.add_log(f"Failed to read subtitle file: {e}", 'ERROR')
+                    return
+            else:
+                # Convert to SRT via ffmpeg
+                tmp_srt = tempfile.NamedTemporaryFile(suffix='.srt', delete=False,
+                                                       mode='w', encoding='utf-8')
+                tmp_srt.close()
+                cmd = ['ffmpeg', '-y', '-i', sub_path, '-c:s', 'srt', tmp_srt.name]
+                try:
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                    if result.returncode != 0:
+                        self.add_log(f"Failed to convert subtitle for editing: "
+                                     f"{result.stderr[-200:]}", 'ERROR')
+                        os.unlink(tmp_srt.name)
+                        return
+                except Exception as e:
+                    self.add_log(f"Convert error: {e}", 'ERROR')
+                    os.unlink(tmp_srt.name)
+                    return
+                with open(tmp_srt.name, 'r', encoding='utf-8', errors='replace') as f:
+                    srt_text = f.read()
+                os.unlink(tmp_srt.name)
+        else:
+            # Extract internal subtitle stream to temp SRT
+            tmp_srt = tempfile.NamedTemporaryFile(suffix='.srt', delete=False, mode='w',
+                                                   encoding='utf-8')
+            tmp_srt.close()
+            cmd = ['ffmpeg', '-y', '-i', filepath, '-map', f'0:{stream_index}',
+                   '-c:s', 'srt', tmp_srt.name]
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                if result.returncode != 0:
+                    self.add_log(f"Failed to extract subtitle #{stream_index} for editing: "
+                                 f"{result.stderr[-200:]}", 'ERROR')
+                    os.unlink(tmp_srt.name)
+                    return
+            except Exception as e:
+                self.add_log(f"Extract error: {e}", 'ERROR')
                 os.unlink(tmp_srt.name)
                 return
-        except Exception as e:
-            self.add_log(f"Extract error: {e}", 'ERROR')
+            with open(tmp_srt.name, 'r', encoding='utf-8', errors='replace') as f:
+                srt_text = f.read()
             os.unlink(tmp_srt.name)
-            return
-
-        # Read and parse SRT
-        with open(tmp_srt.name, 'r', encoding='utf-8', errors='replace') as f:
-            srt_text = f.read()
-        os.unlink(tmp_srt.name)
 
         cues = parse_srt(srt_text)
         if not cues:
-            self.add_log(f"No subtitle cues found in stream #{stream_index}", 'WARNING')
+            label = os.path.basename(external_sub_path) if is_external else f"stream #{stream_index}"
+            self.add_log(f"No subtitle cues found in {label}", 'WARNING')
             return
 
         # Keep original for undo-all
@@ -3058,7 +3109,10 @@ class VideoConverterApp:
 
         # ── Editor Window ──
         editor = tk.Toplevel(self.root)
-        editor.title(f"Edit Subtitles — Stream #{stream_index} — {os.path.basename(filepath)}")
+        if is_external:
+            editor.title(f"Edit Subtitles — {os.path.basename(external_sub_path)}")
+        else:
+            editor.title(f"Edit Subtitles — Stream #{stream_index} — {os.path.basename(filepath)}")
         editor.geometry("950x650")
         editor.transient(self.root)
         editor.grab_set()
@@ -3684,24 +3738,31 @@ class VideoConverterApp:
         stats_label.pack(side='left')
 
         def do_save():
-            """Save edited subtitles — write to temp file and store path on file_info."""
+            """Save edited subtitles."""
             if not cues:
                 messagebox.showwarning("Empty Subtitles",
                                        "All subtitle entries have been removed.\n"
                                        "Nothing to save.", parent=editor)
                 return
-            tmp_dir = tempfile.mkdtemp(prefix='docflix_sub_')
-            out_path = os.path.join(tmp_dir, f"edited_stream{stream_index}.srt")
-            with open(out_path, 'w', encoding='utf-8') as f:
-                f.write(write_srt(cues))
-
-            if 'edited_subs' not in file_info:
-                file_info['edited_subs'] = {}
-            file_info['edited_subs'][stream_index] = out_path
-
             removed = len(original_cues) - len(cues)
-            self.add_log(f"Subtitle edits saved for stream #{stream_index}: "
-                         f"{len(cues)} entries ({removed} removed) → {out_path}", 'SUCCESS')
+            if is_external:
+                # Write directly back to the external subtitle file
+                with open(external_sub_path, 'w', encoding='utf-8') as f:
+                    f.write(write_srt(cues))
+                self.add_log(f"Subtitle edits saved: "
+                             f"{len(cues)} entries ({removed} removed) → "
+                             f"{os.path.basename(external_sub_path)}", 'SUCCESS')
+            else:
+                # Internal stream — write to temp file for encoding pipeline
+                tmp_dir = tempfile.mkdtemp(prefix='docflix_sub_')
+                out_path = os.path.join(tmp_dir, f"edited_stream{stream_index}.srt")
+                with open(out_path, 'w', encoding='utf-8') as f:
+                    f.write(write_srt(cues))
+                if 'edited_subs' not in file_info:
+                    file_info['edited_subs'] = {}
+                file_info['edited_subs'][stream_index] = out_path
+                self.add_log(f"Subtitle edits saved for stream #{stream_index}: "
+                             f"{len(cues)} entries ({removed} removed) → {out_path}", 'SUCCESS')
             editor.destroy()
 
         def do_export():
