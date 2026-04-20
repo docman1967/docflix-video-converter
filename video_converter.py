@@ -429,6 +429,9 @@ def filter_remove_hi(cues):
         text = cue['text']
         for pat in hi_patterns:
             text = pat.sub('', text)
+        # Clean up orphaned colons left after HI removal (e.g. "(gasps): " → ": ")
+        text = re.sub(r'^\s*:\s*', '', text, flags=re.MULTILINE)
+        text = re.sub(r'\n\s*:\s*', '\n', text)
         # Clean up leftover whitespace
         text = re.sub(r'^\s*-?\s*$', '', text, flags=re.MULTILINE)
         text = re.sub(r'\n{2,}', '\n', text).strip()
