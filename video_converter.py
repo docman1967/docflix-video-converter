@@ -689,7 +689,7 @@ def filter_remove_speaker_labels(cues):
     """
     # Match: optional dash/space, then letters (with spaces/numbers for "Man 1")
     # up to 30 chars, ending with colon+space — but first char must be a letter
-    pattern = re.compile(r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}:\s*', re.MULTILINE)
+    pattern = re.compile(r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}:\s*\n?', re.MULTILINE)
     result = []
     for cue in cues:
         text = cue['text']
