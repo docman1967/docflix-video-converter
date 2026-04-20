@@ -3323,6 +3323,9 @@ class VideoConverterApp:
                     break
             return tags
 
+        # Set of original texts for modified detection (index-independent)
+        _orig_texts = {c['text'] for c in original_cues}
+
         def refresh_tree(new_cues, search_indices=None):
             """Reload the treeview with updated cues."""
             nonlocal cues
@@ -3332,8 +3335,12 @@ class VideoConverterApp:
             for i, cue in enumerate(cues):
                 display = cue['text'].replace('\n', ' \\n ')
                 ts = f"{cue['start']} → {cue['end']}"
-                # Determine color tags
-                orig_text = original_cues[i]['text'] if i < len(original_cues) else None
+                # Determine color tags — compare against original text set
+                # Pass a dummy different string to trigger "modified" if text not in originals
+                if cue['text'] in _orig_texts:
+                    orig_text = cue['text']  # matches — not modified
+                else:
+                    orig_text = ''  # doesn't match — will be flagged as modified
                 ctags = _classify_cue(cue, orig_text)
                 if i in search_set:
                     ctags.add(TAG_SEARCH)
