@@ -2418,7 +2418,7 @@ class VideoConverterApp:
                     ttk.Button(inner, text="✏️", width=3,
                                command=lambda s=sub: (
                                    dlg.grab_release(),
-                                   self.show_subtitle_editor(filepath, None, file_info,
+                                   self.show_subtitle_editor(file_info['path'], None, file_info,
                                                              external_sub_path=s['path']),
                                    dlg.grab_set() if dlg.winfo_exists() else None
                                )).grid(row=r, column=5, sticky='e', **rpad)
