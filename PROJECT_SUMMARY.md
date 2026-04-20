@@ -1,10 +1,10 @@
 # Video Converter — Project Summary
 
-**Last Updated:** 2026-04-06 (rev 3)  
+**Last Updated:** 2026-04-20 (rev 5)  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/`  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
-**Purpose:** Batch convert video files to H.265/HEVC format using ffmpeg, with support for both CPU (libx265) and NVIDIA GPU (NVENC) encoding.
+**Purpose:** Batch convert video files to H.265/HEVC format using ffmpeg, with support for CPU and multi-GPU encoding (NVIDIA NVENC, Intel QSV, AMD VAAPI).
 
 ---
 
@@ -12,8 +12,8 @@
 
 | File | Size | Modified | Description |
 |------|------|----------|-------------|
-| `video_converter.py` | ~166 KB / 3,831 lines | 2026-04-06 | Primary Tkinter desktop GUI app |
-| `convert_videos.sh` | ~16 KB / 455 lines | 2026-03-28 | Standalone bash CLI batch converter |
+| `video_converter.py` | ~272 KB / 6,201 lines | 2026-04-20 | Primary Tkinter desktop GUI app |
+| `convert_videos.sh` | ~20 KB / 541 lines | 2026-04-19 | Standalone bash CLI batch converter |
 | `run_converter.sh` | ~2 KB / 57 lines | 2026-04-05 | Launcher for Tkinter desktop app |
 | `install.sh` | ~11 KB / 309 lines | 2026-04-06 | Installer / uninstaller |
 | `logo.png` | 136 KB | 2026-03-27 | Original app logo (RGB, 840×958) |
@@ -22,7 +22,7 @@
 | `README.md` | — | 2026-04-06 | GitHub repository README |
 | `LICENSE` | — | 2026-04-05 | MIT License |
 | `.gitignore` | — | 2026-04-05 | Git ignore rules |
-| `PROJECT_SUMMARY.md` | — | 2026-04-06 | This file |
+| `PROJECT_SUMMARY.md` | — | 2026-04-19 | This file |
 | `logs/` | dir | — | Timestamped launch logs (auto-pruned to 10) |
 
 ---
@@ -56,8 +56,41 @@ The primary interface. Launched via `run_converter.sh`, the `docflix` terminal c
 ### Key Features
 - Drag-and-drop file queuing
 - Per-file **settings override** (different encoder settings per file)
-- **Two-pass encoding** support
-- **Subtitle stream** detection and extraction (with per-stream format control)
+- **Multi-GPU encoding** — auto-detects and supports:
+  - NVIDIA NVENC (presets p1–p7, `-cq` quality flag)
+  - Intel Quick Sync Video / QSV (presets veryfast–veryslow, `-global_quality` flag)
+  - AMD VAAPI (no presets, `-qp` quality flag)
+  - CPU fallback (libx265/libx264/libsvtav1/libvpx-vp9)
+- Encoder selection via **dropdown combobox** showing only detected backends
+- **Two-pass encoding** support (CPU two-pass and GPU multipass where supported)
+- **HW Decode** checkbox — enables hardware-accelerated decoding (auto-disabled for burn-in subtitles)
+- **External subtitle support:**
+  - Drag-and-drop `.srt`, `.ass`, `.ssa`, `.vtt`, `.sub`, `.idx`, `.sup` files onto the queue
+  - Auto-matches subtitles to video files by filename stem (strips language codes, "forced", "sdh" suffixes)
+  - Auto-detects **language** from filename (e.g. `.eng.srt`, `.en.srt`)
+  - Auto-detects **forced** flag from filename (e.g. `.forced.srt`)
+  - Auto-sets **default** flag on the first plain (non-forced, non-SDH) subtitle
+  - Two modes: **embed** (soft sub, muxed as stream) or **burn-in** (hardcoded onto video)
+  - Per-subtitle **Default** and **Forced** disposition flags
+  - **"Remove existing subtitle tracks from source"** option to replace internal subs
+  - 📎 icon indicator on files with external subs attached
+  - Folder scan prompts to attach matching subtitle files found alongside videos
+- **Internal subtitle** (🎞️) dialog — per-stream format control for subtitle tracks already in the source file (double-click a file to open)
+- **Subtitle editor** — full-featured text editor for internal subtitle streams:
+  - Direct inline text editing (double-click a cell)
+  - Filters: Remove HI `[brackets]` `(parens)`, Remove Tags, Remove Ads/Credits, Remove Speaker Labels, Remove Music Notes, Remove Duplicates, Merge Short Cues
+  - Custom ad pattern management (saved to preferences)
+  - Search & Replace across all cues
+  - Timing tools: offset (shift ±ms) and stretch (scale by factor)
+  - Split/Join cues
+  - Undo/Redo stack (Ctrl+Z / Ctrl+Y) with full reset
+  - Color-coded rows: yellow=modified, blue=HI content, pink=tags, orange=long lines, green=search match
+  - Character count warning for lines exceeding 42 characters
+  - Video preview at selected cue timestamp (via ffplay)
+  - Export edited subtitle as standalone `.srt` file
+  - Right-click context menu (preview, split, join, delete)
+  - Edited subtitles are automatically embedded during encoding
+- **Batch ETA** — real-time estimated time remaining for the entire batch, based on rolling average encoding speed weighted by file duration
 - **Estimated output size** calculation before conversion
 - **Media info** panel (shows codec, resolution, duration, streams)
 - **Test encode** (30-second preview clip of settings)
@@ -70,11 +103,10 @@ The primary interface. Launched via `run_converter.sh`, the `docflix` terminal c
 - Open output folder in system file manager
 - Sortable, reorderable file queue
 - Collapsible settings panel and detachable log window
-- **Sound notification** on conversion completion (preview-able)
+- **Sound notification** on conversion completion (configurable in Default Settings)
 - **Preferences** auto-saved to JSON on dialog close — no manual save required
 - Recent folders menu
 - Keyboard shortcuts panel
-- GPU auto-detection; presets auto-apply per codec
 - **Custom logo** in title bar (`logo_transparent.png` at 32×32 px); falls back to 🎬 emoji if unavailable
 
 ### UI / UX Notes
@@ -82,6 +114,21 @@ The primary interface. Launched via `run_converter.sh`, the `docflix` terminal c
 - Settings menu has no "Save Preferences" item; preferences auto-save when the Default Settings dialog is closed via Save
 - Preference saves are confirmed via a log entry only — no popup dialogs
 - Window launches on the monitor containing the mouse pointer (no wrong-monitor flash)
+- Header layout (Option C): Title + encoder combo on top row, separator, then toolbar row with folder controls + output path
+- Folder browser dialogs use **zenity** (GTK native, single-click + Open) with tkinter `askdirectory` fallback
+- GPU backend names in encoder dropdown are short labels (e.g. "NVIDIA (NVENC)") without GPU model names
+- External subtitle dialog uses grid layout with right-justified controls; filename column stretches on resize
+- Backward compatibility: old `encoder: 'gpu'` preference values auto-map to first available GPU backend
+
+### GPU Backend Configuration (`GPU_BACKENDS` dict)
+
+Each backend defines:
+- `hwaccel` flags (e.g. `-hwaccel cuda`)
+- Per-codec encoder names (e.g. `hevc_nvenc`, `hevc_qsv`, `hevc_vaapi`)
+- Presets and defaults
+- Quality flag (`-cq`, `-global_quality`, `-qp`)
+- Multipass support and args
+- Detection method (ffmpeg encoder check + GPU name via nvidia-smi / lspci)
 
 ---
 
@@ -99,7 +146,9 @@ Headless batch converter; runs in the **current directory** and converts all `.m
 | `-q`, `--crf` | CRF quality value (disables bitrate mode) | disabled |
 | `-p`, `--preset` | CPU ffmpeg preset | `ultrafast` |
 | `-g`, `--gpu` | Use NVIDIA GPU (hevc_nvenc) | off |
-| `-P`, `--gpu-preset` | GPU preset p1–p7 | `p1` |
+| `--qsv` | Use Intel Quick Sync Video (hevc_qsv) | off |
+| `--vaapi` | Use VAAPI encoding (hevc_vaapi) | off |
+| `-P`, `--gpu-preset` | GPU preset (NVENC: p1–p7, QSV: veryfast–veryslow) | varies |
 | `-s`, `--suffix` | Output filename suffix | `-2mbps-UF_265` |
 | `-o`, `--overwrite` | Overwrite existing output files | skip |
 | `-c`, `--cleanup` | Delete originals after success | off |
@@ -107,7 +156,8 @@ Headless batch converter; runs in the **current directory** and converts all `.m
 | `-h`, `--help` | Show usage | — |
 
 ### Output Naming Convention
-Input: `movie.mkv` → Output: `movie-2mbps-UF_265.mkv` (suffix varies by mode/preset)
+Input: `movie.mkv` → Output: `movie-2mbps-UF_265.mkv` (suffix varies by mode/preset/backend)
+GPU outputs include backend short name: `-NVENC_H265_p4`, `-QSV_H265_medium`, `-VAAPI_H265_default`
 
 ### Notifications
 - Uses **zenity** desktop popups if available
@@ -166,7 +216,7 @@ Installs the app to user-local directories — no `sudo` required.
 **Presets (fastest → best quality):**  
 `ultrafast` · `superfast` · `veryfast` · `faster` · `fast` · `medium` · `slow` · `slower` · `veryslow`
 
-### GPU Encoding (NVIDIA hevc_nvenc)
+### GPU Encoding — NVIDIA (NVENC)
 | Mode | Parameter | Recommended Range |
 |------|-----------|-------------------|
 | Bitrate | `-b:v` | 1M – 8M+ |
@@ -174,7 +224,55 @@ Installs the app to user-local directories — no `sudo` required.
 
 **Presets (fastest → best quality):** `p1` · `p2` · `p3` · `p4` · `p5` · `p6` · `p7`
 
+### GPU Encoding — Intel (QSV)
+| Mode | Parameter | Recommended Range |
+|------|-----------|-------------------|
+| Bitrate | `-b:v` | 1M – 8M+ |
+| Quality | `-global_quality` | 15–25 (lower = better quality) |
+
+**Presets (fastest → best quality):** `veryfast` · `faster` · `fast` · `medium` · `slow` · `slower` · `veryslow`
+
+### GPU Encoding — AMD / VAAPI
+| Mode | Parameter | Recommended Range |
+|------|-----------|-------------------|
+| Bitrate | `-b:v` | 1M – 8M+ |
+| Quality | `-qp` | 15–25 (lower = better quality) |
+
+**Presets:** None — quality controlled via bitrate/QP only.
+
 > **Note:** GPU encoding is significantly faster but may produce slightly larger files at equivalent quality settings. Audio is always stream-copied by default.
+
+---
+
+## External Subtitle Support
+
+### Supported Formats
+`.srt`, `.ass`, `.ssa`, `.vtt`, `.sub`, `.idx`, `.sup`
+
+### Auto-Detection from Filename
+| Filename Pattern | Language | Forced | Default |
+|---|---|---|---|
+| `movie.srt` | und | ☐ | ✅ (first plain sub) |
+| `movie.eng.srt` | eng | ☐ | ✅ (first plain sub) |
+| `movie.eng.forced.srt` | eng | ✅ | ☐ |
+| `movie.eng.sdh.srt` | eng | ☐ | ☐ |
+| `movie.eng.cc.srt` | eng | ☐ | ☐ |
+| `movie.fra.srt` | fra | ☐ | ☐ (default already taken) |
+
+### Filename Stem Matching
+Progressively strips up to 3 trailing dot-separated tokens:
+- `movie.eng.forced.srt` → tries `movie.eng.forced`, `movie.eng`, `movie` → matches `movie.mkv`
+
+### Embed vs Burn-in
+| Mode | How it works | HW Decode | Togglable |
+|---|---|---|---|
+| **embed** | Muxed as subtitle stream (`-i sub.srt -map`) | Compatible | Yes (player controls) |
+| **burn_in** | Rendered onto video (`-vf subtitles=`) | Auto-disabled | No (permanent) |
+
+### Container Considerations
+- **MKV**: supports all subtitle formats natively
+- **MP4**: external subs auto-converted to `mov_text`
+- Bitmap subtitles (`.sup` PGS, `.sub` VobSub): embed only — cannot be burned in
 
 ---
 
@@ -193,7 +291,9 @@ cd /home/docman1967/scripts/video_converter
 # CLI (run from the folder containing your video files)
 cd /path/to/your/videos
 /home/docman1967/scripts/video_converter/convert_videos.sh          # CPU defaults
-/home/docman1967/scripts/video_converter/convert_videos.sh -g       # GPU fastest
+/home/docman1967/scripts/video_converter/convert_videos.sh -g       # GPU NVIDIA fastest
+/home/docman1967/scripts/video_converter/convert_videos.sh --qsv    # GPU Intel QSV
+/home/docman1967/scripts/video_converter/convert_videos.sh --vaapi  # GPU AMD VAAPI
 /home/docman1967/scripts/video_converter/convert_videos.sh -q 22    # CRF quality mode
 ```
 
@@ -223,22 +323,59 @@ git push
 | `tkinter` | Desktop GUI | `sudo apt install python3-tk` |
 | `tkinterdnd2` | Desktop GUI (drag & drop) | `pip install tkinterdnd2` |
 | `Pillow` | Desktop GUI (logo image) | `pip install Pillow` |
-| `zenity` | Bash CLI (optional) | `sudo apt install zenity` |
-| NVIDIA driver + NVENC-enabled ffmpeg | GPU encoding (optional) | System-specific |
+| `zenity` | Both (folder dialogs, CLI popups) | `sudo apt install zenity` |
+| NVIDIA driver + NVENC-enabled ffmpeg | NVIDIA GPU encoding (optional) | System-specific |
+| Intel media driver + QSV-enabled ffmpeg | Intel QSV encoding (optional) | System-specific |
+| Mesa VAAPI driver + VAAPI-enabled ffmpeg | AMD VAAPI encoding (optional) | System-specific |
 
 ---
 
 ## Known Issues / Notes
 
-1. **CUDA HW Decode compatibility** — Some source files (particularly older or oddly encoded ones) fail with error code -38 (`Function not implemented`) when Hardware Decode is enabled. Workaround: uncheck **HW Decode** for the affected file via per-file settings override, or disable it globally in Default Settings. The GPU still handles encoding; only decoding falls back to CPU.
+1. **HW Decode compatibility** — Some source files (particularly those with mid-stream resolution changes or oddly encoded content) fail with hardware decode enabled. The NVENC backend no longer uses `-hwaccel_output_format cuda` to avoid filter reinitialization errors on variable-resolution sources. Workaround for remaining issues: uncheck **HW Decode** for the affected file via per-file settings override, or disable it globally in Default Settings. The GPU still handles encoding; only decoding falls back to CPU.
 
-2. **Audio handling** — Default audio codec is AC3 (Dolby Digital) at 320k. Can be changed per-file via settings override or globally in Default Settings.
+2. **Burn-in subtitles + HW Decode** — Burn-in subtitles require CPU-side video filtering, which is incompatible with hardware decode. The app automatically disables HW decode when any external subtitle is set to burn-in mode.
 
-3. **Subtitle handling** — The desktop GUI supports per-stream subtitle format control. All subtitle streams are now correctly preserved in both the default conversion path and the per-file subtitle dialog path. Both bugs have been fixed and verified.
+3. **Audio handling** — Default audio codec is AC3 (Dolby Digital) at 320k. Can be changed per-file via settings override or globally in Default Settings.
+
+4. **Subtitle handling** — The desktop GUI supports both internal subtitle management (per-stream format control) and external subtitle attachment (embed/burn-in with language, default, forced flags). All subtitle streams are correctly preserved in both the default conversion path and the per-file subtitle dialog path.
+
+5. **QSV/VAAPI without hardware** — ffmpeg may report QSV or VAAPI encoders as available even without matching GPU hardware (the encoders are compiled in but will fail at encode time). The app detects these via `ffmpeg -encoders` and shows them in the dropdown, but encoding will fail if the hardware isn't present. The error is caught and reported in the log.
 
 ---
 
 ## Change Log
+
+### 2026-04-20
+1. **NVENC hwaccel fix** — Removed `-hwaccel_output_format cuda` from the NVENC backend. Sources with mid-stream resolution changes (e.g. varying letterbox ratios) caused `scale_cuda` filter reinitialization failures ("Error reinitializing filters / Function not implemented"). Without `-hwaccel_output_format cuda`, frames pass through system memory between decode and encode; CUDA decoding and NVENC encoding are still hardware-accelerated with negligible performance difference.
+2. **Batch ETA** — Added real-time estimated time remaining for the entire batch during multi-file encoding. Uses rolling average encoding speed (video-seconds per wall-second) from completed files, weighted by remaining file durations. Displayed as "Batch: Xh Ym left" in the status bar. Self-corrects as files complete. Bootstraps from current file progress before the first file finishes.
+3. **Subtitle editor** — Full-featured inline text editor for internal subtitle streams. Accessed via ✏️ button in the Internal Subtitles dialog or by double-clicking a file. Features:
+   - SRT parser with round-trip read/write
+   - Inline text editing (double-click cell, Ctrl+Enter to save)
+   - Filter menu: Remove HI, Remove Tags, Remove Ads/Credits, Remove Speaker Labels, Remove Music Notes, Remove Duplicates, Merge Short Cues
+   - Custom ad pattern management with regex support (saved to preferences)
+   - Search & Replace across all cues
+   - Timing tools: offset (shift ±ms) and stretch (scale by factor)
+   - Split cue at midpoint / Join consecutive cues
+   - Per-action Undo/Redo stack (Ctrl+Z / Ctrl+Y) with full reset
+   - Color-coded rows: yellow=modified, blue=HI, pink=tags, orange=long lines (>42 chars), green=search match
+   - Video preview at cue timestamp via ffplay (right-click or ▶ button)
+   - Export edited subtitle as standalone `.srt` file
+   - Right-click context menu
+   - Edited subtitles automatically embedded during encoding (replaces original stream via additional ffmpeg input)
+4. **Double-click to open subtitles** — Double-clicking a file in the queue opens the Internal Subtitles dialog directly.
+5. **Notify moved to settings** — Sound notification controls (enable, sound selection, preview) moved from the main toolbar to Default Settings dialog to reduce main page clutter.
+6. **Scroll bleed-through fix** — Internal Subtitles dialog and subtitle editor now use local widget scroll bindings instead of `bind_all`, preventing mousewheel events from bleeding through to parent windows.
+7. **Speaker label removal improved** — Now handles mixed-case speaker names (e.g. `narrator:`, `mom:`) while avoiding false positives on timestamps (e.g. `2:30`, `12:00`) and single-character labels.
+8. **Ad removal improved** — URL-only lines (`www.*`) are only removed when paired with other ad content or when the cue contains nothing but a URL. Dialogue mentioning websites (e.g. "Go to www.fbi.gov") is preserved.
+
+### 2026-04-19
+1. **Multi-GPU support** — Replaced single NVIDIA-only GPU support with a pluggable backend system (`GPU_BACKENDS` dict). Now auto-detects and supports NVIDIA NVENC, Intel QSV, and AMD VAAPI. Each backend defines its own hwaccel flags, encoder names, presets, quality flags, and detection method. UI changed from CPU/GPU radio buttons to a dropdown combobox showing only detected backends. Backward compatible with old `encoder: 'gpu'` preference values. Version bumped to 1.1.0.
+2. **Bash CLI multi-GPU** — Added `--qsv` and `--vaapi` flags to `convert_videos.sh` alongside existing `-g` for NVIDIA. Backend-specific detection, hwaccel flags, and encoder options.
+3. **External subtitle support** — Full drag-and-drop external subtitle system. Auto-matches by filename stem (strips up to 3 trailing tokens for patterns like `.eng.forced.srt`). Auto-detects language, forced flag, and default flag from filename. Two modes: embed (soft sub) and burn-in (hardcoded). Per-subtitle language, default, and forced disposition flags. "Remove existing subtitle tracks" option to replace internal subs. Folder scan prompts to attach matching subtitles. 📎 icon indicator on files with external subs. Grid-based dialog with right-justified controls and responsive resize.
+4. **Folder browser fix** — Folder selection dialogs now use zenity (GTK native dialog with proper single-click + Open button) with tkinter `askdirectory` fallback. Applied to all 3 folder browse locations.
+5. **Header layout redesign** — Reorganized header to Option C layout: title + encoder combo on first row, horizontal separator, then toolbar row with Change Folder, Refresh, output path, Set Output, and Reset controls.
+6. **UI polish** — Renamed "Subtitle Tracks" to "Internal Subtitles" in context menu and dialog. Changed notification preview button from ▶ (play) to 🔊 (speaker) to avoid confusion with media playback. Shortened encoder dropdown labels (removed GPU model names).
 
 ### 2026-04-06
 1. **install.sh bug fix** — `logo_transparent.png` was listed as a required source file but is excluded from the GitHub repo (it's a generated file). Fresh clones from GitHub would fail at the source file check. Fixed by removing it from the required files list and adding a generation step to the installer that creates it from `logo.png` using Pillow. Falls back gracefully to the 🎬 emoji in the title bar if generation fails.

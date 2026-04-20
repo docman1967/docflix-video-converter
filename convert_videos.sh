@@ -3,7 +3,7 @@
 #===============================================================================
 # Video Converter Script - MKV to H.265/HEVC
 # Converts all MKV files in current directory to optimized H.265 format
-# Supports both CPU (libx265) and GPU (NVENC) encoding
+# Supports CPU (libx265) and GPU encoding (NVIDIA NVENC, Intel QSV, AMD VAAPI)
 #===============================================================================
 
 set -euo pipefail
@@ -17,8 +17,9 @@ OUTPUT_SUFFIX="-2mbps-UF_265"
 LOG_FILE="video_convert_$(date +%Y%m%d_%H%M%S).log"
 SKIP_EXISTING=true
 CLEANUP_ORIGINALS=false
-USE_GPU=false
-GPU_PRESET="p1"  # NVENC preset: p1 (fastest) to p7 (best quality)
+GPU_BACKEND=""          # '' = CPU, 'nvenc', 'qsv', or 'vaapi'
+GPU_PRESET="p1"         # NVENC: p1-p7, QSV: veryfast-veryslow
+GPU_SHORT=""            # Short label for output suffix (NVENC, QSV, VAAPI)
 
 # Colors for output
 RED='\033[0;31m'
@@ -68,27 +69,56 @@ check_prerequisites() {
     log_info "Prerequisites check passed"
     log_info "ffmpeg version: $(ffmpeg -version | head -n1)"
 
-    # Check GPU availability if GPU mode is requested
-    if [[ "$USE_GPU" == true ]]; then
-        # Capture encoder list (avoid SIGPIPE with pipefail by not using -q)
+    # Check GPU availability if a GPU backend was requested
+    if [[ -n "$GPU_BACKEND" ]]; then
         local encoder_list
         encoder_list=$(ffmpeg -encoders 2>&1)
-        if echo "$encoder_list" | grep -qE "(h265_nvenc|hevc_nvenc)"; then
-            log_success "NVIDIA GPU encoder (hevc_nvenc) detected"
-            log_info "GPU preset: ${GPU_PRESET} (p1=fastest, p7=best quality)"
-            
-            # Show GPU info if nvidia-smi is available
-            if command -v nvidia-smi &> /dev/null; then
-                local gpu_name
-                gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n1)
-                log_info "GPU: ${gpu_name}"
-            fi
-        else
-            log_error "NVIDIA GPU encoder (h265_nvenc) not available in ffmpeg"
-            log_error "Either install ffmpeg with NVENC support or use CPU encoding"
-            log_error "Falling back to CPU encoding (libx265)"
-            USE_GPU=false
-        fi
+
+        case "$GPU_BACKEND" in
+            nvenc)
+                if echo "$encoder_list" | grep -qE "(h265_nvenc|hevc_nvenc)"; then
+                    log_success "NVIDIA GPU encoder (hevc_nvenc) detected"
+                    log_info "GPU preset: ${GPU_PRESET} (p1=fastest, p7=best quality)"
+                    if command -v nvidia-smi &> /dev/null; then
+                        local gpu_name
+                        gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n1)
+                        log_info "GPU: ${gpu_name}"
+                    fi
+                else
+                    log_error "NVIDIA GPU encoder (hevc_nvenc) not available in ffmpeg"
+                    log_error "Falling back to CPU encoding (libx265)"
+                    GPU_BACKEND=""
+                fi
+                ;;
+            qsv)
+                if echo "$encoder_list" | grep -q "hevc_qsv"; then
+                    log_success "Intel QSV encoder (hevc_qsv) detected"
+                    log_info "QSV preset: ${GPU_PRESET}"
+                else
+                    log_error "Intel QSV encoder (hevc_qsv) not available in ffmpeg"
+                    log_error "Falling back to CPU encoding (libx265)"
+                    GPU_BACKEND=""
+                fi
+                ;;
+            vaapi)
+                if echo "$encoder_list" | grep -q "hevc_vaapi"; then
+                    log_success "VAAPI encoder (hevc_vaapi) detected"
+                    if [[ ! -e /dev/dri/renderD128 ]]; then
+                        log_warning "/dev/dri/renderD128 not found — VAAPI may fail"
+                    fi
+                else
+                    log_error "VAAPI encoder (hevc_vaapi) not available in ffmpeg"
+                    log_error "Falling back to CPU encoding (libx265)"
+                    GPU_BACKEND=""
+                fi
+                ;;
+            *)
+                log_error "Unknown GPU backend: ${GPU_BACKEND}"
+                log_error "Supported backends: nvenc, qsv, vaapi"
+                log_error "Falling back to CPU encoding (libx265)"
+                GPU_BACKEND=""
+                ;;
+        esac
     fi
 }
 
@@ -100,15 +130,17 @@ show_usage() {
 Usage: $(basename "$0") [OPTIONS]
 
 Convert all MKV files in current directory to H.265/HEVC format.
-Supports both CPU (libx265) and NVIDIA GPU (h265_nvenc) encoding.
+Supports CPU (libx265) and GPU encoding (NVIDIA NVENC, Intel QSV, AMD VAAPI).
 
 Options:
     -b, --bitrate BIT     Set video bitrate (default: 2M)
     -q, --crf N           Set CRF quality (0-51, lower=better, default: disabled)
                           CPU: 18-28 recommended | GPU: 15-25 recommended
     -p, --preset PRESET   Set CPU ffmpeg preset (default: ultrafast)
-    -g, --gpu             Use NVIDIA GPU encoding (NVENC) instead of CPU
-    -P, --gpu-preset N    Set GPU preset p1-p7 (default: p1, p7=best quality)
+    -g, --gpu             Use NVIDIA GPU encoding (NVENC)
+    --qsv                 Use Intel Quick Sync Video encoding
+    --vaapi               Use VAAPI encoding (AMD / Intel on Linux)
+    -P, --gpu-preset N    Set GPU preset (NVENC: p1-p7, QSV: veryfast-veryslow)
     -s, --suffix SUFFIX   Set output filename suffix (default: -2mbps-UF_265)
     -o, --overwrite       Overwrite existing output files (default: skip)
     -c, --cleanup         Delete original files after successful conversion
@@ -119,6 +151,8 @@ Examples:
     $(basename "$0")                      # Convert with CPU defaults
     $(basename "$0") -g                   # Use NVIDIA GPU (fastest preset)
     $(basename "$0") -g -P p5             # GPU with balanced quality preset
+    $(basename "$0") --qsv                # Use Intel QSV encoding
+    $(basename "$0") --vaapi              # Use VAAPI encoding (AMD/Intel)
     $(basename "$0") -b 4M -p slow        # Higher quality CPU encode
     $(basename "$0") -c                   # Convert and cleanup originals
     $(basename "$0") -o                   # Force overwrite existing files
@@ -126,11 +160,15 @@ Examples:
 CPU Presets (fastest to best quality):
     ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow
 
-GPU Presets (p1=fastest to p7=best quality):
+NVENC GPU Presets (p1=fastest to p7=best quality):
     p1, p2, p3, p4, p5, p6, p7
+
+QSV Presets (fastest to best quality):
+    veryfast, faster, fast, medium, slow, slower, veryslow
 
 Note: GPU encoding is significantly faster but may produce slightly larger files
       at equivalent quality. Recommended for batch conversions.
+      VAAPI has no user-selectable presets — quality is controlled via bitrate/CRF.
 
 EOF
 }
@@ -138,6 +176,37 @@ EOF
 #-------------------------------------------------------------------------------
 # Parse command line arguments
 #-------------------------------------------------------------------------------
+_set_gpu_backend() {
+    GPU_BACKEND="$1"
+    GPU_SHORT="$2"
+    local default_preset="$3"
+    if [[ "$GPU_PRESET" == "p1" ]]; then  # only override if still default
+        GPU_PRESET="$default_preset"
+    fi
+}
+
+_update_suffix() {
+    # Only update suffix if user hasn't explicitly set one via -s
+    [[ "$SUFFIX_EXPLICIT" == true ]] && return
+    if [[ -n "$GPU_BACKEND" ]]; then
+        local p="$GPU_PRESET"
+        [[ -z "$p" ]] && p="default"
+        if [[ -n "$CRF" ]]; then
+            OUTPUT_SUFFIX="-CRF${CRF}-${GPU_SHORT}_${p}"
+        else
+            OUTPUT_SUFFIX="-${BITRATE}-${GPU_SHORT}_${p}"
+        fi
+    else
+        if [[ -n "$CRF" ]]; then
+            OUTPUT_SUFFIX="-CRF${CRF}-x265_${PRESET}"
+        else
+            OUTPUT_SUFFIX="-${BITRATE}-UF_265"
+        fi
+    fi
+}
+
+SUFFIX_EXPLICIT=false
+
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -147,12 +216,6 @@ parse_args() {
                 ;;
             -q|--crf)
                 CRF="$2"
-                # Update suffix for CRF mode
-                if [[ "$USE_GPU" == true ]]; then
-                    OUTPUT_SUFFIX="-CRF${CRF}-NVENC_${GPU_PRESET}"
-                else
-                    OUTPUT_SUFFIX="-CRF${CRF}-x265_${PRESET}"
-                fi
                 shift 2
                 ;;
             -p|--preset)
@@ -160,29 +223,24 @@ parse_args() {
                 shift 2
                 ;;
             -g|--gpu)
-                USE_GPU=true
-                # Auto-adjust suffix for GPU mode if not explicitly set
-                if [[ "$OUTPUT_SUFFIX" == "-2mbps-UF_265" ]] && [[ -z "$CRF" ]]; then
-                    OUTPUT_SUFFIX="-2mbps-NVENC_${GPU_PRESET}"
-                elif [[ -n "$CRF" ]]; then
-                    OUTPUT_SUFFIX="-CRF${CRF}-NVENC_${GPU_PRESET}"
-                fi
+                _set_gpu_backend "nvenc" "NVENC" "p1"
+                shift
+                ;;
+            --qsv)
+                _set_gpu_backend "qsv" "QSV" "medium"
+                shift
+                ;;
+            --vaapi)
+                _set_gpu_backend "vaapi" "VAAPI" ""
                 shift
                 ;;
             -P|--gpu-preset)
                 GPU_PRESET="$2"
-                # Update suffix if GPU preset is specified before -g
-                if [[ "$USE_GPU" == true ]]; then
-                    if [[ -n "$CRF" ]]; then
-                        OUTPUT_SUFFIX="-CRF${CRF}-NVENC_${GPU_PRESET}"
-                    else
-                        OUTPUT_SUFFIX="-2mbps-NVENC_${GPU_PRESET}"
-                    fi
-                fi
                 shift 2
                 ;;
             -s|--suffix)
                 OUTPUT_SUFFIX="$2"
+                SUFFIX_EXPLICIT=true
                 shift 2
                 ;;
             -o|--overwrite)
@@ -208,6 +266,7 @@ parse_args() {
                 ;;
         esac
     done
+    _update_suffix
 }
 
 #-------------------------------------------------------------------------------
@@ -226,38 +285,60 @@ convert_file() {
     progress=$((file_num * 100 / total_files))
     echo -ne "${BLUE}Progress: ${progress}% (${file_num}/${total_files})${NC}\r"
 
-    # Build encoder command based on GPU/CPU mode and CRF/Bitrate
+    # Build encoder command based on GPU backend and CRF/Bitrate
     local encoder_opts
     local mode_desc
-    
-    if [[ "$USE_GPU" == true ]]; then
-        # NVIDIA NVENC encoding
-        if [[ -n "$CRF" ]]; then
-            # CRF mode for GPU (uses -cq for constant quality)
-            encoder_opts="-c:v hevc_nvenc -preset ${GPU_PRESET} -cq ${CRF}"
-            mode_desc="GPU (NVENC) CRF ${CRF}"
-        else
-            # Bitrate mode for GPU
-            encoder_opts="-c:v hevc_nvenc -preset ${GPU_PRESET} -b:v ${BITRATE} -cq 25"
-            mode_desc="GPU (NVENC) ${BITRATE}"
-        fi
-    else
-        # CPU x265 encoding
-        if [[ -n "$CRF" ]]; then
-            # CRF mode for CPU
-            encoder_opts="-c:v libx265 -preset ${PRESET} -crf ${CRF}"
-            mode_desc="CPU (libx265) CRF ${CRF}"
-        else
-            # Bitrate mode for CPU
-            encoder_opts="-c:v libx265 -preset ${PRESET} -b:v ${BITRATE} -minrate ${BITRATE} -maxrate ${BITRATE} -bufsize ${BITRATE%M}M"
-            mode_desc="CPU (libx265) ${BITRATE}"
-        fi
-    fi
-    
-    log_info "Using encoder: ${mode_desc} (preset: $([ "$USE_GPU" == true ] && echo "${GPU_PRESET}" || echo "${PRESET}"))"
+    local hwaccel_opts=""
+
+    case "$GPU_BACKEND" in
+        nvenc)
+            hwaccel_opts="-hwaccel cuda -hwaccel_output_format cuda"
+            if [[ -n "$CRF" ]]; then
+                encoder_opts="-c:v hevc_nvenc -preset ${GPU_PRESET} -cq ${CRF}"
+                mode_desc="NVIDIA (NVENC) CRF ${CRF}"
+            else
+                encoder_opts="-c:v hevc_nvenc -preset ${GPU_PRESET} -b:v ${BITRATE}"
+                mode_desc="NVIDIA (NVENC) ${BITRATE}"
+            fi
+            ;;
+        qsv)
+            hwaccel_opts="-hwaccel qsv -hwaccel_output_format qsv"
+            if [[ -n "$CRF" ]]; then
+                encoder_opts="-c:v hevc_qsv -preset ${GPU_PRESET} -global_quality ${CRF}"
+                mode_desc="Intel (QSV) CRF ${CRF}"
+            else
+                encoder_opts="-c:v hevc_qsv -preset ${GPU_PRESET} -b:v ${BITRATE}"
+                mode_desc="Intel (QSV) ${BITRATE}"
+            fi
+            ;;
+        vaapi)
+            hwaccel_opts="-hwaccel vaapi -hwaccel_output_format vaapi -vaapi_device /dev/dri/renderD128"
+            if [[ -n "$CRF" ]]; then
+                encoder_opts="-c:v hevc_vaapi -qp ${CRF}"
+                mode_desc="AMD/VAAPI CRF ${CRF}"
+            else
+                encoder_opts="-c:v hevc_vaapi -b:v ${BITRATE}"
+                mode_desc="AMD/VAAPI ${BITRATE}"
+            fi
+            ;;
+        *)
+            # CPU x265 encoding
+            if [[ -n "$CRF" ]]; then
+                encoder_opts="-c:v libx265 -preset ${PRESET} -crf ${CRF}"
+                mode_desc="CPU (libx265) CRF ${CRF}"
+            else
+                encoder_opts="-c:v libx265 -preset ${PRESET} -b:v ${BITRATE} -minrate ${BITRATE} -maxrate ${BITRATE} -bufsize ${BITRATE%M}M"
+                mode_desc="CPU (libx265) ${BITRATE}"
+            fi
+            ;;
+    esac
+
+    local preset_label="${GPU_PRESET:-$PRESET}"
+    [[ -z "$GPU_BACKEND" ]] && preset_label="$PRESET"
+    log_info "Using encoder: ${mode_desc} (preset: ${preset_label})"
 
     # Convert the video
-    if ffmpeg -y -i "$input_file" \
+    if ffmpeg -y $hwaccel_opts -i "$input_file" \
         $encoder_opts \
         -c:a "$AUDIO_CODEC" \
         -stats \
@@ -317,9 +398,14 @@ main() {
     log_info "Video Converter Started"
     log_info "========================================="
     log_info "Working directory: ${p_folder}"
-    log_info "Encoder: $([ "$USE_GPU" == true ] && echo "NVIDIA GPU (NVENC)" || echo "CPU (libx265)")"
-    if [[ "$USE_GPU" == true ]]; then
-        log_info "GPU Preset: ${GPU_PRESET}"
+    case "$GPU_BACKEND" in
+        nvenc)  log_info "Encoder: NVIDIA GPU (NVENC)" ;;
+        qsv)    log_info "Encoder: Intel (QSV)" ;;
+        vaapi)  log_info "Encoder: AMD / VAAPI" ;;
+        *)      log_info "Encoder: CPU (libx265)" ;;
+    esac
+    if [[ -n "$GPU_BACKEND" ]]; then
+        log_info "GPU Preset: ${GPU_PRESET:-none}"
     else
         log_info "CPU Preset: ${PRESET}"
     fi

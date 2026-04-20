@@ -4,14 +4,14 @@ Docflix Video Converter - Standalone GUI Application
 Convert MKV videos to H.265/HEVC format with CPU or GPU encoding
 
 Features:
-- CPU (libx265) and GPU (NVENC) encoding
+- CPU and multi-GPU encoding (NVIDIA NVENC, Intel QSV, AMD VAAPI/AMF)
 - Bitrate and CRF quality modes
 - Batch conversion with progress tracking
 - Folder selection and file management
 - Real-time logging and notifications
 
 Requirements:
-- ffmpeg with optional NVENC support
+- ffmpeg with optional GPU encoder support
 - Python 3.8+
 - tkinter (usually included with Python)
 
@@ -42,81 +42,241 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.2.0"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
 DEFAULT_GPU_PRESET = "p4"
 
+# ── GPU Backend Definitions ──
+# Each backend defines its hwaccel flags, per-codec encoders, presets, quality
+# flags, and how to detect whether the hardware is present.
+GPU_BACKENDS = {
+    'nvenc': {
+        'label':        'NVIDIA (NVENC)',
+        'short':        'NVENC',
+        'hwaccel':      ['-hwaccel', 'cuda'],
+        'scale_filter': 'scale_cuda=format=yuv420p',
+        'detect_encoders': ['hevc_nvenc'],          # checked in ffmpeg -encoders
+        'detect_cmd':   ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+        'encoders': {
+            'H.265 / HEVC': 'hevc_nvenc',
+            'H.264 / AVC':  'h264_nvenc',
+            'AV1':          'av1_nvenc',
+            'VP9':          None,
+            'MPEG-4':       None,
+            'ProRes (QuickTime)': None,
+            'Copy (no re-encode)': 'copy',
+        },
+        'presets':        ('p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7'),
+        'preset_default': 'p4',
+        'preset_flag':    '-preset',
+        'cq_flag':        '-cq',
+        'multipass_encoders': {'hevc_nvenc', 'h264_nvenc', 'av1_nvenc'},
+        'multipass_args':     ['-multipass', 'fullres'],
+    },
+    'qsv': {
+        'label':        'Intel (QSV)',
+        'short':        'QSV',
+        'hwaccel':      ['-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv'],
+        'scale_filter': 'scale_qsv=format=nv12',
+        'detect_encoders': ['hevc_qsv'],
+        'detect_cmd':   None,       # GPU name detected via lspci fallback
+        'encoders': {
+            'H.265 / HEVC': 'hevc_qsv',
+            'H.264 / AVC':  'h264_qsv',
+            'AV1':          'av1_qsv',
+            'VP9':          'vp9_qsv',
+            'MPEG-4':       None,
+            'ProRes (QuickTime)': None,
+            'Copy (no re-encode)': 'copy',
+        },
+        'presets':        ('veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow'),
+        'preset_default': 'medium',
+        'preset_flag':    '-preset',
+        'cq_flag':        '-global_quality',
+        'multipass_encoders': set(),
+        'multipass_args':     [],
+    },
+    'vaapi': {
+        'label':        'AMD / VAAPI',
+        'short':        'VAAPI',
+        'hwaccel':      ['-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi',
+                         '-vaapi_device', '/dev/dri/renderD128'],
+        'scale_filter': 'scale_vaapi=format=nv12',
+        'detect_encoders': ['hevc_vaapi'],
+        'detect_cmd':   None,
+        'encoders': {
+            'H.265 / HEVC': 'hevc_vaapi',
+            'H.264 / AVC':  'h264_vaapi',
+            'AV1':          'av1_vaapi',
+            'VP9':          'vp9_vaapi',
+            'MPEG-4':       None,
+            'ProRes (QuickTime)': None,
+            'Copy (no re-encode)': 'copy',
+        },
+        'presets':        (),       # VAAPI has no presets
+        'preset_default': None,
+        'preset_flag':    None,
+        'cq_flag':        '-qp',    # VAAPI uses -qp for constant quality
+        'multipass_encoders': set(),
+        'multipass_args':     [],
+    },
+}
+
 # Video codec definitions
-# Keys: display name -> dict with cpu_encoder, gpu_encoder (or None), cpu_presets, gpu_presets,
-#       crf_range, crf_default, crf_flag (cpu), cq_flag (gpu), short_name
+# Keys: display name -> dict with cpu_encoder, cpu_presets,
+#       crf_range, crf_default, crf_flag, short_name
+# GPU encoders/presets are now looked up from GPU_BACKENDS above.
 VIDEO_CODEC_MAP = {
     'H.265 / HEVC': {
         'cpu_encoder': 'libx265',
-        'gpu_encoder': 'hevc_nvenc',
         'cpu_presets': ('ultrafast', 'superfast', 'veryfast', 'faster', 'fast',
                         'medium', 'slow', 'slower', 'veryslow'),
-        'gpu_presets': ('p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7'),
         'cpu_preset_default': 'ultrafast',
-        'gpu_preset_default': 'p4',
         'crf_min': 0, 'crf_max': 51, 'crf_default': 23,
-        'crf_flag': '-crf', 'cq_flag': '-cq',
+        'crf_flag': '-crf',
         'short_name': 'H265',
     },
     'H.264 / AVC': {
         'cpu_encoder': 'libx264',
-        'gpu_encoder': 'h264_nvenc',
         'cpu_presets': ('ultrafast', 'superfast', 'veryfast', 'faster', 'fast',
                         'medium', 'slow', 'slower', 'veryslow'),
-        'gpu_presets': ('p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7'),
         'cpu_preset_default': 'ultrafast',
-        'gpu_preset_default': 'p4',
         'crf_min': 0, 'crf_max': 51, 'crf_default': 23,
-        'crf_flag': '-crf', 'cq_flag': '-cq',
+        'crf_flag': '-crf',
         'short_name': 'H264',
     },
     'AV1': {
         'cpu_encoder': 'libsvtav1',
-        'gpu_encoder': 'av1_nvenc',
         'cpu_presets': ('0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13'),
-        'gpu_presets': ('p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7'),
         'cpu_preset_default': '8',
-        'gpu_preset_default': 'p4',
         'crf_min': 0, 'crf_max': 63, 'crf_default': 35,
-        'crf_flag': '-crf', 'cq_flag': '-cq',
+        'crf_flag': '-crf',
         'short_name': 'AV1',
     },
     'VP9': {
         'cpu_encoder': 'libvpx-vp9',
-        'gpu_encoder': None,   # No NVENC for VP9
         'cpu_presets': ('0', '1', '2', '3', '4', '5'),
-        'gpu_presets': (),
         'cpu_preset_default': '2',
-        'gpu_preset_default': None,
         'crf_min': 0, 'crf_max': 63, 'crf_default': 33,
-        'crf_flag': '-crf', 'cq_flag': None,
+        'crf_flag': '-crf',
         'short_name': 'VP9',
+    },
+    'MPEG-4': {
+        'cpu_encoder': 'mpeg4',
+        'cpu_presets': (),
+        'cpu_preset_default': None,
+        'crf_min': 1, 'crf_max': 31, 'crf_default': 4,
+        'crf_flag': '-q:v',
+        'short_name': 'MPEG4',
+    },
+    'ProRes (QuickTime)': {
+        'cpu_encoder': 'prores_ks',
+        'cpu_presets': ('proxy', 'lt', 'standard', 'hq', '4444', '4444xq'),
+        'cpu_preset_default': 'hq',
+        'crf_min': 0, 'crf_max': 64, 'crf_default': 10,
+        'crf_flag': '-q:v',
+        'short_name': 'ProRes',
     },
     'Copy (no re-encode)': {
         'cpu_encoder': 'copy',
-        'gpu_encoder': 'copy',
         'cpu_presets': (),
-        'gpu_presets': (),
         'cpu_preset_default': None,
-        'gpu_preset_default': None,
         'crf_min': 0, 'crf_max': 51, 'crf_default': 23,
-        'crf_flag': None, 'cq_flag': None,
+        'crf_flag': None,
         'short_name': 'copy',
     },
 }
 
+def get_gpu_encoder(codec_name, backend_id):
+    """Return the GPU encoder name for a codec + backend, or None."""
+    backend = GPU_BACKENDS.get(backend_id)
+    if not backend:
+        return None
+    return backend['encoders'].get(codec_name)
+
+def get_gpu_presets(backend_id):
+    """Return (presets_tuple, default) for a GPU backend."""
+    backend = GPU_BACKENDS.get(backend_id)
+    if not backend:
+        return (), None
+    return backend['presets'], backend['preset_default']
+
+def get_cq_flag(backend_id):
+    """Return the constant-quality flag for a GPU backend (e.g. -cq, -global_quality, -qp)."""
+    backend = GPU_BACKENDS.get(backend_id)
+    if not backend:
+        return None
+    return backend.get('cq_flag')
+
 # Supported video extensions
 VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm'}
+
+# Supported external subtitle extensions
+SUBTITLE_EXTENSIONS = {'.srt', '.ass', '.ssa', '.vtt', '.sub', '.idx', '.sup'}
+
+# Subtitle extension to ffmpeg codec name (for embedding)
+SUBTITLE_EXT_TO_CODEC = {
+    '.srt': 'srt',
+    '.ass': 'ass',
+    '.ssa': 'ass',
+    '.vtt': 'webvtt',
+    '.sub': 'dvd_subtitle',
+    '.idx': 'dvd_subtitle',
+    '.sup': 'hdmv_pgs_subtitle',
+}
+
+# Common language codes for subtitle tagging
+SUBTITLE_LANGUAGES = [
+    ('und', 'Undetermined'),
+    ('eng', 'English'),
+    ('spa', 'Spanish'),
+    ('fra', 'French'),
+    ('deu', 'German'),
+    ('ita', 'Italian'),
+    ('por', 'Portuguese'),
+    ('rus', 'Russian'),
+    ('jpn', 'Japanese'),
+    ('kor', 'Korean'),
+    ('zho', 'Chinese'),
+    ('ara', 'Arabic'),
+    ('hin', 'Hindi'),
+    ('nld', 'Dutch'),
+    ('pol', 'Polish'),
+    ('swe', 'Swedish'),
+    ('tur', 'Turkish'),
+    ('vie', 'Vietnamese'),
+]
 
 # ============================================================================
 # Utility Functions
 # ============================================================================
+
+def _create_tooltip(widget, text):
+    """Attach a hover tooltip to a tkinter widget."""
+    tip = None
+
+    def _show(event):
+        nonlocal tip
+        if tip:
+            return
+        tip = tk.Toplevel(widget)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f"+{event.x_root + 12}+{event.y_root + 8}")
+        lbl = tk.Label(tip, text=text, background='#ffffe0', relief='solid',
+                       borderwidth=1, font=('Helvetica', 9), padx=6, pady=2)
+        lbl.pack()
+
+    def _hide(event):
+        nonlocal tip
+        if tip:
+            tip.destroy()
+            tip = None
+
+    widget.bind('<Enter>', _show, add='+')
+    widget.bind('<Leave>', _hide, add='+')
+
 
 def format_size(size_bytes):
     """Format file size in human readable format"""
@@ -190,6 +350,320 @@ def get_subtitle_streams(filepath):
         return []
 
 
+def get_video_pix_fmt(filepath):
+    """Return the pixel format string of the first video stream (e.g. 'yuv420p', 'yuv420p10le')."""
+    try:
+        cmd = [
+            'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=pix_fmt',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            filepath
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SRT Parser & Subtitle Filters
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def parse_srt(text):
+    """Parse SRT subtitle text into a list of cue dicts.
+
+    Each cue: {'index': int, 'start': str, 'end': str, 'text': str}
+    Timestamps are kept as original strings (HH:MM:SS,mmm).
+    """
+    cues = []
+    blocks = re.split(r'\n\n+', text.strip())
+    for block in blocks:
+        lines = block.strip().split('\n')
+        if len(lines) < 2:
+            continue
+        # First line should be the index number
+        try:
+            idx = int(lines[0].strip())
+        except ValueError:
+            # Sometimes the index is missing; generate one
+            idx = len(cues) + 1
+            # Try parsing this line as timestamp instead
+            if '-->' in lines[0]:
+                lines = ['0'] + lines  # dummy index
+                idx = len(cues) + 1
+            else:
+                continue
+        # Second line: timestamp
+        ts_match = re.match(
+            r'(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})',
+            lines[1].strip()
+        )
+        if not ts_match:
+            continue
+        start, end = ts_match.group(1), ts_match.group(2)
+        # Remaining lines: subtitle text
+        sub_text = '\n'.join(lines[2:])
+        cues.append({'index': idx, 'start': start, 'end': end, 'text': sub_text})
+    return cues
+
+
+def write_srt(cues):
+    """Convert a list of cue dicts back to SRT format string."""
+    parts = []
+    for i, cue in enumerate(cues, 1):
+        parts.append(f"{i}\n{cue['start']} --> {cue['end']}\n{cue['text']}\n")
+    return '\n'.join(parts)
+
+
+def filter_remove_hi(cues):
+    """Remove hearing-impaired annotations: [text], (text), ♪ text ♪"""
+    hi_patterns = [
+        re.compile(r'\[.*?\]'),           # [music playing]
+        re.compile(r'\(.*?\)'),           # (laughing)
+    ]
+    result = []
+    for cue in cues:
+        text = cue['text']
+        for pat in hi_patterns:
+            text = pat.sub('', text)
+        # Clean up leftover whitespace
+        text = re.sub(r'^\s*-?\s*$', '', text, flags=re.MULTILINE)
+        text = re.sub(r'\n{2,}', '\n', text).strip()
+        if text:
+            result.append({**cue, 'text': text})
+    return result
+
+
+def filter_remove_music_notes(cues):
+    """Remove cues that contain only music note symbols (♪ ♫) and whitespace/dashes.
+
+    Keeps cues that have actual lyrics or dialogue alongside the notes.
+    """
+    result = []
+    for cue in cues:
+        stripped = re.sub(r'[♪♫\s\-]', '', cue['text'])
+        if stripped:  # has real text, keep it
+            result.append(cue)
+    return result
+
+
+def filter_remove_tags(cues):
+    """Remove HTML/formatting tags: <i>, </i>, <b>, <font ...>, {\\an8}, etc."""
+    tag_patterns = [
+        re.compile(r'<[^>]+>'),           # HTML tags
+        re.compile(r'\{\\[^}]+\}'),       # ASS override tags like {\an8}
+    ]
+    result = []
+    for cue in cues:
+        text = cue['text']
+        for pat in tag_patterns:
+            text = pat.sub('', text)
+        text = text.strip()
+        if text:
+            result.append({**cue, 'text': text})
+    return result
+
+
+# Built-in ad/credit patterns (always present)
+BUILTIN_AD_PATTERNS = [
+    r'subtitl(es|ed)\s+by\b.*',
+    r'synced?\s*((&|and)\s*corrected)?\s+by\b.*',
+    r'caption(s|ed)\s+by\b.*',
+    r'translated\s+by\b.*',
+    r'corrections?\s+by\b.*',
+    r'encoded\s+by\b.*',
+    r'ripped\s+by\b.*',
+    r'opensubtitles\S*',
+    r'addic7ed\S*',
+    r'subscene\S*',
+]
+
+
+def filter_remove_ads(cues, custom_patterns=None):
+    """Remove common ad/credit lines from subtitles.
+
+    custom_patterns: optional list of additional pattern strings (case-insensitive).
+    URL lines (www.*) are only removed if the cue also contains another
+    ad indicator — this avoids stripping real dialogue that mentions websites.
+    """
+    all_pattern_strs = list(BUILTIN_AD_PATTERNS)
+    if custom_patterns:
+        all_pattern_strs.extend(custom_patterns)
+
+    ad_patterns = []
+    for p in all_pattern_strs:
+        try:
+            ad_patterns.append(re.compile(r'(?i)^\s*' + p + r'\s*$', re.MULTILINE))
+        except re.error:
+            pass  # skip invalid patterns
+
+    # URL pattern — only applied when cue is already flagged as an ad
+    url_pattern = re.compile(r'(?i)^\s*(?:https?://|www\.)\S+\s*$', re.MULTILINE)
+    # Quick check to detect if a cue has any ad content
+    ad_check_parts = [
+        r'(subtitl(es|ed)|synced?|caption|translated|corrections?|encoded|ripped)\s+by\b',
+        r'opensubtitles', r'addic7ed', r'subscene',
+    ]
+    if custom_patterns:
+        for p in custom_patterns:
+            try:
+                re.compile(p)  # validate
+                ad_check_parts.append(p)
+            except re.error:
+                pass
+    ad_check = re.compile(r'(?i)(' + '|'.join(ad_check_parts) + r')')
+
+    result = []
+    for cue in cues:
+        text = cue['text']
+        has_ad = bool(ad_check.search(text))
+        for pat in ad_patterns:
+            text = pat.sub('', text)
+        # Only strip URLs if this cue had other ad content, or if the
+        # entire cue is nothing but a URL (no other dialogue)
+        if has_ad or not re.sub(r'(?i)(?:https?://|www\.)\S+', '', text).strip():
+            text = url_pattern.sub('', text)
+        text = re.sub(r'\n{2,}', '\n', text).strip()
+        if text:
+            result.append({**cue, 'text': text})
+    return result
+
+
+def filter_remove_speaker_labels(cues):
+    """Remove speaker name labels from start of lines.
+
+    Matches optional dash, then 1-3 words (any case) followed by a colon,
+    as long as it's near the start of the line (≤30 chars before the colon)
+    and NOT a time-like pattern (e.g. '2:30', '12:00').
+    Examples removed: 'John:', 'MARY:', '- Detective Smith:', 'man 1:'
+    Examples kept: '2:30', 'Wait: what?', 'At 12:00 we left'
+    """
+    # Match: optional dash/space, then letters (with spaces/numbers for "Man 1")
+    # up to 30 chars, ending with colon+space — but first char must be a letter
+    pattern = re.compile(r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}:\s*', re.MULTILINE)
+    result = []
+    for cue in cues:
+        text = cue['text']
+        # Apply pattern but verify each match isn't a time or single short word
+        def _replace(m):
+            label = m.group(0).lstrip('- ')
+            name_part = label.split(':')[0].strip()
+            # Skip if it looks like a time (digits with colon, or ends with digit)
+            if re.match(r'^\d+$', name_part):
+                return m.group(0)  # pure number before colon (e.g. "12:")
+            if re.search(r'\d$', name_part):
+                return m.group(0)  # ends with digit (e.g. "At 2:", "Chapter 3:")
+            # Skip very short labels (1 char) — likely not names
+            if len(name_part) <= 1:
+                return m.group(0)
+            return m.group(1)  # keep the leading dash/space if present
+        text = pattern.sub(_replace, text)
+        text = re.sub(r'^\s*-?\s*$', '', text, flags=re.MULTILINE)
+        text = re.sub(r'\n{2,}', '\n', text).strip()
+        if text:
+            result.append({**cue, 'text': text})
+    return result
+
+
+def srt_ts_to_ms(ts):
+    """Convert SRT timestamp string 'HH:MM:SS,mmm' to milliseconds."""
+    ts = ts.replace(',', '.').replace(';', '.')
+    parts = ts.split(':')
+    h, m = int(parts[0]), int(parts[1])
+    s_parts = parts[2].split('.')
+    s = int(s_parts[0])
+    ms = int(s_parts[1]) if len(s_parts) > 1 else 0
+    return (h * 3600 + m * 60 + s) * 1000 + ms
+
+
+def ms_to_srt_ts(ms):
+    """Convert milliseconds to SRT timestamp string 'HH:MM:SS,mmm'."""
+    if ms < 0:
+        ms = 0
+    h = ms // 3600000
+    ms %= 3600000
+    m = ms // 60000
+    ms %= 60000
+    s = ms // 1000
+    ms %= 1000
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def filter_remove_duplicates(cues):
+    """Remove duplicate cues (same text and overlapping/identical timestamps)."""
+    if not cues:
+        return cues
+    result = [cues[0]]
+    for cue in cues[1:]:
+        prev = result[-1]
+        # Same text and same or overlapping timestamps
+        if (cue['text'].strip() == prev['text'].strip() and
+                cue['start'] == prev['start'] and cue['end'] == prev['end']):
+            continue
+        result.append(cue)
+    return result
+
+
+def filter_merge_short(cues, max_gap_ms=1000):
+    """Merge consecutive cues with a small time gap that appear to be fragments."""
+    if not cues:
+        return cues
+    result = [dict(cues[0])]
+    for cue in cues[1:]:
+        prev = result[-1]
+        prev_end = srt_ts_to_ms(prev['end'])
+        cur_start = srt_ts_to_ms(cue['start'])
+        gap = cur_start - prev_end
+        # Merge if gap is small and previous cue text is short (fragment)
+        prev_text = prev['text'].strip()
+        if 0 <= gap <= max_gap_ms and len(prev_text) < 40 and not prev_text.endswith(('.', '!', '?')):
+            result[-1] = {
+                **prev,
+                'end': cue['end'],
+                'text': prev['text'].rstrip() + ' ' + cue['text'].lstrip()
+            }
+        else:
+            result.append(dict(cue))
+    return result
+
+
+def shift_timestamps(cues, offset_ms):
+    """Shift all cue timestamps by offset_ms (positive = later, negative = earlier)."""
+    result = []
+    for cue in cues:
+        new_start = srt_ts_to_ms(cue['start']) + offset_ms
+        new_end = srt_ts_to_ms(cue['end']) + offset_ms
+        if new_end > 0:  # Drop cues shifted entirely before 0
+            result.append({
+                **cue,
+                'start': ms_to_srt_ts(max(0, new_start)),
+                'end': ms_to_srt_ts(new_end)
+            })
+    return result
+
+
+def stretch_timestamps(cues, factor):
+    """Scale all timestamps by a factor (e.g. 1.04 to speed up 4%)."""
+    if factor <= 0:
+        return cues
+    result = []
+    for cue in cues:
+        new_start = int(srt_ts_to_ms(cue['start']) * factor)
+        new_end = int(srt_ts_to_ms(cue['end']) * factor)
+        result.append({
+            **cue,
+            'start': ms_to_srt_ts(new_start),
+            'end': ms_to_srt_ts(new_end)
+        })
+    return result
+
+
+# Max recommended characters per subtitle line for readability
+MAX_CHARS_PER_LINE = 42
+
+
 def get_video_duration(filepath):
     """Get video duration in seconds using ffprobe"""
     try:
@@ -219,7 +693,7 @@ def estimate_output_size(filepath, settings):
         codec_info = settings.get('codec_info', VIDEO_CODEC_MAP['H.265 / HEVC'])
         transcode_mode = settings.get('transcode_mode', 'video')
         quality_mode = settings.get('mode', 'bitrate')
-        encoder = settings.get('encoder', 'gpu')
+        encoder = settings.get('encoder', 'cpu')
 
         # Video bitrate estimate (bits/sec)
         video_bps = 0
@@ -243,6 +717,11 @@ def estimate_output_size(filepath, settings):
                     video_bps = 6_000_000 * (0.85 ** (crf - 23))
                 elif short == 'AV1':
                     video_bps = 4_000_000 * (0.85 ** (crf - 35))
+                elif short == 'MPEG4':
+                    video_bps = 10_000_000 * (0.80 ** (crf - 4))
+                elif short == 'ProRes':
+                    # ProRes is high-bitrate intra-frame; q:v 10 ≈ 100 Mbps at 1080p
+                    video_bps = 100_000_000 * (0.90 ** (crf - 10))
                 else:  # VP9
                     video_bps = 5_000_000 * (0.85 ** (crf - 33))
 
@@ -350,24 +829,58 @@ def check_ffmpeg():
         pass
     return False, "ffmpeg not found"
 
-def check_gpu_encoding():
-    """Check if NVIDIA GPU encoding is available"""
+def detect_gpu_backends():
+    """Detect all available GPU encoding backends.
+
+    Returns a dict: { backend_id: gpu_name_or_True, ... }
+    Only backends whose key encoder is found in ``ffmpeg -encoders`` are included.
+    """
+    available = {}
     try:
         result = subprocess.run(['ffmpeg', '-encoders'], capture_output=True, text=True, timeout=10)
-        output = result.stdout + result.stderr
-        has_nvenc = 'hevc_nvenc' in output or 'h265_nvenc' in output
-        has_cuda = 'cuda' in output.lower()
-        return has_nvenc, has_cuda
+        encoder_output = result.stdout + result.stderr
     except Exception:
-        return False, False
+        return available
 
-def get_gpu_name():
-    """Get NVIDIA GPU name if available"""
+    for bid, backend in GPU_BACKENDS.items():
+        # Check if the key encoder(s) are present in ffmpeg output
+        if any(enc in encoder_output for enc in backend['detect_encoders']):
+            # Try to get a human-readable GPU name
+            gpu_name = _detect_gpu_name(bid, backend)
+            available[bid] = gpu_name or True
+    return available
+
+
+def _detect_gpu_name(backend_id, backend):
+    """Try to get the GPU name for a backend."""
+    # If the backend defines a detection command, try it first
+    if backend.get('detect_cmd'):
+        try:
+            result = subprocess.run(backend['detect_cmd'],
+                                    capture_output=True, text=True, timeout=10)
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip().split('\n')[0]
+        except Exception:
+            pass
+
+    # Fallback: parse lspci for known GPU vendors
     try:
-        result = subprocess.run(['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
-                              capture_output=True, text=True, timeout=10)
+        result = subprocess.run(['lspci'], capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
-            return result.stdout.strip().split('\n')[0]
+            vendor_patterns = {
+                'nvenc': 'NVIDIA',
+                'qsv':   'Intel.*(?:Graphics|Iris|UHD|Arc)',
+                'vaapi':  'AMD|ATI|Radeon',
+            }
+            pattern = vendor_patterns.get(backend_id)
+            if pattern:
+                for line in result.stdout.splitlines():
+                    if re.search(r'VGA|3D|Display', line, re.IGNORECASE):
+                        if re.search(pattern, line, re.IGNORECASE):
+                            # Extract the device description after the colon
+                            parts = line.split(': ', 1)
+                            if len(parts) == 2:
+                                return parts[1].strip()
     except Exception:
         pass
     return None
@@ -395,10 +908,10 @@ class VideoConverter:
     def convert_file(self, input_path, output_path, settings):
         """
         Convert a single video file
-        
+
         settings dict:
             - transcode_mode: 'video', 'audio', or 'both'
-            - encoder: 'cpu' or 'gpu'
+            - encoder: 'cpu' or GPU backend id (e.g. 'nvenc', 'qsv', 'vaapi')
             - mode: 'bitrate' or 'crf'
             - bitrate: e.g., '2M'
             - crf: int 0-51
@@ -414,12 +927,21 @@ class VideoConverter:
             hw_decode     = settings.get('hw_decode', False)
             transcode_mode = settings.get('transcode_mode', 'both')
             codec_info    = settings.get('codec_info', VIDEO_CODEC_MAP['H.265 / HEVC'])
+            codec_name    = settings.get('codec_name', 'H.265 / HEVC')
             mode          = settings.get('mode', 'bitrate')
             two_pass      = settings.get('two_pass', False)
+            is_gpu        = encoder != 'cpu'
+            backend       = GPU_BACKENDS.get(encoder) if is_gpu else None
+
+            # Resolve the actual ffmpeg encoder name
+            if is_gpu:
+                video_enc_name = get_gpu_encoder(codec_name, encoder) or codec_info['cpu_encoder']
+            else:
+                video_enc_name = codec_info['cpu_encoder']
 
             # Two-pass only makes sense for CPU bitrate mode on supported codecs
             cpu_encoder = codec_info.get('cpu_encoder', '')
-            TWO_PASS_SUPPORTED = {'libx265', 'libx264', 'libvpx-vp9'}
+            TWO_PASS_SUPPORTED = {'libx265', 'libx264', 'libvpx-vp9', 'mpeg4'}
             use_two_pass = (
                 two_pass and
                 encoder == 'cpu' and
@@ -428,41 +950,125 @@ class VideoConverter:
                 transcode_mode in ('video', 'both')
             )
 
-            # GPU NVENC multipass (separate concept from CPU two-pass)
-            gpu_encoder = codec_info.get('gpu_encoder', '')
+            # GPU multipass (separate concept from CPU two-pass)
             use_gpu_multipass = (
                 two_pass and
-                encoder == 'gpu' and
+                is_gpu and
+                backend is not None and
                 mode == 'bitrate' and
-                gpu_encoder in ('hevc_nvenc', 'h264_nvenc', 'av1_nvenc')
+                video_enc_name in backend.get('multipass_encoders', set())
             )
+
+            # ── External subtitle handling ──
+            ext_subs = settings.get('external_subs', [])
+            embed_subs = [s for s in ext_subs if s['mode'] == 'embed']
+            # Forced subtitles first so they appear as the first subtitle track(s)
+            embed_subs.sort(key=lambda s: (not s.get('forced', False)))
+            burn_in_subs = [s for s in ext_subs if s['mode'] == 'burn_in']
+            has_burn_in = bool(burn_in_subs)
+
+            # Burn-in is incompatible with hardware decode
+            effective_hw = hw_decode and not has_burn_in
+
+            if has_burn_in and hw_decode:
+                self.log("Hardware decode disabled: burn-in subtitles require CPU filter pipeline", 'WARNING')
+            if len(burn_in_subs) > 1:
+                self.log("Warning: only the first burn-in subtitle will be rendered", 'WARNING')
+
+            # ── Pixel format compatibility check ──
+            # When using GPU hwaccel, frames stay on the device in the source
+            # pixel format.  If the source is 10-bit (e.g. yuv420p10le) but the
+            # target encoder only supports 8-bit (e.g. h264_nvenc), we need a
+            # scale filter to convert the pixel format.
+            # NOTE: We no longer use -hwaccel_output_format cuda because it
+            # fails on sources with mid-stream resolution changes (the scale_cuda
+            # filter doesn't support filter graph reinit).  Without it, frames
+            # pass through system memory where format conversion is automatic.
+            needs_pix_fmt_convert = False
+            if effective_hw and is_gpu and backend and video_enc_name not in (None, 'copy'):
+                src_pix_fmt = get_video_pix_fmt(input_path) or ''
+                is_10bit_src = '10' in src_pix_fmt  # yuv420p10le, p010le, etc.
+                _8bit_only_encoders = {'h264_nvenc', 'h264_qsv', 'h264_vaapi'}
+                if is_10bit_src and video_enc_name in _8bit_only_encoders:
+                    needs_pix_fmt_convert = True
+                    self.log(f"Source is 10-bit ({src_pix_fmt}) — adding pixel format "
+                             f"conversion for {video_enc_name}", 'INFO')
+
+            # Edited subtitles — maps stream_index → (temp_srt_path, input_index)
+            edited_subs = settings.get('edited_subs', {})
+            # Build ordered list of edited sub inputs for consistent input indexing
+            _edited_sub_inputs = sorted(edited_subs.items())  # [(stream_idx, path), ...]
 
             def _build_base_cmd():
                 """Build the common part of the ffmpeg command."""
                 c = ['ffmpeg', '-y']
-                if hw_decode and encoder == 'gpu' and transcode_mode in ['video', 'both'] and codec_info['gpu_encoder'] not in (None, 'copy'):
-                    c.extend(['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'])
+                if effective_hw and is_gpu and backend and transcode_mode in ['video', 'both'] and video_enc_name not in (None, 'copy'):
+                    c.extend(backend['hwaccel'])
                 c.extend(['-i', input_path])
+                # Add external embed subtitle inputs
+                for es in embed_subs:
+                    c.extend(['-i', es['path']])
+                # Add edited subtitle inputs
+                for _si, _path in _edited_sub_inputs:
+                    c.extend(['-i', _path])
                 return c
+
+            def _edited_sub_input_idx(stream_index):
+                """Return the ffmpeg input index for an edited subtitle, or None."""
+                for i, (si, _path) in enumerate(_edited_sub_inputs):
+                    if si == stream_index:
+                        # Input 0 = main file, 1..N = embed_subs, N+1.. = edited subs
+                        return 1 + len(embed_subs) + i
+                return None
 
             def _add_video_args(c, pass_num=None):
                 """Add video encoding arguments. pass_num: None=single, 1=first, 2=second."""
                 if transcode_mode in ['video', 'both']:
-                    video_encoder = codec_info['gpu_encoder'] if encoder == 'gpu' else codec_info['cpu_encoder']
-                    c.extend(['-c:v', video_encoder])
 
-                    if video_encoder != 'copy':
+                    if video_enc_name != 'copy':
+                        # Video filters MUST come before -c:v for proper filter
+                        # chain initialization with hwaccel_output_format surfaces
+                        if has_burn_in:
+                            sub_path = burn_in_subs[0]['path']
+                            ext = Path(sub_path).suffix.lower()
+                            # Escape special chars for ffmpeg filter syntax
+                            escaped = sub_path.replace('\\', '\\\\\\\\').replace(':', '\\:').replace("'", "\\'")
+                            if ext in ('.ass', '.ssa'):
+                                c.extend(['-vf', f"ass='{escaped}'"])
+                            else:
+                                c.extend(['-vf', f"subtitles='{escaped}'"])
+                        elif needs_pix_fmt_convert and backend:
+                            # GPU hwaccel: convert pixel format on-device
+                            c.extend(['-vf', backend['scale_filter']])
+                        elif codec_info['cpu_encoder'] == 'prores_ks':
+                            # ProRes requires 4:2:2 or 4:4:4
+                            prores_profile = settings.get('preset', '') or 'hq'
+                            if prores_profile in ('4444', '4444xq'):
+                                pix = 'yuva444p10le'
+                            else:
+                                pix = 'yuv422p10le'
+                            c.extend(['-vf', f'format={pix}'])
+
+                    c.extend(['-c:v', video_enc_name])
+
+                    if video_enc_name != 'copy':
                         preset = settings.get('preset', '')
                         if preset:
                             if codec_info['cpu_encoder'] == 'libvpx-vp9' and encoder == 'cpu':
                                 c.extend(['-cpu-used', preset])
-                            else:
+                            elif codec_info['cpu_encoder'] == 'prores_ks' and encoder == 'cpu':
+                                c.extend(['-profile:v', preset])
+                            elif is_gpu and backend and backend.get('preset_flag'):
+                                c.extend([backend['preset_flag'], preset])
+                            elif not is_gpu:
                                 c.extend(['-preset', preset])
 
                         if mode == 'crf':
                             crf_val = str(settings.get('crf', codec_info['crf_default']))
-                            if encoder == 'gpu' and codec_info['cq_flag']:
-                                c.extend([codec_info['cq_flag'], crf_val])
+                            if is_gpu and backend:
+                                cq_flag = backend.get('cq_flag')
+                                if cq_flag:
+                                    c.extend([cq_flag, crf_val])
                             elif codec_info['crf_flag']:
                                 c.extend([codec_info['crf_flag'], crf_val])
                                 if codec_info['cpu_encoder'] == 'libvpx-vp9':
@@ -470,10 +1076,10 @@ class VideoConverter:
                         else:
                             bitrate = settings.get('bitrate', DEFAULT_BITRATE)
                             c.extend(['-b:v', bitrate])
-                            if encoder == 'cpu' and codec_info['cpu_encoder'] not in ('libsvtav1', 'libvpx-vp9'):
+                            if encoder == 'cpu' and codec_info['cpu_encoder'] not in ('libsvtav1', 'libvpx-vp9', 'prores_ks', 'mpeg4'):
                                 c.extend(['-minrate', bitrate, '-maxrate', bitrate, '-bufsize', bitrate])
-                            if use_gpu_multipass:
-                                c.extend(['-multipass', 'fullres'])
+                            if use_gpu_multipass and backend:
+                                c.extend(backend['multipass_args'])
 
                         if pass_num is not None:
                             c.extend(['-pass', str(pass_num)])
@@ -498,16 +1104,167 @@ class VideoConverter:
                         c.extend(['-b:a', audio_bitrate])
 
             def _add_subtitle_args(c):
-                """Add subtitle stream arguments."""
-                sub_settings = settings.get('subtitle_settings', {})
-                if not sub_settings:
-                    # No per-file subtitle config — map ALL streams explicitly
-                    # so ffmpeg doesn't silently drop all but the first subtitle
-                    c.extend(['-map', '0:v?', '-map', '0:a?', '-map', '0:s?'])
-                    c.extend(['-c:s', 'copy'])
-                else:
+                """Add subtitle stream arguments (internal + external embed).
+
+                Output order: forced external subs first, then internal/configured
+                subs, then remaining external subs.  This ensures forced tracks
+                appear as the first subtitle stream(s) in the output.
+                """
+                container = settings.get('container', '.mkv')
+                # AVI does not support embedded subtitle streams
+                if container == '.avi':
                     c.extend(['-map', '0:v?', '-map', '0:a?'])
-                    out_sub_idx = 0  # output subtitle stream counter
+                    self.log("Subtitles skipped: AVI container does not support embedded subtitles", 'WARNING')
+                    return
+
+                sub_settings = settings.get('subtitle_settings', {})
+                strip_internal = settings.get('strip_internal_subs', False)
+
+                if not sub_settings and not embed_subs and not strip_internal and not edited_subs:
+                    # Simple case: no per-file config, no external subs, no edits, keep internals
+                    c.extend(['-map', '0:v?', '-map', '0:a?', '-map', '0:s?'])
+                    if container in ('.mp4', '.mov'):
+                        # MP4/MOV only support mov_text — convert text subs, drop bitmap subs
+                        BITMAP_CODECS = {'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle'}
+                        try:
+                            int_streams = get_subtitle_streams(input_path)
+                        except Exception:
+                            int_streams = []
+                        if int_streams:
+                            for si, ist in enumerate(int_streams):
+                                if ist['codec_name'] in BITMAP_CODECS:
+                                    c.extend([f'-c:s:{si}', 'copy'])
+                                    self.log(f"Subtitle stream {ist['index']} ({ist['codec_name']}): "
+                                             f"bitmap format, may not be supported in {container}", 'WARNING')
+                                else:
+                                    c.extend([f'-c:s:{si}', 'mov_text'])
+                        else:
+                            c.extend(['-c:s', 'mov_text'])
+                    else:
+                        c.extend(['-c:s', 'copy'])
+                    return
+
+                # We need explicit mapping when we have external subs, per-file config,
+                # or are stripping internal tracks
+                c.extend(['-map', '0:v?', '-map', '0:a?'])
+                out_sub_idx = 0
+                container = settings.get('container', '.mkv')
+
+                # Bitmap subtitle codecs that cannot be converted to mov_text
+                _BITMAP_SUB_CODECS = {'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle'}
+
+                def _internal_sub_codec(ist):
+                    """Return the codec to use when copying an internal subtitle stream."""
+                    if container in ('.mp4', '.mov') and ist.get('codec_name') not in _BITMAP_SUB_CODECS:
+                        return 'mov_text'
+                    return 'copy'
+
+                def _map_embed_sub(i, es):
+                    """Map a single external embed subtitle input.
+                    i is the index in embed_subs (input_idx = 1 + i)."""
+                    nonlocal out_sub_idx
+                    input_idx = 1 + i
+                    c.extend(['-map', f'{input_idx}:s:0'])
+                    if container in ('.mp4', '.mov'):
+                        codec = 'mov_text'
+                    else:
+                        codec = es.get('format', 'srt')
+                    c.extend([f'-c:s:{out_sub_idx}', codec])
+                    # Language metadata
+                    lang = es.get('language', 'und')
+                    if lang and lang != 'und':
+                        c.extend([f'-metadata:s:s:{out_sub_idx}', f'language={lang}'])
+                    # Disposition flags (default / forced)
+                    disp_parts = []
+                    if es.get('default'):
+                        disp_parts.append('default')
+                    if es.get('forced'):
+                        disp_parts.append('forced')
+                    if disp_parts:
+                        c.extend([f'-disposition:s:{out_sub_idx}', '+'.join(disp_parts)])
+                    # Track title — makes flags visible in MediaInfo and players
+                    title_parts = []
+                    if lang and lang != 'und':
+                        lang_name = lang
+                        for lc, ln in SUBTITLE_LANGUAGES:
+                            if lc == lang:
+                                lang_name = ln
+                                break
+                        title_parts.append(lang_name)
+                    if es.get('forced'):
+                        title_parts.append('Forced')
+                    if title_parts:
+                        c.extend([f'-metadata:s:s:{out_sub_idx}', f'title={" - ".join(title_parts)}'])
+                    out_sub_idx += 1
+
+                # ── Phase 1: Map forced external subs first ──
+                for i, es in enumerate(embed_subs):
+                    if es.get('forced'):
+                        _map_embed_sub(i, es)
+
+                # ── Phase 2: Map internal / per-file-configured subs ──
+                if strip_internal:
+                    self.log("Stripping internal subtitle tracks (replaced by external subs)", 'INFO')
+                elif not sub_settings:
+                    # Map internal subtitle streams, auto-replacing any that
+                    # conflict with external subs of the same language + type.
+                    try:
+                        internal_streams = get_subtitle_streams(input_path)
+                    except Exception:
+                        internal_streams = []
+
+                    if embed_subs and internal_streams:
+                        replaced = []
+                        for ist in internal_streams:
+                            ist_lang = ist.get('language', 'und')
+                            ist_forced = ist.get('forced', False)
+                            # Check if any external sub replaces this internal one
+                            conflict = False
+                            for es in embed_subs:
+                                es_lang = es.get('language', 'und')
+                                es_forced = es.get('forced', False)
+                                # Match: same language (or either is 'und') and same type
+                                lang_match = (ist_lang == es_lang
+                                              or ist_lang == 'und'
+                                              or es_lang == 'und')
+                                type_match = (ist_forced == es_forced)
+                                if lang_match and type_match:
+                                    conflict = True
+                                    break
+                            if conflict:
+                                replaced.append(ist)
+                            else:
+                                c.extend(['-map', f"0:{ist['index']}"])
+                                c.extend([f'-c:s:{out_sub_idx}', _internal_sub_codec(ist)])
+                                out_sub_idx += 1
+                        if replaced:
+                            labels = []
+                            for r in replaced:
+                                rl = r.get('language', 'und')
+                                rt = ' (forced)' if r.get('forced') else ''
+                                labels.append(f"{rl}{rt}")
+                            self.log(f"Auto-replaced {len(replaced)} internal subtitle(s) "
+                                     f"matching external subs: {', '.join(labels)}", 'INFO')
+                    elif internal_streams:
+                        # No external subs — keep all internal streams
+                        if not edited_subs:
+                            c.extend(['-map', '0:s?'])
+                            for ist in internal_streams:
+                                c.extend([f'-c:s:{out_sub_idx}', _internal_sub_codec(ist)])
+                                out_sub_idx += 1
+                        else:
+                            # Some streams edited — map individually
+                            for ist in internal_streams:
+                                ed_input = _edited_sub_input_idx(ist['index'])
+                                if ed_input is not None:
+                                    c.extend(['-map', f'{ed_input}:s:0'])
+                                    c.extend([f'-c:s:{out_sub_idx}', 'srt'])
+                                    self.log(f"Using edited subtitle for stream #{ist['index']}", 'INFO')
+                                else:
+                                    c.extend(['-map', f"0:{ist['index']}"])
+                                    c.extend([f'-c:s:{out_sub_idx}', _internal_sub_codec(ist)])
+                                out_sub_idx += 1
+                else:
                     for stream_index, ss in sub_settings.items():
                         if not ss.get('keep', True):
                             continue
@@ -516,16 +1273,27 @@ class VideoConverter:
                             continue
                         if fmt == 'extract only':
                             fmt = 'copy'
-                        c.extend(['-map', f"0:{stream_index}"])
-                        c.extend([f'-c:s:{out_sub_idx}', fmt])
+                        # Check if this stream has been edited
+                        ed_input = _edited_sub_input_idx(stream_index)
+                        if ed_input is not None:
+                            c.extend(['-map', f'{ed_input}:s:0'])
+                            c.extend([f'-c:s:{out_sub_idx}', 'srt'])
+                            self.log(f"Using edited subtitle for stream #{stream_index}", 'INFO')
+                        else:
+                            c.extend(['-map', f"0:{stream_index}"])
+                            c.extend([f'-c:s:{out_sub_idx}', fmt])
                         out_sub_idx += 1
 
+                # ── Phase 3: Map remaining (non-forced) external subs ──
+                for i, es in enumerate(embed_subs):
+                    if not es.get('forced'):
+                        _map_embed_sub(i, es)
+
             # ── Log what we're about to do ──
-            video_encoder_name = codec_info['gpu_encoder'] if encoder == 'gpu' else codec_info['cpu_encoder']
-            self.log(f"Video codec: {video_encoder_name}", 'INFO')
+            self.log(f"Video codec: {video_enc_name}", 'INFO')
             self.log(f"Mode: {mode}" + (" (two-pass)" if use_two_pass else " (GPU multipass)" if use_gpu_multipass else ""), 'INFO')
-            if hw_decode and encoder == 'gpu':
-                self.log("Hardware decode: CUDA enabled", 'INFO')
+            if hw_decode and is_gpu and backend:
+                self.log(f"Hardware decode: {backend['hwaccel'][1]} enabled", 'INFO')
 
             import tempfile
             passlog = None
@@ -635,6 +1403,36 @@ class VideoConverter:
             duration = get_video_duration(input_path)
             label = f"[{pass_label}] " if pass_label else ""
 
+            # ── ETA calculation ──
+            # Blended approach: FPS-based ETA (responsive, good early) mixed
+            # with wall-clock average ETA (stable, good over time).  The blend
+            # shifts from 100% FPS-based → 100% wall-clock over BLEND_SECS.
+            process_start = time.monotonic()
+            paused_total = 0.0
+            pause_began = None
+            BLEND_SECS = 30             # seconds to fully transition to wall-clock ETA
+
+            # Get total frame count for FPS-based ETA
+            total_frames = None
+            try:
+                probe_cmd = [
+                    'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                    '-show_entries', 'stream=nb_frames,r_frame_rate',
+                    '-of', 'default=noprint_wrappers=1', input_path
+                ]
+                probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=10)
+                for pline in probe_result.stdout.strip().split('\n'):
+                    if pline.startswith('nb_frames=') and pline.split('=')[1].strip().isdigit():
+                        total_frames = int(pline.split('=')[1].strip())
+                    elif pline.startswith('r_frame_rate='):
+                        num, den = pline.split('=')[1].strip().split('/')
+                        source_fps = float(num) / float(den)
+                # If nb_frames not available, estimate from duration × fps
+                if total_frames is None and duration and source_fps:
+                    total_frames = int(duration * source_fps)
+            except Exception:
+                pass
+
             for line in self.current_process.stdout:
                 if self.is_stopped:
                     self.current_process.terminate()
@@ -642,9 +1440,14 @@ class VideoConverter:
                     return False
 
                 while self.is_paused:
+                    if pause_began is None:
+                        pause_began = time.monotonic()
                     if self.is_stopped:
                         return False
                     time.sleep(0.5)
+                if pause_began is not None:
+                    paused_total += time.monotonic() - pause_began
+                    pause_began = None
 
                 line = line.strip()
 
@@ -655,17 +1458,40 @@ class VideoConverter:
                         current_time = h * 3600 + m * 60 + s
                         progress = (current_time / duration) * 100
 
-                        # Parse fps and speed from the same line
+                        # Parse frame, fps, and speed from the same line
+                        frame_match = re.search(r'frame=\s*(\d+)', line)
                         fps_match   = re.search(r'fps=\s*([\d.]+)', line)
                         speed_match = re.search(r'speed=\s*([\d.]+)x', line)
-                        fps   = float(fps_match.group(1))   if fps_match   else None
-                        speed = float(speed_match.group(1)) if speed_match else None
+                        cur_frame = int(frame_match.group(1))   if frame_match else None
+                        fps       = float(fps_match.group(1))   if fps_match   else None
+                        speed     = float(speed_match.group(1)) if speed_match else None
 
-                        # Calculate ETA
+                        # Calculate blended ETA
                         eta = None
-                        if speed and speed > 0 and duration:
+                        wall_elapsed = time.monotonic() - process_start - paused_total
+
+                        # FPS-based ETA: remaining_frames / current_fps
+                        fps_eta = None
+                        if fps and fps > 0 and total_frames and cur_frame is not None:
+                            remaining_frames = total_frames - cur_frame
+                            if remaining_frames > 0:
+                                fps_eta = remaining_frames / fps
+
+                        # Wall-clock ETA: remaining_video / avg_speed
+                        wall_eta = None
+                        if current_time > 0 and wall_elapsed > 0:
+                            avg_speed = current_time / wall_elapsed
                             remaining_video_secs = duration - current_time
-                            eta = remaining_video_secs / speed  # real-time seconds remaining
+                            wall_eta = remaining_video_secs / avg_speed
+
+                        # Blend: start with FPS-based, shift to wall-clock over time
+                        if fps_eta is not None and wall_eta is not None:
+                            w = min(wall_elapsed / BLEND_SECS, 1.0)
+                            eta = w * wall_eta + (1 - w) * fps_eta
+                        elif fps_eta is not None:
+                            eta = fps_eta
+                        elif wall_eta is not None:
+                            eta = wall_eta
 
                         if self.progress_callback:
                             self.progress_callback(progress, f"{label}{line}",
@@ -722,6 +1548,7 @@ class VideoConverterApp:
         self.working_dir = Path.home()
         self.output_dir = None  # None means "same as source file"
         self.recent_folders = []  # list of Path strings, max 5
+        self.custom_ad_patterns = []  # user-defined ad patterns for subtitle editor
         self.files = []
         self.converter = VideoConverter(
             log_callback=self.add_log,
@@ -732,9 +1559,12 @@ class VideoConverterApp:
         self.conversion_thread = None
         self.start_time = None
         self.current_output_path = None
+        # Batch ETA tracking
+        self._batch_speed_samples = []  # list of (duration_secs, wall_secs) per completed file
+        self._file_start_time = None    # monotonic time when current file started encoding
         
         # Settings
-        self.encoder_mode = tk.StringVar(value='gpu')
+        self.encoder_mode = tk.StringVar(value='cpu')  # updated after GPU detection
         self.video_codec = tk.StringVar(value='H.265 / HEVC')
         self.container_format = tk.StringVar(value='.mkv')
         self.transcode_mode = tk.StringVar(value='video')  # 'video', 'audio', or 'both'
@@ -745,6 +1575,7 @@ class VideoConverterApp:
         self.gpu_preset = tk.StringVar(value='p4')
         self.skip_existing = tk.BooleanVar(value=True)
         self.delete_originals = tk.BooleanVar(value=False)
+        self.strip_internal_subs = tk.BooleanVar(value=False)
         self.two_pass = tk.BooleanVar(value=False)
         self.verify_output = tk.BooleanVar(value=True)
         self.notify_sound = tk.BooleanVar(value=True)
@@ -757,11 +1588,19 @@ class VideoConverterApp:
 
         # Check system capabilities
         self.has_ffmpeg, self.ffmpeg_version = check_ffmpeg()
-        self.has_gpu, has_cuda = check_gpu_encoding()
-        self.gpu_name = get_gpu_name() if self.has_gpu else None
+        self.gpu_backends = detect_gpu_backends()   # {backend_id: gpu_name_or_True}
+        self.has_gpu = bool(self.gpu_backends)
 
-        # Hardware decode defaults to on if GPU is available
-        self.hw_decode = tk.BooleanVar(value=bool(self.has_gpu))
+        # Build the encoder choices list: ['cpu', 'nvenc', 'qsv', 'vaapi', ...]
+        self._encoder_choices = ['cpu'] + list(self.gpu_backends.keys())
+
+        # Backward-compat: pick first available GPU as default, or 'cpu'
+        self._default_gpu = self._encoder_choices[1] if self.has_gpu else 'cpu'
+        # Set encoder mode to best available GPU (or cpu)
+        self.encoder_mode.set(self._default_gpu)
+
+        # Hardware decode defaults to on if any GPU backend is available
+        self.hw_decode = tk.BooleanVar(value=self.has_gpu)
         
         # Setup UI
         self.setup_ui()
@@ -963,35 +1802,31 @@ class VideoConverterApp:
             ttk.Label(title_frame, text=f"🎬 {APP_NAME}",
                       font=('Helvetica', 18, 'bold')).pack(side='left')
         
-        # Encoder toggle (also contains folder/refresh buttons)
-        encoder_frame = ttk.Frame(header_frame, padding=5)
+        # ── Encoder selector (right side of title row) ──
+        encoder_frame = ttk.Frame(header_frame)
         encoder_frame.grid(row=0, column=1, sticky="e", padx=10)
 
-        ttk.Button(encoder_frame, text="📁 Change Folder",
-                  command=self.change_folder).pack(side='left', padx=(0, 5))
+        # Build display labels for the encoder combobox
+        self._encoder_labels = {}  # display_label -> backend_id
+        self._encoder_ids = {}     # backend_id -> display_label
+        cpu_label = 'CPU'
+        self._encoder_labels[cpu_label] = 'cpu'
+        self._encoder_ids['cpu'] = cpu_label
+        for bid in self.gpu_backends:
+            backend = GPU_BACKENDS[bid]
+            lbl_text = backend['label']
+            self._encoder_labels[lbl_text] = bid
+            self._encoder_ids[bid] = lbl_text
 
-        ttk.Button(encoder_frame, text="🔄 Refresh",
-                  command=self.refresh_files).pack(side='left', padx=(0, 10))
+        self.encoder_combo = ttk.Combobox(
+            encoder_frame, state='readonly',
+            values=list(self._encoder_labels.keys()),
+            width=max(len(l) for l in self._encoder_labels) + 2)
+        self.encoder_combo.set(self._encoder_ids.get(self.encoder_mode.get(), cpu_label))
+        self.encoder_combo.pack(side='left', padx=(0, 8))
+        self.encoder_combo.bind('<<ComboboxSelected>>', lambda e: self._on_encoder_combo())
 
-        ttk.Separator(encoder_frame, orient='vertical').pack(side='left', fill='y', padx=(0, 8))
-
-        self.cpu_radio = ttk.Radiobutton(encoder_frame, text="CPU",
-                                        variable=self.encoder_mode, value='cpu',
-                                        command=self.on_encoder_change)
-        self.cpu_radio.pack(side='left')
-        
-        self.gpu_radio = ttk.Radiobutton(encoder_frame, text="GPU",
-                                        variable=self.encoder_mode, value='gpu',
-                                        command=self.on_encoder_change,
-                                        state='normal' if self.has_gpu else 'disabled')
-        self.gpu_radio.pack(side='left', padx=10)
-        
-        if self.gpu_name:
-            ttk.Label(encoder_frame, text=f"({self.gpu_name})",
-                     font=('Helvetica', 8)).pack(side='left')
-
-        # Hardware decode checkbox — only useful with GPU
-        ttk.Separator(encoder_frame, orient='vertical').pack(side='left', fill='y', padx=(8, 0))
+        # Hardware decode checkbox
         self.hw_decode_check = tk.Checkbutton(
             encoder_frame, text="HW Decode",
             variable=self.hw_decode,
@@ -999,21 +1834,34 @@ class VideoConverterApp:
             relief='flat', bd=0)
         self.hw_decode_check.pack(side='left')
 
-        # Output directory row
-        out_frame = ttk.Frame(header_frame)
-        out_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
-        out_frame.columnconfigure(1, weight=1)
+        # ── Separator ──
+        ttk.Separator(header_frame, orient='horizontal').grid(
+            row=1, column=0, columnspan=2, sticky='ew', pady=(6, 4))
 
-        ttk.Label(out_frame, text="Output Folder:").grid(row=0, column=0, sticky='w', padx=(0, 6))
+        # ── Toolbar row: folder controls + output path ──
+        toolbar = ttk.Frame(header_frame)
+        toolbar.grid(row=2, column=0, columnspan=2, sticky='ew')
+        toolbar.columnconfigure(2, weight=1)  # output path stretches
 
-        self.output_dir_label = ttk.Label(out_frame, text="Same as source file",
+        ttk.Button(toolbar, text="📁 Change Folder",
+                   command=self.change_folder).grid(row=0, column=0, padx=(0, 4))
+        ttk.Button(toolbar, text="🔄 Refresh",
+                   command=self.refresh_files).grid(row=0, column=1, padx=(0, 8))
+
+        # Output path display (stretches to fill)
+        out_inner = ttk.Frame(toolbar)
+        out_inner.grid(row=0, column=2, sticky='ew', padx=(4, 4))
+        out_inner.columnconfigure(1, weight=1)
+
+        ttk.Label(out_inner, text="Output:").grid(row=0, column=0, padx=(0, 4))
+        self.output_dir_label = ttk.Label(out_inner, text="Same as source file",
                                           foreground='gray', anchor='w')
         self.output_dir_label.grid(row=0, column=1, sticky='ew')
 
-        ttk.Button(out_frame, text="📂 Set Output Folder",
-                   command=self.change_output_folder).grid(row=0, column=2, padx=(6, 4))
-        ttk.Button(out_frame, text="✖ Reset to Source",
-                   command=self.reset_output_folder).grid(row=0, column=3)
+        ttk.Button(toolbar, text="📂 Set Output",
+                   command=self.change_output_folder).grid(row=0, column=3, padx=(4, 4))
+        ttk.Button(toolbar, text="✖ Reset",
+                   command=self.reset_output_folder).grid(row=0, column=4)
 
     def setup_settings(self, parent):
         """Setup settings panel"""
@@ -1231,23 +2079,9 @@ class VideoConverterApp:
         self.two_pass_check.pack(side='left', padx=5)
         ttk.Checkbutton(self.check_frame, text="Verify output",
                        variable=self.verify_output).pack(side='left', padx=5)
+        ttk.Checkbutton(self.check_frame, text="Remove existing subtitles",
+                       variable=self.strip_internal_subs).pack(side='left', padx=5)
 
-        ttk.Separator(self.check_frame, orient='vertical').pack(side='left', fill='y', padx=8)
-
-        ttk.Checkbutton(self.check_frame, text="🔔 Notify when done",
-                       variable=self.notify_sound).pack(side='left', padx=(0, 4))
-
-        SOUND_NAMES = [
-            'complete', 'alarm-clock-elapsed', 'bell', 'message',
-            'dialog-information', 'phone-incoming-call', 'service-login',
-            'window-attention', 'audio-test-signal'
-        ]
-        self.sound_combo = ttk.Combobox(self.check_frame, textvariable=self.notify_sound_file,
-                                        values=SOUND_NAMES, width=18, state='readonly')
-        self.sound_combo.pack(side='left', padx=2)
-
-        ttk.Button(self.check_frame, text="▶", width=2,
-                   command=self.preview_sound).pack(side='left', padx=2)
 
     def setup_file_list(self, parent):
         """Setup file list section"""
@@ -1330,10 +2164,23 @@ class VideoConverterApp:
         self.tree_context_menu.add_command(label="⚙️ Override Settings...", command=self.show_override_dialog)
         self.tree_context_menu.add_command(label="✖ Clear Override", command=self.clear_override)
         self.tree_context_menu.add_separator()
-        self.tree_context_menu.add_command(label="🎞️ Subtitle Tracks...", command=self.show_subtitle_dialog)
+        self.tree_context_menu.add_command(label="🎞️ Internal Subtitles...", command=self.show_subtitle_dialog)
+        self.tree_context_menu.add_command(label="📎 External Subtitles...", command=self.show_external_subtitle_dialog)
+        self.tree_context_menu.add_command(label="✖ Remove External Subs", command=self.remove_external_subs)
         self.tree_context_menu.add_separator()
         self.tree_context_menu.add_command(label="🗑️ Remove from list", command=self.remove_selected_file)
         self.file_tree.bind('<Button-3>', self.on_file_tree_right_click)
+        def on_file_double_click(event):
+            # Identify which row was double-clicked
+            item = self.file_tree.identify_row(event.y)
+            if not item:
+                return
+            # Select and focus the item
+            self.file_tree.selection_set(item)
+            self.file_tree.focus(item)
+            # Use after_idle so the selection is fully processed first
+            self.root.after_idle(self.show_subtitle_dialog)
+        self.file_tree.bind('<Double-1>', on_file_double_click)
         self.file_tree.bind('<Delete>', lambda e: self.remove_selected_file())
 
         file_frame.rowconfigure(1, weight=1)
@@ -1394,9 +2241,14 @@ class VideoConverterApp:
         return item, index
 
     def _refresh_tree_row(self, item, file_info):
-        """Redraw a single tree row to reflect override indicator and est size."""
+        """Redraw a single tree row to reflect override/subtitle indicators and est size."""
         name = file_info['name']
-        display_name = ('⚙️ ' + name) if 'overrides' in file_info else name
+        prefix = ''
+        if 'overrides' in file_info:
+            prefix += '⚙️ '
+        if file_info.get('external_subs'):
+            prefix += '📎 '
+        display_name = prefix + name
         self.file_tree.item(item, values=(
             display_name,
             file_info['size'],
@@ -1417,6 +2269,251 @@ class VideoConverterApp:
             self.add_log(f"Cleared overrides: {file_info['name']}", 'INFO')
         else:
             self.add_log(f"No overrides to clear for: {file_info['name']}", 'INFO')
+
+    def remove_external_subs(self):
+        """Remove all external subtitles from the selected file."""
+        item, index = self._get_selected_file_index()
+        if index is None:
+            return
+        file_info = self.files[index]
+        if file_info.get('external_subs'):
+            file_info['external_subs'] = []
+            self._refresh_tree_row(item, file_info)
+            self.add_log(f"Removed external subs: {file_info['name']}", 'INFO')
+        else:
+            self.add_log(f"No external subs to remove for: {file_info['name']}", 'INFO')
+
+    def show_external_subtitle_dialog(self):
+        """Show a dialog to manage external subtitle files attached to the selected video."""
+        item, index = self._get_selected_file_index()
+        if index is None:
+            return
+        file_info = self.files[index]
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title(f"External Subtitles — {os.path.basename(file_info['name'])}")
+        dlg.geometry("820x420")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        self._center_on_main(dlg)
+        dlg.resizable(True, True)
+        dlg.minsize(700, 300)
+
+        # Working copy of external subs
+        subs = [dict(s) for s in file_info.get('external_subs', [])]
+
+        # ── Scrollable list area ──
+        list_frame = ttk.LabelFrame(dlg, text="Attached Subtitle Files", padding=8)
+        list_frame.pack(fill='both', expand=True, padx=10, pady=(10, 4))
+
+        canvas = tk.Canvas(list_frame, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(list_frame, orient='vertical', command=canvas.yview)
+        inner = ttk.Frame(canvas)
+
+        inner.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+        inner_window = canvas.create_window((0, 0), window=inner, anchor='nw')
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        # Keep inner frame width in sync with canvas so grid stretches properly
+        def _on_canvas_resize(event):
+            canvas.itemconfigure(inner_window, width=event.width)
+        canvas.bind('<Configure>', _on_canvas_resize)
+
+        canvas.pack(side='left', fill='both', expand=True)
+        scrollbar.pack(side='right', fill='y')
+
+        lang_values = [f"{code} — {name}" for code, name in SUBTITLE_LANGUAGES]
+        lang_codes = [code for code, _ in SUBTITLE_LANGUAGES]
+
+        # Grid column configuration
+        COL_W = {'lang': 16, 'mode': 8}
+
+        def _rebuild_list():
+            """Rebuild the subtitle list UI from the working copy."""
+            for w in inner.winfo_children():
+                w.destroy()
+
+            # Filename column stretches; others are fixed width on the right
+            inner.columnconfigure(0, weight=1)
+            for c in range(1, 6):
+                inner.columnconfigure(c, weight=0)
+
+            if not subs:
+                ttk.Label(inner, text="No external subtitles attached.\n\n"
+                          "Use  ➕ Add Subtitle File  below,\n"
+                          "or drag .srt / .ass / .vtt files onto the file queue.",
+                          foreground='gray', justify='center').grid(row=0, column=0,
+                          columnspan=6, padx=40, pady=30)
+                return
+
+            # ── Column headers ──
+            hdr_font = ('Helvetica', 9, 'bold')
+            pad = {'padx': 4, 'pady': (0, 6)}
+            ttk.Label(inner, text="Filename",  font=hdr_font, anchor='w').grid(row=0, column=0, sticky='w', **pad)
+            ttk.Label(inner, text="Language",   font=hdr_font, anchor='w').grid(row=0, column=1, sticky='e', **pad)
+            ttk.Label(inner, text="Mode",       font=hdr_font, anchor='w').grid(row=0, column=2, sticky='e', **pad)
+            ttk.Label(inner, text="Default",    font=hdr_font, anchor='center').grid(row=0, column=3, sticky='e', **pad)
+            ttk.Label(inner, text="Forced",     font=hdr_font, anchor='center').grid(row=0, column=4, sticky='e', **pad)
+            ttk.Label(inner, text="",           font=hdr_font).grid(row=0, column=5, **pad)
+
+            # Separator under headers
+            ttk.Separator(inner, orient='horizontal').grid(
+                row=1, column=0, columnspan=6, sticky='ew', pady=(0, 4))
+
+            # ── Subtitle rows ──
+            for i, sub in enumerate(subs):
+                r = i + 2  # row offset for headers + separator
+                rpad = {'padx': 4, 'pady': 3}
+
+                # Filename — full width, stretches with dialog
+                name_lbl = ttk.Label(inner, text=sub['label'], anchor='w')
+                name_lbl.grid(row=r, column=0, sticky='ew', **rpad)
+                _create_tooltip(name_lbl, sub['label'])
+
+                # Language
+                lang_var = tk.StringVar()
+                try:
+                    li = lang_codes.index(sub['language'])
+                    lang_var.set(lang_values[li])
+                except ValueError:
+                    lang_var.set(lang_values[0])
+                lang_cb = ttk.Combobox(inner, textvariable=lang_var,
+                                       values=lang_values, width=COL_W['lang'], state='readonly')
+                lang_cb.grid(row=r, column=1, sticky='e', **rpad)
+                def _on_lang(evt, idx=i, var=lang_var):
+                    subs[idx]['language'] = var.get().split(' — ')[0] if ' — ' in var.get() else 'und'
+                lang_cb.bind('<<ComboboxSelected>>', _on_lang)
+
+                # Mode
+                mode_var = tk.StringVar(value=sub['mode'])
+                bitmap_fmts = {'hdmv_pgs_subtitle', 'dvd_subtitle'}
+                mode_values = ['embed'] if sub['format'] in bitmap_fmts else ['embed', 'burn_in']
+                mode_cb = ttk.Combobox(inner, textvariable=mode_var,
+                                       values=mode_values, width=COL_W['mode'], state='readonly')
+                mode_cb.grid(row=r, column=2, sticky='e', **rpad)
+                def _on_mode(evt, idx=i, var=mode_var):
+                    subs[idx]['mode'] = var.get()
+                    _update_warning()
+                mode_cb.bind('<<ComboboxSelected>>', _on_mode)
+
+                # Default checkbox
+                def_var = tk.BooleanVar(value=sub.get('default', False))
+                ttk.Checkbutton(inner, variable=def_var).grid(row=r, column=3, sticky='e', **rpad)
+                def _on_default(idx=i, var=def_var):
+                    subs[idx]['default'] = var.get()
+                def_var.trace_add('write', lambda *a, idx=i, var=def_var: _on_default(idx, var))
+
+                # Forced checkbox
+                forced_var = tk.BooleanVar(value=sub.get('forced', False))
+                ttk.Checkbutton(inner, variable=forced_var).grid(row=r, column=4, sticky='e', **rpad)
+                def _on_forced(idx=i, var=forced_var):
+                    subs[idx]['forced'] = var.get()
+                forced_var.trace_add('write', lambda *a, idx=i, var=forced_var: _on_forced(idx, var))
+
+                # Remove button
+                ttk.Button(inner, text="✖ Remove", width=8,
+                           command=lambda idx=i: _remove_sub(idx)).grid(row=r, column=5, sticky='e', **rpad)
+
+            _update_warning()
+
+        # ── Strip existing tracks option ──
+        strip_existing = tk.BooleanVar(value=file_info.get('strip_internal_subs', False))
+        strip_frame = ttk.Frame(dlg)
+        strip_frame.pack(fill='x', padx=14, pady=(4, 0))
+        ttk.Checkbutton(strip_frame, text="Remove existing subtitle tracks from source",
+                        variable=strip_existing).pack(side='left')
+        ttk.Label(strip_frame, text="(only external subs will be included in output)",
+                  foreground='gray', font=('Helvetica', 8)).pack(side='left', padx=(6, 0))
+
+        # ── Burn-in warning ──
+        warn_var = tk.StringVar()
+        warn_label = ttk.Label(dlg, textvariable=warn_var, foreground='#cc6600',
+                               wraplength=780, justify='left')
+        warn_label.pack(fill='x', padx=14, pady=(0, 2))
+
+        def _update_warning():
+            has_burn = any(s['mode'] == 'burn_in' for s in subs)
+            burn_count = sum(1 for s in subs if s['mode'] == 'burn_in')
+            msgs = []
+            if has_burn:
+                msgs.append("⚠ Burn-in subtitles require CPU filtering — "
+                            "hardware decode will be automatically disabled for this file.")
+            if burn_count > 1:
+                msgs.append("⚠ Only the first burn-in subtitle will be rendered. "
+                            "Set the others to 'embed' or remove them.")
+            warn_var.set('\n'.join(msgs))
+
+        def _remove_sub(idx):
+            subs.pop(idx)
+            _rebuild_list()
+
+        def _add_sub():
+            filetypes = [("Subtitle files", " ".join(f"*{ext}" for ext in SUBTITLE_EXTENSIONS)),
+                         ("All files", "*.*")]
+            paths = filedialog.askopenfilenames(
+                title="Add External Subtitle File(s)",
+                filetypes=filetypes,
+                initialdir=str(Path(file_info['path']).parent))
+            for p in paths:
+                p = Path(p)
+                ext = p.suffix.lower()
+                if ext not in SUBTITLE_EXTENSIONS:
+                    continue
+                if any(s['path'] == str(p) for s in subs):
+                    continue
+                # Auto-detect language from filename tokens
+                _lang2to3 = {
+                    'en': 'eng', 'es': 'spa', 'fr': 'fra', 'de': 'deu',
+                    'it': 'ita', 'pt': 'por', 'ru': 'rus', 'ja': 'jpn',
+                    'ko': 'kor', 'zh': 'zho', 'ar': 'ara', 'hi': 'hin',
+                    'nl': 'nld', 'pl': 'pol', 'sv': 'swe', 'tr': 'tur',
+                    'vi': 'vie',
+                }
+                lang = 'und'
+                stem_tokens = p.stem.lower().split('.')
+                for token in reversed(stem_tokens[1:]):
+                    if token in _lang2to3:
+                        lang = _lang2to3[token]
+                        break
+                    elif any(token == lc for lc, _ in SUBTITLE_LANGUAGES):
+                        lang = token
+                        break
+                # Auto-detect forced / SDH / default from filename tokens
+                is_forced = 'forced' in stem_tokens
+                is_sdh = 'sdh' in stem_tokens or 'cc' in stem_tokens
+                is_plain = not is_forced and not is_sdh
+                existing_has_default = any(s.get('default') for s in subs)
+                sub_info = {
+                    'path': str(p),
+                    'label': p.name,
+                    'language': lang,
+                    'mode': 'embed',
+                    'format': SUBTITLE_EXT_TO_CODEC.get(ext, 'srt'),
+                    'default': is_plain and not existing_has_default,
+                    'forced': is_forced,
+                }
+                subs.append(sub_info)
+            _rebuild_list()
+
+        # ── Buttons ──
+        btn_frame = ttk.Frame(dlg, padding=(10, 4, 10, 10))
+        btn_frame.pack(fill='x')
+
+        ttk.Button(btn_frame, text="➕ Add Subtitle File...", command=_add_sub).pack(side='left')
+
+        def _on_save():
+            file_info['external_subs'] = subs
+            file_info['strip_internal_subs'] = strip_existing.get()
+            self._refresh_tree_row(item, file_info)
+            count = len(subs)
+            strip_msg = " (replacing internal tracks)" if strip_existing.get() else ""
+            self.add_log(f"External subs updated: {file_info['name']} ({count} file(s)){strip_msg}", 'INFO')
+            dlg.destroy()
+
+        ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side='right', padx=(4, 0))
+        ttk.Button(btn_frame, text="Save", command=_on_save).pack(side='right')
+
+        _rebuild_list()
 
     def show_override_dialog(self):
         """Show a per-file settings override dialog."""
@@ -1472,13 +2569,29 @@ class VideoConverterApp:
         lbl("Encoder:", row)
         enc_frame = ttk.Frame(f)
         enc_frame.grid(row=row, column=1, sticky='w', **pad); row += 1
-        cpu_rb = ttk.Radiobutton(enc_frame, text="CPU", variable=v_encoder, value='cpu',
-                                 command=lambda: _update_presets())
-        cpu_rb.pack(side='left')
-        gpu_rb = ttk.Radiobutton(enc_frame, text="GPU", variable=v_encoder, value='gpu',
-                                 command=lambda: _update_presets(),
-                                 state='normal' if self.has_gpu else 'disabled')
-        gpu_rb.pack(side='left', padx=8)
+
+        # Build encoder choices for the override dialog
+        ovr_encoder_labels = {}   # display -> id
+        ovr_encoder_ids = {}      # id -> display
+        ovr_encoder_labels['CPU'] = 'cpu'
+        ovr_encoder_ids['cpu'] = 'CPU'
+        for bid in self.gpu_backends:
+            bk = GPU_BACKENDS[bid]
+            lbl_txt = bk['label']
+            ovr_encoder_labels[lbl_txt] = bid
+            ovr_encoder_ids[bid] = lbl_txt
+
+        ovr_enc_combo = ttk.Combobox(enc_frame, state='readonly',
+                                      values=list(ovr_encoder_labels.keys()),
+                                      width=max(len(l) for l in ovr_encoder_labels) + 2 if ovr_encoder_labels else 12)
+        ovr_enc_combo.set(ovr_encoder_ids.get(v_encoder.get(), 'CPU'))
+        ovr_enc_combo.pack(side='left')
+        def _on_ovr_enc(evt=None):
+            bid = ovr_encoder_labels.get(ovr_enc_combo.get(), 'cpu')
+            v_encoder.set(bid)
+            _update_presets()
+        ovr_enc_combo.bind('<<ComboboxSelected>>', _on_ovr_enc)
+
         hw_cb = ttk.Checkbutton(enc_frame, text="HW Decode", variable=v_hw_decode,
                                 state='normal' if self.has_gpu else 'disabled')
         hw_cb.pack(side='left', padx=8)
@@ -1553,9 +2666,14 @@ class VideoConverterApp:
         def _update_presets():
             info = VIDEO_CODEC_MAP.get(v_video_codec.get(), VIDEO_CODEC_MAP['H.265 / HEVC'])
             enc = v_encoder.get()
-            if enc == 'gpu' and info['gpu_encoder']:
-                presets = info['gpu_presets']
-                default = info['gpu_preset_default']
+            codec_nm = v_video_codec.get()
+            if enc != 'cpu':
+                gpu_enc = get_gpu_encoder(codec_nm, enc)
+                if gpu_enc and gpu_enc != 'copy':
+                    presets, default = get_gpu_presets(enc)
+                else:
+                    presets = info['cpu_presets']
+                    default = info['cpu_preset_default']
             else:
                 presets = info['cpu_presets']
                 default = info['cpu_preset_default']
@@ -1563,7 +2681,13 @@ class VideoConverterApp:
             if v_preset.get() not in presets:
                 v_preset.set(default or (presets[0] if presets else ''))
             # HW decode only useful with GPU
-            hw_cb.configure(state='normal' if (enc == 'gpu' and self.has_gpu) else 'disabled')
+            hw_cb.configure(state='normal' if (enc != 'cpu' and enc in self.gpu_backends) else 'disabled')
+            # Update encoder combo values based on codec support
+            labels = ['CPU']
+            for bid in self.gpu_backends:
+                if self._encoder_has_codec(codec_nm, bid):
+                    labels.append(ovr_encoder_ids[bid])
+            ovr_enc_combo['values'] = labels
 
         def _update_quality():
             if v_quality_mode.get() == 'crf':
@@ -1630,14 +2754,13 @@ class VideoConverterApp:
         file_info = self.files[index]
         filepath = file_info['path']
 
-        # Probe subtitle streams in a thread so UI doesn't freeze
+        # Probe subtitle streams
         streams = get_subtitle_streams(filepath)
 
         dlg = tk.Toplevel(self.root)
-        dlg.title(f"Subtitle Tracks — {os.path.basename(filepath)}")
+        dlg.title(f"Internal Subtitles — {os.path.basename(filepath)}")
         dlg.geometry("700x420")
         dlg.transient(self.root)
-        dlg.grab_set()
         self._center_on_main(dlg)
         dlg.resizable(True, True)
 
@@ -1646,6 +2769,7 @@ class VideoConverterApp:
             ttk.Label(dlg, text="No subtitle tracks found in this file.",
                       font=('Helvetica', 11), padding=20).pack()
             ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=10)
+            dlg.grab_set()
             dlg.wait_window()
             return
 
@@ -1667,12 +2791,12 @@ class VideoConverterApp:
         SUB_FORMATS = ['copy', 'srt', 'ass', 'webvtt', 'ttml', 'extract only', 'drop']
 
         # ── Column headers (outside scroll area so they stay fixed) ──
-        COL_WIDTHS = [40, 60, 70, 100, 0, 120]  # 0 = expand
+        COL_WIDTHS = [40, 60, 70, 100, 0, 120, 50]  # 0 = expand
         header_frame = ttk.Frame(dlg, padding=(10, 0, 10, 0))
         header_frame.pack(fill='x')
         header_frame.columnconfigure(4, weight=1)
         for col, (text, w) in enumerate(zip(
-            ['Keep', 'Stream', 'Language', 'Codec', 'Title / Flags', 'Convert To'],
+            ['Keep', 'Stream', 'Language', 'Codec', 'Title / Flags', 'Convert To', ''],
             COL_WIDTHS
         )):
             ttk.Label(header_frame, text=text,
@@ -1701,13 +2825,18 @@ class VideoConverterApp:
         list_frame.bind('<Configure>', on_frame_configure)
         canvas.bind('<Configure>', on_canvas_configure)
 
-        # Mouse wheel scrolling
+        # Mouse wheel scrolling (bind to dialog widgets, not globally)
         def on_mousewheel(e):
             canvas.yview_scroll(int(-1 * (e.delta / 120)), 'units')
-        canvas.bind_all('<MouseWheel>', on_mousewheel)
-        # Linux scroll
-        canvas.bind_all('<Button-4>', lambda e: canvas.yview_scroll(-1, 'units'))
-        canvas.bind_all('<Button-5>', lambda e: canvas.yview_scroll(1, 'units'))
+            return 'break'
+
+        def _bind_scroll(widget):
+            widget.bind('<MouseWheel>', on_mousewheel)
+            widget.bind('<Button-4>', lambda e: (canvas.yview_scroll(-1, 'units'), 'break')[-1])
+            widget.bind('<Button-5>', lambda e: (canvas.yview_scroll(1, 'units'), 'break')[-1])
+
+        _bind_scroll(canvas)
+        _bind_scroll(list_frame)
 
         # Load existing subtitle settings if any
         existing_sub = file_info.get('subtitle_settings', {})
@@ -1751,11 +2880,17 @@ class VideoConverterApp:
                                      values=SUB_FORMATS, width=12, state='readonly')
             fmt_combo.grid(row=r, column=5, padx=4, pady=2)
 
+            # Edit button (only for text-based subtitles)
+            _BITMAP_SUB_CODECS_SET = {'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle'}
+            if s['codec_name'] not in _BITMAP_SUB_CODECS_SET:
+                edit_btn = ttk.Button(list_frame, text="✏️", width=3,
+                    command=lambda si=s['index'], fi=file_info, fp=filepath: (
+                        self.show_subtitle_editor(fp, si, fi)
+                    ))
+                edit_btn.grid(row=r, column=6, padx=2, pady=2)
+
         # Unbind mousewheel when dialog closes
         def on_close():
-            canvas.unbind_all('<MouseWheel>')
-            canvas.unbind_all('<Button-4>')
-            canvas.unbind_all('<Button-5>')
             dlg.destroy()
         dlg.protocol('WM_DELETE_WINDOW', on_close)
 
@@ -1852,7 +2987,757 @@ class VideoConverterApp:
         ttk.Button(btn_frame, text="💾 Save & Close", command=do_save).pack(side='right', padx=(4, 0))
         ttk.Button(btn_frame, text="Cancel", command=on_close).pack(side='right')
 
+        dlg.update_idletasks()  # ensure all widgets are rendered
+        dlg.grab_set()
         dlg.wait_window()
+
+    def show_subtitle_editor(self, filepath, stream_index, file_info):
+        """Show subtitle text editor for a specific subtitle stream.
+
+        Full-featured editor with filters, search/replace, timing tools,
+        undo/redo, duplicate detection, video preview, and export.
+        """
+        import tempfile
+        import copy
+
+        # Extract subtitle to temp SRT
+        tmp_srt = tempfile.NamedTemporaryFile(suffix='.srt', delete=False, mode='w',
+                                               encoding='utf-8')
+        tmp_srt.close()
+        cmd = ['ffmpeg', '-y', '-i', filepath, '-map', f'0:{stream_index}',
+               '-c:s', 'srt', tmp_srt.name]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                self.add_log(f"Failed to extract subtitle #{stream_index} for editing: "
+                             f"{result.stderr[-200:]}", 'ERROR')
+                os.unlink(tmp_srt.name)
+                return
+        except Exception as e:
+            self.add_log(f"Extract error: {e}", 'ERROR')
+            os.unlink(tmp_srt.name)
+            return
+
+        # Read and parse SRT
+        with open(tmp_srt.name, 'r', encoding='utf-8', errors='replace') as f:
+            srt_text = f.read()
+        os.unlink(tmp_srt.name)
+
+        cues = parse_srt(srt_text)
+        if not cues:
+            self.add_log(f"No subtitle cues found in stream #{stream_index}", 'WARNING')
+            return
+
+        # Keep original for undo-all
+        original_cues = [dict(c) for c in cues]
+
+        # ── Undo / Redo stack ──
+        undo_stack = []   # list of previous cue states
+        redo_stack = []
+
+        def push_undo():
+            """Save current state to undo stack."""
+            undo_stack.append([dict(c) for c in cues])
+            redo_stack.clear()  # new action clears redo
+
+        def do_undo(event=None):
+            nonlocal cues
+            if not undo_stack:
+                return
+            redo_stack.append([dict(c) for c in cues])
+            cues = undo_stack.pop()
+            refresh_tree(cues)
+
+        def do_redo(event=None):
+            nonlocal cues
+            if not redo_stack:
+                return
+            undo_stack.append([dict(c) for c in cues])
+            cues = redo_stack.pop()
+            refresh_tree(cues)
+
+        # ── Editor Window ──
+        editor = tk.Toplevel(self.root)
+        editor.title(f"Edit Subtitles — Stream #{stream_index} — {os.path.basename(filepath)}")
+        editor.geometry("950x650")
+        editor.transient(self.root)
+        editor.grab_set()
+        self._center_on_main(editor)
+        editor.resizable(True, True)
+
+        # Keyboard shortcuts
+        editor.bind('<Control-z>', do_undo)
+        editor.bind('<Control-y>', do_redo)
+        editor.bind('<Control-Z>', do_undo)
+        editor.bind('<Control-Y>', do_redo)
+
+        # Track state
+        modified_count = tk.IntVar(value=0)
+        deleted_count = tk.IntVar(value=0)
+
+        # ── Color tag styles for treeview ──
+        # Will be configured after tree is created; define names here
+        TAG_MODIFIED = 'modified'
+        TAG_HI = 'has_hi'
+        TAG_TAGS = 'has_tags'
+        TAG_LONG = 'long_line'
+        TAG_SEARCH = 'search_match'
+
+        def _classify_cue(cue, orig_text=None):
+            """Return set of tag names for a cue based on its content."""
+            tags = set()
+            text = cue['text']
+            # Modified from original
+            if orig_text is not None and text != orig_text:
+                tags.add(TAG_MODIFIED)
+            # Contains HI annotations
+            if re.search(r'\[.*?\]|\(.*?\)|♪|♫', text):
+                tags.add(TAG_HI)
+            # Contains HTML/ASS tags
+            if re.search(r'<[^>]+>|\{\\[^}]+\}', text):
+                tags.add(TAG_TAGS)
+            # Long lines
+            for line in text.split('\n'):
+                if len(line) > MAX_CHARS_PER_LINE:
+                    tags.add(TAG_LONG)
+                    break
+            return tags
+
+        def refresh_tree(new_cues, search_indices=None):
+            """Reload the treeview with updated cues."""
+            nonlocal cues
+            cues = new_cues
+            tree.delete(*tree.get_children())
+            search_set = set(search_indices or [])
+            for i, cue in enumerate(cues):
+                display = cue['text'].replace('\n', ' \\n ')
+                ts = f"{cue['start']} → {cue['end']}"
+                # Determine color tags
+                orig_text = original_cues[i]['text'] if i < len(original_cues) else None
+                ctags = _classify_cue(cue, orig_text)
+                if i in search_set:
+                    ctags.add(TAG_SEARCH)
+                # Priority: search > modified > hi > tags > long
+                if TAG_SEARCH in ctags:
+                    row_tag = TAG_SEARCH
+                elif TAG_MODIFIED in ctags:
+                    row_tag = TAG_MODIFIED
+                elif TAG_HI in ctags:
+                    row_tag = TAG_HI
+                elif TAG_TAGS in ctags:
+                    row_tag = TAG_TAGS
+                elif TAG_LONG in ctags:
+                    row_tag = TAG_LONG
+                else:
+                    row_tag = ''
+                tree.insert('', 'end', iid=str(i),
+                            values=(i + 1, ts, display),
+                            tags=(row_tag,) if row_tag else ())
+            # Update stats
+            deleted_count.set(len(original_cues) - len(cues))
+            mod = sum(1 for i, c in enumerate(cues) if i < len(original_cues)
+                      and c['text'] != original_cues[i]['text'])
+            modified_count.set(mod)
+            long_count = sum(1 for c in cues
+                             if any(len(l) > MAX_CHARS_PER_LINE for l in c['text'].split('\n')))
+            stats_parts = [
+                f"{len(cues)} entries",
+                f"{modified_count.get()} modified",
+                f"{deleted_count.get()} removed",
+            ]
+            if long_count:
+                stats_parts.append(f"{long_count} long lines")
+            stats_label.configure(text=" │ ".join(stats_parts))
+
+        def apply_filter(filter_func, name):
+            nonlocal cues
+            push_undo()
+            before = len(cues)
+            cues = filter_func(cues)
+            after = len(cues)
+            self.add_log(f"Filter '{name}': {before - after} entries removed, "
+                         f"{after} remaining", 'INFO')
+            refresh_tree(cues)
+
+        def undo_all():
+            nonlocal cues
+            push_undo()
+            cues = [dict(c) for c in original_cues]
+            refresh_tree(cues)
+            self.add_log("Subtitle edits reset to original", 'INFO')
+
+        def delete_selected():
+            nonlocal cues
+            selected = tree.selection()
+            if not selected:
+                return
+            push_undo()
+            indices_to_remove = set(int(s) for s in selected)
+            cues = [c for i, c in enumerate(cues) if i not in indices_to_remove]
+            refresh_tree(cues)
+
+        def split_selected():
+            """Split the selected cue into two at the midpoint."""
+            nonlocal cues
+            selected = tree.selection()
+            if len(selected) != 1:
+                messagebox.showinfo("Split", "Select exactly one cue to split.",
+                                    parent=editor)
+                return
+            idx = int(selected[0])
+            cue = cues[idx]
+            text = cue['text']
+            lines = text.split('\n')
+            if len(lines) < 2:
+                mid = len(text) // 2
+                space_pos = text.rfind(' ', 0, mid + 10)
+                if space_pos > mid - 20:
+                    mid = space_pos
+                text1 = text[:mid].rstrip()
+                text2 = text[mid:].lstrip()
+            else:
+                mid_line = len(lines) // 2
+                text1 = '\n'.join(lines[:mid_line])
+                text2 = '\n'.join(lines[mid_line:])
+
+            if not text1 or not text2:
+                return
+
+            push_undo()
+            start_ms = srt_ts_to_ms(cue['start'])
+            end_ms = srt_ts_to_ms(cue['end'])
+            mid_ms = (start_ms + end_ms) // 2
+
+            cue1 = {**cue, 'text': text1, 'end': ms_to_srt_ts(mid_ms)}
+            cue2 = {**cue, 'text': text2, 'start': ms_to_srt_ts(mid_ms + 1)}
+            cues[idx:idx + 1] = [cue1, cue2]
+            refresh_tree(cues)
+
+        def join_selected():
+            """Join two or more selected consecutive cues into one."""
+            nonlocal cues
+            selected = sorted(tree.selection(), key=int)
+            if len(selected) < 2:
+                messagebox.showinfo("Join", "Select two or more consecutive cues to join.",
+                                    parent=editor)
+                return
+            indices = [int(s) for s in selected]
+            for i in range(1, len(indices)):
+                if indices[i] != indices[i - 1] + 1:
+                    messagebox.showwarning("Join",
+                        "Selected cues must be consecutive.", parent=editor)
+                    return
+
+            push_undo()
+            first = cues[indices[0]]
+            last = cues[indices[-1]]
+            merged_text = ' '.join(cues[i]['text'] for i in indices)
+            merged = {
+                **first,
+                'end': last['end'],
+                'text': merged_text
+            }
+            cues[indices[0]:indices[-1] + 1] = [merged]
+            refresh_tree(cues)
+
+        def show_timing_dialog():
+            """Show a small dialog for timing offset and stretch."""
+            td = tk.Toplevel(editor)
+            td.title("Timing Adjustment")
+            td.geometry("320x180")
+            td.transient(editor)
+            td.grab_set()
+            self._center_on_main(td)
+            td.resizable(False, False)
+
+            of = ttk.LabelFrame(td, text="Offset (shift all timestamps)", padding=8)
+            of.pack(fill='x', padx=10, pady=(10, 5))
+            offset_var = tk.StringVar(value="0")
+            ttk.Label(of, text="Milliseconds (+/−):").pack(side='left')
+            ttk.Entry(of, textvariable=offset_var, width=10).pack(side='left', padx=4)
+
+            def apply_offset():
+                nonlocal cues
+                try:
+                    ms = int(offset_var.get())
+                except ValueError:
+                    messagebox.showwarning("Invalid", "Enter a number in milliseconds.",
+                                           parent=td)
+                    return
+                if ms == 0:
+                    return
+                push_undo()
+                cues = shift_timestamps(cues, ms)
+                refresh_tree(cues)
+                direction = "forward" if ms > 0 else "backward"
+                self.add_log(f"Shifted timestamps {direction} by {abs(ms)}ms", 'INFO')
+                td.destroy()
+
+            ttk.Button(of, text="Apply", command=apply_offset).pack(side='right')
+
+            sf = ttk.LabelFrame(td, text="Stretch (scale timestamps)", padding=8)
+            sf.pack(fill='x', padx=10, pady=5)
+            stretch_var = tk.StringVar(value="1.0")
+            ttk.Label(sf, text="Factor:").pack(side='left')
+            ttk.Entry(sf, textvariable=stretch_var, width=10).pack(side='left', padx=4)
+
+            def apply_stretch():
+                nonlocal cues
+                try:
+                    factor = float(stretch_var.get())
+                except ValueError:
+                    messagebox.showwarning("Invalid", "Enter a decimal number (e.g. 1.04).",
+                                           parent=td)
+                    return
+                if factor <= 0:
+                    messagebox.showwarning("Invalid", "Factor must be positive.", parent=td)
+                    return
+                if factor == 1.0:
+                    return
+                push_undo()
+                cues = stretch_timestamps(cues, factor)
+                refresh_tree(cues)
+                self.add_log(f"Stretched timestamps by factor {factor}", 'INFO')
+                td.destroy()
+
+            ttk.Button(sf, text="Apply", command=apply_stretch).pack(side='right')
+            ttk.Button(td, text="Close", command=td.destroy).pack(pady=(5, 10))
+
+        # Search state
+        find_var = tk.StringVar()
+        replace_var = tk.StringVar()
+        use_regex = tk.BooleanVar(value=False)  # reserved for future use
+
+        def do_find():
+            """Highlight all cues matching the search term."""
+            term = find_var.get()
+            if not term:
+                refresh_tree(cues)
+                return
+            matches = []
+            for i, cue in enumerate(cues):
+                try:
+                    if use_regex.get():
+                        if re.search(term, cue['text'], re.IGNORECASE):
+                            matches.append(i)
+                    else:
+                        if term.lower() in cue['text'].lower():
+                            matches.append(i)
+                except re.error:
+                    pass
+            refresh_tree(cues, search_indices=matches)
+            if matches:
+                tree.see(str(matches[0]))
+                tree.selection_set(str(matches[0]))
+            self.add_log(f"Search: {len(matches)} matches for '{term}'", 'INFO')
+
+        def do_replace_all():
+            """Replace all occurrences of search term."""
+            nonlocal cues
+            term = find_var.get()
+            repl = replace_var.get()
+            if not term:
+                return
+            push_undo()
+            count = 0
+            for cue in cues:
+                old_text = cue['text']
+                try:
+                    if use_regex.get():
+                        new_text = re.sub(term, repl, old_text, flags=re.IGNORECASE)
+                    else:
+                        pattern = re.escape(term)
+                        new_text = re.sub(pattern, repl, old_text, flags=re.IGNORECASE)
+                except re.error:
+                    continue
+                if new_text != old_text:
+                    cue['text'] = new_text
+                    count += 1
+            cues = [c for c in cues if c['text'].strip()]
+            refresh_tree(cues)
+            self.add_log(f"Replaced {count} occurrence(s) of '{term}' → '{repl}'", 'INFO')
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Menu bar
+        # ══════════════════════════════════════════════════════════════════════
+        menubar = tk.Menu(editor)
+        editor.configure(menu=menubar)
+
+        # ── Filters menu ──
+        filter_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Filters", menu=filter_menu)
+        filter_menu.add_command(label="Remove HI  [brackets] (parens)",
+                                command=lambda: apply_filter(filter_remove_hi, "Remove HI"))
+        filter_menu.add_command(label="Remove Tags  <i> {\\an8}",
+                                command=lambda: apply_filter(filter_remove_tags, "Remove Tags"))
+        def apply_remove_ads():
+            apply_filter(lambda c: filter_remove_ads(c, self.custom_ad_patterns),
+                         "Remove Ads")
+
+        filter_menu.add_command(label="Remove Ads / Credits", command=apply_remove_ads)
+        filter_menu.add_command(label="Remove Speaker Labels",
+                                command=lambda: apply_filter(filter_remove_speaker_labels, "Remove Speaker"))
+        filter_menu.add_command(label="Remove Music Notes  ♪ ♫",
+                                command=lambda: apply_filter(filter_remove_music_notes, "Remove Music Notes"))
+        filter_menu.add_separator()
+        filter_menu.add_command(label="Remove Duplicates",
+                                command=lambda: apply_filter(filter_remove_duplicates, "Remove Duplicates"))
+        filter_menu.add_command(label="Merge Short Cues",
+                                command=lambda: apply_filter(filter_merge_short, "Merge Short Cues"))
+        filter_menu.add_separator()
+
+        def show_ad_patterns_dialog():
+            """Dialog to view built-in ad patterns and manage custom ones."""
+            pd = tk.Toplevel(editor)
+            pd.title("Ad / Credit Patterns")
+            pd.geometry("500x420")
+            pd.transient(editor)
+            pd.grab_set()
+            self._center_on_main(pd)
+            pd.resizable(True, True)
+
+            # Built-in patterns (read-only)
+            bf = ttk.LabelFrame(pd, text="Built-in Patterns (always active)", padding=8)
+            bf.pack(fill='x', padx=10, pady=(10, 5))
+            builtin_list = tk.Listbox(bf, height=6, font=('Courier', 9))
+            builtin_list.pack(fill='x')
+            for p in BUILTIN_AD_PATTERNS:
+                builtin_list.insert('end', p)
+
+            # Custom patterns (editable)
+            cf = ttk.LabelFrame(pd, text="Custom Patterns (saved to preferences)", padding=8)
+            cf.pack(fill='both', expand=True, padx=10, pady=5)
+
+            custom_list = tk.Listbox(cf, height=8, font=('Courier', 9))
+            custom_list.pack(fill='both', expand=True)
+            for p in self.custom_ad_patterns:
+                custom_list.insert('end', p)
+
+            add_frame = ttk.Frame(cf)
+            add_frame.pack(fill='x', pady=(4, 0))
+            new_pattern_var = tk.StringVar()
+            pattern_entry = ttk.Entry(add_frame, textvariable=new_pattern_var)
+            pattern_entry.pack(side='left', fill='x', expand=True, padx=(0, 4))
+
+            def add_pattern():
+                pat = new_pattern_var.get().strip()
+                if not pat:
+                    return
+                # Validate regex
+                try:
+                    re.compile(pat)
+                except re.error as e:
+                    messagebox.showwarning("Invalid Pattern",
+                                           f"Not a valid regex:\n{e}", parent=pd)
+                    return
+                if pat not in self.custom_ad_patterns:
+                    self.custom_ad_patterns.append(pat)
+                    custom_list.insert('end', pat)
+                    new_pattern_var.set('')
+                    self.add_log(f"Added custom ad pattern: {pat}", 'INFO')
+
+            def remove_selected():
+                sel = custom_list.curselection()
+                if not sel:
+                    return
+                idx = sel[0]
+                removed = self.custom_ad_patterns.pop(idx)
+                custom_list.delete(idx)
+                self.add_log(f"Removed custom ad pattern: {removed}", 'INFO')
+
+            ttk.Button(add_frame, text="Add", command=add_pattern).pack(side='right')
+            pattern_entry.bind('<Return>', lambda e: add_pattern())
+
+            # Hint
+            ttk.Label(cf, text="Patterns are case-insensitive regex matched at start of line.",
+                      font=('Helvetica', 8), foreground='gray').pack(anchor='w')
+
+            # Buttons
+            btn_frame = ttk.Frame(pd, padding=(10, 6, 10, 10))
+            btn_frame.pack(fill='x')
+            ttk.Button(btn_frame, text="Remove Selected", command=remove_selected).pack(side='left')
+
+            def save_and_close():
+                self.save_preferences()
+                pd.destroy()
+
+            ttk.Button(btn_frame, text="Save & Close", command=save_and_close).pack(side='right')
+            ttk.Button(btn_frame, text="Cancel", command=pd.destroy).pack(side='right', padx=4)
+
+        filter_menu.add_command(label="Manage Ad Patterns...",
+                                command=show_ad_patterns_dialog)
+
+        # ── Edit menu ──
+        edit_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Edit", menu=edit_menu)
+        edit_menu.add_command(label="Undo                Ctrl+Z", command=do_undo)
+        edit_menu.add_command(label="Redo                Ctrl+Y", command=do_redo)
+        edit_menu.add_command(label="Reset to Original", command=undo_all)
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Delete Selected     Del", command=delete_selected)
+        edit_menu.add_command(label="Split Cue", command=split_selected)
+        edit_menu.add_command(label="Join Selected Cues", command=join_selected)
+
+        # ── Timing menu ──
+        timing_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Timing", menu=timing_menu)
+        timing_menu.add_command(label="Offset / Stretch...", command=show_timing_dialog)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Search & Replace toolbar (compact single row)
+        # ══════════════════════════════════════════════════════════════════════
+        search_frame = ttk.Frame(editor, padding=(10, 4, 10, 4))
+        search_frame.pack(fill='x')
+
+        ttk.Label(search_frame, text="Find:").pack(side='left')
+        find_entry = ttk.Entry(search_frame, textvariable=find_var, width=20)
+        find_entry.pack(side='left', padx=(2, 6))
+        find_entry.bind('<Return>', lambda e: do_find())
+
+        ttk.Label(search_frame, text="Replace:").pack(side='left')
+        replace_entry = ttk.Entry(search_frame, textvariable=replace_var, width=20)
+        replace_entry.pack(side='left', padx=(2, 6))
+
+        ttk.Button(search_frame, text="Find", command=do_find).pack(side='left', padx=2)
+        ttk.Button(search_frame, text="Replace All", command=do_replace_all).pack(side='left', padx=2)
+
+        # Bind Ctrl+F to focus the find field
+        editor.bind('<Control-f>', lambda e: find_entry.focus_set())
+        editor.bind('<Control-F>', lambda e: find_entry.focus_set())
+
+        ttk.Separator(editor, orient='horizontal').pack(fill='x')
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Treeview with subtitle entries
+        # ══════════════════════════════════════════════════════════════════════
+        tree_frame = ttk.Frame(editor)
+        tree_frame.pack(fill='both', expand=True, padx=10, pady=(4, 0))
+
+        tree_scroll_y = ttk.Scrollbar(tree_frame, orient='vertical')
+        tree_scroll_y.pack(side='right', fill='y')
+
+        tree = ttk.Treeview(tree_frame, columns=('num', 'time', 'text'),
+                            show='headings', yscrollcommand=tree_scroll_y.set,
+                            selectmode='extended')
+        tree_scroll_y.config(command=tree.yview)
+
+        tree.heading('num', text='#')
+        tree.heading('time', text='Timestamp')
+        tree.heading('text', text='Text')
+        tree.column('num', width=40, minwidth=30, stretch=False)
+        tree.column('time', width=180, minwidth=140, stretch=False)
+        tree.column('text', width=500, minwidth=200, stretch=True)
+        tree.pack(fill='both', expand=True)
+
+        # ── Color coding ──
+        tree.tag_configure(TAG_MODIFIED, background='#fff3cd')   # yellow — modified
+        tree.tag_configure(TAG_HI, background='#cce5ff')         # blue — HI content
+        tree.tag_configure(TAG_TAGS, background='#f8d7da')       # pink — has tags
+        tree.tag_configure(TAG_LONG, background='#ffe0b2')       # orange — long lines
+        tree.tag_configure(TAG_SEARCH, background='#c8e6c9')     # green — search match
+
+        # ── Mousewheel scrolling (consume events to prevent bleed-through) ──
+        def on_tree_mousewheel(event):
+            tree.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+            return 'break'
+
+        def on_tree_scroll_up(event):
+            tree.yview_scroll(-3, 'units')
+            return 'break'
+
+        def on_tree_scroll_down(event):
+            tree.yview_scroll(3, 'units')
+            return 'break'
+
+        tree.bind('<MouseWheel>', on_tree_mousewheel)
+        tree.bind('<Button-4>', on_tree_scroll_up)
+        tree.bind('<Button-5>', on_tree_scroll_down)
+
+        # ── Inline edit on double-click ──
+        edit_entry = None
+
+        def on_double_click(event):
+            nonlocal edit_entry, cues
+            item = tree.identify_row(event.y)
+            col = tree.identify_column(event.x)
+            if not item or col != '#3':  # Only edit the text column
+                return
+
+            bbox = tree.bbox(item, col)
+            if not bbox:
+                return
+            x, y, w, h = bbox
+            idx = int(item)
+
+            if edit_entry:
+                edit_entry.destroy()
+
+            push_undo()
+            edit_entry = tk.Text(tree_frame, wrap='word', height=3)
+            edit_entry.place(x=x, y=y, width=w, height=max(h, 60))
+            edit_entry.insert('1.0', cues[idx]['text'])
+            edit_entry.focus_set()
+            edit_entry.tag_configure('sel', background='#4a90d9')
+
+            def save_edit(e=None):
+                nonlocal edit_entry
+                new_text = edit_entry.get('1.0', 'end-1c').strip()
+                if new_text:
+                    cues[idx]['text'] = new_text
+                    display = new_text.replace('\n', ' \\n ')
+                    tree.set(item, 'text', display)
+                    # Update row color tag
+                    orig_text = original_cues[idx]['text'] if idx < len(original_cues) else None
+                    ctags = _classify_cue(cues[idx], orig_text)
+                    row_tag = ''
+                    for t in (TAG_MODIFIED, TAG_HI, TAG_TAGS, TAG_LONG):
+                        if t in ctags:
+                            row_tag = t
+                            break
+                    tree.item(item, tags=(row_tag,) if row_tag else ())
+                else:
+                    del cues[idx]
+                    refresh_tree(cues)
+                edit_entry.destroy()
+                edit_entry = None
+                # Update stats
+                deleted_count.set(len(original_cues) - len(cues))
+                mod = sum(1 for i, c in enumerate(cues) if i < len(original_cues)
+                          and c['text'] != original_cues[i]['text'])
+                modified_count.set(mod)
+                long_count = sum(1 for c in cues
+                                 if any(len(l) > MAX_CHARS_PER_LINE
+                                        for l in c['text'].split('\n')))
+                stats_parts = [
+                    f"{len(cues)} entries",
+                    f"{modified_count.get()} modified",
+                    f"{deleted_count.get()} removed",
+                ]
+                if long_count:
+                    stats_parts.append(f"{long_count} long lines")
+                stats_label.configure(text=" │ ".join(stats_parts))
+
+            def cancel_edit(e=None):
+                nonlocal edit_entry
+                if edit_entry:
+                    edit_entry.destroy()
+                    edit_entry = None
+                    if undo_stack:
+                        undo_stack.pop()  # discard the undo we pushed
+
+            edit_entry.bind('<Escape>', cancel_edit)
+            edit_entry.bind('<Control-Return>', save_edit)
+            edit_entry.bind('<Tab>', save_edit)
+
+            def on_focus_out(e):
+                if edit_entry:
+                    save_edit()
+            edit_entry.bind('<FocusOut>', on_focus_out)
+
+        tree.bind('<Double-1>', on_double_click)
+
+        # ── Video preview on right-click ──
+        def preview_at_cue(event=None):
+            """Play a short clip starting at the selected cue's timestamp."""
+            selected = tree.selection()
+            if not selected:
+                return
+            idx = int(selected[0])
+            start_ts = cues[idx]['start'].replace(',', '.')
+            # Play 5 seconds starting from the cue timestamp
+            cmd = ['ffplay', '-ss', start_ts, '-t', '5',
+                   '-autoexit', '-window_title', f'Preview — cue #{idx + 1}',
+                   '-loglevel', 'quiet', filepath]
+            try:
+                subprocess.Popen(cmd)
+            except FileNotFoundError:
+                self.add_log("ffplay not found — cannot preview video", 'WARNING')
+            except Exception as e:
+                self.add_log(f"Preview error: {e}", 'ERROR')
+
+        # Right-click context menu
+        ctx_menu = tk.Menu(editor, tearoff=0)
+        ctx_menu.add_command(label="▶ Preview at this cue", command=preview_at_cue)
+        ctx_menu.add_separator()
+        ctx_menu.add_command(label="✂ Split cue", command=split_selected)
+        ctx_menu.add_command(label="⊕ Join selected cues", command=join_selected)
+        ctx_menu.add_separator()
+        ctx_menu.add_command(label="🗑 Delete selected", command=delete_selected)
+
+        def show_context_menu(event):
+            # Select the row under cursor if not already selected
+            item = tree.identify_row(event.y)
+            if item and item not in tree.selection():
+                tree.selection_set(item)
+            ctx_menu.post(event.x_root, event.y_root)
+
+        tree.bind('<Button-3>', show_context_menu)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Status bar + action buttons
+        # ══════════════════════════════════════════════════════════════════════
+        status_frame = ttk.Frame(editor, padding=(10, 6, 10, 6))
+        status_frame.pack(fill='x')
+
+        stats_label = ttk.Label(status_frame,
+                                text=f"{len(cues)} entries │ 0 modified │ 0 removed")
+        stats_label.pack(side='left')
+
+        def do_save():
+            """Save edited subtitles — write to temp file and store path on file_info."""
+            if not cues:
+                messagebox.showwarning("Empty Subtitles",
+                                       "All subtitle entries have been removed.\n"
+                                       "Nothing to save.", parent=editor)
+                return
+            tmp_dir = tempfile.mkdtemp(prefix='docflix_sub_')
+            out_path = os.path.join(tmp_dir, f"edited_stream{stream_index}.srt")
+            with open(out_path, 'w', encoding='utf-8') as f:
+                f.write(write_srt(cues))
+
+            if 'edited_subs' not in file_info:
+                file_info['edited_subs'] = {}
+            file_info['edited_subs'][stream_index] = out_path
+
+            removed = len(original_cues) - len(cues)
+            self.add_log(f"Subtitle edits saved for stream #{stream_index}: "
+                         f"{len(cues)} entries ({removed} removed) → {out_path}", 'SUCCESS')
+            editor.destroy()
+
+        def do_export():
+            """Export the edited subtitle as a standalone .srt file."""
+            if not cues:
+                messagebox.showwarning("Empty", "No subtitle entries to export.",
+                                       parent=editor)
+                return
+            out_dir = self.output_dir or Path(filepath).parent
+            default_name = f"{Path(filepath).stem}.edited.srt"
+            out_path = filedialog.asksaveasfilename(
+                parent=editor,
+                initialdir=str(out_dir),
+                initialfile=default_name,
+                defaultextension='.srt',
+                filetypes=[('SubRip', '*.srt'), ('All files', '*.*')]
+            )
+            if not out_path:
+                return
+            with open(out_path, 'w', encoding='utf-8') as f:
+                f.write(write_srt(cues))
+            self.add_log(f"Exported edited subtitle → {out_path}", 'SUCCESS')
+
+        ttk.Button(status_frame, text="💾 Save", command=do_save).pack(side='right', padx=(4, 0))
+        ttk.Button(status_frame, text="Cancel", command=editor.destroy).pack(side='right')
+        ttk.Button(status_frame, text="📤 Export SRT", command=do_export).pack(side='right', padx=4)
+        ttk.Button(status_frame, text="▶ Preview",
+                   command=preview_at_cue).pack(side='right', padx=4)
+
+        # Populate tree
+        refresh_tree(cues)
+
+        # Delete key shortcut
+        editor.bind('<Delete>', lambda e: delete_selected())
+
+        editor.wait_window()
 
     def on_drop(self, event):
         """Handle files/folders dropped onto the file list."""
@@ -1875,28 +3760,64 @@ class VideoConverterApp:
                     paths.append(raw[i:end])
                     i = end + 1
 
-        added = 0
+        # Separate dropped paths into video files and subtitle files
+        video_paths = []
+        sub_paths = []
         for path_str in paths:
             path = Path(path_str.strip())
             if path.is_dir():
-                # Recursively add all video files from dropped folder
                 for filepath in sorted(path.rglob('*')):
-                    if filepath.is_file() and filepath.suffix.lower() in VIDEO_EXTENSIONS:
-                        added += self._add_file_to_list(filepath)
-            elif path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS:
-                added += self._add_file_to_list(path)
+                    if filepath.is_file():
+                        if filepath.suffix.lower() in VIDEO_EXTENSIONS:
+                            video_paths.append(filepath)
+                        elif filepath.suffix.lower() in SUBTITLE_EXTENSIONS:
+                            sub_paths.append(filepath)
+            elif path.is_file():
+                if path.suffix.lower() in VIDEO_EXTENSIONS:
+                    video_paths.append(path)
+                elif path.suffix.lower() in SUBTITLE_EXTENSIONS:
+                    sub_paths.append(path)
+
+        # Add video files first
+        added = 0
+        for filepath in video_paths:
+            added += self._add_file_to_list(filepath)
+
+        # Associate subtitle files with video files
+        attached = 0
+        unmatched = []
+        for sub_path in sub_paths:
+            if self._associate_external_sub(sub_path):
+                attached += 1
+            else:
+                unmatched.append(sub_path)
+
+        # Unmatched subs: try to attach to currently selected file
+        if unmatched:
+            item, index = self._get_selected_file_index()
+            if index is not None and len(unmatched) > 0:
+                for sub_path in unmatched:
+                    self._attach_external_sub(self.files[index], sub_path)
+                    attached += 1
+                self._refresh_tree_row(item, self.files[index])
+                unmatched = []
 
         if added:
             self.add_log(f"Added {added} file(s) via drag & drop.", 'INFO')
-        else:
-            self.add_log("No supported video files found in dropped items.", 'WARNING')
+        if attached:
+            self.add_log(f"Attached {attached} external subtitle(s).", 'INFO')
+        if unmatched:
+            names = ', '.join(p.name for p in unmatched)
+            self.add_log(f"Could not match subtitle(s): {names} — select a video file first.", 'WARNING')
+        if not added and not attached and not unmatched:
+            self.add_log("No supported video or subtitle files found in dropped items.", 'WARNING')
 
     def _add_file_to_list(self, filepath):
         """Add a single file to the list if not already present. Returns 1 if added, 0 if skipped."""
         filepath = Path(filepath)
         f = filepath.name
         # Skip already-converted files
-        if re.search(r'-(\d+(\.\d+)?M|CRF\d+)-(NVENC_|)(H265|H264|AV1|VP9)_|-video-copy|-audio-copy|-[A-Z0-9]+_\d+k', f):
+        if re.search(r'-(\d+(\.\d+)?M|CRF\d+)-(NVENC_|)(H265|H264|AV1|VP9|MPEG4|ProRes)_|-video-copy|-audio-copy|-[A-Z0-9]+_\d+k', f):
             return 0
         # Skip duplicates already in the list
         existing_paths = {fi['path'] for fi in self.files}
@@ -1913,11 +3834,93 @@ class VideoConverterApp:
             'duration_str': dur_str,
             'duration_secs': dur_secs,
             'est_size': est,
-            'status': 'Pending'
+            'status': 'Pending',
+            'external_subs': [],
         }
         self.files.append(file_info)
         self.file_tree.insert('', 'end', values=(f, size, dur_str, est, 'Pending'))
         return 1
+
+    def _associate_external_sub(self, sub_path):
+        """Try to auto-associate an external subtitle file with a video in the queue.
+
+        Matches by filename stem — e.g. ``movie.srt`` matches ``movie.mkv``,
+        ``movie.en.srt`` matches ``movie.mkv``, and
+        ``movie.en.forced.srt`` matches ``movie.mkv``
+        (progressively strips trailing dot-separated suffixes).
+        Returns True if a match was found and attached.
+        """
+        sub_path = Path(sub_path)
+        sub_stem = sub_path.stem.lower()
+
+        # Build a list of candidate stems by progressively stripping
+        # trailing dot-separated tokens (e.g. lang codes, "forced", "sdh")
+        candidates = [sub_stem]
+        stem = sub_stem
+        for _ in range(3):  # strip up to 3 trailing tokens
+            if '.' not in stem:
+                break
+            stem = stem.rsplit('.', 1)[0]
+            candidates.append(stem)
+
+        for i, file_info in enumerate(self.files):
+            video_stem = Path(file_info['path']).stem.lower()
+            if video_stem in candidates:
+                self._attach_external_sub(file_info, sub_path)
+                items = self.file_tree.get_children()
+                if i < len(items):
+                    self._refresh_tree_row(items[i], file_info)
+                return True
+        return False
+
+    def _attach_external_sub(self, file_info, sub_path):
+        """Attach an external subtitle file to a file_info dict."""
+        sub_path = Path(sub_path)
+        ext = sub_path.suffix.lower()
+
+        # Try to detect language from filename suffixes
+        # Handles: movie.en.srt, movie.eng.srt, movie.en.forced.srt, etc.
+        lang = 'und'
+        _lang2to3 = {
+            'en': 'eng', 'es': 'spa', 'fr': 'fra', 'de': 'deu',
+            'it': 'ita', 'pt': 'por', 'ru': 'rus', 'ja': 'jpn',
+            'ko': 'kor', 'zh': 'zho', 'ar': 'ara', 'hi': 'hin',
+            'nl': 'nld', 'pl': 'pol', 'sv': 'swe', 'tr': 'tur',
+            'vi': 'vie',
+        }
+        # Check trailing dot-separated tokens for language codes
+        stem_tokens = sub_path.stem.lower().split('.')
+        for token in reversed(stem_tokens[1:]):  # skip the first token (main filename)
+            if token in _lang2to3:
+                lang = _lang2to3[token]
+                break
+            elif any(token == lc for lc, _ in SUBTITLE_LANGUAGES):
+                lang = token
+                break
+
+        # Auto-detect flags from filename tokens
+        stem_tokens = [t.lower() for t in sub_path.stem.split('.')]
+        is_forced = 'forced' in stem_tokens
+        is_sdh = 'sdh' in stem_tokens or 'cc' in stem_tokens
+        # "Plain" subtitle = not forced, not SDH/CC — candidate for default track
+        is_plain = not is_forced and not is_sdh
+        # Only set default if no other sub already has it for this file
+        existing_has_default = any(s.get('default') for s in file_info.get('external_subs', []))
+
+        sub_info = {
+            'path': str(sub_path),
+            'label': sub_path.name,
+            'language': lang,
+            'mode': 'embed',        # 'embed' or 'burn_in'
+            'format': SUBTITLE_EXT_TO_CODEC.get(ext, 'srt'),
+            'default': is_plain and not existing_has_default,
+            'forced': is_forced,
+        }
+
+        # Avoid duplicate attachments
+        existing_paths = {s['path'] for s in file_info.get('external_subs', [])}
+        if str(sub_path) not in existing_paths:
+            file_info.setdefault('external_subs', []).append(sub_info)
 
     def setup_log_panel(self):
         """Create the detached log window (hidden until user clicks Log button)."""
@@ -2015,8 +4018,8 @@ class VideoConverterApp:
         ttk.Entry(vf_frame, textvariable=v_video_folder).grid(row=0, column=0, sticky='ew')
         ttk.Button(vf_frame, text="Browse…",
                    command=lambda: v_video_folder.set(
-                       filedialog.askdirectory(initialdir=v_video_folder.get(),
-                                              title="Select Default Video Folder")
+                       self._ask_directory(initialdir=v_video_folder.get(),
+                                           title="Select Default Video Folder")
                        or v_video_folder.get()
                    )).grid(row=0, column=1, padx=(4, 0))
 
@@ -2029,8 +4032,8 @@ class VideoConverterApp:
         ttk.Entry(of_frame, textvariable=v_output_folder).grid(row=0, column=0, sticky='ew')
         ttk.Button(of_frame, text="Browse…",
                    command=lambda: v_output_folder.set(
-                       filedialog.askdirectory(initialdir=v_output_folder.get() or str(Path.home()),
-                                              title="Select Default Save To Folder")
+                       self._ask_directory(initialdir=v_output_folder.get() or str(Path.home()),
+                                           title="Select Default Save To Folder")
                        or v_output_folder.get()
                    )).grid(row=0, column=1, padx=(4, 0))
         ttk.Label(f, text="(leave blank to save alongside source files)",
@@ -2097,19 +4100,43 @@ class VideoConverterApp:
         def on_player_changed(*args):
             if v_player.get() == 'Custom...':
                 custom_frame.grid()
-                dlg.geometry("640x400")
+                dlg.geometry("640x420")
             else:
                 custom_frame.grid_remove()
-                dlg.geometry("640x360")
+                dlg.geometry("640x380")
 
         v_player.trace_add('write', on_player_changed)
         # Set initial state
         if v_player.get() == 'Custom...':
             custom_frame.grid()
-            dlg.geometry("640x400")
         else:
             custom_frame.grid_remove()
-            dlg.geometry("640x360")
+
+        # ── Notification Sound ──
+        ttk.Label(f, text="Notify When Done:").grid(row=7, column=0, sticky='w', **pad)
+        notify_frame = ttk.Frame(f)
+        notify_frame.grid(row=7, column=1, sticky='w', **pad)
+
+        v_notify = tk.BooleanVar(value=self.notify_sound.get())
+        ttk.Checkbutton(notify_frame, text="Play sound",
+                       variable=v_notify).pack(side='left', padx=(0, 8))
+
+        SOUND_NAMES = [
+            'complete', 'alarm-clock-elapsed', 'bell', 'message',
+            'dialog-information', 'phone-incoming-call', 'service-login',
+            'window-attention', 'audio-test-signal'
+        ]
+        v_sound_file = tk.StringVar(value=self.notify_sound_file.get())
+        ttk.Combobox(notify_frame, textvariable=v_sound_file,
+                     values=SOUND_NAMES, width=18, state='readonly').pack(side='left', padx=2)
+        ttk.Button(notify_frame, text="🔊", width=2,
+                   command=lambda: (
+                       self.notify_sound_file.set(v_sound_file.get()),
+                       self.preview_sound()
+                   )).pack(side='left', padx=2)
+
+        # Adjust dialog height for all content
+        dlg.geometry("640x380")
 
         # ── Buttons ──
         btn_frame = ttk.Frame(dlg, padding=(16, 0, 16, 12))
@@ -2146,6 +4173,10 @@ class VideoConverterApp:
             else:
                 self.default_player.set(v_player.get())
 
+            # Notification
+            self.notify_sound.set(v_notify.get())
+            self.notify_sound_file.set(v_sound_file.get())
+
             # Persist to prefs file
             self.save_preferences()
             dlg.destroy()
@@ -2170,6 +4201,7 @@ class VideoConverterApp:
             'skip_existing':        self.skip_existing.get(),
             'delete_originals':     self.delete_originals.get(),
             'hw_decode':            self.hw_decode.get(),
+            'strip_internal_subs':  self.strip_internal_subs.get(),
             'two_pass':             self.two_pass.get(),
             'verify_output':        self.verify_output.get(),
             'notify_sound':         self.notify_sound.get(),
@@ -2178,6 +4210,7 @@ class VideoConverterApp:
             'default_video_folder':  str(self.working_dir),
             'default_output_folder': str(self.output_dir) if self.output_dir else '',
             'recent_folders':        self.recent_folders,
+            'custom_ad_patterns':    self.custom_ad_patterns,
         }
         try:
             self._prefs_path().parent.mkdir(parents=True, exist_ok=True)
@@ -2193,7 +4226,14 @@ class VideoConverterApp:
             return
         try:
             prefs = json.loads(self._prefs_path().read_text())
-            self.encoder_mode.set(prefs.get('encoder',          self.encoder_mode.get()))
+            saved_encoder = prefs.get('encoder', self.encoder_mode.get())
+            # Backward compat: map old 'gpu' value to first available GPU backend
+            if saved_encoder == 'gpu':
+                saved_encoder = self._default_gpu
+            # Validate that the saved backend is actually available
+            if saved_encoder != 'cpu' and saved_encoder not in self.gpu_backends:
+                saved_encoder = 'cpu'
+            self.encoder_mode.set(saved_encoder)
             self.video_codec.set(prefs.get('video_codec',       self.video_codec.get()))
             self.container_format.set(prefs.get('container',    self.container_format.get()))
             self.transcode_mode.set(prefs.get('transcode_mode', self.transcode_mode.get()))
@@ -2207,12 +4247,14 @@ class VideoConverterApp:
             self.skip_existing.set(prefs.get('skip_existing',   self.skip_existing.get()))
             self.delete_originals.set(prefs.get('delete_originals', self.delete_originals.get()))
             self.hw_decode.set(prefs.get('hw_decode',           self.hw_decode.get()))
+            self.strip_internal_subs.set(prefs.get('strip_internal_subs', self.strip_internal_subs.get()))
             self.two_pass.set(prefs.get('two_pass',             self.two_pass.get()))
             self.verify_output.set(prefs.get('verify_output',   self.verify_output.get()))
             self.notify_sound.set(prefs.get('notify_sound',     self.notify_sound.get()))
             self.notify_sound_file.set(prefs.get('notify_sound_file', self.notify_sound_file.get()))
             # Default folders
             self.recent_folders = prefs.get('recent_folders', [])
+            self.custom_ad_patterns = prefs.get('custom_ad_patterns', [])
             self._rebuild_recent_menu()
             self.default_player.set(prefs.get('default_player', 'auto'))
             dvf = prefs.get('default_video_folder', '')
@@ -2231,7 +4273,7 @@ class VideoConverterApp:
         if not messagebox.askyesno("Reset to Defaults",
                                    "Reset all settings to their defaults?"):
             return
-        self.encoder_mode.set('gpu')
+        self.encoder_mode.set(self._default_gpu if self.has_gpu else 'cpu')
         self.video_codec.set('H.265 / HEVC')
         self.container_format.set('.mkv')
         self.transcode_mode.set('video')
@@ -2244,7 +4286,7 @@ class VideoConverterApp:
         self.audio_bitrate.set('128k')
         self.skip_existing.set(True)
         self.delete_originals.set(False)
-        self.hw_decode.set(bool(self.has_gpu))
+        self.hw_decode.set(self.has_gpu)
         self.two_pass.set(False)
         self.verify_output.set(True)
         self.notify_sound.set(True)
@@ -2324,7 +4366,7 @@ class VideoConverterApp:
             f"{APP_NAME}\nVersion {APP_VERSION}\n\n"
             f"A full-featured video transcoding application\n"
             f"powered by ffmpeg.\n\n"
-            f"Supports H.265, H.264, AV1, VP9 encoding\n"
+            f"Supports H.265, H.264, AV1, VP9, MPEG-4, ProRes encoding\n"
             f"with NVIDIA NVENC GPU acceleration.\n\n"
             f"Built with Python + Tkinter."
         )
@@ -2343,6 +4385,9 @@ class VideoConverterApp:
 
         self.time_label = ttk.Label(status_frame, text="Elapsed: 0s")
         self.time_label.pack(side='right', padx=10)
+
+        self.batch_eta_label = ttk.Label(status_frame, text="")
+        self.batch_eta_label.pack(side='right', padx=10)
 
         self.eta_label = ttk.Label(status_frame, text="")
         self.eta_label.pack(side='right', padx=10)
@@ -2384,17 +4429,77 @@ class VideoConverterApp:
             self.log_text.see('end')
         self.root.after(0, _add)
     
+    def _calc_batch_eta(self, current_file_eta=None):
+        """Calculate estimated time remaining for the entire batch.
+
+        Uses the rolling average encoding speed (video-seconds per wall-second)
+        from completed files, plus the current file's remaining ETA, to estimate
+        how long the rest of the batch will take.
+
+        Returns seconds remaining, or None if not enough data.
+        """
+        if len(self.files) <= 1:
+            return None  # No batch ETA for single files
+
+        # Calculate average speed from completed files
+        if self._batch_speed_samples:
+            total_vid = sum(d for d, _ in self._batch_speed_samples)
+            total_wall = sum(w for _, w in self._batch_speed_samples)
+            avg_speed = total_vid / total_wall if total_wall > 0 else None
+        else:
+            avg_speed = None
+
+        # Sum durations of files not yet started (after current)
+        remaining_duration = 0.0
+        for j in range(self.current_file_index + 1, len(self.files)):
+            fi = self.files[j]
+            if fi.get('status') not in ('skipped',):
+                remaining_duration += fi.get('duration_secs', 0) or 0
+
+        # Estimate time for remaining files
+        if avg_speed and avg_speed > 0:
+            remaining_files_eta = remaining_duration / avg_speed
+        elif self._file_start_time is not None:
+            # No completed files yet — use current file's progress to estimate speed
+            import time as _time
+            wall_so_far = _time.monotonic() - self._file_start_time
+            cur_dur = (self.files[self.current_file_index].get('duration_secs') or 0)
+            if wall_so_far > 2 and cur_dur > 0:
+                # Estimate speed from current file progress
+                cur_speed = cur_dur / (wall_so_far + (current_file_eta or 0))
+                remaining_files_eta = remaining_duration / cur_speed if cur_speed > 0 else None
+            else:
+                return None
+        else:
+            return None
+
+        # Add current file's remaining time
+        batch_remaining = (current_file_eta or 0) + remaining_files_eta
+        return batch_remaining if batch_remaining > 0 else None
+
     def update_progress(self, percent, details='', fps=None, eta=None, pass_label=None):
-        """Update progress bar, fps, and ETA labels."""
+        """Update progress bar, fps, elapsed timer, and ETA labels."""
         def _update():
             self.progress_var.set(percent)
             # FPS
             if fps is not None:
                 self.fps_label.configure(text=f"⚡ {fps:.1f} fps")
-            # ETA
+            # Elapsed timer
+            if self.start_time is not None:
+                elapsed = (datetime.now() - self.start_time).total_seconds()
+                self.time_label.configure(text=f"Elapsed: {format_time(elapsed)}")
+            # Per-file ETA
             if eta is not None:
                 pass_str = f" ({pass_label})" if pass_label else ""
                 self.eta_label.configure(text=f"ETA{pass_str}: {format_time(eta)}")
+            # Batch ETA (only show when multiple files)
+            if len(self.files) > 1 and self.is_converting:
+                batch_eta = self._calc_batch_eta(current_file_eta=eta)
+                if batch_eta is not None:
+                    self.batch_eta_label.configure(
+                        text=f"Batch: {format_time(batch_eta)} left")
+                else:
+                    self.batch_eta_label.configure(text="")
         self.root.after(0, _update)
     
     def _current_settings(self):
@@ -2411,7 +4516,7 @@ class VideoConverterApp:
                 'audio_bitrate':  self.audio_bitrate.get(),
             }
         except Exception:
-            return {'transcode_mode': 'video', 'encoder': 'gpu',
+            return {'transcode_mode': 'video', 'encoder': self._default_gpu,
                     'codec_info': VIDEO_CODEC_MAP['H.265 / HEVC'],
                     'mode': 'bitrate', 'bitrate': '2M', 'crf': 23,
                     'audio_codec': 'aac', 'audio_bitrate': '128k'}
@@ -2438,9 +4543,35 @@ class VideoConverterApp:
         for item, file_info in zip(self.file_tree.get_children(), self.files):
             self._refresh_tree_row(item, file_info)
 
+    def _ask_directory(self, initialdir=None, title="Select Folder"):
+        """Open a folder-selection dialog.
+
+        Tries zenity first (GTK dialog with proper single-click + Open
+        button behaviour), then falls back to tkinter's askdirectory.
+        """
+        if initialdir:
+            initialdir = str(initialdir)
+        if shutil.which('zenity'):
+            try:
+                cmd = [
+                    'zenity', '--file-selection', '--directory',
+                    '--title', title,
+                ]
+                if initialdir:
+                    cmd += ['--filename', initialdir + '/']
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=120
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip()
+                return ''            # user cancelled
+            except Exception:
+                pass                 # fall through to tkinter
+        return filedialog.askdirectory(initialdir=initialdir, title=title)
+
     def change_output_folder(self):
         """Set a custom output directory."""
-        folder = filedialog.askdirectory(
+        folder = self._ask_directory(
             initialdir=self.output_dir or self.working_dir,
             title="Select Output Folder"
         )
@@ -2582,7 +4713,7 @@ class VideoConverterApp:
                     ext = filepath.suffix.lower()
                     if ext in VIDEO_EXTENSIONS:
                         f = filepath.name
-                        if not re.search(r'-(\d+(\.\d+)?M|CRF\d+)-(NVENC_|)(H265|H264|AV1|VP9)_|-video-copy|-audio-copy|-[A-Z0-9]+_\d+k', f):
+                        if not re.search(r'-(\d+(\.\d+)?M|CRF\d+)-(NVENC_|)(H265|H264|AV1|VP9|MPEG4|ProRes)_|-video-copy|-audio-copy|-[A-Z0-9]+_\d+k', f):
                             found.append(filepath)
         except Exception as e:
             self.add_log(f"Error scanning directory: {e}", 'ERROR')
@@ -2601,7 +4732,8 @@ class VideoConverterApp:
                 'duration_str': '…',
                 'duration_secs': None,
                 'est_size': '…',
-                'status': 'Pending'
+                'status': 'Pending',
+                'external_subs': [],
             }
             self.files.append(file_info)
             self.file_tree.insert('', 'end', values=(rel, size, '…', '…', 'Pending'))
@@ -2609,6 +4741,10 @@ class VideoConverterApp:
         count = len(self.files)
         self.add_log(f"Found {count} video file(s) — loading metadata...", 'INFO')
         self.status_label.configure(text=f"Loading metadata for {count} file(s)...")
+
+        # Check for subtitle files in the same directory and offer to attach them
+        if count > 0:
+            self._offer_subtitle_association()
 
         # ── Phase 2: background ffprobe pass ──
         def _load_metadata():
@@ -2643,7 +4779,43 @@ class VideoConverterApp:
             self.root.after(0, _done)
 
         threading.Thread(target=_load_metadata, daemon=True).start()
-    
+
+    def _offer_subtitle_association(self):
+        """Check for subtitle files in the working directory and offer to attach them."""
+        try:
+            sub_files = []
+            for filepath in sorted(Path(self.working_dir).rglob('*')):
+                if filepath.is_file() and filepath.suffix.lower() in SUBTITLE_EXTENSIONS:
+                    sub_files.append(filepath)
+        except Exception:
+            return
+
+        if not sub_files:
+            return
+
+        # Ask the user
+        count = len(sub_files)
+        msg = (f"Found {count} subtitle file(s) in this folder.\n\n"
+               f"Would you like to attach them to matching video files?")
+        if not messagebox.askyesno("Subtitles Found", msg):
+            return
+
+        # Auto-associate each subtitle file
+        attached = 0
+        unmatched = []
+        for sub_path in sub_files:
+            if self._associate_external_sub(sub_path):
+                attached += 1
+            else:
+                unmatched.append(sub_path)
+
+        if attached:
+            self.add_log(f"Attached {attached} subtitle file(s) to matching videos.", 'INFO')
+        if unmatched:
+            names = ', '.join(p.name for p in unmatched[:5])
+            extra = f" (and {len(unmatched) - 5} more)" if len(unmatched) > 5 else ""
+            self.add_log(f"Could not match {len(unmatched)} subtitle(s): {names}{extra}", 'WARNING')
+
     def change_folder(self):
         """Open custom single-click folder browser dialog"""
         dialog = tk.Toplevel(self.root)
@@ -2948,10 +5120,12 @@ class VideoConverterApp:
             return
 
         # Build settings same as run_conversion
+        codec_name = self.video_codec.get()
         settings = {
             'transcode_mode': self.transcode_mode.get(),
             'encoder':        self.encoder_mode.get(),
             'codec_info':     self.get_codec_info(),
+            'codec_name':     codec_name,
             'mode':           self.quality_mode.get(),
             'bitrate':        self.bitrate.get(),
             'crf':            int(self.crf.get()),
@@ -2968,33 +5142,65 @@ class VideoConverterApp:
         self.status_label.configure(text="Test encoding (30s)...")
 
         def _run():
-            # Inject -t 30 before the output path
-            import copy
             # Build command manually with -t 30
             cmd = ['ffmpeg', '-y']
             encoder  = settings['encoder']
             hw       = settings['hw_decode']
             ci       = settings['codec_info']
+            cn       = settings['codec_name']
             tm       = settings['transcode_mode']
-            if hw and encoder == 'gpu' and tm in ('video','both') and ci['gpu_encoder'] not in (None,'copy'):
-                cmd.extend(['-hwaccel','cuda','-hwaccel_output_format','cuda'])
+            is_gpu   = encoder != 'cpu'
+            backend  = GPU_BACKENDS.get(encoder) if is_gpu else None
+
+            # Resolve video encoder name
+            if is_gpu:
+                video_enc = get_gpu_encoder(cn, encoder) or ci['cpu_encoder']
+            else:
+                video_enc = ci['cpu_encoder']
+
+            effective_hw = hw and is_gpu and backend and tm in ('video','both') and video_enc not in (None,'copy')
+            if effective_hw:
+                cmd.extend(backend['hwaccel'])
             cmd.extend(['-i', input_path, '-t', '30'])
-            # Let convert_file handle the rest by calling _run_process via a temp wrapper
-            # Instead build a simplified single-pass command
-            video_enc = ci['gpu_encoder'] if encoder == 'gpu' else ci['cpu_encoder']
+
+            # Check for 10-bit → 8-bit pixel format conversion
+            test_pix_convert = False
+            if effective_hw:
+                src_pix = get_video_pix_fmt(input_path) or ''
+                _8bit_only = {'h264_nvenc', 'h264_qsv', 'h264_vaapi'}
+                if '10' in src_pix and video_enc in _8bit_only:
+                    test_pix_convert = True
+
             if tm in ('video','both'):
+                if video_enc != 'copy':
+                    # Filters MUST come before -c:v for hwaccel compatibility
+                    if test_pix_convert and backend:
+                        cmd.extend(['-vf', backend['scale_filter']])
+                    elif ci['cpu_encoder'] == 'prores_ks':
+                        prores_profile = settings['preset'] or 'hq'
+                        if prores_profile in ('4444', '4444xq'):
+                            pix = 'yuva444p10le'
+                        else:
+                            pix = 'yuv422p10le'
+                        cmd.extend(['-vf', f'format={pix}'])
                 cmd.extend(['-c:v', video_enc])
                 if video_enc != 'copy':
                     preset = settings['preset']
                     if preset:
                         if ci['cpu_encoder'] == 'libvpx-vp9' and encoder == 'cpu':
                             cmd.extend(['-cpu-used', preset])
-                        else:
+                        elif ci['cpu_encoder'] == 'prores_ks' and encoder == 'cpu':
+                            cmd.extend(['-profile:v', preset])
+                        elif is_gpu and backend and backend.get('preset_flag'):
+                            cmd.extend([backend['preset_flag'], preset])
+                        elif not is_gpu:
                             cmd.extend(['-preset', preset])
                     if settings['mode'] == 'crf':
                         crf_val = str(settings['crf'])
-                        if encoder == 'gpu' and ci['cq_flag']:
-                            cmd.extend([ci['cq_flag'], crf_val])
+                        if is_gpu and backend:
+                            cq_flag = backend.get('cq_flag')
+                            if cq_flag:
+                                cmd.extend([cq_flag, crf_val])
                         elif ci['crf_flag']:
                             cmd.extend([ci['crf_flag'], crf_val])
                     else:
@@ -3127,18 +5333,49 @@ class VideoConverterApp:
         """Return the VIDEO_CODEC_MAP entry for the currently selected codec."""
         return VIDEO_CODEC_MAP.get(self.video_codec.get(), VIDEO_CODEC_MAP['H.265 / HEVC'])
 
+    def _get_encoder_backend(self):
+        """Return the current GPU backend id or 'cpu'."""
+        return self.encoder_mode.get()
+
+    def _get_video_encoder_name(self, codec_name=None, encoder=None):
+        """Return the ffmpeg encoder name for the current codec + encoder selection."""
+        if codec_name is None:
+            codec_name = self.video_codec.get()
+        if encoder is None:
+            encoder = self.encoder_mode.get()
+        if encoder == 'cpu':
+            return VIDEO_CODEC_MAP.get(codec_name, VIDEO_CODEC_MAP['H.265 / HEVC'])['cpu_encoder']
+        return get_gpu_encoder(codec_name, encoder)
+
+    def _encoder_has_codec(self, codec_name, encoder):
+        """Check if the given encoder backend supports the given codec."""
+        if encoder == 'cpu':
+            return True
+        gpu_enc = get_gpu_encoder(codec_name, encoder)
+        return gpu_enc is not None and gpu_enc != 'copy'
+
+    def _encoder_display_label(self, encoder=None):
+        """Human-readable label for the current encoder (e.g. 'NVIDIA (NVENC)')."""
+        if encoder is None:
+            encoder = self.encoder_mode.get()
+        if encoder == 'cpu':
+            return 'CPU'
+        backend = GPU_BACKENDS.get(encoder)
+        return backend['label'] if backend else encoder
+
     def on_video_codec_change(self, event=None):
         """Handle video codec selection change."""
         info = self.get_codec_info()
         encoder = self.encoder_mode.get()
+        codec_name = self.video_codec.get()
 
-        # VP9 has no GPU encoder — force CPU and disable GPU radio
-        if info['gpu_encoder'] is None:
+        # If current GPU backend doesn't support this codec, fall back to CPU
+        if encoder != 'cpu' and not self._encoder_has_codec(codec_name, encoder):
             self.encoder_mode.set('cpu')
-            self.gpu_radio.configure(state='disabled')
-        else:
-            if self.has_gpu:
-                self.gpu_radio.configure(state='normal')
+            self.encoder_combo.set(self._encoder_ids['cpu'])
+
+        # Update encoder combo — filter out GPU backends that don't support this codec
+        self._rebuild_encoder_combo(codec_name)
 
         # Copy mode — hide quality / preset controls entirely
         if info['cpu_encoder'] == 'copy':
@@ -3185,12 +5422,28 @@ class VideoConverterApp:
         self.add_log(f"Video codec: {self.video_codec.get()}", 'INFO')
         self._schedule_estimate_refresh()
 
+    def _rebuild_encoder_combo(self, codec_name=None):
+        """Rebuild the encoder combobox values, disabling backends that don't support the codec."""
+        if codec_name is None:
+            codec_name = self.video_codec.get()
+        labels = [self._encoder_ids['cpu']]
+        for bid in self.gpu_backends:
+            if self._encoder_has_codec(codec_name, bid) or codec_name == 'Copy (no re-encode)':
+                labels.append(self._encoder_ids[bid])
+        self.encoder_combo['values'] = labels
+
     def _apply_presets_for_codec(self, info, silent=True):
         """Update preset combobox values and selection for current codec+encoder."""
         encoder = self.encoder_mode.get()
-        if encoder == 'gpu' and info['gpu_encoder'] and info['gpu_encoder'] != 'copy':
-            presets = info['gpu_presets']
-            default = info['gpu_preset_default']
+        codec_name = self.video_codec.get()
+
+        if encoder != 'cpu':
+            gpu_enc = get_gpu_encoder(codec_name, encoder)
+            if gpu_enc and gpu_enc != 'copy':
+                presets, default = get_gpu_presets(encoder)
+            else:
+                presets = info['cpu_presets']
+                default = info['cpu_preset_default']
         else:
             presets = info['cpu_presets']
             default = info['cpu_preset_default']
@@ -3210,48 +5463,69 @@ class VideoConverterApp:
 
     def on_two_pass_change(self):
         """Notify user when two-pass is enabled on GPU."""
-        if self.two_pass.get() and self.encoder_mode.get() == 'gpu':
-            messagebox.showinfo(
-                "GPU Two-Pass Encoding",
-                "On GPU (NVENC), two-pass uses the -multipass fullres flag which runs "
-                "inside a single ffmpeg process.\n\n"
-                "This is different from CPU two-pass which runs ffmpeg twice — "
-                "once for analysis and once for encoding.\n\n"
-                "NVENC multipass still improves quality slightly over single-pass, "
-                "but don't expect it to take twice as long.\n\n"
-                "For the most accurate bitrate targeting and best quality, "
-                "use CPU encoding with two-pass enabled."
-            )
+        encoder = self.encoder_mode.get()
+        if self.two_pass.get() and encoder != 'cpu':
+            backend = GPU_BACKENDS.get(encoder)
+            if backend and backend['multipass_encoders']:
+                messagebox.showinfo(
+                    "GPU Two-Pass Encoding",
+                    f"On {backend['label']}, two-pass uses the "
+                    f"{' '.join(backend['multipass_args'])} flag which runs "
+                    "inside a single ffmpeg process.\n\n"
+                    "This is different from CPU two-pass which runs ffmpeg twice — "
+                    "once for analysis and once for encoding.\n\n"
+                    "For the most accurate bitrate targeting and best quality, "
+                    "use CPU encoding with two-pass enabled."
+                )
 
     def _update_two_pass_state(self):
         """Enable two-pass checkbox only when applicable."""
         info = self.get_codec_info()
         encoder = self.encoder_mode.get()
         mode = self.quality_mode.get()
+        codec_name = self.video_codec.get()
         cpu_enc = info.get('cpu_encoder', '')
-        TWO_PASS_SUPPORTED = {'libx265', 'libx264', 'libvpx-vp9'}
-        # CPU bitrate mode on supported codecs, OR GPU bitrate mode with NVENC
-        gpu_enc = info.get('gpu_encoder', '')
-        GPU_MULTIPASS = {'hevc_nvenc', 'h264_nvenc', 'av1_nvenc'}
+        TWO_PASS_SUPPORTED = {'libx265', 'libx264', 'libvpx-vp9', 'mpeg4'}
+
+        # Check GPU multipass support for current backend
+        gpu_multipass = False
+        if encoder != 'cpu':
+            backend = GPU_BACKENDS.get(encoder)
+            if backend:
+                gpu_enc = get_gpu_encoder(codec_name, encoder)
+                gpu_multipass = gpu_enc in backend.get('multipass_encoders', set())
+
         applicable = (
             mode == 'bitrate' and (
                 (encoder == 'cpu' and cpu_enc in TWO_PASS_SUPPORTED) or
-                (encoder == 'gpu' and gpu_enc in GPU_MULTIPASS)
+                (encoder != 'cpu' and gpu_multipass)
             )
         )
         self.two_pass_check.configure(state='normal' if applicable else 'disabled')
         if not applicable:
             self.two_pass.set(False)
 
+    def _on_encoder_combo(self):
+        """Handle encoder combobox selection."""
+        label = self.encoder_combo.get()
+        bid = self._encoder_labels.get(label, 'cpu')
+        self.encoder_mode.set(bid)
+        self.on_encoder_change()
+
     def on_encoder_change(self, silent=False):
-        """Handle CPU/GPU encoder toggle."""
+        """Handle encoder selection change (CPU or any GPU backend)."""
         info = self.get_codec_info()
         encoder = self.encoder_mode.get()
+
+        # Sync the combobox display
+        display = self._encoder_ids.get(encoder, self._encoder_ids.get('cpu', 'CPU'))
+        if self.encoder_combo.get() != display:
+            self.encoder_combo.set(display)
 
         self._apply_presets_for_codec(info, silent=silent)
 
         # Enable/disable HW decode checkbox based on encoder selection
-        if encoder == 'gpu' and self.has_gpu:
+        if encoder != 'cpu' and encoder in self.gpu_backends:
             self.hw_decode_check.configure(state='normal')
         else:
             self.hw_decode.set(False)
@@ -3260,7 +5534,7 @@ class VideoConverterApp:
         self._update_two_pass_state()
 
         if not silent:
-            label = 'GPU (NVENC)' if encoder == 'gpu' else 'CPU'
+            label = self._encoder_display_label(encoder)
             preset = self.preset_combo.get()
             self.add_log(f"Switched to {label} encoding (preset: {preset})", 'INFO')
         self._schedule_estimate_refresh()
@@ -3268,7 +5542,7 @@ class VideoConverterApp:
     def on_preset_change(self, event=None):
         """Handle preset selection change."""
         preset = self.preset_combo.get()
-        if self.encoder_mode.get() == 'gpu':
+        if self.encoder_mode.get() != 'cpu':
             self.gpu_preset.set(preset)
         else:
             self.cpu_preset.set(preset)
@@ -3474,10 +5748,28 @@ class VideoConverterApp:
         
         # Confirm settings
         encoder = self.encoder_mode.get()
-        if encoder == 'gpu' and not self.has_gpu:
-            messagebox.showerror("Error", "GPU encoding is not available on this system.")
+        if encoder != 'cpu' and encoder not in self.gpu_backends:
+            messagebox.showerror("Error", f"GPU backend '{encoder}' is not available on this system.")
             return
-        
+
+        # Container / codec compatibility check
+        container = self.container_format.get()
+        codec_name = self.video_codec.get()
+        CONTAINER_CODEC_COMPAT = {
+            '.avi':  {'H.264 / AVC', 'MPEG-4', 'Copy (no re-encode)'},
+            '.webm': {'VP9', 'AV1', 'Copy (no re-encode)'},
+            '.mov':  {'H.265 / HEVC', 'H.264 / AVC', 'ProRes (QuickTime)', 'MPEG-4', 'Copy (no re-encode)'},
+        }
+        allowed = CONTAINER_CODEC_COMPAT.get(container)
+        if allowed and codec_name not in allowed:
+            supported = ', '.join(sorted(c for c in allowed if c != 'Copy (no re-encode)'))
+            messagebox.showerror(
+                "Incompatible Settings",
+                f"The {container} container does not support {codec_name}.\n\n"
+                f"Supported codecs for {container}: {supported}\n\n"
+                f"Please change the codec or container format.")
+            return
+
         # Disable controls
         self.is_converting = True
         self.pause_btn.configure(state='normal')
@@ -3503,12 +5795,19 @@ class VideoConverterApp:
         # Log video settings (if applicable)
         if mode in ['video', 'both']:
             codec_info = self.get_codec_info()
-            video_encoder = codec_info['gpu_encoder'] if encoder == 'gpu' else codec_info['cpu_encoder']
-            self.add_log(f"Video Codec: {self.video_codec.get()} ({video_encoder})", 'INFO')
-            self.add_log(f"Encoder: {'GPU (NVENC)' if encoder == 'gpu' else 'CPU'}", 'INFO')
-            if encoder == 'gpu' and self.hw_decode.get():
-                self.add_log("Hardware Decode: CUDA (enabled)", 'INFO')
-            elif encoder == 'gpu':
+            codec_name = self.video_codec.get()
+            is_gpu = encoder != 'cpu'
+            backend = GPU_BACKENDS.get(encoder) if is_gpu else None
+            if is_gpu:
+                video_encoder = get_gpu_encoder(codec_name, encoder) or codec_info['cpu_encoder']
+            else:
+                video_encoder = codec_info['cpu_encoder']
+            self.add_log(f"Video Codec: {codec_name} ({video_encoder})", 'INFO')
+            self.add_log(f"Encoder: {self._encoder_display_label(encoder)}", 'INFO')
+            if is_gpu and self.hw_decode.get():
+                hwaccel_type = backend['hwaccel'][1] if backend else 'unknown'
+                self.add_log(f"Hardware Decode: {hwaccel_type} (enabled)", 'INFO')
+            elif is_gpu:
                 self.add_log("Hardware Decode: disabled", 'INFO')
             if video_encoder != 'copy':
                 self.add_log(f"Quality Mode: {self.quality_mode.get()}", 'INFO')
@@ -3517,13 +5816,16 @@ class VideoConverterApp:
                     if self.two_pass.get():
                         info = self.get_codec_info()
                         cpu_enc = info.get('cpu_encoder', '')
-                        gpu_enc = info.get('gpu_encoder', '')
-                        TWO_PASS_CPU = {'libx265', 'libx264', 'libvpx-vp9'}
-                        GPU_MULTIPASS = {'hevc_nvenc', 'h264_nvenc', 'av1_nvenc'}
+                        TWO_PASS_CPU = {'libx265', 'libx264', 'libvpx-vp9', 'mpeg4'}
                         if encoder == 'cpu' and cpu_enc in TWO_PASS_CPU:
                             self.add_log("Two-Pass Encoding: enabled (pass 1 = analysis, pass 2 = encode)", 'INFO')
-                        elif encoder == 'gpu' and gpu_enc in GPU_MULTIPASS:
-                            self.add_log("Two-Pass Encoding: GPU multipass fullres (NVENC)", 'INFO')
+                        elif is_gpu and backend:
+                            gpu_enc = get_gpu_encoder(codec_name, encoder)
+                            if gpu_enc in backend.get('multipass_encoders', set()):
+                                mp_label = ' '.join(backend['multipass_args'])
+                                self.add_log(f"Two-Pass Encoding: GPU multipass {mp_label} ({backend['short']})", 'INFO')
+                            else:
+                                self.add_log("Two-Pass Encoding: requested but not supported for this codec — using single pass", 'WARNING')
                         else:
                             self.add_log("Two-Pass Encoding: requested but not supported for this codec — using single pass", 'WARNING')
                     else:
@@ -3550,6 +5852,8 @@ class VideoConverterApp:
         """Run batch conversion in background thread"""
         self.start_time = datetime.now()
         self.current_file_index = 0
+        self._batch_speed_samples = []  # reset for new batch
+        self._file_start_time = None
         completed = 0
         failed = 0
         skipped = 0
@@ -3558,6 +5862,7 @@ class VideoConverterApp:
             'transcode_mode': self.transcode_mode.get(),
             'encoder': self.encoder_mode.get(),
             'codec_info': self.get_codec_info(),
+            'codec_name': self.video_codec.get(),
             'mode': self.quality_mode.get(),
             'bitrate': self.bitrate.get(),
             'crf': int(self.crf.get()),
@@ -3567,8 +5872,12 @@ class VideoConverterApp:
             'audio_bitrate': self.audio_bitrate.get(),
             'hw_decode': self.hw_decode.get(),
             'two_pass': self.two_pass.get(),
-            'subtitle_settings': {}  # per-file override below
+            'subtitle_settings': {},  # per-file override below
+            'external_subs': [],     # per-file — populated from file_info
+            'container': self.container_format.get(),
         }
+
+        renamed_candidates = []  # (output_path, original_input_path) for files whose originals were deleted
 
         for i, file_info in enumerate(self.files):
             if not self.is_converting:
@@ -3586,10 +5895,16 @@ class VideoConverterApp:
             def _ov(key):
                 return ov.get(key, settings[key])
 
+            # Handle backward-compat for overrides with 'gpu' encoder value
+            ov_encoder = ov.get('encoder', settings['encoder'])
+            if ov_encoder == 'gpu':
+                ov_encoder = self._default_gpu
+
             file_settings = {
                 'transcode_mode': ov.get('transcode_mode', settings['transcode_mode']),
-                'encoder':        ov.get('encoder',        settings['encoder']),
+                'encoder':        ov_encoder,
                 'codec_info':     ov.get('codec_info',     settings['codec_info']),
+                'codec_name':     ov.get('video_codec',    settings['codec_name']),
                 'mode':           ov.get('quality_mode',   settings['mode']),
                 'bitrate':        ov.get('bitrate',        settings['bitrate']),
                 'crf':            int(ov.get('crf',        settings['crf'])),
@@ -3600,6 +5915,10 @@ class VideoConverterApp:
                 'hw_decode':         ov.get('hw_decode',      settings['hw_decode']),
                 'two_pass':          ov.get('two_pass',        settings['two_pass']),
                 'subtitle_settings': file_info.get('subtitle_settings', {}),
+                'edited_subs':       file_info.get('edited_subs', {}),
+                'external_subs':     file_info.get('external_subs', []),
+                'strip_internal_subs': file_info.get('strip_internal_subs', self.strip_internal_subs.get()),
+                'container':         ov.get('container', self.container_format.get()),
             }
 
             transcode_mode = file_settings['transcode_mode']
@@ -3624,12 +5943,20 @@ class VideoConverterApp:
                 short = codec_info['short_name']
                 if codec_info['cpu_encoder'] == 'copy':
                     suffix = '-video-copy'
-                elif quality_mode == 'crf':
-                    suffix = f"-CRF{file_settings['crf']}"
-                    suffix += f"-NVENC_{short}_{preset}" if encoder == 'gpu' else f"-{short}_{preset}"
                 else:
-                    suffix = f"-{file_settings['bitrate']}"
-                    suffix += f"-NVENC_{short}_{preset}" if encoder == 'gpu' else f"-{short}_{preset}"
+                    gpu_short = ''
+                    if encoder != 'cpu':
+                        bk = GPU_BACKENDS.get(encoder)
+                        gpu_short = bk['short'] if bk else 'GPU'
+
+                    if quality_mode == 'crf':
+                        suffix = f"-CRF{file_settings['crf']}"
+                    else:
+                        suffix = f"-{file_settings['bitrate']}"
+                    if encoder != 'cpu':
+                        suffix += f"-{gpu_short}_{short}_{preset}"
+                    else:
+                        suffix += f"-{short}_{preset}"
 
                 if transcode_mode == 'both' and audio_codec != 'copy':
                     suffix += f"-{audio_codec.upper()}_{audio_bitrate}"
@@ -3651,10 +5978,19 @@ class VideoConverterApp:
                 text=f"Converting: {os.path.basename(p)}"
             ))
 
-            # Convert
+            # Convert — track timing for batch ETA
+            import time as _time
+            self._file_start_time = _time.monotonic()
             self.current_output_path = output_path
             success = self.converter.convert_file(input_path, output_path, file_settings)
+            file_wall_secs = _time.monotonic() - self._file_start_time
+            self._file_start_time = None
             self.current_output_path = None
+
+            # Record speed sample for batch ETA (only for successfully encoded files)
+            file_dur = file_info.get('duration_secs') or 0
+            if file_dur > 0 and file_wall_secs > 1:
+                self._batch_speed_samples.append((file_dur, file_wall_secs))
 
             if success:
                 # Verify output file if enabled
@@ -3688,6 +6024,7 @@ class VideoConverterApp:
                     try:
                         os.remove(input_path)
                         self.add_log(f"Deleted original: {file_info['name']}", 'INFO')
+                        renamed_candidates.append((output_path, input_path))
                     except Exception as e:
                         self.add_log(f"Failed to delete original: {e}", 'ERROR')
             else:
@@ -3712,7 +6049,8 @@ class VideoConverterApp:
             self.status_label.configure(text=f"Complete! {completed} converted, {failed} failed, {skipped} skipped"),
             self.time_label.configure(text=f"Elapsed: {format_time(elapsed.total_seconds())}"),
             self.fps_label.configure(text=""),
-            self.eta_label.configure(text="")
+            self.eta_label.configure(text=""),
+            self.batch_eta_label.configure(text="")
         ))
         
         self.add_log("=" * 50, 'INFO')
@@ -3732,6 +6070,38 @@ class VideoConverterApp:
             f"Completed: {completed}\nFailed: {failed}\nSkipped: {skipped}\n\n"
             f"Time: {format_time(elapsed.total_seconds())}"
         ))
+
+        # Offer to rename encoded files back to original names (only if originals were deleted)
+        if renamed_candidates:
+            def _ask_rename():
+                answer = messagebox.askyesno(
+                    "Rename Encoded Files",
+                    f"{len(renamed_candidates)} original file(s) were deleted.\n\n"
+                    "Would you like to rename the encoded files back to\n"
+                    "their original file names?"
+                )
+                if answer:
+                    renamed = 0
+                    for output_path, original_input_path in renamed_candidates:
+                        try:
+                            original_stem = Path(original_input_path).stem
+                            output_p = Path(output_path)
+                            new_path = output_p.parent / f"{original_stem}{output_p.suffix}"
+                            if new_path.exists():
+                                self.add_log(
+                                    f"Cannot rename, file already exists: {new_path.name}",
+                                    'WARNING'
+                                )
+                                continue
+                            os.rename(output_path, str(new_path))
+                            self.add_log(
+                                f"Renamed: {output_p.name} → {new_path.name}", 'INFO'
+                            )
+                            renamed += 1
+                        except Exception as e:
+                            self.add_log(f"Failed to rename {Path(output_path).name}: {e}", 'ERROR')
+                    self.add_log(f"Renamed {renamed} of {len(renamed_candidates)} file(s)", 'SUCCESS')
+            self.root.after(500, _ask_rename)
     
     def update_file_status(self, index, status):
         """Update status of a file in the tree"""
