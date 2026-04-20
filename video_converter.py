@@ -432,9 +432,11 @@ def filter_remove_hi(cues):
         # Clean up orphaned colons left after HI removal (e.g. "(gasps): " → ": ")
         text = re.sub(r'^\s*:\s*', '', text, flags=re.MULTILINE)
         text = re.sub(r'\n\s*:\s*', '\n', text)
-        # Clean up leftover whitespace
+        # Clean up leftover whitespace and blank lines
         text = re.sub(r'^\s*-?\s*$', '', text, flags=re.MULTILINE)
-        text = re.sub(r'\n{2,}', '\n', text).strip()
+        text = re.sub(r'\n{2,}', '\n', text)
+        text = re.sub(r'^\n+', '', text)  # strip leading newlines
+        text = text.strip()
         if text:
             result.append({**cue, 'text': text})
     return result
