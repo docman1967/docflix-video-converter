@@ -42,7 +42,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -1272,8 +1272,15 @@ def _verify_gpu_encoder(backend_id, backend):
     This catches cases where the encoder is compiled into ffmpeg but the
     hardware driver/runtime is missing or misconfigured (e.g. Intel QSV
     without libmfx/oneVPL, NVIDIA without drivers, VAAPI without va-driver).
+
+    For QSV on Linux, multiple initialization methods are tried because
+    some systems only support QSV through the VAAPI backend (libvpl)
+    rather than direct MFX session creation.
+
+    Returns a truthy string indicating the method that worked, or False.
+    For QSV: 'direct', 'vaapi_backend', or 'init_device'.
+    For others: 'direct' or False.
     """
-    # Pick the first available encoder from the backend
     test_encoder = None
     for enc in backend['detect_encoders']:
         test_encoder = enc
@@ -1281,41 +1288,77 @@ def _verify_gpu_encoder(backend_id, backend):
     if not test_encoder:
         return False
 
-    # Build a minimal test encode command using a synthetic input.
-    # Each backend needs slightly different setup to initialize the hardware.
-    cmd = ['ffmpeg', '-y', '-loglevel', 'error']
+    def _run_test(cmd):
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            return result.returncode == 0
+        except Exception:
+            return False
 
     if backend_id == 'vaapi':
         # VAAPI needs device init + hwupload to get frames onto the GPU
-        cmd.extend([
+        if _run_test([
+            'ffmpeg', '-y', '-loglevel', 'error',
             '-vaapi_device', '/dev/dri/renderD128',
             '-f', 'lavfi', '-i', 'color=black:s=256x256:d=0.1:r=1',
             '-vf', 'format=nv12,hwupload',
             '-c:v', test_encoder,
             '-frames:v', '1',
             '-f', 'null', '-'
-        ])
+        ]):
+            return 'direct'
+        return False
+
     elif backend_id == 'qsv':
-        # QSV: test without hwaccel flags (encode-only, no device-bound input)
-        cmd.extend([
+        # QSV on Linux can be initialized in several ways depending on the
+        # driver stack. Try each method — if any succeeds, QSV is usable.
+
+        # Method 1: Direct QSV (works with legacy libmfx)
+        if _run_test([
+            'ffmpeg', '-y', '-loglevel', 'error',
             '-f', 'lavfi', '-i', 'color=black:s=256x256:d=0.1:r=1',
             '-c:v', test_encoder,
             '-frames:v', '1',
             '-f', 'null', '-'
-        ])
+        ]):
+            return 'direct'
+
+        # Method 2: QSV via VAAPI backend (modern libvpl / oneVPL on Linux)
+        # This is how HandBrake initializes QSV on many Linux systems
+        if _run_test([
+            'ffmpeg', '-y', '-loglevel', 'error',
+            '-init_hw_device', 'vaapi=va:/dev/dri/renderD128',
+            '-init_hw_device', 'qsv=qsv@va',
+            '-f', 'lavfi', '-i', 'color=black:s=256x256:d=0.1:r=1',
+            '-c:v', test_encoder,
+            '-frames:v', '1',
+            '-f', 'null', '-'
+        ]):
+            return 'vaapi_backend'
+
+        # Method 3: QSV with explicit device init
+        if _run_test([
+            'ffmpeg', '-y', '-loglevel', 'error',
+            '-init_hw_device', 'qsv=qsv',
+            '-f', 'lavfi', '-i', 'color=black:s=256x256:d=0.1:r=1',
+            '-c:v', test_encoder,
+            '-frames:v', '1',
+            '-f', 'null', '-'
+        ]):
+            return 'init_device'
+
+        return False
+
     else:
         # NVENC and others: straightforward test
-        cmd.extend([
+        if _run_test([
+            'ffmpeg', '-y', '-loglevel', 'error',
             '-f', 'lavfi', '-i', 'color=black:s=256x256:d=0.1:r=1',
             '-c:v', test_encoder,
             '-frames:v', '1',
             '-f', 'null', '-'
-        ])
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        return result.returncode == 0
-    except Exception:
+        ]):
+            return 'direct'
         return False
 
 
@@ -1326,6 +1369,9 @@ def detect_gpu_backends():
     Backends are included only if:
       1. Their key encoder is found in ``ffmpeg -encoders``
       2. A quick test encode succeeds (verifies driver/runtime is working)
+
+    For QSV, if the VAAPI-backed init method works (but direct MFX doesn't),
+    the backend's hwaccel flags are updated to use the VAAPI init path.
     """
     available = {}
     try:
@@ -1338,7 +1384,16 @@ def detect_gpu_backends():
         # Check if the key encoder(s) are present in ffmpeg output
         if any(enc in encoder_output for enc in backend['detect_encoders']):
             # Verify the encoder actually works with a quick test
-            if _verify_gpu_encoder(bid, backend):
+            method = _verify_gpu_encoder(bid, backend)
+            if method:
+                # If QSV works via VAAPI backend, update hwaccel flags
+                if bid == 'qsv' and method == 'vaapi_backend':
+                    backend['hwaccel'] = [
+                        '-init_hw_device', 'vaapi=va:/dev/dri/renderD128',
+                        '-init_hw_device', 'qsv=qsv@va',
+                        '-hwaccel', 'qsv',
+                        '-hwaccel_output_format', 'qsv',
+                    ]
                 gpu_name = _detect_gpu_name(bid, backend)
                 available[bid] = gpu_name or True
     return available
