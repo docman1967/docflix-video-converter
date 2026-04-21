@@ -42,7 +42,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -344,8 +344,35 @@ def get_subtitle_streams(filepath):
                 'title':      tags.get('title', ''),
                 'forced':     bool(disp.get('forced', 0)),
                 'sdh':        bool(disp.get('hearing_impaired', 0)),
+                'default':    bool(disp.get('default', 0)),
             })
         return streams
+    except Exception:
+        return []
+
+
+def get_all_streams(filepath):
+    """Return a list of all stream dicts (video, audio, subtitle, attachment, data, etc.).
+    Each dict has: index, codec_type, codec_name."""
+    try:
+        cmd = [
+            'ffprobe', '-v', 'quiet',
+            '-print_format', 'json',
+            '-show_streams',
+            filepath
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return []
+        data = json.loads(result.stdout)
+        return [
+            {
+                'index':      s.get('index', 0),
+                'codec_type': s.get('codec_type', 'unknown'),
+                'codec_name': s.get('codec_name', 'unknown'),
+            }
+            for s in data.get('streams', [])
+        ]
     except Exception:
         return []
 
@@ -420,7 +447,10 @@ def write_srt(cues):
 def filter_remove_hi(cues):
     """Remove hearing-impaired annotations and speaker labels.
 
-    Removes: [brackets], (parentheses), and speaker labels (Name:).
+    Removes: [brackets], (parentheses), speaker labels (Name:),
+    and ALL CAPS HI descriptor labels (HIGH-PITCHED:, MUFFLED:, etc.)
+    where the entire line is removed since the content after the label
+    is part of the sound description, not dialogue.
     """
     hi_patterns = [
         re.compile(r'\[.*?\]', re.DOTALL),          # [music playing] — including multi-line
@@ -429,6 +459,17 @@ def filter_remove_hi(cues):
     ]
     # Speaker label pattern (same as filter_remove_speaker_labels)
     speaker_pattern = re.compile(r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}:\s*\n?', re.MULTILINE)
+
+    # ALL CAPS HI descriptor labels — these describe sounds/actions, not speakers.
+    # Only the label up to and including the colon is removed; text after is kept.
+    # Matches: HIGH-PITCHED: ..., MUFFLED: ..., OFF-SCREEN: ..., DEEP VOICE: ...
+    # Each ALL CAPS word must be 4+ letters or contain a hyphen.
+    # This preserves short acronyms (FBI:, BBC:, NHS:, CIA:, MR:) while
+    # catching HI descriptors (MUFFLED:, NARRATOR:, HIGH-PITCHED:, DEEP VOICE:).
+    caps_hi_label = re.compile(
+        r'^(-?\s*)(?:[A-Z]{4,}|[A-Z][A-Z\-]*-[A-Z\-]*)(?:\s+(?:[A-Z]{4,}|[A-Z][A-Z\-]*-[A-Z\-]*))*:\s*',
+        re.MULTILINE
+    )
 
     def _speaker_replace(m):
         label = m.group(0).lstrip('- ')
@@ -441,13 +482,23 @@ def filter_remove_hi(cues):
             return m.group(0)
         return m.group(1)
 
+    # Reuse _is_caps_hi_line from filter_remove_caps_hi to also catch
+    # ALL CAPS HI lines (UK style) in one pass
+    caps_hi_checker = _build_caps_hi_checker()
+
     result = []
     for cue in cues:
         text = cue['text']
+        # Remove ALL CAPS HI descriptor labels, keep text after the colon
+        text = caps_hi_label.sub(r'\1', text)
         for pat in hi_patterns:
             text = pat.sub('', text)
         # Remove speaker labels
         text = speaker_pattern.sub(_speaker_replace, text)
+        # Remove ALL CAPS HI lines (UK style — e.g. SHEENA LAUGHS, THANK YOU.)
+        lines = text.split('\n')
+        lines = [line for line in lines if not caps_hi_checker(line)]
+        text = '\n'.join(lines)
         # Clean up orphaned colons left after HI removal (e.g. "(gasps): " → ": ")
         text = re.sub(r'^\s*:\s*', '', text, flags=re.MULTILINE)
         text = re.sub(r'\n\s*:\s*', '\n', text)
@@ -456,6 +507,138 @@ def filter_remove_hi(cues):
         text = re.sub(r'\n{2,}', '\n', text)
         text = re.sub(r'^\n+', '', text)
         text = text.strip()
+        if text:
+            result.append({**cue, 'text': text})
+    return result
+
+
+# ── Shared ALL CAPS HI line detection ──
+# Used by both filter_remove_hi and filter_remove_caps_hi.
+
+# Single-word HI terms that should be removed even as standalone words
+_CAPS_HI_SINGLE_WORDS = {
+    'applause', 'laughter', 'laughing', 'laughs', 'chuckling', 'chuckles',
+    'giggling', 'giggles', 'snickering', 'sniggering',
+    'screaming', 'screams', 'shrieking', 'shrieks', 'shriek',
+    'crying', 'cries', 'sobbing', 'sobs', 'weeping', 'weeps',
+    'gasping', 'gasps', 'groaning', 'groans', 'moaning', 'moans',
+    'sighing', 'sighs', 'panting', 'pants',
+    'coughing', 'coughs', 'sneezing', 'sneezes', 'sniffing', 'sniffs',
+    'whispering', 'whispers', 'muttering', 'mutters', 'mumbling', 'mumbles',
+    'shouting', 'shouts', 'yelling', 'yells', 'exclaiming', 'exclaims',
+    'stuttering', 'stutters', 'stammering', 'stammers',
+    'silence', 'inaudible', 'indistinct', 'unintelligible',
+    'music', 'singing', 'humming', 'whistling', 'chanting',
+    'cheering', 'cheers', 'booing', 'boos', 'jeering',
+    'thunder', 'explosion', 'gunshot', 'gunshots', 'gunfire',
+    'sirens', 'alarm', 'buzzing', 'ringing', 'beeping', 'bleeping',
+    'knocking', 'banging', 'crashing', 'thudding', 'thumping',
+    'squeaking', 'creaking', 'rustling', 'clattering', 'rattling',
+    'splashing', 'dripping', 'sizzling', 'bubbling',
+    'doorbell', 'telephone', 'ringtone',
+    'snoring', 'yawning', 'hiccupping', 'hiccups', 'belching', 'retching',
+    'growling', 'barking', 'howling', 'whimpering', 'purring', 'meowing',
+    'neighing', 'chirping', 'squawking',
+    'clapping', 'footsteps', 'static', 'feedback', 'interference',
+    'continues', 'resumes', 'stops', 'ends', 'fades',
+}
+
+# Acronyms and short words to always preserve (even if all-caps line)
+_CAPS_HI_KEEP_WORDS = {
+    # Common acronyms
+    'ok', 'okay', 'no', 'oh', 'hi', 'hey', 'yes', 'yeah', 'god', 'oi',
+    'ha', 'ah', 'uh', 'hm', 'mm', 'sh', 'shh', 'psst', 'wow', 'boo',
+    # Known acronyms / initialisms
+    'fbi', 'cia', 'nsa', 'dea', 'atf', 'nypd', 'lapd', 'swat',
+    'nasa', 'nato', 'un', 'eu', 'uk', 'usa', 'us',
+    'bbc', 'itv', 'cnn', 'nbc', 'cbs', 'abc', 'hbo', 'pbs', 'nhs',
+    'ceo', 'cfo', 'cto', 'vip', 'rip', 'awol', 'mia', 'pow',
+    'dna', 'hiv', 'aids', 'icu', 'cpr', 'gps', 'eta', 'asap',
+    'tv', 'pc', 'dj', 'mc', 'id', 'iq', 'phd', 'md',
+    'mph', 'rpm', 'atm', 'suv', 'ufo', 'aka',
+    'nyc', 'la', 'dc', 'sf',
+}
+
+
+def _is_caps_hi_line(line):
+    """Determine if a line is an ALL CAPS HI description.
+
+    Multi-word all-caps lines (2+ words) are removed.
+    Single all-caps words are only removed if they match known HI keywords.
+    Short words (≤3 chars) and known acronyms are always kept.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return False
+
+    # Remove leading dash/hyphen for analysis
+    clean = re.sub(r'^-\s*', '', stripped)
+    if not clean:
+        return False
+
+    # Get just the letter content to check if it's all uppercase
+    letters = re.sub(r'[^a-zA-Z]', '', clean)
+    if not letters:
+        return False
+
+    # Must be ALL CAPS (every letter is uppercase)
+    if not letters.isupper():
+        return False
+
+    # Split into words
+    words = clean.split()
+
+    # Single word — only remove if it's a known HI keyword
+    if len(words) == 1:
+        word_lower = letters.lower()
+        if len(letters) <= 3:
+            return False
+        if word_lower in _CAPS_HI_KEEP_WORDS:
+            return False
+        return word_lower in _CAPS_HI_SINGLE_WORDS
+
+    # Multi-word all-caps line
+    # Check if ALL words are known acronyms/keep-words — if so, preserve
+    all_words_lower = [re.sub(r'[^a-z]', '', w.lower()) for w in words]
+    all_words_lower = [w for w in all_words_lower if w]
+    if all_words_lower and all(w in _CAPS_HI_KEEP_WORDS for w in all_words_lower):
+        return False
+
+    # Multi-word all-caps line that isn't all acronyms → remove
+    return True
+
+
+def _build_caps_hi_checker():
+    """Return the _is_caps_hi_line function for use by other filters."""
+    return _is_caps_hi_line
+
+
+def filter_remove_caps_hi(cues):
+    """Remove ALL CAPS hearing-impaired descriptions common in UK subtitles.
+
+    Targets entire lines that are ALL CAPS and describe actions or sounds, e.g.:
+      'SHEENA LAUGHS', 'DOOR SLAMS SHUT', 'DRAMATIC MUSIC', 'APPLAUSE'
+
+    Rules:
+      - Multi-word all-caps lines (2+ words) are removed — these are almost
+        always HI descriptions (e.g. 'HE SIGHS', 'TENSE MUSIC PLAYS').
+      - Single all-caps words are only removed if they match known HI keywords
+        (e.g. 'APPLAUSE', 'LAUGHTER', 'SILENCE').
+      - Short words (≤3 chars) like OK, NO, OH, YES, HI are always kept.
+      - Known acronyms (FBI, BBC, NASA, etc.) are always kept.
+      - Lines with mixed case are never touched.
+      - Processes line-by-line within each cue, so mixed cues like:
+          'She can get free trams.\\nSHEENA LAUGHS'
+        become: 'She can get free trams.'
+    """
+    result = []
+    for cue in cues:
+        lines = cue['text'].split('\n')
+        kept_lines = [line for line in lines if not _is_caps_hi_line(line)]
+        text = '\n'.join(kept_lines).strip()
+        # Clean up leftover blank lines and orphaned dashes
+        text = re.sub(r'^\s*-?\s*$', '', text, flags=re.MULTILINE)
+        text = re.sub(r'\n{2,}', '\n', text).strip()
         if text:
             result.append({**cue, 'text': text})
     return result
@@ -697,6 +880,74 @@ def filter_remove_ads(cues, custom_patterns=None):
     return result
 
 
+def filter_remove_offscreen_quotes(cues):
+    """Remove wrapping single quotes used for off-screen dialogue (UK style).
+
+    UK subtitles often wrap lines in single quotes when the speaker is
+    off-screen.  The quotes may span across cues, so a cue might have:
+      - Both opening and closing:  'She said hello.'
+      - Only opening (speech continues in next cue):  'She said hello
+      - Only closing (speech started in previous cue):  and goodbye.'
+      - Continuation with opening only:  'and then she left
+
+    Rules:
+      - Opening and closing quotes are handled independently — they don't
+        need to appear as a pair within the same line.
+      - Opening ' is a wrapping quote unless the word after it is a known
+        contraction ('cause, 'til, 'bout, 'cos, 'em, etc.).
+      - Closing ' is a wrapping quote if NOT preceded by a letter
+        (preserves dropped-g words like somethin', thinkin', nothin').
+      - Internal apostrophes (don't, she's, I'm) are never affected.
+    """
+    # Words that form contractions with a leading apostrophe — keep the '
+    CONTRACTION_WORDS = {
+        'cause', 'cos', 'coz', 'til', 'bout', 'em', 'im',
+        'twas', 'tis', 'neath', 'ere', 'appen',
+        'ave', 'alf', 'ad', 'ow', 'owt', 'nowt',  # UK dialect
+    }
+
+    result = []
+    for cue in cues:
+        lines = cue['text'].split('\n')
+        cleaned = []
+        for line in lines:
+            stripped = line.strip()
+            # Separate leading dash if present
+            leading = ''
+            inner = stripped
+            m = re.match(r'^(-\s*)', inner)
+            if m:
+                leading = m.group(1)
+                inner = inner[len(leading):]
+
+            # ── Opening quote ──
+            if inner and inner[0] == "'":
+                # Get the first word after the apostrophe
+                word_match = re.match(r"'([a-zA-Z]+)", inner)
+                if word_match:
+                    first_word = word_match.group(1).lower()
+                    # Only keep the ' if it's a known contraction
+                    if first_word not in CONTRACTION_WORDS:
+                        inner = inner[1:]  # strip opening '
+                else:
+                    # ' followed by space or non-letter — wrapping quote
+                    inner = inner[1:]
+
+            # ── Closing quote ──
+            if inner and inner[-1] == "'":
+                # Wrapping quote if NOT preceded by a letter
+                # (letter before ' = contraction like somethin', nothin')
+                if not inner[-2:-1].isalpha():
+                    inner = inner[:-1]
+
+            cleaned.append(leading + inner)
+
+        text = '\n'.join(cleaned).strip()
+        if text:
+            result.append({**cue, 'text': text})
+    return result
+
+
 def filter_remove_speaker_labels(cues):
     """Remove speaker name labels from start of lines.
 
@@ -728,6 +979,25 @@ def filter_remove_speaker_labels(cues):
         text = pattern.sub(_replace, text)
         text = re.sub(r'^\s*-?\s*$', '', text, flags=re.MULTILINE)
         text = re.sub(r'\n{2,}', '\n', text).strip()
+        if text:
+            result.append({**cue, 'text': text})
+    return result
+
+
+def filter_remove_leading_dashes(cues):
+    """Remove leading dashes from each line of subtitle text.
+
+    Handles dashes with or without trailing spaces, e.g.:
+      '- Hello there'  →  'Hello there'
+      '-Hello'         →  'Hello'
+      '- Hello\n- World' → 'Hello\nWorld'
+    Removes empty cues that result from the operation.
+    """
+    result = []
+    for cue in cues:
+        lines = cue['text'].split('\n')
+        cleaned = [re.sub(r'^-\s*', '', line) for line in lines]
+        text = '\n'.join(cleaned).strip()
         if text:
             result.append({**cue, 'text': text})
     return result
@@ -995,11 +1265,67 @@ def check_ffmpeg():
         pass
     return False, "ffmpeg not found"
 
+def _verify_gpu_encoder(backend_id, backend):
+    """Run a quick test encode to verify a GPU backend actually works.
+
+    Returns True if the encoder produced output successfully, False otherwise.
+    This catches cases where the encoder is compiled into ffmpeg but the
+    hardware driver/runtime is missing or misconfigured (e.g. Intel QSV
+    without libmfx/oneVPL, NVIDIA without drivers, VAAPI without va-driver).
+    """
+    # Pick the first available encoder from the backend
+    test_encoder = None
+    for enc in backend['detect_encoders']:
+        test_encoder = enc
+        break
+    if not test_encoder:
+        return False
+
+    # Build a minimal test encode command using a synthetic input.
+    # Each backend needs slightly different setup to initialize the hardware.
+    cmd = ['ffmpeg', '-y', '-loglevel', 'error']
+
+    if backend_id == 'vaapi':
+        # VAAPI needs device init + hwupload to get frames onto the GPU
+        cmd.extend([
+            '-vaapi_device', '/dev/dri/renderD128',
+            '-f', 'lavfi', '-i', 'color=black:s=64x64:d=0.1:r=1',
+            '-vf', 'format=nv12,hwupload',
+            '-c:v', test_encoder,
+            '-frames:v', '1',
+            '-f', 'null', '-'
+        ])
+    elif backend_id == 'qsv':
+        # QSV: test without hwaccel flags (encode-only, no device-bound input)
+        cmd.extend([
+            '-f', 'lavfi', '-i', 'color=black:s=64x64:d=0.1:r=1',
+            '-c:v', test_encoder,
+            '-frames:v', '1',
+            '-f', 'null', '-'
+        ])
+    else:
+        # NVENC and others: straightforward test
+        cmd.extend([
+            '-f', 'lavfi', '-i', 'color=black:s=64x64:d=0.1:r=1',
+            '-c:v', test_encoder,
+            '-frames:v', '1',
+            '-f', 'null', '-'
+        ])
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 def detect_gpu_backends():
     """Detect all available GPU encoding backends.
 
     Returns a dict: { backend_id: gpu_name_or_True, ... }
-    Only backends whose key encoder is found in ``ffmpeg -encoders`` are included.
+    Backends are included only if:
+      1. Their key encoder is found in ``ffmpeg -encoders``
+      2. A quick test encode succeeds (verifies driver/runtime is working)
     """
     available = {}
     try:
@@ -1011,9 +1337,10 @@ def detect_gpu_backends():
     for bid, backend in GPU_BACKENDS.items():
         # Check if the key encoder(s) are present in ffmpeg output
         if any(enc in encoder_output for enc in backend['detect_encoders']):
-            # Try to get a human-readable GPU name
-            gpu_name = _detect_gpu_name(bid, backend)
-            available[bid] = gpu_name or True
+            # Verify the encoder actually works with a quick test
+            if _verify_gpu_encoder(bid, backend):
+                gpu_name = _detect_gpu_name(bid, backend)
+                available[bid] = gpu_name or True
     return available
 
 
@@ -1892,6 +2219,11 @@ class VideoConverterApp:
         tools_menu.add_command(label="Open Output Folder",
                                accelerator="Ctrl+Shift+F",
                                command=self.open_output_folder)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="✏ Subtitle Editor...",
+                               command=self.open_standalone_subtitle_editor)
+        tools_menu.add_command(label="📦 Batch Filter Subtitles...",
+                               command=self.open_batch_filter)
         # Help menu
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
@@ -3172,6 +3504,1692 @@ class VideoConverterApp:
         dlg.grab_set()
         dlg.wait_window()
 
+    def open_standalone_subtitle_editor(self):
+        """Open the subtitle editor as a standalone app window with its own File menu."""
+        import tempfile
+
+        editor = tk.Toplevel(self.root)
+        editor.title("Subtitle Editor")
+        editor.geometry("950x650")
+        editor.resizable(True, True)
+        self._center_on_main(editor)
+
+        # ── Shared mutable state ──
+        cues = []
+        original_cues = []
+        undo_stack = []
+        redo_stack = []
+        current_path = [None]  # mutable ref for current file path
+        video_source = [None]  # set when editing a subtitle from a video file
+        # When set: {'path': video_path, 'stream_index': N, 'temp_srt': path,
+        #            'streams': [...], 'stream_info': {...}}
+
+        # ── Color tag names ──
+        TAG_MODIFIED = 'modified'
+        TAG_HI = 'has_hi'
+        TAG_TAGS = 'has_tags'
+        TAG_LONG = 'long_line'
+        TAG_SEARCH = 'search_match'
+
+        # ── Undo / Redo ──
+        def push_undo():
+            undo_stack.append([dict(c) for c in cues])
+            redo_stack.clear()
+
+        def do_undo(event=None):
+            nonlocal cues
+            if not undo_stack:
+                return
+            redo_stack.append([dict(c) for c in cues])
+            cues = undo_stack.pop()
+            refresh_tree(cues)
+
+        def do_redo(event=None):
+            nonlocal cues
+            if not redo_stack:
+                return
+            undo_stack.append([dict(c) for c in cues])
+            cues = redo_stack.pop()
+            refresh_tree(cues)
+
+        editor.bind('<Control-z>', do_undo)
+        editor.bind('<Control-y>', do_redo)
+        editor.bind('<Control-Z>', do_undo)
+        editor.bind('<Control-Y>', do_redo)
+
+        # ── Track state ──
+        modified_count = tk.IntVar(value=0)
+        deleted_count = tk.IntVar(value=0)
+
+        # ── Classification for color coding ──
+        _orig_texts = set()
+
+        def _classify_cue(cue, orig_text=None):
+            tags = set()
+            text = cue['text']
+            if orig_text is not None and text != orig_text:
+                tags.add(TAG_MODIFIED)
+            if re.search(r'\[.*?\]|\(.*?\)|♪|♫', text):
+                tags.add(TAG_HI)
+            if re.search(r'<[^>]+>|\{\\[^}]+\}', text):
+                tags.add(TAG_TAGS)
+            for line in text.split('\n'):
+                if len(line) > MAX_CHARS_PER_LINE:
+                    tags.add(TAG_LONG)
+                    break
+            return tags
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Menu bar
+        # ══════════════════════════════════════════════════════════════════════
+        menubar = tk.Menu(editor)
+        editor.configure(menu=menubar)
+
+        # ── File menu ──
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="File", menu=file_menu)
+
+        def load_file(sub_path):
+            """Load a subtitle file into the editor by path."""
+            sub_exts = {'.srt', '.ass', '.ssa', '.vtt', '.sub'}
+            ext = Path(sub_path).suffix.lower()
+            if ext not in sub_exts:
+                messagebox.showwarning("Unsupported Format",
+                    f"Not a recognised subtitle file:\n{os.path.basename(sub_path)}",
+                    parent=editor)
+                return
+            if ext in ('.srt',):
+                try:
+                    with open(sub_path, 'r', encoding='utf-8', errors='replace') as f:
+                        srt_text = f.read()
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to read file:\n{e}",
+                                         parent=editor)
+                    return
+            else:
+                # Convert to SRT via ffmpeg
+                tmp_srt = tempfile.NamedTemporaryFile(suffix='.srt', delete=False,
+                                                       mode='w', encoding='utf-8')
+                tmp_srt.close()
+                cmd = ['ffmpeg', '-y', '-i', sub_path, '-c:s', 'srt', tmp_srt.name]
+                try:
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                    if result.returncode != 0:
+                        messagebox.showerror("Error",
+                            f"Failed to convert subtitle:\n{result.stderr[-300:]}",
+                            parent=editor)
+                        os.unlink(tmp_srt.name)
+                        return
+                except Exception as e:
+                    messagebox.showerror("Error", f"Convert error:\n{e}", parent=editor)
+                    os.unlink(tmp_srt.name)
+                    return
+                with open(tmp_srt.name, 'r', encoding='utf-8', errors='replace') as f:
+                    srt_text = f.read()
+                os.unlink(tmp_srt.name)
+
+            title = f"Subtitle Editor — {os.path.basename(sub_path)}"
+            if _load_cues_into_editor(srt_text, title, sub_path):
+                self.add_log(f"Opened subtitle file: {os.path.basename(sub_path)} "
+                             f"({len(cues)} entries)", 'INFO')
+
+        def _load_cues_into_editor(srt_text, title, source_path):
+            """Common logic: parse SRT text and load cues into the editor."""
+            nonlocal cues, original_cues
+            new_cues = parse_srt(srt_text)
+            if not new_cues:
+                messagebox.showwarning("Empty",
+                    f"No subtitle cues found in:\n{os.path.basename(source_path)}",
+                    parent=editor)
+                return False
+
+            cues = new_cues
+            original_cues = [dict(c) for c in cues]
+            _orig_texts.clear()
+            _orig_texts.update(c['text'] for c in original_cues)
+            undo_stack.clear()
+            redo_stack.clear()
+            current_path[0] = source_path
+            editor.title(title)
+
+            placeholder.pack_forget()
+            content_frame.pack(fill='both', expand=True)
+            _set_menus_state('normal')
+            refresh_tree(cues)
+            return True
+
+        def load_video_subtitle(video_path):
+            """Probe a video file for subtitle streams, let the user pick one,
+            extract it, and load it into the editor for editing."""
+            nonlocal cues, original_cues
+
+            # Bitmap codecs that can't be converted to SRT
+            BITMAP_CODECS = {'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle',
+                             'dvb_teletext', 'xsub'}
+
+            streams = get_subtitle_streams(video_path)
+            if not streams:
+                messagebox.showinfo("No Subtitles",
+                    f"No subtitle streams found in:\n{os.path.basename(video_path)}",
+                    parent=editor)
+                return
+
+            # Filter out bitmap subtitles
+            text_streams = [s for s in streams if s['codec_name'] not in BITMAP_CODECS]
+            if not text_streams:
+                messagebox.showwarning("No Editable Subtitles",
+                    "This video only contains bitmap subtitle streams "
+                    "(PGS/VobSub) which cannot be edited as text.",
+                    parent=editor)
+                return
+
+            # If only one text stream, use it directly; otherwise show picker
+            if len(text_streams) == 1:
+                chosen = text_streams[0]
+            else:
+                chosen = [None]  # mutable ref for dialog result
+
+                picker = tk.Toplevel(editor)
+                picker.title("Select Subtitle Stream")
+                picker.geometry("640x340")
+                picker.transient(editor)
+                picker.grab_set()
+                self._center_on_main(picker)
+                picker.resizable(True, True)
+
+                ttk.Label(picker,
+                          text=f"Select a subtitle stream to edit from:\n"
+                               f"{os.path.basename(video_path)}",
+                          padding=(10, 10)).pack()
+
+                # ── Treeview with columns ──
+                tree_frame = ttk.Frame(picker)
+                tree_frame.pack(fill='both', expand=True, padx=10, pady=5)
+
+                scrollbar = ttk.Scrollbar(tree_frame, orient='vertical')
+                scrollbar.pack(side='right', fill='y')
+
+                cols = ('stream', 'lang', 'format', 'title', 'flags')
+                stream_tree = ttk.Treeview(tree_frame, columns=cols,
+                                           show='headings', height=8,
+                                           selectmode='browse',
+                                           yscrollcommand=scrollbar.set)
+                scrollbar.config(command=stream_tree.yview)
+
+                stream_tree.heading('stream', text='#')
+                stream_tree.heading('lang', text='Language')
+                stream_tree.heading('format', text='Format')
+                stream_tree.heading('title', text='Title')
+                stream_tree.heading('flags', text='Flags')
+
+                stream_tree.column('stream', width=50, minwidth=40, stretch=False)
+                stream_tree.column('lang', width=90, minwidth=70, stretch=False)
+                stream_tree.column('format', width=70, minwidth=60, stretch=False)
+                stream_tree.column('title', width=200, minwidth=100, stretch=True)
+                stream_tree.column('flags', width=140, minwidth=100, stretch=False)
+
+                stream_tree.pack(fill='both', expand=True)
+
+                for i, s in enumerate(text_streams):
+                    lang = s['language'] if s['language'] != 'und' else 'Unknown'
+                    flags = []
+                    if s['default']:
+                        flags.append('Default')
+                    if s['sdh']:
+                        flags.append('SDH')
+                    if s['forced']:
+                        flags.append('Forced')
+                    flag_str = ', '.join(flags) if flags else ''
+                    title_str = s['title'] if s['title'] else ''
+                    stream_tree.insert('', 'end', iid=str(i),
+                                       values=(s['index'], lang,
+                                               s['codec_name'], title_str,
+                                               flag_str))
+
+                stream_tree.selection_set('0')
+
+                def on_select():
+                    sel = stream_tree.selection()
+                    if sel:
+                        chosen[0] = text_streams[int(sel[0])]
+                    picker.destroy()
+
+                def on_double_click(event):
+                    on_select()
+
+                stream_tree.bind('<Double-1>', on_double_click)
+
+                btn_frame = ttk.Frame(picker, padding=(10, 8, 10, 10))
+                btn_frame.pack(fill='x')
+                ttk.Button(btn_frame, text="Edit Selected",
+                           command=on_select).pack(side='right', padx=(4, 0))
+                ttk.Button(btn_frame, text="Cancel",
+                           command=picker.destroy).pack(side='right')
+
+                picker.wait_window()
+
+                chosen = chosen[0]
+                if chosen is None:
+                    return  # user cancelled
+
+            # Extract the selected stream to a temp SRT file
+            stream_index = chosen['index']
+            tmp_srt = tempfile.NamedTemporaryFile(suffix='.srt', delete=False,
+                                                   mode='w', encoding='utf-8')
+            tmp_srt.close()
+            cmd = ['ffmpeg', '-y', '-i', video_path,
+                   '-map', f'0:{stream_index}', '-c:s', 'srt', tmp_srt.name]
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                if result.returncode != 0:
+                    messagebox.showerror("Error",
+                        f"Failed to extract subtitle stream #{stream_index}:\n"
+                        f"{result.stderr[-300:]}",
+                        parent=editor)
+                    os.unlink(tmp_srt.name)
+                    return
+            except Exception as e:
+                messagebox.showerror("Error", f"Extract error:\n{e}", parent=editor)
+                os.unlink(tmp_srt.name)
+                return
+
+            with open(tmp_srt.name, 'r', encoding='utf-8', errors='replace') as f:
+                srt_text = f.read()
+
+            # Build title
+            lang = chosen['language'] if chosen['language'] != 'und' else '?'
+            title_str = (f"Subtitle Editor — Stream #{stream_index} ({lang}) — "
+                         f"{os.path.basename(video_path)}")
+
+            if _load_cues_into_editor(srt_text, title_str, tmp_srt.name):
+                # Store video source info for re-muxing on save
+                video_source[0] = {
+                    'path': video_path,
+                    'stream_index': stream_index,
+                    'temp_srt': tmp_srt.name,
+                    'streams': streams,
+                    'stream_info': chosen,
+                }
+                self.add_log(f"Opened video subtitle: stream #{stream_index} ({lang}) "
+                             f"from {os.path.basename(video_path)} "
+                             f"({len(cues)} entries)", 'INFO')
+            else:
+                os.unlink(tmp_srt.name)
+
+        def do_open_file():
+            path = filedialog.askopenfilename(
+                parent=editor,
+                title="Open Subtitle or Video File",
+                filetypes=[
+                    ('Subtitle files', '*.srt *.ass *.ssa *.vtt *.sub'),
+                    ('Video files', '*.mkv *.mp4 *.avi *.mov *.wmv *.flv *.webm'),
+                    ('All files', '*.*'),
+                ]
+            )
+            if not path:
+                return
+            ext = Path(path).suffix.lower()
+            if ext in VIDEO_EXTENSIONS:
+                load_video_subtitle(path)
+            else:
+                video_source[0] = None  # clear video mode
+                load_file(path)
+
+        def on_drop_subtitle(event):
+            """Handle subtitle or video files dragged and dropped onto the editor."""
+            raw = event.data
+            # tkinterdnd2 wraps paths with spaces in curly braces: {/path/to/my file.srt}
+            paths = []
+            i = 0
+            while i < len(raw):
+                if raw[i] == '{':
+                    end = raw.find('}', i)
+                    paths.append(raw[i + 1:end])
+                    i = end + 2
+                elif raw[i] == ' ':
+                    i += 1
+                else:
+                    end = raw.find(' ', i)
+                    if end == -1:
+                        paths.append(raw[i:])
+                        break
+                    else:
+                        paths.append(raw[i:end])
+                        i = end + 1
+            if paths:
+                path = paths[0]
+                ext = Path(path).suffix.lower()
+                if ext in VIDEO_EXTENSIONS:
+                    load_video_subtitle(path)
+                else:
+                    video_source[0] = None  # clear video mode
+                    load_file(path)
+
+        # ── Register drag-and-drop on the editor window ──
+        if HAS_DND:
+            editor.drop_target_register(DND_FILES)
+            editor.dnd_bind('<<Drop>>', on_drop_subtitle)
+
+        def do_save_file():
+            if not cues or not current_path[0]:
+                return
+            removed = len(original_cues) - len(cues)
+
+            if video_source[0]:
+                # ── Re-mux edited subtitle back into the video ──
+                vs = video_source[0]
+                video_path = vs['path']
+                stream_idx = vs['stream_index']
+                temp_srt = vs['temp_srt']
+                streams = vs['streams']
+
+                # Write edited SRT to temp file
+                with open(temp_srt, 'w', encoding='utf-8') as f:
+                    f.write(write_srt(cues))
+
+                # Build ffmpeg command: map every stream in order, replacing
+                # the target subtitle with the edited version to preserve track order
+                tmp_out = str(Path(video_path).with_suffix('.tmp' + Path(video_path).suffix))
+                cmd = ['ffmpeg', '-y', '-i', video_path, '-i', temp_srt]
+
+                all_streams = get_all_streams(video_path)
+                out_sub_count = 0
+                replaced_out_sub_idx = None
+                for s in all_streams:
+                    if s['index'] == stream_idx:
+                        # Replace this subtitle with the edited version
+                        cmd.extend(['-map', '1:0'])
+                        replaced_out_sub_idx = out_sub_count
+                        out_sub_count += 1
+                    else:
+                        cmd.extend(['-map', f"0:{s['index']}"])
+                        if s['codec_type'] == 'subtitle':
+                            out_sub_count += 1
+
+                # Copy all codecs (no re-encoding)
+                cmd.extend(['-c', 'copy'])
+
+                # Preserve metadata on the replaced subtitle stream
+                orig = vs['stream_info']
+                if replaced_out_sub_idx is not None:
+                    if orig.get('language') and orig['language'] != 'und':
+                        cmd.extend([f'-metadata:s:s:{replaced_out_sub_idx}',
+                                    f"language={orig['language']}"])
+                    if orig.get('title'):
+                        cmd.extend([f'-metadata:s:s:{replaced_out_sub_idx}',
+                                    f"title={orig['title']}"])
+                    # Preserve disposition flags
+                    disp_parts = []
+                    if orig.get('default'):
+                        disp_parts.append('default')
+                    if orig.get('forced'):
+                        disp_parts.append('forced')
+                    if orig.get('sdh'):
+                        disp_parts.append('hearing_impaired')
+                    if disp_parts:
+                        cmd.extend([f'-disposition:s:{replaced_out_sub_idx}',
+                                    '+'.join(disp_parts)])
+
+                    # For MP4 containers, subtitle codec must be mov_text
+                    if Path(video_path).suffix.lower() in ('.mp4', '.m4v'):
+                        cmd.extend([f'-c:s:{replaced_out_sub_idx}', 'mov_text'])
+
+                cmd.append(tmp_out)
+
+                self.add_log(f"Re-muxing subtitle into {os.path.basename(video_path)}...",
+                             'INFO')
+                self.add_log(f"ffmpeg command: {' '.join(cmd)}", 'INFO')
+                editor.update_idletasks()
+
+                try:
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                    if result.returncode != 0:
+                        self.add_log(f"Re-mux stderr: {result.stderr[-500:]}", 'ERROR')
+                        messagebox.showerror("Re-mux Failed",
+                            f"Failed to save subtitle back to video:\n\n"
+                            f"{result.stderr[-400:]}",
+                            parent=editor)
+                        # Clean up failed temp output
+                        if os.path.exists(tmp_out):
+                            os.unlink(tmp_out)
+                        return
+
+                    # Atomic replace: swap temp output over original
+                    os.replace(tmp_out, video_path)
+
+                    # Cleanup temp SRT
+                    try:
+                        os.unlink(temp_srt)
+                    except OSError:
+                        pass
+
+                    self.add_log(f"Subtitle re-muxed into video: {len(cues)} entries "
+                                 f"({removed} removed) → {os.path.basename(video_path)}",
+                                 'SUCCESS')
+                    messagebox.showinfo("Saved",
+                        f"Subtitle stream #{stream_idx} saved back to:\n"
+                        f"{os.path.basename(video_path)}",
+                        parent=editor)
+                    video_source[0] = None  # clear video mode after successful save
+
+                except Exception as e:
+                    messagebox.showerror("Error", f"Re-mux error:\n{e}", parent=editor)
+                    if os.path.exists(tmp_out):
+                        os.unlink(tmp_out)
+            else:
+                # ── Normal subtitle file save ──
+                with open(current_path[0], 'w', encoding='utf-8') as f:
+                    f.write(write_srt(cues))
+                self.add_log(f"Subtitle saved: {len(cues)} entries ({removed} removed) → "
+                             f"{os.path.basename(current_path[0])}", 'SUCCESS')
+
+        def do_save_as():
+            if not cues:
+                return
+            if video_source[0]:
+                ref_path = video_source[0]['path']
+            elif current_path[0]:
+                ref_path = current_path[0]
+            else:
+                ref_path = None
+            out_dir = str(Path(ref_path).parent) if ref_path else ''
+            default_name = (f"{Path(ref_path).stem}.srt"
+                            if ref_path else "subtitle.srt")
+            out_path = filedialog.asksaveasfilename(
+                parent=editor,
+                initialdir=out_dir,
+                initialfile=default_name,
+                defaultextension='.srt',
+                filetypes=[('SubRip', '*.srt'), ('All files', '*.*')]
+            )
+            if not out_path:
+                return
+            with open(out_path, 'w', encoding='utf-8') as f:
+                f.write(write_srt(cues))
+            current_path[0] = out_path
+            editor.title(f"Subtitle Editor — {os.path.basename(out_path)}")
+            self.add_log(f"Subtitle saved as: {out_path}", 'SUCCESS')
+
+        def do_export():
+            if not cues:
+                messagebox.showwarning("Empty", "No subtitle entries to export.",
+                                       parent=editor)
+                return
+            # Use the video file path for directory/name when editing a video subtitle
+            if video_source[0]:
+                ref_path = video_source[0]['path']
+            elif current_path[0]:
+                ref_path = current_path[0]
+            else:
+                ref_path = None
+            out_dir = str(Path(ref_path).parent) if ref_path else ''
+            default_name = (f"{Path(ref_path).stem}.srt"
+                            if ref_path else "subtitle.srt")
+            out_path = filedialog.asksaveasfilename(
+                parent=editor,
+                initialdir=out_dir,
+                initialfile=default_name,
+                defaultextension='.srt',
+                filetypes=[('SubRip', '*.srt'), ('All files', '*.*')]
+            )
+            if not out_path:
+                return
+            with open(out_path, 'w', encoding='utf-8') as f:
+                f.write(write_srt(cues))
+            self.add_log(f"Exported subtitle → {out_path}", 'SUCCESS')
+
+        file_menu.add_command(label="Open...", accelerator="Ctrl+O", command=do_open_file)
+        file_menu.add_separator()
+        file_menu.add_command(label="Save", accelerator="Ctrl+S", command=do_save_file)
+        file_menu.add_command(label="Save As...", accelerator="Ctrl+Shift+S",
+                              command=do_save_as)
+        file_menu.add_command(label="Export SRT...", command=do_export)
+        file_menu.add_separator()
+        file_menu.add_command(label="Batch Filter...", command=self.open_batch_filter)
+        file_menu.add_separator()
+        file_menu.add_command(label="Close", command=lambda: on_editor_close())
+
+        editor.bind('<Control-o>', lambda e: do_open_file())
+        editor.bind('<Control-O>', lambda e: do_open_file())
+        editor.bind('<Control-s>', lambda e: do_save_file())
+        editor.bind('<Control-S>', lambda e: do_save_file())
+
+        # ── Filters menu ──
+        def apply_filter(filter_func, name):
+            nonlocal cues
+            push_undo()
+            before = len(cues)
+            cues = filter_func(cues)
+            after = len(cues)
+            self.add_log(f"Filter '{name}': {before - after} entries removed, "
+                         f"{after} remaining", 'INFO')
+            refresh_tree(cues)
+
+        def undo_all():
+            nonlocal cues
+            push_undo()
+            cues = [dict(c) for c in original_cues]
+            refresh_tree(cues)
+            self.add_log("Subtitle edits reset to original", 'INFO')
+
+        filter_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Filters", menu=filter_menu)
+        filter_menu.add_command(label="Remove HI  [brackets] (parens) Speaker:",
+                                command=lambda: apply_filter(filter_remove_hi, "Remove HI"))
+        filter_menu.add_command(label="Remove Tags  <i> {\\an8}",
+                                command=lambda: apply_filter(filter_remove_tags, "Remove Tags"))
+
+        def apply_remove_ads():
+            apply_filter(lambda c: filter_remove_ads(c, self.custom_ad_patterns),
+                         "Remove Ads")
+
+        filter_menu.add_command(label="Remove Ads / Credits", command=apply_remove_ads)
+        filter_menu.add_command(label="Remove Music Notes  ♪ ♫",
+                                command=lambda: apply_filter(filter_remove_music_notes, "Remove Music Notes"))
+        filter_menu.add_command(label="Remove Leading Dashes  -",
+                                command=lambda: apply_filter(filter_remove_leading_dashes, "Remove Leading Dashes"))
+        filter_menu.add_command(label="Remove ALL CAPS HI  (UK style)",
+                                command=lambda: apply_filter(filter_remove_caps_hi, "Remove CAPS HI"))
+        filter_menu.add_command(label="Remove Off-Screen Quotes  ' '  (UK style)",
+                                command=lambda: apply_filter(filter_remove_offscreen_quotes, "Remove Off-Screen Quotes"))
+        filter_menu.add_separator()
+        filter_menu.add_command(label="Remove Duplicates",
+                                command=lambda: apply_filter(filter_remove_duplicates, "Remove Duplicates"))
+        filter_menu.add_command(label="Merge Short Cues",
+                                command=lambda: apply_filter(filter_merge_short, "Merge Short Cues"))
+        filter_menu.add_separator()
+
+        # ── Fix ALL CAPS ──
+        if not hasattr(self, 'custom_cap_words'):
+            self.custom_cap_words = []
+
+        def apply_fix_caps():
+            apply_filter(lambda c: filter_fix_caps(c, self.custom_cap_words),
+                         "Fix ALL CAPS")
+
+        def show_fix_caps_dialog():
+            cd = tk.Toplevel(editor)
+            cd.title("Fix ALL CAPS — Custom Names")
+            cd.geometry("420x380")
+            cd.transient(editor)
+            cd.grab_set()
+            self._center_on_main(cd)
+            cd.resizable(True, True)
+
+            ttk.Label(cd, text="Add character names and other proper nouns\n"
+                      "that should be capitalized after conversion.",
+                      justify='center', padding=(10, 10)).pack()
+
+            lf = ttk.LabelFrame(cd, text="Custom Names (in addition to built-in list)",
+                                padding=8)
+            lf.pack(fill='both', expand=True, padx=10, pady=5)
+
+            word_list = tk.Listbox(lf, height=8, font=('Courier', 10))
+            word_list.pack(fill='both', expand=True)
+            for w in self.custom_cap_words:
+                word_list.insert('end', w)
+
+            add_frame = ttk.Frame(lf)
+            add_frame.pack(fill='x', pady=(4, 0))
+            new_word_var = tk.StringVar()
+            word_entry = ttk.Entry(add_frame, textvariable=new_word_var)
+            word_entry.pack(side='left', fill='x', expand=True, padx=(0, 4))
+            word_entry.focus_set()
+
+            def add_word():
+                word = new_word_var.get().strip()
+                if not word:
+                    return
+                if word.lower() not in [w.lower() for w in self.custom_cap_words]:
+                    self.custom_cap_words.append(word)
+                    word_list.insert('end', word)
+                new_word_var.set('')
+
+            def remove_word():
+                sel = word_list.curselection()
+                if sel:
+                    self.custom_cap_words.pop(sel[0])
+                    word_list.delete(sel[0])
+
+            ttk.Button(add_frame, text="Add", command=add_word).pack(side='right')
+            word_entry.bind('<Return>', lambda e: add_word())
+
+            ttk.Label(lf, text="Tip: Add character names like 'John', 'Sarah', 'Dr. House'",
+                      font=('Helvetica', 8), foreground='gray').pack(anchor='w')
+
+            btn_frame = ttk.Frame(cd, padding=(10, 8, 10, 10))
+            btn_frame.pack(fill='x')
+            ttk.Button(btn_frame, text="Remove Selected", command=remove_word).pack(side='left')
+            ttk.Button(btn_frame, text="Apply Fix Caps",
+                       command=lambda: (cd.destroy(), apply_fix_caps())).pack(side='right')
+            ttk.Button(btn_frame, text="Cancel", command=cd.destroy).pack(side='right', padx=4)
+
+        filter_menu.add_command(label="Fix ALL CAPS", command=apply_fix_caps)
+        filter_menu.add_command(label="Fix ALL CAPS + Add Names...",
+                                command=show_fix_caps_dialog)
+        filter_menu.add_separator()
+
+        def show_ad_patterns_dialog():
+            pd = tk.Toplevel(editor)
+            pd.title("Ad / Credit Patterns")
+            pd.geometry("500x420")
+            pd.transient(editor)
+            pd.grab_set()
+            self._center_on_main(pd)
+            pd.resizable(True, True)
+
+            bf = ttk.LabelFrame(pd, text="Built-in Patterns (always active)", padding=8)
+            bf.pack(fill='x', padx=10, pady=(10, 5))
+            builtin_list = tk.Listbox(bf, height=6, font=('Courier', 9))
+            builtin_list.pack(fill='x')
+            for p in BUILTIN_AD_PATTERNS:
+                builtin_list.insert('end', p)
+
+            cf = ttk.LabelFrame(pd, text="Custom Patterns (saved to preferences)", padding=8)
+            cf.pack(fill='both', expand=True, padx=10, pady=5)
+
+            custom_list = tk.Listbox(cf, height=8, font=('Courier', 9))
+            custom_list.pack(fill='both', expand=True)
+            for p in self.custom_ad_patterns:
+                custom_list.insert('end', p)
+
+            add_frame = ttk.Frame(cf)
+            add_frame.pack(fill='x', pady=(4, 0))
+            new_pattern_var = tk.StringVar()
+            pattern_entry = ttk.Entry(add_frame, textvariable=new_pattern_var)
+            pattern_entry.pack(side='left', fill='x', expand=True, padx=(0, 4))
+
+            def add_pattern():
+                pat = new_pattern_var.get().strip()
+                if not pat:
+                    return
+                try:
+                    re.compile(pat)
+                except re.error as e:
+                    messagebox.showwarning("Invalid Pattern",
+                                           f"Not a valid regex:\n{e}", parent=pd)
+                    return
+                if pat not in self.custom_ad_patterns:
+                    self.custom_ad_patterns.append(pat)
+                    custom_list.insert('end', pat)
+                    new_pattern_var.set('')
+                    self.add_log(f"Added custom ad pattern: {pat}", 'INFO')
+
+            def remove_selected():
+                sel = custom_list.curselection()
+                if not sel:
+                    return
+                idx = sel[0]
+                removed = self.custom_ad_patterns.pop(idx)
+                custom_list.delete(idx)
+                self.add_log(f"Removed custom ad pattern: {removed}", 'INFO')
+
+            ttk.Button(add_frame, text="Add", command=add_pattern).pack(side='right')
+            pattern_entry.bind('<Return>', lambda e: add_pattern())
+
+            ttk.Label(cf, text="Patterns are case-insensitive regex matched at start of line.",
+                      font=('Helvetica', 8), foreground='gray').pack(anchor='w')
+
+            btn_frame = ttk.Frame(pd, padding=(10, 6, 10, 10))
+            btn_frame.pack(fill='x')
+            ttk.Button(btn_frame, text="Remove Selected", command=remove_selected).pack(side='left')
+
+            def save_and_close():
+                self.save_preferences()
+                pd.destroy()
+
+            ttk.Button(btn_frame, text="Save & Close", command=save_and_close).pack(side='right')
+            ttk.Button(btn_frame, text="Cancel", command=pd.destroy).pack(side='right', padx=4)
+
+        filter_menu.add_command(label="Manage Ad Patterns...",
+                                command=show_ad_patterns_dialog)
+
+        # ── Edit menu ──
+        edit_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Edit", menu=edit_menu)
+        edit_menu.add_command(label="Undo                Ctrl+Z", command=do_undo)
+        edit_menu.add_command(label="Redo                Ctrl+Y", command=do_redo)
+        edit_menu.add_command(label="Reset to Original", command=undo_all)
+        edit_menu.add_separator()
+
+        def delete_selected():
+            nonlocal cues
+            selected = tree.selection()
+            if not selected:
+                return
+            push_undo()
+            indices_to_remove = set(int(s) for s in selected)
+            cues = [c for i, c in enumerate(cues) if i not in indices_to_remove]
+            refresh_tree(cues)
+
+        def split_selected():
+            nonlocal cues
+            selected = tree.selection()
+            if len(selected) != 1:
+                messagebox.showinfo("Split", "Select exactly one cue to split.",
+                                    parent=editor)
+                return
+            idx = int(selected[0])
+            cue = cues[idx]
+            text = cue['text']
+            lines = text.split('\n')
+            if len(lines) < 2:
+                mid = len(text) // 2
+                space_pos = text.rfind(' ', 0, mid + 10)
+                if space_pos > mid - 20:
+                    mid = space_pos
+                text1 = text[:mid].rstrip()
+                text2 = text[mid:].lstrip()
+            else:
+                mid_line = len(lines) // 2
+                text1 = '\n'.join(lines[:mid_line])
+                text2 = '\n'.join(lines[mid_line:])
+            if not text1 or not text2:
+                return
+            push_undo()
+            start_ms = srt_ts_to_ms(cue['start'])
+            end_ms = srt_ts_to_ms(cue['end'])
+            mid_ms = (start_ms + end_ms) // 2
+            cue1 = {**cue, 'text': text1, 'end': ms_to_srt_ts(mid_ms)}
+            cue2 = {**cue, 'text': text2, 'start': ms_to_srt_ts(mid_ms + 1)}
+            cues[idx:idx + 1] = [cue1, cue2]
+            refresh_tree(cues)
+
+        def join_selected():
+            nonlocal cues
+            selected = sorted(tree.selection(), key=int)
+            if len(selected) < 2:
+                messagebox.showinfo("Join", "Select two or more consecutive cues to join.",
+                                    parent=editor)
+                return
+            indices = [int(s) for s in selected]
+            for i in range(1, len(indices)):
+                if indices[i] != indices[i - 1] + 1:
+                    messagebox.showwarning("Join",
+                        "Selected cues must be consecutive.", parent=editor)
+                    return
+            push_undo()
+            first = cues[indices[0]]
+            last = cues[indices[-1]]
+            merged_text = ' '.join(cues[i]['text'] for i in indices)
+            merged = {**first, 'end': last['end'], 'text': merged_text}
+            cues[indices[0]:indices[-1] + 1] = [merged]
+            refresh_tree(cues)
+
+        edit_menu.add_command(label="Delete Selected     Del", command=delete_selected)
+        edit_menu.add_command(label="Split Cue", command=split_selected)
+        edit_menu.add_command(label="Join Selected Cues", command=join_selected)
+
+        # ── Timing menu ──
+        def show_timing_dialog():
+            td = tk.Toplevel(editor)
+            td.title("Timing Adjustment")
+            td.geometry("320x180")
+            td.transient(editor)
+            td.grab_set()
+            self._center_on_main(td)
+            td.resizable(False, False)
+
+            of = ttk.LabelFrame(td, text="Offset (shift all timestamps)", padding=8)
+            of.pack(fill='x', padx=10, pady=(10, 5))
+            offset_var = tk.StringVar(value="0")
+            ttk.Label(of, text="Milliseconds (+/−):").pack(side='left')
+            ttk.Entry(of, textvariable=offset_var, width=10).pack(side='left', padx=4)
+
+            def apply_offset():
+                nonlocal cues
+                try:
+                    ms = int(offset_var.get())
+                except ValueError:
+                    messagebox.showwarning("Invalid", "Enter a number in milliseconds.",
+                                           parent=td)
+                    return
+                if ms == 0:
+                    return
+                push_undo()
+                cues = shift_timestamps(cues, ms)
+                refresh_tree(cues)
+                direction = "forward" if ms > 0 else "backward"
+                self.add_log(f"Shifted timestamps {direction} by {abs(ms)}ms", 'INFO')
+                td.destroy()
+
+            ttk.Button(of, text="Apply", command=apply_offset).pack(side='right')
+
+            sf = ttk.LabelFrame(td, text="Stretch (scale timestamps)", padding=8)
+            sf.pack(fill='x', padx=10, pady=5)
+            stretch_var = tk.StringVar(value="1.0")
+            ttk.Label(sf, text="Factor:").pack(side='left')
+            ttk.Entry(sf, textvariable=stretch_var, width=10).pack(side='left', padx=4)
+
+            def apply_stretch():
+                nonlocal cues
+                try:
+                    factor = float(stretch_var.get())
+                except ValueError:
+                    messagebox.showwarning("Invalid", "Enter a decimal number (e.g. 1.04).",
+                                           parent=td)
+                    return
+                if factor <= 0:
+                    messagebox.showwarning("Invalid", "Factor must be positive.", parent=td)
+                    return
+                if factor == 1.0:
+                    return
+                push_undo()
+                cues = stretch_timestamps(cues, factor)
+                refresh_tree(cues)
+                self.add_log(f"Stretched timestamps by factor {factor}", 'INFO')
+                td.destroy()
+
+            ttk.Button(sf, text="Apply", command=apply_stretch).pack(side='right')
+            ttk.Button(td, text="Close", command=td.destroy).pack(pady=(5, 10))
+
+        timing_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Timing", menu=timing_menu)
+        timing_menu.add_command(label="Offset / Stretch...", command=show_timing_dialog)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Placeholder — shown when no file is loaded
+        # ══════════════════════════════════════════════════════════════════════
+        placeholder = ttk.Frame(editor)
+        placeholder.pack(fill='both', expand=True)
+        ph_label = ttk.Label(placeholder,
+                             text="Open a subtitle file to begin editing\n\n"
+                                  "File → Open   (Ctrl+O)\n\n"
+                                  "or drag and drop a subtitle or video file here",
+                             font=('Helvetica', 14),
+                             foreground='gray',
+                             justify='center',
+                             anchor='center')
+        ph_label.pack(expand=True)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Content frame — hidden until a file is loaded
+        # ══════════════════════════════════════════════════════════════════════
+        content_frame = ttk.Frame(editor)
+
+        # ── Search & Replace toolbar ──
+        find_var = tk.StringVar()
+        replace_var = tk.StringVar()
+        use_regex = tk.BooleanVar(value=False)
+        wrap_around = tk.BooleanVar(value=False)
+
+        def do_find():
+            term = find_var.get()
+            if not term:
+                refresh_tree(cues)
+                return
+            matches = []
+            for i, cue in enumerate(cues):
+                try:
+                    if use_regex.get():
+                        if re.search(term, cue['text'], re.IGNORECASE):
+                            matches.append(i)
+                    else:
+                        if term.lower() in cue['text'].lower():
+                            matches.append(i)
+                except re.error:
+                    pass
+            refresh_tree(cues, search_indices=matches)
+            if matches:
+                tree.see(str(matches[0]))
+                tree.selection_set(str(matches[0]))
+            self.add_log(f"Search: {len(matches)} matches for '{term}'", 'INFO')
+
+        def do_replace_one():
+            """Replace the first occurrence of search term from current selection."""
+            nonlocal cues
+            term = find_var.get()
+            repl = replace_var.get()
+            if not term:
+                return
+            sel = tree.selection()
+            start_idx = int(sel[0]) if sel else 0
+            if wrap_around.get():
+                order = list(range(start_idx, len(cues))) + list(range(0, start_idx))
+            else:
+                order = list(range(start_idx, len(cues)))
+            for i in order:
+                old_text = cues[i]['text']
+                try:
+                    if use_regex.get():
+                        new_text = re.sub(term, repl, old_text, count=1,
+                                          flags=re.IGNORECASE)
+                    else:
+                        pat = re.escape(term)
+                        new_text = re.sub(pat, repl, old_text, count=1,
+                                          flags=re.IGNORECASE)
+                except re.error:
+                    continue
+                if new_text != old_text:
+                    push_undo()
+                    cues[i]['text'] = new_text
+                    if not new_text.strip():
+                        del cues[i]
+                    refresh_tree(cues)
+                    # Select and scroll to the next match
+                    if wrap_around.get():
+                        next_order = list(range(i + 1, len(cues))) + list(range(0, i + 1))
+                    else:
+                        next_order = list(range(i + 1, len(cues)))
+                    for j in next_order:
+                        try:
+                            if use_regex.get():
+                                if re.search(term, cues[j]['text'], re.IGNORECASE):
+                                    tree.see(str(j))
+                                    tree.selection_set(str(j))
+                                    break
+                            else:
+                                if term.lower() in cues[j]['text'].lower():
+                                    tree.see(str(j))
+                                    tree.selection_set(str(j))
+                                    break
+                        except (re.error, IndexError):
+                            pass
+                    self.add_log(f"Replaced 1 occurrence of '{term}' → '{repl}'", 'INFO')
+                    return
+            self.add_log(f"No more matches found for '{term}'", 'INFO')
+
+        def do_replace_all():
+            nonlocal cues
+            term = find_var.get()
+            repl = replace_var.get()
+            if not term:
+                return
+            push_undo()
+            count = 0
+            for cue in cues:
+                old_text = cue['text']
+                try:
+                    if use_regex.get():
+                        new_text = re.sub(term, repl, old_text, flags=re.IGNORECASE)
+                    else:
+                        pattern = re.escape(term)
+                        new_text = re.sub(pattern, repl, old_text, flags=re.IGNORECASE)
+                except re.error:
+                    continue
+                if new_text != old_text:
+                    cue['text'] = new_text
+                    count += 1
+            cues = [c for c in cues if c['text'].strip()]
+            refresh_tree(cues)
+            self.add_log(f"Replaced {count} occurrence(s) of '{term}' → '{repl}'", 'INFO')
+
+        search_frame = ttk.Frame(content_frame, padding=(10, 4, 10, 4))
+        search_frame.pack(fill='x')
+
+        def _add_entry_context_menu(entry):
+            """Attach a right-click Cut/Copy/Paste menu to a ttk.Entry."""
+            menu = tk.Menu(entry, tearoff=0)
+            menu.add_command(label="Cut",
+                command=lambda: entry.event_generate('<<Cut>>'))
+            menu.add_command(label="Copy",
+                command=lambda: entry.event_generate('<<Copy>>'))
+            menu.add_command(label="Paste",
+                command=lambda: entry.event_generate('<<Paste>>'))
+            menu.add_separator()
+            menu.add_command(label="Select All",
+                command=lambda: (entry.select_range(0, 'end'),
+                                 entry.icursor('end')))
+            def _show(event):
+                menu.tk_popup(event.x_root, event.y_root)
+            entry.bind('<Button-3>', _show)
+
+        ttk.Label(search_frame, text="Find:").pack(side='left')
+        find_entry = ttk.Entry(search_frame, textvariable=find_var, width=20)
+        find_entry.pack(side='left', padx=(2, 6))
+        find_entry.bind('<Return>', lambda e: do_find())
+        _add_entry_context_menu(find_entry)
+
+        ttk.Label(search_frame, text="Replace:").pack(side='left')
+        replace_entry = ttk.Entry(search_frame, textvariable=replace_var, width=20)
+        replace_entry.pack(side='left', padx=(2, 6))
+        _add_entry_context_menu(replace_entry)
+
+        ttk.Button(search_frame, text="Find", command=do_find).pack(side='left', padx=2)
+        ttk.Button(search_frame, text="Replace",
+                   command=do_replace_one).pack(side='left', padx=2)
+        ttk.Button(search_frame, text="Replace All",
+                   command=do_replace_all).pack(side='left', padx=2)
+        ttk.Checkbutton(search_frame, text="Wrap",
+                        variable=wrap_around).pack(side='left', padx=(6, 2))
+
+        editor.bind('<Control-f>', lambda e: find_entry.focus_set())
+        editor.bind('<Control-F>', lambda e: find_entry.focus_set())
+
+        ttk.Separator(content_frame, orient='horizontal').pack(fill='x')
+
+        # ── Treeview ──
+        tree_frame = ttk.Frame(content_frame)
+        tree_frame.pack(fill='both', expand=True, padx=10, pady=(4, 0))
+
+        tree_scroll_y = ttk.Scrollbar(tree_frame, orient='vertical')
+        tree_scroll_y.pack(side='right', fill='y')
+
+        tree = ttk.Treeview(tree_frame, columns=('num', 'time', 'text'),
+                            show='headings', yscrollcommand=tree_scroll_y.set,
+                            selectmode='extended')
+        tree_scroll_y.config(command=tree.yview)
+
+        tree.heading('num', text='#')
+        tree.heading('time', text='Timestamp')
+        tree.heading('text', text='Text')
+        tree.column('num', width=40, minwidth=30, stretch=False)
+        tree.column('time', width=260, minwidth=220, stretch=False)
+        tree.column('text', width=500, minwidth=200, stretch=True)
+        tree.pack(fill='both', expand=True)
+
+        # Color coding
+        tree.tag_configure(TAG_MODIFIED, background='#fff3cd')
+        tree.tag_configure(TAG_HI, background='#cce5ff')
+        tree.tag_configure(TAG_TAGS, background='#f8d7da')
+        tree.tag_configure(TAG_LONG, background='#ffe0b2')
+        tree.tag_configure(TAG_SEARCH, background='#c8e6c9')
+
+        # Mousewheel scrolling
+        def on_tree_mousewheel(event):
+            tree.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+            return 'break'
+
+        def on_tree_scroll_up(event):
+            tree.yview_scroll(-3, 'units')
+            return 'break'
+
+        def on_tree_scroll_down(event):
+            tree.yview_scroll(3, 'units')
+            return 'break'
+
+        tree.bind('<MouseWheel>', on_tree_mousewheel)
+        tree.bind('<Button-4>', on_tree_scroll_up)
+        tree.bind('<Button-5>', on_tree_scroll_down)
+
+        # ── Inline edit on double-click ──
+        edit_entry = None
+
+        def on_double_click(event):
+            nonlocal edit_entry, cues
+            item = tree.identify_row(event.y)
+            col = tree.identify_column(event.x)
+            if not item or col != '#3':
+                return
+            bbox = tree.bbox(item, col)
+            if not bbox:
+                return
+            x, y, w, h = bbox
+            idx = int(item)
+
+            if edit_entry:
+                edit_entry.destroy()
+
+            push_undo()
+            edit_entry = tk.Text(tree_frame, wrap='word', height=3)
+            edit_entry.place(x=x, y=y, width=w, height=max(h, 60))
+            edit_entry.insert('1.0', cues[idx]['text'])
+            edit_entry.focus_set()
+            edit_entry.tag_configure('sel', background='#4a90d9')
+
+            def save_edit(e=None):
+                nonlocal edit_entry
+                new_text = edit_entry.get('1.0', 'end-1c').strip()
+                if new_text:
+                    cues[idx]['text'] = new_text
+                    display = new_text.replace('\n', ' \\n ')
+                    tree.set(item, 'text', display)
+                    orig_text = original_cues[idx]['text'] if idx < len(original_cues) else None
+                    ctags = _classify_cue(cues[idx], orig_text)
+                    row_tag = ''
+                    for t in (TAG_MODIFIED, TAG_HI, TAG_TAGS, TAG_LONG):
+                        if t in ctags:
+                            row_tag = t
+                            break
+                    tree.item(item, tags=(row_tag,) if row_tag else ())
+                else:
+                    del cues[idx]
+                    refresh_tree(cues)
+                edit_entry.destroy()
+                edit_entry = None
+                # Update stats
+                deleted_count.set(len(original_cues) - len(cues))
+                mod = sum(1 for i, c in enumerate(cues) if i < len(original_cues)
+                          and c['text'] != original_cues[i]['text'])
+                modified_count.set(mod)
+                long_count = sum(1 for c in cues
+                                 if any(len(l) > MAX_CHARS_PER_LINE
+                                        for l in c['text'].split('\n')))
+                stats_parts = [
+                    f"{len(cues)} entries",
+                    f"{modified_count.get()} modified",
+                    f"{deleted_count.get()} removed",
+                ]
+                if long_count:
+                    stats_parts.append(f"{long_count} long lines")
+                stats_label.configure(text=" │ ".join(stats_parts))
+
+            def cancel_edit(e=None):
+                nonlocal edit_entry
+                if edit_entry:
+                    edit_entry.destroy()
+                    edit_entry = None
+                    if undo_stack:
+                        undo_stack.pop()
+
+            edit_entry.bind('<Escape>', cancel_edit)
+            edit_entry.bind('<Control-Return>', save_edit)
+            edit_entry.bind('<Tab>', save_edit)
+
+            # Right-click context menu for copy/paste
+            edit_ctx = tk.Menu(edit_entry, tearoff=0)
+
+            def _edit_action(action):
+                """Perform an edit action and refocus the edit widget."""
+                if not edit_entry:
+                    return
+                if action == 'cut':
+                    edit_entry.event_generate('<<Cut>>')
+                elif action == 'copy':
+                    edit_entry.event_generate('<<Copy>>')
+                elif action == 'paste':
+                    edit_entry.event_generate('<<Paste>>')
+                elif action == 'select_all':
+                    edit_entry.tag_add('sel', '1.0', 'end')
+                    edit_entry.mark_set('insert', 'end')
+                edit_entry.focus_force()
+
+            edit_ctx.add_command(label="Cut", command=lambda: _edit_action('cut'))
+            edit_ctx.add_command(label="Copy", command=lambda: _edit_action('copy'))
+            edit_ctx.add_command(label="Paste", command=lambda: _edit_action('paste'))
+            edit_ctx.add_separator()
+            edit_ctx.add_command(label="Select All",
+                                command=lambda: _edit_action('select_all'))
+
+            _edit_ctx_open = [False]
+
+            def show_edit_ctx(event):
+                _edit_ctx_open[0] = True
+                def on_menu_close():
+                    _edit_ctx_open[0] = False
+                    if edit_entry:
+                        edit_entry.focus_force()
+                edit_ctx.tk_popup(event.x_root, event.y_root)
+                # tk_popup is blocking on some platforms; schedule cleanup
+                edit_entry.after(50, on_menu_close)
+                return 'break'
+            edit_entry.bind('<Button-3>', show_edit_ctx)
+
+            def on_focus_out(e):
+                if not edit_entry:
+                    return
+                # Wait for context menu interactions to complete
+                def deferred_save():
+                    if not edit_entry:
+                        return
+                    if _edit_ctx_open[0]:
+                        # Menu still active, check again later
+                        edit_entry.after(200, deferred_save)
+                        return
+                    try:
+                        if edit_entry.focus_get() == edit_entry:
+                            return  # focus came back, don't save
+                    except Exception:
+                        pass
+                    save_edit()
+                edit_entry.after(300, deferred_save)
+            edit_entry.bind('<FocusOut>', on_focus_out)
+
+        tree.bind('<Double-1>', on_double_click)
+
+        # ── Right-click context menu ──
+        ctx_menu = tk.Menu(editor, tearoff=0)
+        def insert_cue(position):
+            """Insert a blank cue above or below the selected cue."""
+            nonlocal cues
+            selected = tree.selection()
+            if not selected:
+                return
+            idx = int(selected[0])
+            ref = cues[idx]
+
+            if position == 'above':
+                # Place the new cue just before the selected one
+                ref_start_ms = srt_ts_to_ms(ref['start'])
+                new_end_ms = max(ref_start_ms - 1, 0)
+                new_start_ms = max(new_end_ms - 2000, 0)
+                insert_idx = idx
+            else:
+                # Place the new cue just after the selected one
+                ref_end_ms = srt_ts_to_ms(ref['end'])
+                new_start_ms = ref_end_ms + 1
+                new_end_ms = new_start_ms + 2000
+                insert_idx = idx + 1
+
+            push_undo()
+            new_cue = {
+                'index': 0,
+                'start': ms_to_srt_ts(new_start_ms),
+                'end': ms_to_srt_ts(new_end_ms),
+                'text': ' ',
+            }
+            cues.insert(insert_idx, new_cue)
+            refresh_tree(cues)
+            # Select the new cue and scroll to it
+            tree.see(str(insert_idx))
+            tree.selection_set(str(insert_idx))
+
+        ctx_menu.add_command(label="✂ Split cue", command=split_selected)
+        ctx_menu.add_command(label="⊕ Join selected cues", command=join_selected)
+        ctx_menu.add_separator()
+        ctx_menu.add_command(label="⤒ Insert line above", command=lambda: insert_cue('above'))
+        ctx_menu.add_command(label="⤓ Insert line below", command=lambda: insert_cue('below'))
+        ctx_menu.add_separator()
+        ctx_menu.add_command(label="🗑 Delete selected", command=delete_selected)
+
+        def show_context_menu(event):
+            item = tree.identify_row(event.y)
+            if item and item not in tree.selection():
+                tree.selection_set(item)
+            ctx_menu.tk_popup(event.x_root, event.y_root)
+
+        tree.bind('<Button-3>', show_context_menu)
+
+        # ── Status bar ──
+        status_frame = ttk.Frame(content_frame, padding=(10, 6, 10, 6))
+        status_frame.pack(fill='x')
+
+        stats_label = ttk.Label(status_frame, text="0 entries")
+        stats_label.pack(side='left')
+
+        ttk.Button(status_frame, text="💾 Save", command=do_save_file).pack(side='right', padx=(4, 0))
+        ttk.Button(status_frame, text="📤 Export SRT", command=do_export).pack(side='right', padx=4)
+
+        # ── Refresh tree function ──
+        def refresh_tree(new_cues, search_indices=None):
+            nonlocal cues
+            cues = new_cues
+            tree.delete(*tree.get_children())
+            search_set = set(search_indices or [])
+            for i, cue in enumerate(cues):
+                display = cue['text'].replace('\n', ' \\n ')
+                ts = f"{cue['start']} → {cue['end']}"
+                if cue['text'] in _orig_texts:
+                    orig_text = cue['text']
+                else:
+                    orig_text = ''
+                ctags = _classify_cue(cue, orig_text)
+                if i in search_set:
+                    ctags.add(TAG_SEARCH)
+                if TAG_SEARCH in ctags:
+                    row_tag = TAG_SEARCH
+                elif TAG_MODIFIED in ctags:
+                    row_tag = TAG_MODIFIED
+                elif TAG_HI in ctags:
+                    row_tag = TAG_HI
+                elif TAG_TAGS in ctags:
+                    row_tag = TAG_TAGS
+                elif TAG_LONG in ctags:
+                    row_tag = TAG_LONG
+                else:
+                    row_tag = ''
+                tree.insert('', 'end', iid=str(i),
+                            values=(i + 1, ts, display),
+                            tags=(row_tag,) if row_tag else ())
+            deleted_count.set(len(original_cues) - len(cues))
+            mod = sum(1 for i, c in enumerate(cues) if i < len(original_cues)
+                      and c['text'] != original_cues[i]['text'])
+            modified_count.set(mod)
+            long_count = sum(1 for c in cues
+                             if any(len(l) > MAX_CHARS_PER_LINE for l in c['text'].split('\n')))
+            stats_parts = [
+                f"{len(cues)} entries",
+                f"{modified_count.get()} modified",
+                f"{deleted_count.get()} removed",
+            ]
+            if long_count:
+                stats_parts.append(f"{long_count} long lines")
+            stats_label.configure(text=" │ ".join(stats_parts))
+
+        # Delete key shortcut
+        editor.bind('<Delete>', lambda e: None if isinstance(e.widget, tk.Text) else delete_selected())
+
+        # ── Disable menus until a file is loaded ──
+        def _set_menus_state(state):
+            for menu_label in ('Filters', 'Edit', 'Timing'):
+                try:
+                    idx = menubar.index(menu_label)
+                    menubar.entryconfigure(idx, state=state)
+                except (tk.TclError, ValueError):
+                    pass
+            # Disable save/export in File menu (indices 2=Save, 3=Save As, 4=Export)
+            for i in (2, 3, 4):
+                try:
+                    file_menu.entryconfigure(i, state=state)
+                except tk.TclError:
+                    pass
+
+        _set_menus_state('disabled')
+
+        # ── Cleanup temp files on editor close ──
+        def on_editor_close():
+            if video_source[0] and video_source[0].get('temp_srt'):
+                try:
+                    os.unlink(video_source[0]['temp_srt'])
+                except OSError:
+                    pass
+            editor.destroy()
+
+        editor.protocol('WM_DELETE_WINDOW', on_editor_close)
+
+        editor.wait_window()
+
+    def open_batch_filter(self):
+        """Open a batch filter window to apply filters to multiple subtitle files at once."""
+        import tempfile
+
+        win = tk.Toplevel(self.root)
+        win.title("Batch Filter Subtitles")
+        win.geometry("620x720")
+        win.resizable(True, True)
+        self._center_on_main(win)
+
+        file_paths = []  # list of absolute paths
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Files section
+        # ══════════════════════════════════════════════════════════════════════
+        files_frame = ttk.LabelFrame(win, text="Subtitle Files", padding=8)
+        files_frame.pack(fill='both', expand=True, padx=10, pady=(10, 5))
+
+        list_frame = ttk.Frame(files_frame)
+        list_frame.pack(fill='both', expand=True)
+
+        list_scroll = ttk.Scrollbar(list_frame, orient='vertical')
+        list_scroll.pack(side='right', fill='y')
+
+        file_listbox = tk.Listbox(list_frame, height=10, font=('Courier', 9),
+                                  selectmode='extended',
+                                  yscrollcommand=list_scroll.set)
+        file_listbox.pack(fill='both', expand=True)
+        list_scroll.config(command=file_listbox.yview)
+
+        file_count_var = tk.StringVar(value="0 files loaded")
+
+        def _update_file_count():
+            n = len(file_paths)
+            file_count_var.set(f"{n} file{'s' if n != 1 else ''} loaded")
+
+        def _add_paths(paths):
+            """Add valid subtitle paths, skipping duplicates."""
+            sub_exts = {'.srt', '.ass', '.ssa', '.vtt', '.sub'}
+            added = 0
+            for p in paths:
+                if Path(p).suffix.lower() in sub_exts and p not in file_paths:
+                    file_paths.append(p)
+                    file_listbox.insert('end', os.path.basename(p))
+                    added += 1
+            if added:
+                _update_file_count()
+                self.add_log(f"Batch filter: added {added} subtitle file(s)", 'INFO')
+
+        def add_files():
+            paths = filedialog.askopenfilenames(
+                parent=win,
+                title="Select Subtitle Files",
+                filetypes=[
+                    ('Subtitle files', '*.srt *.ass *.ssa *.vtt *.sub'),
+                    ('SubRip', '*.srt'),
+                    ('All files', '*.*'),
+                ]
+            )
+            if paths:
+                _add_paths(paths)
+
+        def remove_selected():
+            selected = sorted(file_listbox.curselection(), reverse=True)
+            for idx in selected:
+                file_listbox.delete(idx)
+                del file_paths[idx]
+            _update_file_count()
+
+        def clear_all():
+            file_listbox.delete(0, 'end')
+            file_paths.clear()
+            _update_file_count()
+
+        btn_frame = ttk.Frame(files_frame)
+        btn_frame.pack(fill='x', pady=(6, 0))
+        ttk.Button(btn_frame, text="Add Files...", command=add_files).pack(side='left', padx=(0, 4))
+        ttk.Button(btn_frame, text="Remove Selected", command=remove_selected).pack(side='left', padx=4)
+        ttk.Button(btn_frame, text="Clear All", command=clear_all).pack(side='left', padx=4)
+        ttk.Label(btn_frame, textvariable=file_count_var,
+                  foreground='gray').pack(side='right')
+
+        # Drag-and-drop hint
+        ttk.Label(files_frame, text="Drag and drop subtitle files here",
+                  font=('Helvetica', 9), foreground='gray').pack(anchor='center', pady=(4, 0))
+
+        # DnD registration
+        def on_batch_drop(event):
+            raw = event.data
+            paths = []
+            i = 0
+            while i < len(raw):
+                if raw[i] == '{':
+                    end = raw.find('}', i)
+                    paths.append(raw[i + 1:end])
+                    i = end + 2
+                elif raw[i] == ' ':
+                    i += 1
+                else:
+                    end = raw.find(' ', i)
+                    if end == -1:
+                        paths.append(raw[i:])
+                        break
+                    else:
+                        paths.append(raw[i:end])
+                        i = end + 1
+            _add_paths(paths)
+
+        if HAS_DND:
+            win.drop_target_register(DND_FILES)
+            win.dnd_bind('<<Drop>>', on_batch_drop)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Filters section
+        # ══════════════════════════════════════════════════════════════════════
+        filters_frame = ttk.LabelFrame(win, text="Filters to Apply", padding=8)
+        filters_frame.pack(fill='x', padx=10, pady=5)
+
+        if not hasattr(self, 'custom_cap_words'):
+            self.custom_cap_words = []
+
+        # Define filters: (key, label, filter_function)
+        filter_defs = [
+            ('remove_hi',      "Remove HI  [brackets] (parens) Speaker:",  filter_remove_hi),
+            ('remove_tags',    "Remove Tags  <i> {\\an8}",        filter_remove_tags),
+            ('remove_ads',     "Remove Ads / Credits",
+             lambda c: filter_remove_ads(c, self.custom_ad_patterns)),
+            ('remove_music',   "Remove Music Notes  ♪ ♫",        filter_remove_music_notes),
+            ('remove_dashes',  "Remove Leading Dashes  -",        filter_remove_leading_dashes),
+            ('remove_caps_hi', "Remove ALL CAPS HI (UK style)",   filter_remove_caps_hi),
+            ('remove_quotes',  "Remove Off-Screen Quotes ' ' (UK style)", filter_remove_offscreen_quotes),
+            ('remove_dupes',   "Remove Duplicates",               filter_remove_duplicates),
+            ('merge_short',    "Merge Short Cues",                filter_merge_short),
+            ('fix_caps',       "Fix ALL CAPS",
+             lambda c: filter_fix_caps(c, self.custom_cap_words)),
+        ]
+
+        filter_vars = {}
+        for key, label, _ in filter_defs:
+            var = tk.BooleanVar(value=False)
+            filter_vars[key] = var
+            ttk.Checkbutton(filters_frame, text=label, variable=var).pack(anchor='w')
+
+        sel_frame = ttk.Frame(filters_frame)
+        sel_frame.pack(fill='x', pady=(6, 0))
+
+        def select_all_filters():
+            for v in filter_vars.values():
+                v.set(True)
+
+        def deselect_all_filters():
+            for v in filter_vars.values():
+                v.set(False)
+
+        ttk.Button(sel_frame, text="Select All", command=select_all_filters).pack(side='left', padx=(0, 4))
+        ttk.Button(sel_frame, text="Deselect All", command=deselect_all_filters).pack(side='left')
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Output section
+        # ══════════════════════════════════════════════════════════════════════
+        output_frame = ttk.LabelFrame(win, text="Output", padding=8)
+        output_frame.pack(fill='x', padx=10, pady=5)
+
+        output_mode = tk.StringVar(value='overwrite')
+        subfolder_name = tk.StringVar(value='filtered')
+
+        ttk.Radiobutton(output_frame, text="Overwrite original files",
+                        variable=output_mode, value='overwrite').pack(anchor='w')
+
+        sub_row = ttk.Frame(output_frame)
+        sub_row.pack(fill='x', anchor='w')
+        ttk.Radiobutton(sub_row, text="Save to subfolder:",
+                        variable=output_mode, value='subfolder').pack(side='left')
+        ttk.Entry(sub_row, textvariable=subfolder_name, width=20).pack(side='left', padx=(4, 0))
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Progress + Apply
+        # ══════════════════════════════════════════════════════════════════════
+        progress_frame = ttk.Frame(win, padding=(10, 6, 10, 6))
+        progress_frame.pack(fill='x')
+
+        progress_var = tk.DoubleVar(value=0)
+        progress_bar = ttk.Progressbar(progress_frame, variable=progress_var,
+                                        maximum=100)
+        progress_bar.pack(fill='x', side='left', expand=True, padx=(0, 8))
+
+        progress_label = ttk.Label(progress_frame, text="")
+        progress_label.pack(side='right')
+
+        action_frame = ttk.Frame(win, padding=(10, 4, 10, 10))
+        action_frame.pack(fill='x')
+
+        result_label = ttk.Label(action_frame, text="", foreground='green')
+        result_label.pack(side='left')
+
+        def do_batch_apply():
+            """Apply selected filters to all loaded files and save."""
+            if not file_paths:
+                messagebox.showwarning("No Files",
+                    "Add subtitle files before applying filters.", parent=win)
+                return
+
+            # Gather selected filters in order
+            active_filters = [(label, func) for key, label, func in filter_defs
+                              if filter_vars[key].get()]
+            if not active_filters:
+                messagebox.showwarning("No Filters",
+                    "Select at least one filter to apply.", parent=win)
+                return
+
+            apply_btn.configure(state='disabled')
+            total = len(file_paths)
+            success = 0
+            errors = 0
+
+            for idx, fpath in enumerate(file_paths):
+                progress_label.configure(text=f"{idx + 1}/{total}")
+                progress_var.set((idx / total) * 100)
+                win.update_idletasks()
+
+                try:
+                    # Read / convert to SRT
+                    ext = Path(fpath).suffix.lower()
+                    if ext in ('.srt',):
+                        with open(fpath, 'r', encoding='utf-8', errors='replace') as f:
+                            srt_text = f.read()
+                    else:
+                        tmp_srt = tempfile.NamedTemporaryFile(
+                            suffix='.srt', delete=False, mode='w', encoding='utf-8')
+                        tmp_srt.close()
+                        cmd = ['ffmpeg', '-y', '-i', fpath, '-c:s', 'srt', tmp_srt.name]
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                        if result.returncode != 0:
+                            self.add_log(f"Batch: failed to convert {os.path.basename(fpath)}: "
+                                         f"{result.stderr[-200:]}", 'ERROR')
+                            os.unlink(tmp_srt.name)
+                            errors += 1
+                            continue
+                        with open(tmp_srt.name, 'r', encoding='utf-8',
+                                  errors='replace') as f:
+                            srt_text = f.read()
+                        os.unlink(tmp_srt.name)
+
+                    cues = parse_srt(srt_text)
+                    if not cues:
+                        self.add_log(f"Batch: no cues found in {os.path.basename(fpath)}", 'WARNING')
+                        errors += 1
+                        continue
+
+                    # Apply each active filter in order
+                    before = len(cues)
+                    for f_label, f_func in active_filters:
+                        cues = f_func(cues)
+
+                    if not cues:
+                        self.add_log(f"Batch: all cues removed from {os.path.basename(fpath)}, "
+                                     "skipping save", 'WARNING')
+                        errors += 1
+                        continue
+
+                    # Determine output path
+                    if output_mode.get() == 'subfolder':
+                        sub_dir = os.path.join(os.path.dirname(fpath),
+                                               subfolder_name.get() or 'filtered')
+                        os.makedirs(sub_dir, exist_ok=True)
+                        # Always save as .srt (since we converted to SRT)
+                        out_name = Path(fpath).stem + '.srt'
+                        out_path = os.path.join(sub_dir, out_name)
+                    else:
+                        # Overwrite — if original was .srt, overwrite it;
+                        # otherwise save as .srt alongside original
+                        if ext == '.srt':
+                            out_path = fpath
+                        else:
+                            out_path = str(Path(fpath).with_suffix('.srt'))
+
+                    with open(out_path, 'w', encoding='utf-8') as f:
+                        f.write(write_srt(cues))
+
+                    removed = before - len(cues)
+                    self.add_log(f"Batch: {os.path.basename(fpath)} → "
+                                 f"{len(cues)} entries ({removed} removed) → "
+                                 f"{os.path.basename(out_path)}", 'SUCCESS')
+                    success += 1
+
+                    # Highlight processed file in the listbox
+                    file_listbox.itemconfig(idx, fg='green')
+
+                except Exception as e:
+                    self.add_log(f"Batch: error processing {os.path.basename(fpath)}: {e}",
+                                 'ERROR')
+                    file_listbox.itemconfig(idx, fg='red')
+                    errors += 1
+
+            progress_var.set(100)
+            progress_label.configure(text=f"{total}/{total}")
+            apply_btn.configure(state='normal')
+
+            filters_used = ", ".join(label for label, _ in active_filters)
+            result_label.configure(
+                text=f"Done — {success} succeeded, {errors} failed",
+                foreground='green' if errors == 0 else 'orange')
+            self.add_log(f"Batch filter complete: {success}/{total} files processed. "
+                         f"Filters: {filters_used}", 'SUCCESS')
+
+        apply_btn = ttk.Button(action_frame, text="Apply Filters", command=do_batch_apply)
+        apply_btn.pack(side='right', padx=(4, 0))
+        ttk.Button(action_frame, text="Close", command=win.destroy).pack(side='right')
+
+        win.wait_window()
+
     def show_subtitle_editor(self, filepath, stream_index, file_info,
                                 external_sub_path=None):
         """Show subtitle text editor for a subtitle stream or external file.
@@ -3536,6 +5554,7 @@ class VideoConverterApp:
         find_var = tk.StringVar()
         replace_var = tk.StringVar()
         use_regex = tk.BooleanVar(value=False)  # reserved for future use
+        wrap_around = tk.BooleanVar(value=False)
 
         def do_find():
             """Highlight all cues matching the search term."""
@@ -3559,6 +5578,59 @@ class VideoConverterApp:
                 tree.see(str(matches[0]))
                 tree.selection_set(str(matches[0]))
             self.add_log(f"Search: {len(matches)} matches for '{term}'", 'INFO')
+
+        def do_replace_one():
+            """Replace the first occurrence of search term from current selection."""
+            nonlocal cues
+            term = find_var.get()
+            repl = replace_var.get()
+            if not term:
+                return
+            sel = tree.selection()
+            start_idx = int(sel[0]) if sel else 0
+            if wrap_around.get():
+                order = list(range(start_idx, len(cues))) + list(range(0, start_idx))
+            else:
+                order = list(range(start_idx, len(cues)))
+            for i in order:
+                old_text = cues[i]['text']
+                try:
+                    if use_regex.get():
+                        new_text = re.sub(term, repl, old_text, count=1,
+                                          flags=re.IGNORECASE)
+                    else:
+                        pat = re.escape(term)
+                        new_text = re.sub(pat, repl, old_text, count=1,
+                                          flags=re.IGNORECASE)
+                except re.error:
+                    continue
+                if new_text != old_text:
+                    push_undo()
+                    cues[i]['text'] = new_text
+                    if not new_text.strip():
+                        del cues[i]
+                    refresh_tree(cues)
+                    if wrap_around.get():
+                        next_order = list(range(i + 1, len(cues))) + list(range(0, i + 1))
+                    else:
+                        next_order = list(range(i + 1, len(cues)))
+                    for j in next_order:
+                        try:
+                            if use_regex.get():
+                                if re.search(term, cues[j]['text'], re.IGNORECASE):
+                                    tree.see(str(j))
+                                    tree.selection_set(str(j))
+                                    break
+                            else:
+                                if term.lower() in cues[j]['text'].lower():
+                                    tree.see(str(j))
+                                    tree.selection_set(str(j))
+                                    break
+                        except (re.error, IndexError):
+                            pass
+                    self.add_log(f"Replaced 1 occurrence of '{term}' → '{repl}'", 'INFO')
+                    return
+            self.add_log(f"No more matches found for '{term}'", 'INFO')
 
         def do_replace_all():
             """Replace all occurrences of search term."""
@@ -3595,7 +5667,7 @@ class VideoConverterApp:
         # ── Filters menu ──
         filter_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Filters", menu=filter_menu)
-        filter_menu.add_command(label="Remove HI  [brackets] (parens)",
+        filter_menu.add_command(label="Remove HI  [brackets] (parens) Speaker:",
                                 command=lambda: apply_filter(filter_remove_hi, "Remove HI"))
         filter_menu.add_command(label="Remove Tags  <i> {\\an8}",
                                 command=lambda: apply_filter(filter_remove_tags, "Remove Tags"))
@@ -3604,10 +5676,14 @@ class VideoConverterApp:
                          "Remove Ads")
 
         filter_menu.add_command(label="Remove Ads / Credits", command=apply_remove_ads)
-        filter_menu.add_command(label="Remove Speaker Labels",
-                                command=lambda: apply_filter(filter_remove_speaker_labels, "Remove Speaker"))
         filter_menu.add_command(label="Remove Music Notes  ♪ ♫",
                                 command=lambda: apply_filter(filter_remove_music_notes, "Remove Music Notes"))
+        filter_menu.add_command(label="Remove Leading Dashes  -",
+                                command=lambda: apply_filter(filter_remove_leading_dashes, "Remove Leading Dashes"))
+        filter_menu.add_command(label="Remove ALL CAPS HI  (UK style)",
+                                command=lambda: apply_filter(filter_remove_caps_hi, "Remove CAPS HI"))
+        filter_menu.add_command(label="Remove Off-Screen Quotes  ' '  (UK style)",
+                                command=lambda: apply_filter(filter_remove_offscreen_quotes, "Remove Off-Screen Quotes"))
         filter_menu.add_separator()
         filter_menu.add_command(label="Remove Duplicates",
                                 command=lambda: apply_filter(filter_remove_duplicates, "Remove Duplicates"))
@@ -3791,17 +5867,41 @@ class VideoConverterApp:
         search_frame = ttk.Frame(editor, padding=(10, 4, 10, 4))
         search_frame.pack(fill='x')
 
+        def _add_entry_context_menu(entry):
+            """Attach a right-click Cut/Copy/Paste menu to a ttk.Entry."""
+            menu = tk.Menu(entry, tearoff=0)
+            menu.add_command(label="Cut",
+                command=lambda: entry.event_generate('<<Cut>>'))
+            menu.add_command(label="Copy",
+                command=lambda: entry.event_generate('<<Copy>>'))
+            menu.add_command(label="Paste",
+                command=lambda: entry.event_generate('<<Paste>>'))
+            menu.add_separator()
+            menu.add_command(label="Select All",
+                command=lambda: (entry.select_range(0, 'end'),
+                                 entry.icursor('end')))
+            def _show(event):
+                menu.tk_popup(event.x_root, event.y_root)
+            entry.bind('<Button-3>', _show)
+
         ttk.Label(search_frame, text="Find:").pack(side='left')
         find_entry = ttk.Entry(search_frame, textvariable=find_var, width=20)
         find_entry.pack(side='left', padx=(2, 6))
         find_entry.bind('<Return>', lambda e: do_find())
+        _add_entry_context_menu(find_entry)
 
         ttk.Label(search_frame, text="Replace:").pack(side='left')
         replace_entry = ttk.Entry(search_frame, textvariable=replace_var, width=20)
         replace_entry.pack(side='left', padx=(2, 6))
+        _add_entry_context_menu(replace_entry)
 
         ttk.Button(search_frame, text="Find", command=do_find).pack(side='left', padx=2)
-        ttk.Button(search_frame, text="Replace All", command=do_replace_all).pack(side='left', padx=2)
+        ttk.Button(search_frame, text="Replace",
+                   command=do_replace_one).pack(side='left', padx=2)
+        ttk.Button(search_frame, text="Replace All",
+                   command=do_replace_all).pack(side='left', padx=2)
+        ttk.Checkbutton(search_frame, text="Wrap",
+                        variable=wrap_around).pack(side='left', padx=(6, 2))
 
         # Bind Ctrl+F to focus the find field
         editor.bind('<Control-f>', lambda e: find_entry.focus_set())
@@ -3827,7 +5927,7 @@ class VideoConverterApp:
         tree.heading('time', text='Timestamp')
         tree.heading('text', text='Text')
         tree.column('num', width=40, minwidth=30, stretch=False)
-        tree.column('time', width=180, minwidth=140, stretch=False)
+        tree.column('time', width=260, minwidth=220, stretch=False)
         tree.column('text', width=500, minwidth=200, stretch=True)
         tree.pack(fill='both', expand=True)
 
@@ -3931,9 +6031,63 @@ class VideoConverterApp:
             edit_entry.bind('<Control-Return>', save_edit)
             edit_entry.bind('<Tab>', save_edit)
 
+            # Right-click context menu for copy/paste
+            edit_ctx = tk.Menu(edit_entry, tearoff=0)
+
+            def _edit_action(action):
+                """Perform an edit action and refocus the edit widget."""
+                if not edit_entry:
+                    return
+                if action == 'cut':
+                    edit_entry.event_generate('<<Cut>>')
+                elif action == 'copy':
+                    edit_entry.event_generate('<<Copy>>')
+                elif action == 'paste':
+                    edit_entry.event_generate('<<Paste>>')
+                elif action == 'select_all':
+                    edit_entry.tag_add('sel', '1.0', 'end')
+                    edit_entry.mark_set('insert', 'end')
+                edit_entry.focus_force()
+
+            edit_ctx.add_command(label="Cut", command=lambda: _edit_action('cut'))
+            edit_ctx.add_command(label="Copy", command=lambda: _edit_action('copy'))
+            edit_ctx.add_command(label="Paste", command=lambda: _edit_action('paste'))
+            edit_ctx.add_separator()
+            edit_ctx.add_command(label="Select All",
+                                command=lambda: _edit_action('select_all'))
+
+            _edit_ctx_open = [False]
+
+            def show_edit_ctx(event):
+                _edit_ctx_open[0] = True
+                def on_menu_close():
+                    _edit_ctx_open[0] = False
+                    if edit_entry:
+                        edit_entry.focus_force()
+                edit_ctx.tk_popup(event.x_root, event.y_root)
+                # tk_popup is blocking on some platforms; schedule cleanup
+                edit_entry.after(50, on_menu_close)
+                return 'break'
+            edit_entry.bind('<Button-3>', show_edit_ctx)
+
             def on_focus_out(e):
-                if edit_entry:
+                if not edit_entry:
+                    return
+                # Wait for context menu interactions to complete
+                def deferred_save():
+                    if not edit_entry:
+                        return
+                    if _edit_ctx_open[0]:
+                        # Menu still active, check again later
+                        edit_entry.after(200, deferred_save)
+                        return
+                    try:
+                        if edit_entry.focus_get() == edit_entry:
+                            return  # focus came back, don't save
+                    except Exception:
+                        pass
                     save_edit()
+                edit_entry.after(300, deferred_save)
             edit_entry.bind('<FocusOut>', on_focus_out)
 
         tree.bind('<Double-1>', on_double_click)
@@ -3961,8 +6115,46 @@ class VideoConverterApp:
         ctx_menu = tk.Menu(editor, tearoff=0)
         ctx_menu.add_command(label="▶ Preview at this cue", command=preview_at_cue)
         ctx_menu.add_separator()
+        def insert_cue(position):
+            """Insert a blank cue above or below the selected cue."""
+            nonlocal cues
+            selected = tree.selection()
+            if not selected:
+                return
+            idx = int(selected[0])
+            ref = cues[idx]
+
+            if position == 'above':
+                # Place the new cue just before the selected one
+                ref_start_ms = srt_ts_to_ms(ref['start'])
+                new_end_ms = max(ref_start_ms - 1, 0)
+                new_start_ms = max(new_end_ms - 2000, 0)
+                insert_idx = idx
+            else:
+                # Place the new cue just after the selected one
+                ref_end_ms = srt_ts_to_ms(ref['end'])
+                new_start_ms = ref_end_ms + 1
+                new_end_ms = new_start_ms + 2000
+                insert_idx = idx + 1
+
+            push_undo()
+            new_cue = {
+                'index': 0,
+                'start': ms_to_srt_ts(new_start_ms),
+                'end': ms_to_srt_ts(new_end_ms),
+                'text': ' ',
+            }
+            cues.insert(insert_idx, new_cue)
+            refresh_tree(cues)
+            # Select the new cue and scroll to it
+            tree.see(str(insert_idx))
+            tree.selection_set(str(insert_idx))
+
         ctx_menu.add_command(label="✂ Split cue", command=split_selected)
         ctx_menu.add_command(label="⊕ Join selected cues", command=join_selected)
+        ctx_menu.add_separator()
+        ctx_menu.add_command(label="⤒ Insert line above", command=lambda: insert_cue('above'))
+        ctx_menu.add_command(label="⤓ Insert line below", command=lambda: insert_cue('below'))
         ctx_menu.add_separator()
         ctx_menu.add_command(label="🗑 Delete selected", command=delete_selected)
 
@@ -3971,7 +6163,7 @@ class VideoConverterApp:
             item = tree.identify_row(event.y)
             if item and item not in tree.selection():
                 tree.selection_set(item)
-            ctx_menu.post(event.x_root, event.y_root)
+            ctx_menu.tk_popup(event.x_root, event.y_root)
 
         tree.bind('<Button-3>', show_context_menu)
 
@@ -3986,7 +6178,7 @@ class VideoConverterApp:
         stats_label.pack(side='left')
 
         def do_save():
-            """Save edited subtitles."""
+            """Save edited subtitles (for encoding pipeline or external file)."""
             if not cues:
                 messagebox.showwarning("Empty Subtitles",
                                        "All subtitle entries have been removed.\n"
@@ -4013,6 +6205,121 @@ class VideoConverterApp:
                              f"{len(cues)} entries ({removed} removed) → {out_path}", 'SUCCESS')
             editor.destroy()
 
+        def do_save_to_video():
+            """Re-mux the edited subtitle directly back into the video file."""
+            if not cues:
+                messagebox.showwarning("Empty Subtitles",
+                                       "All subtitle entries have been removed.\n"
+                                       "Nothing to save.", parent=editor)
+                return
+            if is_external or not filepath:
+                messagebox.showinfo("Not Available",
+                    "Save to Video is only available for internal subtitle streams.",
+                    parent=editor)
+                return
+
+            removed = len(original_cues) - len(cues)
+            streams = get_subtitle_streams(filepath)
+
+            # Write edited SRT to temp file
+            tmp_srt = tempfile.NamedTemporaryFile(suffix='.srt', delete=False,
+                                                   mode='w', encoding='utf-8')
+            tmp_srt.close()
+            with open(tmp_srt.name, 'w', encoding='utf-8') as f:
+                f.write(write_srt(cues))
+
+            # Build ffmpeg command: map every stream in order, replacing
+            # the target subtitle with the edited version to preserve track order
+            tmp_out = str(Path(filepath).with_suffix('.tmp' + Path(filepath).suffix))
+            cmd = ['ffmpeg', '-y', '-i', filepath, '-i', tmp_srt.name]
+
+            all_streams = get_all_streams(filepath)
+            out_sub_count = 0
+            replaced_out_sub_idx = None
+            orig_stream = next(s for s in streams if s['index'] == stream_index)
+            for s in all_streams:
+                if s['index'] == stream_index:
+                    # Replace this subtitle with the edited version
+                    cmd.extend(['-map', '1:0'])
+                    replaced_out_sub_idx = out_sub_count
+                    out_sub_count += 1
+                else:
+                    cmd.extend(['-map', f"0:{s['index']}"])
+                    if s['codec_type'] == 'subtitle':
+                        out_sub_count += 1
+
+            # Copy all codecs (no re-encoding)
+            cmd.extend(['-c', 'copy'])
+
+            # Preserve metadata on the replaced subtitle stream
+            if replaced_out_sub_idx is not None:
+                if orig_stream.get('language') and orig_stream['language'] != 'und':
+                    cmd.extend([f'-metadata:s:s:{replaced_out_sub_idx}',
+                                f"language={orig_stream['language']}"])
+                if orig_stream.get('title'):
+                    cmd.extend([f'-metadata:s:s:{replaced_out_sub_idx}',
+                                f"title={orig_stream['title']}"])
+                # Preserve disposition flags
+                disp_parts = []
+                if orig_stream.get('default'):
+                    disp_parts.append('default')
+                if orig_stream.get('forced'):
+                    disp_parts.append('forced')
+                if orig_stream.get('sdh'):
+                    disp_parts.append('hearing_impaired')
+                if disp_parts:
+                    cmd.extend([f'-disposition:s:{replaced_out_sub_idx}',
+                                '+'.join(disp_parts)])
+
+                # For MP4 containers, subtitle codec must be mov_text
+                if Path(filepath).suffix.lower() in ('.mp4', '.m4v'):
+                    cmd.extend([f'-c:s:{replaced_out_sub_idx}', 'mov_text'])
+
+            cmd.append(tmp_out)
+
+            self.add_log(f"Re-muxing subtitle into {os.path.basename(filepath)}...", 'INFO')
+            self.add_log(f"ffmpeg command: {' '.join(cmd)}", 'INFO')
+            editor.update_idletasks()
+
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                if result.returncode != 0:
+                    self.add_log(f"Re-mux stderr: {result.stderr[-500:]}", 'ERROR')
+                    messagebox.showerror("Re-mux Failed",
+                        f"Failed to save subtitle back to video:\n\n"
+                        f"{result.stderr[-400:]}",
+                        parent=editor)
+                    if os.path.exists(tmp_out):
+                        os.unlink(tmp_out)
+                    os.unlink(tmp_srt.name)
+                    return
+
+                # Atomic replace: swap temp output over original
+                os.replace(tmp_out, filepath)
+
+                # Cleanup temp SRT
+                try:
+                    os.unlink(tmp_srt.name)
+                except OSError:
+                    pass
+
+                self.add_log(f"Subtitle re-muxed into video: {len(cues)} entries "
+                             f"({removed} removed) → {os.path.basename(filepath)}", 'SUCCESS')
+                messagebox.showinfo("Saved",
+                    f"Subtitle stream #{stream_index} saved back to:\n"
+                    f"{os.path.basename(filepath)}",
+                    parent=editor)
+                editor.destroy()
+
+            except Exception as e:
+                messagebox.showerror("Error", f"Re-mux error:\n{e}", parent=editor)
+                if os.path.exists(tmp_out):
+                    os.unlink(tmp_out)
+                try:
+                    os.unlink(tmp_srt.name)
+                except OSError:
+                    pass
+
         def do_export():
             """Export the edited subtitle as a standalone .srt file."""
             if not cues:
@@ -4035,6 +6342,9 @@ class VideoConverterApp:
             self.add_log(f"Exported edited subtitle → {out_path}", 'SUCCESS')
 
         ttk.Button(status_frame, text="💾 Save", command=do_save).pack(side='right', padx=(4, 0))
+        if not is_external:
+            ttk.Button(status_frame, text="💾 Save to Video",
+                       command=do_save_to_video).pack(side='right', padx=(4, 0))
         ttk.Button(status_frame, text="Cancel", command=editor.destroy).pack(side='right')
         ttk.Button(status_frame, text="📤 Export SRT", command=do_export).pack(side='right', padx=4)
         ttk.Button(status_frame, text="▶ Preview",
@@ -4044,7 +6354,7 @@ class VideoConverterApp:
         refresh_tree(cues)
 
         # Delete key shortcut
-        editor.bind('<Delete>', lambda e: delete_selected())
+        editor.bind('<Delete>', lambda e: None if isinstance(e.widget, tk.Text) else delete_selected())
 
         editor.wait_window()
 
@@ -6292,6 +8602,45 @@ class VideoConverterApp:
             self._file_start_time = _time.monotonic()
             self.current_output_path = output_path
             success = self.converter.convert_file(input_path, output_path, file_settings)
+
+            # ── GPU → CPU fallback ──
+            # If GPU encoding failed, retry with CPU settings automatically
+            if not success and file_settings.get('encoder', 'cpu') != 'cpu':
+                gpu_encoder = file_settings['encoder']
+                gpu_label = GPU_BACKENDS.get(gpu_encoder, {}).get('label', gpu_encoder)
+                self.add_log(f"GPU encoding failed ({gpu_label}), retrying with CPU...",
+                             'WARNING')
+                # Clean up the failed output file
+                if os.path.exists(output_path):
+                    try:
+                        os.unlink(output_path)
+                    except OSError:
+                        pass
+                # Build CPU fallback settings
+                cpu_settings = dict(file_settings)
+                cpu_settings['encoder'] = 'cpu'
+                cpu_settings['hw_decode'] = False
+                # Map GPU preset to a reasonable CPU preset
+                codec_name = cpu_settings.get('video_codec', 'H.265 / HEVC')
+                cpu_codec_info = VIDEO_CODEC_MAP.get(codec_name, {})
+                cpu_presets = cpu_codec_info.get('cpu_presets')
+                if cpu_presets:
+                    cpu_settings['preset'] = cpu_codec_info.get('cpu_preset_default', 'medium')
+                # Update output filename to reflect CPU encoding
+                cpu_short = cpu_codec_info.get('short_name', 'H265')
+                cpu_preset = cpu_settings.get('preset', 'medium')
+                old_suffix = Path(output_path).stem.split(base_name, 1)[-1]
+                if quality_mode == 'crf':
+                    new_suffix = f"-CRF{file_settings['crf']}-{cpu_short}_{cpu_preset}"
+                else:
+                    new_suffix = f"-{file_settings['bitrate']}-{cpu_short}_{cpu_preset}"
+                output_path = str(out_dir / f"{base_name}{new_suffix}{output_ext}")
+                self.current_output_path = output_path
+                success = self.converter.convert_file(input_path, output_path, cpu_settings)
+                if success:
+                    self.add_log(f"CPU fallback succeeded: {os.path.basename(output_path)}",
+                                 'SUCCESS')
+
             file_wall_secs = _time.monotonic() - self._file_start_time
             self._file_start_time = None
             self.current_output_path = None
