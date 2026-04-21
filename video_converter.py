@@ -1289,7 +1289,7 @@ def _verify_gpu_encoder(backend_id, backend):
         # VAAPI needs device init + hwupload to get frames onto the GPU
         cmd.extend([
             '-vaapi_device', '/dev/dri/renderD128',
-            '-f', 'lavfi', '-i', 'color=black:s=64x64:d=0.1:r=1',
+            '-f', 'lavfi', '-i', 'color=black:s=256x256:d=0.1:r=1',
             '-vf', 'format=nv12,hwupload',
             '-c:v', test_encoder,
             '-frames:v', '1',
@@ -1298,7 +1298,7 @@ def _verify_gpu_encoder(backend_id, backend):
     elif backend_id == 'qsv':
         # QSV: test without hwaccel flags (encode-only, no device-bound input)
         cmd.extend([
-            '-f', 'lavfi', '-i', 'color=black:s=64x64:d=0.1:r=1',
+            '-f', 'lavfi', '-i', 'color=black:s=256x256:d=0.1:r=1',
             '-c:v', test_encoder,
             '-frames:v', '1',
             '-f', 'null', '-'
@@ -1306,7 +1306,7 @@ def _verify_gpu_encoder(backend_id, backend):
     else:
         # NVENC and others: straightforward test
         cmd.extend([
-            '-f', 'lavfi', '-i', 'color=black:s=64x64:d=0.1:r=1',
+            '-f', 'lavfi', '-i', 'color=black:s=256x256:d=0.1:r=1',
             '-c:v', test_encoder,
             '-frames:v', '1',
             '-f', 'null', '-'
