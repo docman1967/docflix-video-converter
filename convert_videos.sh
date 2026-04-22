@@ -427,7 +427,7 @@ main() {
 
     # Use nullglob to handle case where no files match
     shopt -s nullglob
-    for file in *.mkv *.MKV; do
+    for file in *.mkv *.MKV *.mp4 *.MP4 *.avi *.AVI *.mov *.MOV *.wmv *.WMV *.flv *.FLV *.webm *.WEBM *.ts *.TS *.m2ts *.M2TS *.mts *.MTS; do
         # Skip if it's an output file (already converted)
         if [[ "$file" == *"${OUTPUT_SUFFIX}"* ]]; then
             log_info "Skipping output file: $file"
@@ -439,12 +439,12 @@ main() {
 
     # Check if any files were found
     if [[ ${#files[@]} -eq 0 ]]; then
-        log_warning "No MKV files found in ${p_folder}"
-        
+        log_warning "No video files found in ${p_folder}"
+
         if [[ "$USE_ZENITY" == true ]]; then
             zenity --warning \
                 --title "No Files Found" \
-                --text "No MKV files found in: ${p_folder}" \
+                --text "No video files found in: ${p_folder}" \
                 --width=400
         fi
         
@@ -452,7 +452,7 @@ main() {
     fi
 
     local total_files=${#files[@]}
-    log_info "Found ${total_files} MKV file(s) to convert"
+    log_info "Found ${total_files} video file(s) to convert"
     echo ""
 
     # Process each file

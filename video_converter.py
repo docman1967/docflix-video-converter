@@ -211,7 +211,7 @@ def get_cq_flag(backend_id):
     return backend.get('cq_flag')
 
 # Supported video extensions
-VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm'}
+VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.ts', '.m2ts', '.mts'}
 
 # Supported external subtitle extensions
 SUBTITLE_EXTENSIONS = {'.srt', '.ass', '.ssa', '.vtt', '.sub', '.idx', '.sup'}
@@ -375,6 +375,61 @@ def get_all_streams(filepath):
         ]
     except Exception:
         return []
+
+
+def detect_closed_captions(filepath):
+    """Detect ATSC A53 closed captions (EIA-608/CEA-708) embedded in video frame side data.
+    Returns True if CC data is found, False otherwise.
+    These are common in MPEG-2 transport stream (.ts) HDTV recordings."""
+    try:
+        cmd = [
+            'ffprobe', '-v', 'quiet',
+            '-read_intervals', '%+#30',   # read only first 30 frames (fast)
+            '-show_entries', 'frame=side_data_list:side_data=side_data_type',
+            '-print_format', 'json',
+            '-select_streams', 'v:0',
+            filepath
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return False
+        return 'ATSC A53' in result.stdout or 'Closed Captions' in result.stdout
+    except Exception:
+        return False
+
+
+def extract_closed_captions_to_srt(filepath, output_srt_path, timeout=None):
+    """Extract ATSC A53 closed captions to SRT using ccextractor (if available).
+    Returns True on success (and output file has content), False otherwise.
+    timeout is calculated from video duration if not provided."""
+    import shutil
+    if not shutil.which('ccextractor'):
+        return False
+    try:
+        if timeout is None:
+            dur = get_video_duration(filepath)
+            # Allow roughly 1/4 of real-time plus a generous base
+            timeout = max(120, int(dur * 0.25) + 60) if dur else 600
+        cmd = ['ccextractor', filepath, '-o', output_srt_path, '--no_progress_bar', '-utf8']
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 10:
+            return True
+        return False
+    except Exception:
+        return False
+
+
+# Encoder flags to enable A53 CC passthrough (embedded in video bitstream)
+_A53CC_ENCODER_FLAGS = {
+    'libx264':     [],            # a53cc defaults to true
+    'libx265':     ['-a53cc', '1'],
+    'hevc_nvenc':  ['-a53cc', '1'],
+    'h264_nvenc':  ['-a53cc', '1'],
+    'hevc_qsv':    [],            # uses -sei a53_cc which is on by default
+    'h264_qsv':    [],
+    'hevc_vaapi':  [],            # uses -sei a53_cc which is on by default
+    'h264_vaapi':  [],
+}
 
 
 def get_video_pix_fmt(filepath):
@@ -696,6 +751,11 @@ PROPER_NOUNS = {
     'mr', 'mrs', 'ms', 'dr', 'jr', 'sr', 'st', 'mt',
     'ave', 'blvd', 'dept', 'sgt', 'cpl', 'pvt', 'lt', 'capt',
     'gen', 'col', 'cmdr', 'prof', 'rev', 'hon',
+    # Address / place words (capitalised when part of a name)
+    'street', 'avenue', 'road', 'drive', 'lane', 'boulevard',
+    'court', 'place', 'terrace', 'highway', 'parkway', 'plaza',
+    'bridge', 'park', 'lake', 'river', 'mountain', 'island',
+    'north', 'south', 'east', 'west',
     # Religious / cultural
     'god', 'jesus', 'christ', 'bible', 'catholic', 'christian',
     'muslim', 'islam', 'jewish', 'buddhist', 'hindu',
@@ -729,7 +789,7 @@ def filter_fix_caps(cues, custom_names=None):
     phrases = [n for n in sorted_nouns if ' ' in n]
     words = [n for n in sorted_nouns if ' ' not in n]
 
-    def fix_case(text):
+    def fix_case(text, cap_first=True):
         # Only process lines that are mostly uppercase
         alpha = re.sub(r'[^a-zA-Z]', '', text)
         if not alpha:
@@ -741,17 +801,29 @@ def filter_fix_caps(cues, custom_names=None):
         # Step 1: lowercase everything
         text = text.lower()
 
-        # Step 2: capitalize first letter of each line
+        # Step 2: capitalize first letter of each line, but only if it's a
+        # sentence start.  The first line is capitalized only if cap_first
+        # is True (i.e. the previous cue ended with punctuation).  Subsequent
+        # lines are capitalized only when:
+        #   - The previous line ended with sentence-ending punctuation (.!?)
+        #   - The line starts with a dash (dialogue from a different speaker)
         lines = text.split('\n')
         capped_lines = []
-        for line in lines:
+        for idx, line in enumerate(lines):
             line = line.strip()
             if line:
-                # Capitalize after leading dash/hyphen
-                line = re.sub(r'^(-\s*)', lambda m: m.group(1), line)
-                # Capitalize first real letter
-                line = re.sub(r'^(-\s*)?([a-z])',
-                              lambda m: (m.group(1) or '') + m.group(2).upper(), line)
+                is_first_line = (idx == 0)
+                prev_ended_sentence = (idx > 0 and capped_lines
+                    and re.search(r'[.!?]["\'\u201d\u2019]?\s*$', capped_lines[-1]))
+                starts_with_dash = line.startswith('-')
+
+                should_cap = starts_with_dash or prev_ended_sentence
+                if is_first_line:
+                    should_cap = cap_first or starts_with_dash
+
+                if should_cap:
+                    line = re.sub(r'^(-\s*)?([a-z])',
+                                  lambda m: (m.group(1) or '') + m.group(2).upper(), line)
             capped_lines.append(line)
         text = '\n'.join(capped_lines)
 
@@ -792,9 +864,59 @@ def filter_fix_caps(cues, custom_names=None):
 
         return text
 
+    def apply_custom_names(text):
+        """Capitalize custom names even in already-converted (non-all-caps) text.
+
+        This runs as a second pass so that names added after an initial
+        Fix ALL CAPS run still get capitalized.
+        """
+        if not custom_names:
+            return text
+
+        # Multi-word custom phrases first
+        custom_phrases = [n for n in custom_names if ' ' in n]
+        for phrase in custom_phrases:
+            pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+            text = pattern.sub(phrase.title(), text)
+
+        # Single-word custom names
+        custom_single = {n.lower(): n for n in custom_names if ' ' not in n}
+        if custom_single:
+            def _cap_custom(m):
+                word = m.group(0)
+                original = custom_single.get(word.lower())
+                if original:
+                    return original  # use the exact casing the user entered
+                return word
+            text = re.sub(r'\b[a-zA-Z]+\b', _cap_custom, text)
+
+        return text
+
     result = []
+    prev_text = ''
     for cue in cues:
-        result.append({**cue, 'text': fix_case(cue['text'])})
+        text = cue['text']
+
+        # Check if this cue continues a sentence from the previous cue.
+        # If the previous cue didn't end with sentence-ending punctuation,
+        # don't capitalize the first word of this cue.
+        prev_ended_sentence = (not prev_text
+            or bool(re.search(r'[.!?]["\'\u201d\u2019]?\s*$', prev_text)))
+
+        text = fix_case(text, cap_first=prev_ended_sentence)
+
+        # Always fix sentence-start capitalization, even if fix_case skipped
+        # (text wasn't all-caps).  This handles second-pass runs where the
+        # user adds custom names after an initial Fix ALL CAPS.
+        if prev_ended_sentence:
+            # Capitalize first letter of the cue (respecting leading dashes)
+            text = re.sub(r'^(-\s*)?([a-z])',
+                          lambda m: (m.group(1) or '') + m.group(2).upper(), text)
+
+        # Always apply custom names, even if fix_case skipped (text wasn't all-caps)
+        text = apply_custom_names(text)
+        prev_text = text
+        result.append({**cue, 'text': text})
     return result
 
 
@@ -1547,6 +1669,37 @@ class VideoConverter:
             # Build ordered list of edited sub inputs for consistent input indexing
             _edited_sub_inputs = sorted(edited_subs.items())  # [(stream_idx, path), ...]
 
+            # ── Closed caption handling (ATSC A53 / EIA-608 / CEA-708) ──
+            cc_srt_path = None
+            has_cc = settings.get('has_closed_captions', False)
+            if has_cc and settings.get('extract_cc', True):
+                import tempfile
+                import shutil as _shutil
+                if _shutil.which('ccextractor'):
+                    cc_tmp = tempfile.NamedTemporaryFile(suffix='_cc.srt', delete=False, dir=os.path.dirname(output_path))
+                    cc_tmp.close()
+                    self.log("Extracting ATSC A53 closed captions with ccextractor…", 'INFO')
+                    if extract_closed_captions_to_srt(input_path, cc_tmp.name):
+                        cc_srt_path = cc_tmp.name
+                        self.log("Closed captions extracted to SRT successfully", 'SUCCESS')
+                    else:
+                        self.log("ccextractor could not extract caption data", 'WARNING')
+                        try:
+                            os.remove(cc_tmp.name)
+                        except OSError:
+                            pass
+                else:
+                    self.log("ccextractor not found — CC will be preserved via A53 passthrough only", 'INFO')
+
+            # A53 CC passthrough: embed CC data in the output video bitstream
+            # This preserves CC for players that support it (VLC, mpv, etc.)
+            cc_passthrough_flags = []
+            if has_cc and video_enc_name and video_enc_name != 'copy':
+                flags = _A53CC_ENCODER_FLAGS.get(video_enc_name)
+                if flags is not None:
+                    cc_passthrough_flags = flags
+                    self.log(f"A53 CC passthrough enabled for {video_enc_name}", 'INFO')
+
             def _build_base_cmd():
                 """Build the common part of the ffmpeg command."""
                 c = ['ffmpeg', '-y']
@@ -1559,6 +1712,9 @@ class VideoConverter:
                 # Add edited subtitle inputs
                 for _si, _path in _edited_sub_inputs:
                     c.extend(['-i', _path])
+                # Add extracted closed caption SRT as input
+                if cc_srt_path:
+                    c.extend(['-i', cc_srt_path])
                 return c
 
             def _edited_sub_input_idx(stream_index):
@@ -1598,6 +1754,10 @@ class VideoConverter:
                             c.extend(['-vf', f'format={pix}'])
 
                     c.extend(['-c:v', video_enc_name])
+
+                    # A53 CC passthrough flags
+                    if cc_passthrough_flags:
+                        c.extend(cc_passthrough_flags)
 
                     if video_enc_name != 'copy':
                         preset = settings.get('preset', '')
@@ -1659,10 +1819,32 @@ class VideoConverter:
                 appear as the first subtitle stream(s) in the output.
                 """
                 container = settings.get('container', '.mkv')
+                # Helper to compute the ffmpeg input index for the extracted CC SRT
+                def _cc_input_idx():
+                    return 1 + len(embed_subs) + len(_edited_sub_inputs)
+
                 # AVI does not support embedded subtitle streams
                 if container == '.avi':
-                    c.extend(['-map', '0:v?', '-map', '0:a?'])
+                    c.extend(['-map', '0:v:0?', '-map', '0:a?'])
                     self.log("Subtitles skipped: AVI container does not support embedded subtitles", 'WARNING')
+                    if cc_srt_path:
+                        self.log("Closed captions also skipped: AVI does not support subtitles", 'WARNING')
+                    return
+
+                # MPEG-TS only supports DVB subtitles — drop text-based subs
+                if container == '.ts':
+                    c.extend(['-map', '0:v:0?', '-map', '0:a?'])
+                    # Map through any DVB subtitle streams from the source
+                    try:
+                        int_streams = get_subtitle_streams(input_path)
+                        for si, ist in enumerate(int_streams):
+                            if ist.get('codec_name') == 'dvb_subtitle':
+                                c.extend(['-map', f'0:s:{si}', f'-c:s:{si}', 'copy'])
+                    except Exception:
+                        pass
+                    self.log("Text subtitles skipped: MPEG-TS container only supports DVB subtitles", 'WARNING')
+                    if cc_srt_path:
+                        self.log("Closed captions also skipped: MPEG-TS output does not support SRT", 'WARNING')
                     return
 
                 sub_settings = settings.get('subtitle_settings', {})
@@ -1670,14 +1852,18 @@ class VideoConverter:
 
                 if not sub_settings and not embed_subs and not strip_internal and not edited_subs:
                     # Simple case: no per-file config, no external subs, no edits, keep internals
-                    c.extend(['-map', '0:v?', '-map', '0:a?', '-map', '0:s?'])
+                    c.extend(['-map', '0:v:0?', '-map', '0:a?', '-map', '0:s?'])
+                    # Handle subtitle codec compatibility between containers
+                    BITMAP_CODECS = {'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle'}
+                    try:
+                        int_streams = get_subtitle_streams(input_path)
+                    except Exception:
+                        int_streams = []
+
+                    out_sub_idx = len(int_streams)
+
                     if container in ('.mp4', '.mov'):
                         # MP4/MOV only support mov_text — convert text subs, drop bitmap subs
-                        BITMAP_CODECS = {'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle'}
-                        try:
-                            int_streams = get_subtitle_streams(input_path)
-                        except Exception:
-                            int_streams = []
                         if int_streams:
                             for si, ist in enumerate(int_streams):
                                 if ist['codec_name'] in BITMAP_CODECS:
@@ -1689,12 +1875,33 @@ class VideoConverter:
                         else:
                             c.extend(['-c:s', 'mov_text'])
                     else:
-                        c.extend(['-c:s', 'copy'])
+                        # MKV/other containers: copy most subs, but convert mov_text to srt
+                        # (mov_text is MP4-only and not supported in MKV)
+                        if int_streams and any(s['codec_name'] == 'mov_text' for s in int_streams):
+                            for si, ist in enumerate(int_streams):
+                                if ist['codec_name'] == 'mov_text':
+                                    c.extend([f'-c:s:{si}', 'srt'])
+                                else:
+                                    c.extend([f'-c:s:{si}', 'copy'])
+                        else:
+                            c.extend(['-c:s', 'copy'])
+
+                    # Map extracted closed captions as an additional subtitle track
+                    if cc_srt_path:
+                        cc_idx = _cc_input_idx()
+                        c.extend(['-map', f'{cc_idx}:s:0'])
+                        if container in ('.mp4', '.mov'):
+                            c.extend([f'-c:s:{out_sub_idx}', 'mov_text'])
+                        else:
+                            c.extend([f'-c:s:{out_sub_idx}', 'srt'])
+                        c.extend([f'-metadata:s:s:{out_sub_idx}', 'language=eng'])
+                        c.extend([f'-metadata:s:s:{out_sub_idx}', 'title=Closed Captions (CC)'])
+                        self.log("Mapping extracted closed captions as subtitle track", 'INFO')
                     return
 
                 # We need explicit mapping when we have external subs, per-file config,
                 # or are stripping internal tracks
-                c.extend(['-map', '0:v?', '-map', '0:a?'])
+                c.extend(['-map', '0:v:0?', '-map', '0:a?'])
                 out_sub_idx = 0
                 container = settings.get('container', '.mkv')
 
@@ -1715,6 +1922,8 @@ class VideoConverter:
                     c.extend(['-map', f'{input_idx}:s:0'])
                     if container in ('.mp4', '.mov'):
                         codec = 'mov_text'
+                    elif container == '.ts':
+                        codec = 'dvb_subtitle'
                     else:
                         codec = es.get('format', 'srt')
                     c.extend([f'-c:s:{out_sub_idx}', codec])
@@ -1837,6 +2046,19 @@ class VideoConverter:
                     if not es.get('forced'):
                         _map_embed_sub(i, es)
 
+                # ── Phase 4: Map extracted closed captions ──
+                if cc_srt_path:
+                    cc_idx = _cc_input_idx()
+                    c.extend(['-map', f'{cc_idx}:s:0'])
+                    if container in ('.mp4', '.mov'):
+                        c.extend([f'-c:s:{out_sub_idx}', 'mov_text'])
+                    else:
+                        c.extend([f'-c:s:{out_sub_idx}', 'srt'])
+                    c.extend([f'-metadata:s:s:{out_sub_idx}', 'language=eng'])
+                    c.extend([f'-metadata:s:s:{out_sub_idx}', 'title=Closed Captions (CC)'])
+                    out_sub_idx += 1
+                    self.log("Mapping extracted closed captions as subtitle track", 'INFO')
+
             # ── Log what we're about to do ──
             self.log(f"Video codec: {video_enc_name}", 'INFO')
             self.log(f"Mode: {mode}" + (" (two-pass)" if use_two_pass else " (GPU multipass)" if use_gpu_multipass else ""), 'INFO')
@@ -1929,12 +2151,18 @@ class VideoConverter:
             else:
                 # Explicit per-stream mapping — must also map video and audio
                 # otherwise ffmpeg disables default stream selection
-                cmd.extend(['-map', '0:v?', '-map', '0:a?'])
+                cmd.extend(['-map', '0:v:0?', '-map', '0:a?'])
         except Exception as e:
             self.log(f"Conversion error: {str(e)}", "ERROR")
             return False
         finally:
             self.current_process = None
+            # Clean up extracted CC temp file
+            if cc_srt_path:
+                try:
+                    os.remove(cc_srt_path)
+                except OSError:
+                    pass
 
     def _run_process(self, cmd, input_path, pass_label=None):
         """Run an ffmpeg subprocess, parse progress, handle pause/stop. Returns True on success."""
@@ -2097,6 +2325,8 @@ class VideoConverterApp:
         self.output_dir = None  # None means "same as source file"
         self.recent_folders = []  # list of Path strings, max 5
         self.custom_ad_patterns = []  # user-defined ad patterns for subtitle editor
+        self.custom_cap_words = []   # user-defined names for Fix ALL CAPS filter
+        self.custom_replacements = []  # list of [find, replace] pairs for batch S&R
         self.files = []
         self.converter = VideoConverter(
             log_callback=self.add_log,
@@ -2436,7 +2666,7 @@ class VideoConverterApp:
 
         ttk.Label(codec_frame, text="  Container:").pack(side='left')
         self.container_combo = ttk.Combobox(codec_frame, textvariable=self.container_format,
-                                            values=['.mkv', '.mp4', '.webm', '.avi', '.mov'],
+                                            values=['.mkv', '.mp4', '.webm', '.avi', '.mov', '.ts'],
                                             width=7, state='readonly')
         self.container_combo.pack(side='left', padx=(2, 0))
 
@@ -2616,12 +2846,13 @@ class VideoConverterApp:
         self.audio_bitrate_combo.set('128k')  # Default
         self.audio_bitrate_combo.pack(side='left', padx=5)
         
-        # Hide audio frame initially (video mode is default)
-        self.audio_frame.grid_remove()
-        
-        # Checkboxes - Row 5 (default, moves to row 6 when audio shown)
+        # Audio frame always visible — disabled when in video-only mode
+        self.audio_codec_combo.configure(state='disabled')
+        self.audio_bitrate_combo.configure(state='disabled')
+
+        # Checkboxes - Row 7
         self.check_frame = ttk.Frame(settings_frame)
-        self.check_frame.grid(row=6, column=0, columnspan=2, sticky='w', pady=10)
+        self.check_frame.grid(row=7, column=0, columnspan=2, sticky='w', pady=10)
         
         ttk.Checkbutton(self.check_frame, text="Skip existing files",
                        variable=self.skip_existing).pack(side='left', padx=5)
@@ -2801,6 +3032,8 @@ class VideoConverterApp:
             prefix += '⚙️ '
         if file_info.get('external_subs'):
             prefix += '📎 '
+        if file_info.get('has_closed_captions'):
+            prefix += 'CC '
         display_name = prefix + name
         self.file_tree.item(item, values=(
             display_name,
@@ -3334,8 +3567,38 @@ class VideoConverterApp:
 
         # ── Header info ──
         if not streams:
-            ttk.Label(dlg, text="No subtitle tracks found in this file.",
-                      font=('Helvetica', 11), padding=20).pack()
+            has_cc = file_info.get('has_closed_captions', False)
+            if has_cc:
+                import shutil as _shutil
+                has_ccextractor = bool(_shutil.which('ccextractor'))
+
+                cc_frame = ttk.Frame(dlg, padding=20)
+                cc_frame.pack(fill='x')
+                ttk.Label(cc_frame,
+                          text="No subtitle streams found, but ATSC A53 closed captions detected.",
+                          font=('Helvetica', 11)).pack(anchor='w')
+
+                # CC passthrough is always enabled (embedded in video bitstream)
+                ttk.Label(cc_frame,
+                          text="✔ CC data will be preserved in the video stream (A53 passthrough).",
+                          font=('Helvetica', 10)).pack(anchor='w', pady=(4, 0))
+
+                if has_ccextractor:
+                    ttk.Label(cc_frame,
+                              text="✔ ccextractor found — CC can also be extracted as a separate SRT subtitle track.",
+                              font=('Helvetica', 10)).pack(anchor='w', pady=(2, 8))
+                    cc_var = tk.BooleanVar(value=file_info.get('extract_cc', True))
+                    def on_cc_toggle():
+                        file_info['extract_cc'] = cc_var.get()
+                    tk.Checkbutton(cc_frame, text="Extract CC to SRT subtitle track during conversion",
+                                   variable=cc_var, command=on_cc_toggle).pack(anchor='w')
+                else:
+                    ttk.Label(cc_frame,
+                              text="ℹ Install ccextractor to also extract CC as a separate SRT subtitle track.",
+                              font=('Helvetica', 10)).pack(anchor='w', pady=(2, 8))
+            else:
+                ttk.Label(dlg, text="No subtitle tracks found in this file.",
+                          font=('Helvetica', 11), padding=20).pack()
             ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=10)
             dlg.grab_set()
             dlg.wait_window()
@@ -3877,7 +4140,7 @@ class VideoConverterApp:
                 title="Open Subtitle or Video File",
                 filetypes=[
                     ('Subtitle files', '*.srt *.ass *.ssa *.vtt *.sub'),
-                    ('Video files', '*.mkv *.mp4 *.avi *.mov *.wmv *.flv *.webm'),
+                    ('Video files', '*.mkv *.mp4 *.avi *.mov *.wmv *.flv *.webm *.ts *.m2ts *.mts'),
                     ('All files', '*.*'),
                 ]
             )
@@ -3894,23 +4157,33 @@ class VideoConverterApp:
             """Handle subtitle or video files dragged and dropped onto the editor."""
             raw = event.data
             # tkinterdnd2 wraps paths with spaces in curly braces: {/path/to/my file.srt}
+            # On Linux, file managers may also send file:// URIs (one per line)
             paths = []
-            i = 0
-            while i < len(raw):
-                if raw[i] == '{':
-                    end = raw.find('}', i)
-                    paths.append(raw[i + 1:end])
-                    i = end + 2
-                elif raw[i] == ' ':
-                    i += 1
-                else:
-                    end = raw.find(' ', i)
-                    if end == -1:
-                        paths.append(raw[i:])
-                        break
+            if 'file://' in raw:
+                from urllib.parse import unquote, urlparse
+                for line in raw.splitlines():
+                    line = line.strip()
+                    if line.startswith('file://'):
+                        decoded = unquote(urlparse(line).path)
+                        if decoded:
+                            paths.append(decoded)
+            else:
+                i = 0
+                while i < len(raw):
+                    if raw[i] == '{':
+                        end = raw.find('}', i)
+                        paths.append(raw[i + 1:end])
+                        i = end + 2
+                    elif raw[i] == ' ':
+                        i += 1
                     else:
-                        paths.append(raw[i:end])
-                        i = end + 1
+                        end = raw.find(' ', i)
+                        if end == -1:
+                            paths.append(raw[i:])
+                            break
+                        else:
+                            paths.append(raw[i:end])
+                            i = end + 1
             if paths:
                 path = paths[0]
                 ext = Path(path).suffix.lower()
@@ -4120,6 +4393,27 @@ class VideoConverterApp:
                          f"{after} remaining", 'INFO')
             refresh_tree(cues)
 
+        def _is_mostly_allcaps():
+            """Check if the subtitle text is mostly ALL CAPS."""
+            if not cues:
+                return False
+            all_text = ' '.join(c['text'] for c in cues)
+            alpha = re.sub(r'[^a-zA-Z]', '', all_text)
+            if not alpha:
+                return False
+            return sum(1 for c in alpha if c.isupper()) / len(alpha) >= 0.6
+
+        def apply_remove_hi():
+            """Apply Remove HI, auto-running Fix ALL CAPS first if text is all-caps."""
+            nonlocal cues
+            if _is_mostly_allcaps():
+                self.add_log("Text is mostly ALL CAPS — running Fix ALL CAPS first "
+                             "to avoid false HI detection", 'INFO')
+                push_undo()
+                cues = filter_fix_caps(cues, self.custom_cap_words)
+                refresh_tree(cues)
+            apply_filter(filter_remove_hi, "Remove HI")
+
         def undo_all():
             nonlocal cues
             push_undo()
@@ -4130,7 +4424,7 @@ class VideoConverterApp:
         filter_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Filters", menu=filter_menu)
         filter_menu.add_command(label="Remove HI  [brackets] (parens) Speaker:",
-                                command=lambda: apply_filter(filter_remove_hi, "Remove HI"))
+                                command=lambda: apply_remove_hi())
         filter_menu.add_command(label="Remove Tags  <i> {\\an8}",
                                 command=lambda: apply_filter(filter_remove_tags, "Remove Tags"))
 
@@ -4158,24 +4452,21 @@ class VideoConverterApp:
         if not hasattr(self, 'custom_cap_words'):
             self.custom_cap_words = []
 
-        def apply_fix_caps():
-            apply_filter(lambda c: filter_fix_caps(c, self.custom_cap_words),
-                         "Fix ALL CAPS")
-
         def show_fix_caps_dialog():
             cd = tk.Toplevel(editor)
-            cd.title("Fix ALL CAPS — Custom Names")
-            cd.geometry("420x380")
-            cd.transient(editor)
-            cd.grab_set()
+            cd.title("Fix ALL CAPS")
+            cd.geometry("420x400")
             self._center_on_main(cd)
             cd.resizable(True, True)
+            # Keep on top but don't grab — allows scrolling the subtitle list
+            cd.attributes('-topmost', True)
 
-            ttk.Label(cd, text="Add character names and other proper nouns\n"
-                      "that should be capitalized after conversion.",
+            ttk.Label(cd, text="Converts ALL CAPS text to sentence case.\n"
+                      "Add character names below to preserve their capitalisation.\n"
+                      "You can scroll the subtitle list to find names.",
                       justify='center', padding=(10, 10)).pack()
 
-            lf = ttk.LabelFrame(cd, text="Custom Names (in addition to built-in list)",
+            lf = ttk.LabelFrame(cd, text="Custom Names (saved across sessions)",
                                 padding=8)
             lf.pack(fill='both', expand=True, padx=10, pady=5)
 
@@ -4190,6 +4481,15 @@ class VideoConverterApp:
             word_entry = ttk.Entry(add_frame, textvariable=new_word_var)
             word_entry.pack(side='left', fill='x', expand=True, padx=(0, 4))
             word_entry.focus_set()
+            # Right-click context menu for copy/paste
+            _wm = tk.Menu(word_entry, tearoff=0)
+            _wm.add_command(label="Cut", command=lambda: word_entry.event_generate('<<Cut>>'))
+            _wm.add_command(label="Copy", command=lambda: word_entry.event_generate('<<Copy>>'))
+            _wm.add_command(label="Paste", command=lambda: word_entry.event_generate('<<Paste>>'))
+            _wm.add_separator()
+            _wm.add_command(label="Select All",
+                command=lambda: (word_entry.select_range(0, 'end'), word_entry.icursor('end')))
+            word_entry.bind('<Button-3>', lambda e, m=_wm: m.tk_popup(e.x_root, e.y_root))
 
             def add_word():
                 word = new_word_var.get().strip()
@@ -4198,6 +4498,7 @@ class VideoConverterApp:
                 if word.lower() not in [w.lower() for w in self.custom_cap_words]:
                     self.custom_cap_words.append(word)
                     word_list.insert('end', word)
+                    self.save_preferences()
                 new_word_var.set('')
 
             def remove_word():
@@ -4205,23 +4506,24 @@ class VideoConverterApp:
                 if sel:
                     self.custom_cap_words.pop(sel[0])
                     word_list.delete(sel[0])
+                    self.save_preferences()
 
             ttk.Button(add_frame, text="Add", command=add_word).pack(side='right')
             word_entry.bind('<Return>', lambda e: add_word())
 
-            ttk.Label(lf, text="Tip: Add character names like 'John', 'Sarah', 'Dr. House'",
+            ttk.Label(lf, text="Names are saved automatically and persist between sessions.",
                       font=('Helvetica', 8), foreground='gray').pack(anchor='w')
 
             btn_frame = ttk.Frame(cd, padding=(10, 8, 10, 10))
             btn_frame.pack(fill='x')
             ttk.Button(btn_frame, text="Remove Selected", command=remove_word).pack(side='left')
-            ttk.Button(btn_frame, text="Apply Fix Caps",
-                       command=lambda: (cd.destroy(), apply_fix_caps())).pack(side='right')
-            ttk.Button(btn_frame, text="Cancel", command=cd.destroy).pack(side='right', padx=4)
+            ttk.Button(btn_frame, text="Apply",
+                       command=lambda: (cd.destroy(), apply_filter(
+                           lambda c: filter_fix_caps(c, self.custom_cap_words),
+                           "Fix ALL CAPS"))).pack(side='right')
+            ttk.Button(btn_frame, text="Close", command=cd.destroy).pack(side='right', padx=4)
 
-        filter_menu.add_command(label="Fix ALL CAPS", command=apply_fix_caps)
-        filter_menu.add_command(label="Fix ALL CAPS + Add Names...",
-                                command=show_fix_caps_dialog)
+        filter_menu.add_command(label="Fix ALL CAPS...", command=show_fix_caps_dialog)
         filter_menu.add_separator()
 
         def show_ad_patterns_dialog():
@@ -4940,7 +5242,7 @@ class VideoConverterApp:
 
         win = tk.Toplevel(self.root)
         win.title("Batch Filter Subtitles")
-        win.geometry("620x720")
+        win.geometry("620x700")
         win.resizable(True, True)
         self._center_on_main(win)
 
@@ -5072,10 +5374,93 @@ class VideoConverterApp:
         ]
 
         filter_vars = {}
-        for key, label, _ in filter_defs:
+        # Two-column grid layout for filters
+        cols_frame = ttk.Frame(filters_frame)
+        cols_frame.pack(fill='x')
+        left_col = ttk.Frame(cols_frame)
+        left_col.pack(side='left', fill='both', expand=True, anchor='n')
+        right_col = ttk.Frame(cols_frame)
+        right_col.pack(side='left', fill='both', expand=True, anchor='n')
+
+        mid = (len(filter_defs) + 1) // 2  # split point
+        for i, (key, label, _) in enumerate(filter_defs):
             var = tk.BooleanVar(value=False)
             filter_vars[key] = var
-            ttk.Checkbutton(filters_frame, text=label, variable=var).pack(anchor='w')
+            col = left_col if i < mid else right_col
+            if key == 'fix_caps':
+                caps_row = ttk.Frame(col)
+                caps_row.pack(fill='x', anchor='w')
+                ttk.Checkbutton(caps_row, text=label, variable=var).pack(side='left')
+                ttk.Button(caps_row, text="Names...",
+                           command=lambda: show_batch_names_dialog()).pack(side='left', padx=(4, 0))
+            else:
+                ttk.Checkbutton(col, text=label, variable=var).pack(anchor='w')
+
+        def show_batch_names_dialog():
+            """Open the custom names editor from the batch filter window."""
+            nd = tk.Toplevel(win)
+            nd.title("Custom Names — Fix ALL CAPS")
+            nd.geometry("400x350")
+            self._center_on_main(nd)
+            nd.resizable(True, True)
+            nd.attributes('-topmost', True)
+
+            ttk.Label(nd, text="Add character names to preserve their\n"
+                      "capitalisation when Fix ALL CAPS is applied.",
+                      justify='center', padding=(10, 10)).pack()
+
+            lf = ttk.LabelFrame(nd, text="Custom Names (saved across sessions)",
+                                padding=8)
+            lf.pack(fill='both', expand=True, padx=10, pady=5)
+
+            word_list = tk.Listbox(lf, height=8, font=('Courier', 10))
+            word_list.pack(fill='both', expand=True)
+            for w in self.custom_cap_words:
+                word_list.insert('end', w)
+
+            add_frame = ttk.Frame(lf)
+            add_frame.pack(fill='x', pady=(4, 0))
+            new_word_var = tk.StringVar()
+            word_entry = ttk.Entry(add_frame, textvariable=new_word_var)
+            word_entry.pack(side='left', fill='x', expand=True, padx=(0, 4))
+            word_entry.focus_set()
+            # Right-click context menu for copy/paste
+            _wm = tk.Menu(word_entry, tearoff=0)
+            _wm.add_command(label="Cut", command=lambda: word_entry.event_generate('<<Cut>>'))
+            _wm.add_command(label="Copy", command=lambda: word_entry.event_generate('<<Copy>>'))
+            _wm.add_command(label="Paste", command=lambda: word_entry.event_generate('<<Paste>>'))
+            _wm.add_separator()
+            _wm.add_command(label="Select All",
+                command=lambda: (word_entry.select_range(0, 'end'), word_entry.icursor('end')))
+            word_entry.bind('<Button-3>', lambda e, m=_wm: m.tk_popup(e.x_root, e.y_root))
+
+            def add_word():
+                word = new_word_var.get().strip()
+                if not word:
+                    return
+                if word.lower() not in [w.lower() for w in self.custom_cap_words]:
+                    self.custom_cap_words.append(word)
+                    word_list.insert('end', word)
+                    self.save_preferences()
+                new_word_var.set('')
+
+            def remove_word():
+                sel = word_list.curselection()
+                if sel:
+                    self.custom_cap_words.pop(sel[0])
+                    word_list.delete(sel[0])
+                    self.save_preferences()
+
+            ttk.Button(add_frame, text="Add", command=add_word).pack(side='right')
+            word_entry.bind('<Return>', lambda e: add_word())
+
+            ttk.Label(lf, text="Names are saved automatically and persist between sessions.",
+                      font=('Helvetica', 8), foreground='gray').pack(anchor='w')
+
+            btn_frame = ttk.Frame(nd, padding=(10, 8, 10, 10))
+            btn_frame.pack(fill='x')
+            ttk.Button(btn_frame, text="Remove Selected", command=remove_word).pack(side='left')
+            ttk.Button(btn_frame, text="Close", command=nd.destroy).pack(side='right')
 
         sel_frame = ttk.Frame(filters_frame)
         sel_frame.pack(fill='x', pady=(6, 0))
@@ -5090,6 +5475,106 @@ class VideoConverterApp:
 
         ttk.Button(sel_frame, text="Select All", command=select_all_filters).pack(side='left', padx=(0, 4))
         ttk.Button(sel_frame, text="Deselect All", command=deselect_all_filters).pack(side='left')
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Search & Replace section
+        # ══════════════════════════════════════════════════════════════════════
+        sr_frame = ttk.LabelFrame(win, text="Search && Replace (applied to all files)",
+                                  padding=8)
+        sr_frame.pack(fill='both', expand=True, padx=10, pady=5)
+
+        # Input row
+        sr_input = ttk.Frame(sr_frame)
+        sr_input.pack(fill='x')
+
+        ttk.Label(sr_input, text="Find:").pack(side='left')
+        sr_find_var = tk.StringVar()
+        sr_find_entry = ttk.Entry(sr_input, textvariable=sr_find_var, width=18)
+        sr_find_entry.pack(side='left', padx=(2, 6))
+
+        ttk.Label(sr_input, text="Replace:").pack(side='left')
+        sr_repl_var = tk.StringVar()
+        sr_repl_entry = ttk.Entry(sr_input, textvariable=sr_repl_var, width=18)
+        sr_repl_entry.pack(side='left', padx=(2, 6))
+
+        sr_case_var = tk.BooleanVar(value=False)
+
+        def sr_add_pair():
+            find = sr_find_var.get()
+            if not find:
+                return
+            repl = sr_repl_var.get()
+            pair = [find, repl, sr_case_var.get()]
+            # Avoid exact duplicates
+            if pair not in self.custom_replacements:
+                self.custom_replacements.append(pair)
+                case_str = " [Aa]" if not pair[2] else ""
+                sr_listbox.insert('end', f'"{find}" → "{repl}"{case_str}')
+                self.save_preferences()
+            sr_find_var.set('')
+            sr_repl_var.set('')
+
+        ttk.Button(sr_input, text="Add", command=sr_add_pair).pack(side='left', padx=2)
+
+        # Right-click copy/paste on find/replace entries
+        for entry in (sr_find_entry, sr_repl_entry):
+            _m = tk.Menu(entry, tearoff=0)
+            _m.add_command(label="Cut", command=lambda e=entry: e.event_generate('<<Cut>>'))
+            _m.add_command(label="Copy", command=lambda e=entry: e.event_generate('<<Copy>>'))
+            _m.add_command(label="Paste", command=lambda e=entry: e.event_generate('<<Paste>>'))
+            _m.add_separator()
+            _m.add_command(label="Select All",
+                command=lambda e=entry: (e.select_range(0, 'end'), e.icursor('end')))
+            entry.bind('<Button-3>', lambda ev, m=_m: m.tk_popup(ev.x_root, ev.y_root))
+
+        # Options row
+        sr_opts = ttk.Frame(sr_frame)
+        sr_opts.pack(fill='x', pady=(4, 4))
+        ttk.Checkbutton(sr_opts, text="Case sensitive",
+                        variable=sr_case_var).pack(side='left')
+
+        # Replacement list
+        sr_list_frame = ttk.Frame(sr_frame)
+        sr_list_frame.pack(fill='both', expand=True)
+
+        sr_scroll = ttk.Scrollbar(sr_list_frame, orient='vertical')
+        sr_scroll.pack(side='right', fill='y')
+
+        sr_listbox = tk.Listbox(sr_list_frame, height=4, font=('Courier', 9),
+                                yscrollcommand=sr_scroll.set)
+        sr_listbox.pack(fill='both', expand=True)
+        sr_scroll.config(command=sr_listbox.yview)
+
+        # Populate from saved replacements
+        for pair in self.custom_replacements:
+            find, repl = pair[0], pair[1]
+            case_sensitive = pair[2] if len(pair) > 2 else False
+            case_str = "" if case_sensitive else " [Aa]"
+            sr_listbox.insert('end', f'"{find}" → "{repl}"{case_str}')
+
+        def sr_remove_selected():
+            sel = sorted(sr_listbox.curselection(), reverse=True)
+            for idx in sel:
+                sr_listbox.delete(idx)
+                del self.custom_replacements[idx]
+            if sel:
+                self.save_preferences()
+
+        def sr_clear_all():
+            sr_listbox.delete(0, 'end')
+            self.custom_replacements.clear()
+            self.save_preferences()
+
+        sr_btn_frame = ttk.Frame(sr_frame)
+        sr_btn_frame.pack(fill='x', pady=(4, 0))
+        ttk.Button(sr_btn_frame, text="Remove Selected",
+                   command=sr_remove_selected).pack(side='left', padx=(0, 4))
+        ttk.Button(sr_btn_frame, text="Clear All",
+                   command=sr_clear_all).pack(side='left')
+        ttk.Label(sr_btn_frame, text="Saved across sessions",
+                  font=('Helvetica', 8), foreground='gray').pack(side='right')
+
+        sr_find_entry.bind('<Return>', lambda e: sr_add_pair())
 
         # ══════════════════════════════════════════════════════════════════════
         # Output section
@@ -5137,11 +5622,23 @@ class VideoConverterApp:
                 return
 
             # Gather selected filters in order
-            active_filters = [(label, func) for key, label, func in filter_defs
+            active_filters = [(key, label, func) for key, label, func in filter_defs
                               if filter_vars[key].get()]
-            if not active_filters:
-                messagebox.showwarning("No Filters",
-                    "Select at least one filter to apply.", parent=win)
+            # If both Fix ALL CAPS and Remove HI are selected, ensure Fix ALL CAPS
+            # runs first to avoid false HI detection on all-caps text
+            active_keys = {k for k, _, _ in active_filters}
+            if 'fix_caps' in active_keys and 'remove_hi' in active_keys:
+                fix_entry = next(e for e in active_filters if e[0] == 'fix_caps')
+                active_filters.remove(fix_entry)
+                hi_idx = next(i for i, e in enumerate(active_filters) if e[0] == 'remove_hi')
+                active_filters.insert(hi_idx, fix_entry)
+            # Strip the key, keep only (label, func)
+            active_filters = [(label, func) for _, label, func in active_filters]
+            has_replacements = bool(self.custom_replacements)
+            if not active_filters and not has_replacements:
+                messagebox.showwarning("Nothing to Apply",
+                    "Select at least one filter or add search & replace pairs.",
+                    parent=win)
                 return
 
             apply_btn.configure(state='disabled')
@@ -5188,6 +5685,18 @@ class VideoConverterApp:
                     for f_label, f_func in active_filters:
                         cues = f_func(cues)
 
+                    # Apply search & replace pairs
+                    for pair in self.custom_replacements:
+                        find_str, repl_str = pair[0], pair[1]
+                        case_sensitive = pair[2] if len(pair) > 2 else False
+                        flags = 0 if case_sensitive else re.IGNORECASE
+                        pattern = re.escape(find_str)
+                        for cue in cues:
+                            cue['text'] = re.sub(pattern, repl_str, cue['text'],
+                                                 flags=flags)
+                    # Remove any cues that became empty after replacements
+                    cues = [c for c in cues if c['text'].strip()]
+
                     if not cues:
                         self.add_log(f"Batch: all cues removed from {os.path.basename(fpath)}, "
                                      "skipping save", 'WARNING')
@@ -5233,6 +5742,8 @@ class VideoConverterApp:
             apply_btn.configure(state='normal')
 
             filters_used = ", ".join(label for label, _ in active_filters)
+            if self.custom_replacements:
+                filters_used += f", {len(self.custom_replacements)} replacement(s)"
             result_label.configure(
                 text=f"Done — {success} succeeded, {errors} failed",
                 foreground='green' if errors == 0 else 'orange')
@@ -5460,6 +5971,27 @@ class VideoConverterApp:
             self.add_log(f"Filter '{name}': {before - after} entries removed, "
                          f"{after} remaining", 'INFO')
             refresh_tree(cues)
+
+        def _is_mostly_allcaps():
+            """Check if the subtitle text is mostly ALL CAPS."""
+            if not cues:
+                return False
+            all_text = ' '.join(c['text'] for c in cues)
+            alpha = re.sub(r'[^a-zA-Z]', '', all_text)
+            if not alpha:
+                return False
+            return sum(1 for c in alpha if c.isupper()) / len(alpha) >= 0.6
+
+        def apply_remove_hi():
+            """Apply Remove HI, auto-running Fix ALL CAPS first if text is all-caps."""
+            nonlocal cues
+            if _is_mostly_allcaps():
+                self.add_log("Text is mostly ALL CAPS — running Fix ALL CAPS first "
+                             "to avoid false HI detection", 'INFO')
+                push_undo()
+                cues = filter_fix_caps(cues, self.custom_cap_words)
+                refresh_tree(cues)
+            apply_filter(filter_remove_hi, "Remove HI")
 
         def undo_all():
             nonlocal cues
@@ -5723,7 +6255,7 @@ class VideoConverterApp:
         filter_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Filters", menu=filter_menu)
         filter_menu.add_command(label="Remove HI  [brackets] (parens) Speaker:",
-                                command=lambda: apply_filter(filter_remove_hi, "Remove HI"))
+                                command=lambda: apply_remove_hi())
         filter_menu.add_command(label="Remove Tags  <i> {\\an8}",
                                 command=lambda: apply_filter(filter_remove_tags, "Remove Tags"))
         def apply_remove_ads():
@@ -5751,26 +6283,22 @@ class VideoConverterApp:
         if not hasattr(self, 'custom_cap_words'):
             self.custom_cap_words = []
 
-        def apply_fix_caps():
-            apply_filter(lambda c: filter_fix_caps(c, self.custom_cap_words),
-                         "Fix ALL CAPS")
-
         def show_fix_caps_dialog():
-            """Apply Fix Caps with option to add custom names first."""
+            """Show Fix ALL CAPS dialog with custom names management."""
             cd = tk.Toplevel(editor)
-            cd.title("Fix ALL CAPS — Custom Names")
-            cd.geometry("420x380")
-            cd.transient(editor)
-            cd.grab_set()
+            cd.title("Fix ALL CAPS")
+            cd.geometry("420x400")
             self._center_on_main(cd)
             cd.resizable(True, True)
+            # Keep on top but don't grab — allows scrolling the subtitle list
+            cd.attributes('-topmost', True)
 
-            ttk.Label(cd, text="Add character names and other proper nouns\n"
-                      "that should be capitalized after conversion.",
+            ttk.Label(cd, text="Converts ALL CAPS text to sentence case.\n"
+                      "Add character names below to preserve their capitalisation.\n"
+                      "You can scroll the subtitle list to find names.",
                       justify='center', padding=(10, 10)).pack()
 
-            # Current custom words
-            lf = ttk.LabelFrame(cd, text="Custom Names (in addition to built-in list)",
+            lf = ttk.LabelFrame(cd, text="Custom Names (saved across sessions)",
                                 padding=8)
             lf.pack(fill='both', expand=True, padx=10, pady=5)
 
@@ -5785,6 +6313,15 @@ class VideoConverterApp:
             word_entry = ttk.Entry(add_frame, textvariable=new_word_var)
             word_entry.pack(side='left', fill='x', expand=True, padx=(0, 4))
             word_entry.focus_set()
+            # Right-click context menu for copy/paste
+            _wm = tk.Menu(word_entry, tearoff=0)
+            _wm.add_command(label="Cut", command=lambda: word_entry.event_generate('<<Cut>>'))
+            _wm.add_command(label="Copy", command=lambda: word_entry.event_generate('<<Copy>>'))
+            _wm.add_command(label="Paste", command=lambda: word_entry.event_generate('<<Paste>>'))
+            _wm.add_separator()
+            _wm.add_command(label="Select All",
+                command=lambda: (word_entry.select_range(0, 'end'), word_entry.icursor('end')))
+            word_entry.bind('<Button-3>', lambda e, m=_wm: m.tk_popup(e.x_root, e.y_root))
 
             def add_word():
                 word = new_word_var.get().strip()
@@ -5793,6 +6330,7 @@ class VideoConverterApp:
                 if word.lower() not in [w.lower() for w in self.custom_cap_words]:
                     self.custom_cap_words.append(word)
                     word_list.insert('end', word)
+                    self.save_preferences()
                 new_word_var.set('')
 
             def remove_word():
@@ -5800,23 +6338,24 @@ class VideoConverterApp:
                 if sel:
                     self.custom_cap_words.pop(sel[0])
                     word_list.delete(sel[0])
+                    self.save_preferences()
 
             ttk.Button(add_frame, text="Add", command=add_word).pack(side='right')
             word_entry.bind('<Return>', lambda e: add_word())
 
-            ttk.Label(lf, text="Tip: Add character names like 'John', 'Sarah', 'Dr. House'",
+            ttk.Label(lf, text="Names are saved automatically and persist between sessions.",
                       font=('Helvetica', 8), foreground='gray').pack(anchor='w')
 
             btn_frame = ttk.Frame(cd, padding=(10, 8, 10, 10))
             btn_frame.pack(fill='x')
             ttk.Button(btn_frame, text="Remove Selected", command=remove_word).pack(side='left')
-            ttk.Button(btn_frame, text="Apply Fix Caps",
-                       command=lambda: (cd.destroy(), apply_fix_caps())).pack(side='right')
-            ttk.Button(btn_frame, text="Cancel", command=cd.destroy).pack(side='right', padx=4)
+            ttk.Button(btn_frame, text="Apply",
+                       command=lambda: (cd.destroy(), apply_filter(
+                           lambda c: filter_fix_caps(c, self.custom_cap_words),
+                           "Fix ALL CAPS"))).pack(side='right')
+            ttk.Button(btn_frame, text="Close", command=cd.destroy).pack(side='right', padx=4)
 
-        filter_menu.add_command(label="Fix ALL CAPS", command=apply_fix_caps)
-        filter_menu.add_command(label="Fix ALL CAPS + Add Names...",
-                                command=show_fix_caps_dialog)
+        filter_menu.add_command(label="Fix ALL CAPS...", command=show_fix_caps_dialog)
         filter_menu.add_separator()
 
         def show_ad_patterns_dialog():
@@ -6417,22 +6956,33 @@ class VideoConverterApp:
         """Handle files/folders dropped onto the file list."""
         raw = event.data
         # tkinterdnd2 wraps paths with spaces in curly braces: {/path/to/my file.mkv}
+        # On Linux, file managers may also send file:// URIs (one per line)
         # Parse them properly
         paths = []
-        i = 0
-        while i < len(raw):
-            if raw[i] == '{':
-                end = raw.find('}', i)
-                paths.append(raw[i+1:end])
-                i = end + 2
-            else:
-                end = raw.find(' ', i)
-                if end == -1:
-                    paths.append(raw[i:])
-                    break
+        if 'file://' in raw:
+            # URI list format: one file:// URI per line, percent-encoded
+            from urllib.parse import unquote, urlparse
+            for line in raw.splitlines():
+                line = line.strip()
+                if line.startswith('file://'):
+                    decoded = unquote(urlparse(line).path)
+                    if decoded:
+                        paths.append(decoded)
+        else:
+            i = 0
+            while i < len(raw):
+                if raw[i] == '{':
+                    end = raw.find('}', i)
+                    paths.append(raw[i+1:end])
+                    i = end + 2
                 else:
-                    paths.append(raw[i:end])
-                    i = end + 1
+                    end = raw.find(' ', i)
+                    if end == -1:
+                        paths.append(raw[i:])
+                        break
+                    else:
+                        paths.append(raw[i:end])
+                        i = end + 1
 
         # Separate dropped paths into video files and subtitle files
         video_paths = []
@@ -6501,6 +7051,11 @@ class VideoConverterApp:
         est = estimate_output_size(str(filepath), self._current_settings())
         dur_secs = get_video_duration(str(filepath))
         dur_str = format_duration(dur_secs)
+        # Detect ATSC A53 closed captions (common in MPEG-2 .ts files)
+        has_cc = False
+        if filepath.suffix.lower() in ('.ts', '.m2ts', '.mts'):
+            has_cc = detect_closed_captions(str(filepath))
+
         file_info = {
             'name': f,
             'path': str(filepath),
@@ -6510,9 +7065,14 @@ class VideoConverterApp:
             'est_size': est,
             'status': 'Pending',
             'external_subs': [],
+            'has_closed_captions': has_cc,
+            'extract_cc': has_cc,  # auto-extract by default if CC detected
         }
         self.files.append(file_info)
-        self.file_tree.insert('', 'end', values=(f, size, dur_str, est, 'Pending'))
+        prefix = ''
+        if has_cc:
+            prefix = 'CC '
+        self.file_tree.insert('', 'end', values=(prefix + f, size, dur_str, est, 'Pending'))
         return 1
 
     def _associate_external_sub(self, sub_path):
@@ -6885,6 +7445,8 @@ class VideoConverterApp:
             'default_output_folder': str(self.output_dir) if self.output_dir else '',
             'recent_folders':        self.recent_folders,
             'custom_ad_patterns':    self.custom_ad_patterns,
+            'custom_cap_words':      self.custom_cap_words,
+            'custom_replacements':   self.custom_replacements,
         }
         try:
             self._prefs_path().parent.mkdir(parents=True, exist_ok=True)
@@ -6910,7 +7472,8 @@ class VideoConverterApp:
             self.encoder_mode.set(saved_encoder)
             self.video_codec.set(prefs.get('video_codec',       self.video_codec.get()))
             self.container_format.set(prefs.get('container',    self.container_format.get()))
-            self.transcode_mode.set(prefs.get('transcode_mode', self.transcode_mode.get()))
+            # Always start in video-only mode regardless of saved preference
+            self.transcode_mode.set('video')
             self.quality_mode.set(prefs.get('quality_mode',     self.quality_mode.get()))
             self.bitrate.set(prefs.get('bitrate',               self.bitrate.get()))
             self.crf.set(prefs.get('crf',                       self.crf.get()))
@@ -6929,6 +7492,8 @@ class VideoConverterApp:
             # Default folders
             self.recent_folders = prefs.get('recent_folders', [])
             self.custom_ad_patterns = prefs.get('custom_ad_patterns', [])
+            self.custom_cap_words = prefs.get('custom_cap_words', [])
+            self.custom_replacements = prefs.get('custom_replacements', [])
             self._rebuild_recent_menu()
             self.default_player.set(prefs.get('default_player', 'auto'))
             dvf = prefs.get('default_video_folder', '')
@@ -8355,8 +8920,10 @@ class VideoConverterApp:
             self.crf_preset_frame.grid_remove()
             self.preset_label.grid_remove()
             self.preset_combo.grid_remove()
-            # Show audio controls
+            # Show audio controls (enabled)
             self.audio_frame.grid(row=3)
+            self.audio_codec_combo.configure(state='readonly')
+            self.audio_bitrate_combo.configure(state='readonly')
             self.check_frame.grid(row=4)
             self.add_log("Audio-only transcoding mode selected", 'INFO')
         else:
@@ -8400,13 +8967,12 @@ class VideoConverterApp:
         self.preset_label.grid(row=5)
         self.preset_combo.grid(row=5)
 
-        # Audio and checkboxes position based on mode
-        if show_audio:
-            self.audio_frame.grid(row=6)
-            self.check_frame.grid(row=7)
-        else:
-            self.audio_frame.grid_remove()
-            self.check_frame.grid(row=6)
+        # Audio controls are always visible but disabled when not in 'both' mode
+        self.audio_frame.grid(row=6)
+        self.check_frame.grid(row=7)
+        audio_state = 'readonly' if show_audio else 'disabled'
+        self.audio_codec_combo.configure(state=audio_state)
+        self.audio_bitrate_combo.configure(state=audio_state)
         self._update_two_pass_state()
         self._schedule_estimate_refresh()
 
@@ -8433,6 +8999,7 @@ class VideoConverterApp:
             '.avi':  {'H.264 / AVC', 'MPEG-4', 'Copy (no re-encode)'},
             '.webm': {'VP9', 'AV1', 'Copy (no re-encode)'},
             '.mov':  {'H.265 / HEVC', 'H.264 / AVC', 'ProRes (QuickTime)', 'MPEG-4', 'Copy (no re-encode)'},
+            '.ts':   {'H.265 / HEVC', 'H.264 / AVC', 'MPEG-4', 'Copy (no re-encode)'},
         }
         allowed = CONTAINER_CODEC_COMPAT.get(container)
         if allowed and codec_name not in allowed:
@@ -8593,6 +9160,8 @@ class VideoConverterApp:
                 'external_subs':     file_info.get('external_subs', []),
                 'strip_internal_subs': file_info.get('strip_internal_subs', self.strip_internal_subs.get()),
                 'container':         ov.get('container', self.container_format.get()),
+                'has_closed_captions': file_info.get('has_closed_captions', False),
+                'extract_cc':          file_info.get('extract_cc', False),
             }
 
             transcode_mode = file_settings['transcode_mode']
