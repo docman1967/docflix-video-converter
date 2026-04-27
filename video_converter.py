@@ -9636,6 +9636,7 @@ class VideoConverterApp:
         _tvdb_token = [None]
         _all_shows = {}      # {show_name: {(season, ep): ep_data, ...}}
         _file_items = []     # list of {'path': ..., 'season': N, 'episode': N, 'ext': ...}
+        _rename_history = []  # list of [(old_path, new_path), ...] for undo
 
         # Load API keys and preferences
         _saved_key = getattr(self, '_tvdb_api_key', '')
@@ -9897,9 +9898,23 @@ class VideoConverterApp:
 
         # ── Episode number parser ──
         def _parse_episode_info(filename):
-            """Extract season and episode numbers from a filename."""
+            """Extract season and episode numbers from a filename.
+            Returns (season, episode) for single-episode files, or
+            (season, [ep1, ep2, ...]) for multi-episode files."""
             name = os.path.basename(filename)
-            # S01E01, s1e1, S01E01E02 (multi-episode)
+            # S01E01E02, S01E01-E03, S01E01E02E03 (multi-episode)
+            m = re.search(r'[Ss](\d{1,2})\s*[Ee](\d{1,3})(?:\s*-?\s*[Ee](\d{1,3}))+', name)
+            if m:
+                season = int(m.group(1))
+                # Extract all episode numbers from the full match
+                eps = [int(x) for x in re.findall(r'[Ee](\d{1,3})', m.group(0))]
+                if len(eps) > 1:
+                    # Check for range pattern like S01E01-E03 (fill in gaps)
+                    if len(eps) == 2 and eps[1] > eps[0] + 1:
+                        eps = list(range(eps[0], eps[1] + 1))
+                    return season, eps
+                return season, eps[0]
+            # S01E01, s1e1 (single episode)
             m = re.search(r'[Ss](\d{1,2})\s*[Ee](\d{1,3})', name)
             if m:
                 return int(m.group(1)), int(m.group(2))
@@ -10101,16 +10116,46 @@ class VideoConverterApp:
             e = item.get('episode')
             if s is None or e is None:
                 return None
-            ep_data = show_data.get((s, e))
-            title = ep_data.get('name', '') if ep_data else ''
 
-            name = template.format(
-                show=show_name,
-                season=str(s).zfill(2),
-                episode=str(e).zfill(2),
-                title=title,
-                year=ep_data.get('year', '') if ep_data else '',
-            )
+            # ── Multi-episode support ──
+            if isinstance(e, list) and len(e) > 1:
+                # Build combined episode tag: E01-E02 or E01E02E03
+                first_ep, last_ep = e[0], e[-1]
+                if e == list(range(first_ep, last_ep + 1)):
+                    ep_tag = f"E{str(first_ep).zfill(2)}-E{str(last_ep).zfill(2)}"
+                else:
+                    ep_tag = ''.join(f"E{str(x).zfill(2)}" for x in e)
+                # Collect titles from each episode
+                titles = []
+                year = ''
+                for ep_num in e:
+                    ep_data = show_data.get((s, ep_num))
+                    if ep_data:
+                        t = ep_data.get('name', '')
+                        if t:
+                            titles.append(t)
+                        if not year:
+                            year = ep_data.get('year', '')
+                title = ' & '.join(titles) if titles else ''
+                name = template.format(
+                    show=show_name,
+                    season=str(s).zfill(2),
+                    episode=ep_tag,
+                    title=title,
+                    year=year,
+                )
+            else:
+                # Single episode
+                ep_num = e[0] if isinstance(e, list) else e
+                ep_data = show_data.get((s, ep_num))
+                title = ep_data.get('name', '') if ep_data else ''
+                name = template.format(
+                    show=show_name,
+                    season=str(s).zfill(2),
+                    episode=str(ep_num).zfill(2),
+                    title=title,
+                    year=ep_data.get('year', '') if ep_data else '',
+                )
             ext = item['ext']
             # For subtitle files, preserve language/forced/SDH tags
             sub_tags = ''
@@ -10142,10 +10187,14 @@ class VideoConverterApp:
             # Save preference
             self._tv_rename_provider = provider_var.get()
             self.save_preferences()
-            # Clear loaded shows when switching provider
-            if _all_shows:
-                _all_shows.clear()
-                _file_items_refresh_matches()
+            # Clear loaded shows and re-search with the new provider
+            _all_shows.clear()
+            for item in _file_items:
+                item.pop('matched_show', None)
+            if _file_items:
+                _auto_load_shows()
+            else:
+                _refresh_preview()
 
         def _file_items_refresh_matches():
             """Re-run matching and refresh preview after provider change."""
@@ -10165,7 +10214,7 @@ class VideoConverterApp:
         def _clean_show_name(raw):
             """Strip episode info, quality tags, and release group from a show name."""
             name = re.sub(r'[._\-]', ' ', raw).strip()
-            # Truncate at episode markers
+            # Truncate at episode markers (including multi-episode S01E01E02)
             name = re.sub(r'\s*[Ss]\d{1,2}\s*[Ee]\d.*', '', name)
             name = re.sub(r'\s*\d{1,2}[xX]\d.*', '', name)
             # Truncate at quality/resolution tags
@@ -10501,7 +10550,8 @@ class VideoConverterApp:
             return show_name
 
         def _auto_load_shows():
-            """Detect unique show names from file list and load them all."""
+            """Detect unique show names from file list and load them all
+            in a background thread with progress indication."""
             if not _file_items:
                 _log("No files loaded — add files first", 'WARNING')
                 return
@@ -10535,23 +10585,85 @@ class VideoConverterApp:
                 _refresh_preview()
                 return
 
-            _log(f"Auto-loading {len(to_search)} show(s) from {provider_var.get()}...")
-            win.update_idletasks()
+            total = len(to_search)
+            _log(f"Auto-loading {total} show(s) from {provider_var.get()}...")
 
-            loaded_count = 0
-            for name in sorted(to_search):
-                _log(f"Searching: \"{name}\"...")
-                win.update_idletasks()
-                try:
-                    result = _load_show_by_name(name)
-                    if result:
-                        loaded_count += 1
-                except Exception as e:
-                    _log(f"  Error loading \"{name}\": {e}", 'ERROR')
+            # ── Progress bar ──
+            prog_f = ttk.Frame(main_f)
+            prog_f.grid(row=4, column=0, columnspan=3, sticky='ew',
+                        padx=4, pady=(2, 0))
+            prog_lbl = ttk.Label(prog_f, text="Loading shows...",
+                                 font=('Helvetica', 9))
+            prog_lbl.pack(side='left', padx=(0, 8))
+            prog_bar = ttk.Progressbar(prog_f, maximum=total, mode='determinate')
+            prog_bar.pack(side='left', fill='x', expand=True)
 
-            _log(f"Auto-load complete: {loaded_count}/{len(to_search)} shows loaded",
-                 'SUCCESS')
-            _refresh_preview()
+            _api_cancel = [False]
+
+            def _cancel_load():
+                _api_cancel[0] = True
+                cancel_btn_api.configure(state='disabled')
+
+            cancel_btn_api = ttk.Button(prog_f, text="Cancel",
+                                        command=_cancel_load, width=7)
+            cancel_btn_api.pack(side='right', padx=(4, 0))
+
+            def _worker():
+                loaded_count = 0
+                for i, name in enumerate(sorted(to_search)):
+                    if _api_cancel[0]:
+                        win.after(0, lambda: _log("Auto-load cancelled", 'WARNING'))
+                        break
+                    win.after(0, lambda n=name: _log(f"Searching: \"{n}\"..."))
+                    win.after(0, lambda n=name, idx=i:
+                              (prog_lbl.configure(
+                                  text=f"Loading {idx + 1}/{total}: {n}"),
+                               prog_bar.configure(value=idx)))
+                    try:
+                        # _load_show_by_name may open a picker dialog,
+                        # which needs to run on the main thread
+                        import queue
+                        result_q = queue.Queue()
+
+                        def _do_load(q=name):
+                            try:
+                                r = _load_show_by_name(q)
+                                result_q.put(('ok', r))
+                            except Exception as ex:
+                                result_q.put(('error', ex))
+
+                        win.after(0, _do_load)
+                        # Wait for result (check periodically)
+                        result = None
+                        while True:
+                            try:
+                                status, val = result_q.get(timeout=0.1)
+                                if status == 'ok':
+                                    result = val
+                                else:
+                                    raise val
+                                break
+                            except queue.Empty:
+                                if _api_cancel[0]:
+                                    break
+                                continue
+                        if _api_cancel[0]:
+                            break
+                        if result:
+                            loaded_count += 1
+                    except Exception as e:
+                        win.after(0, lambda n=name, err=e:
+                                  _log(f"  Error loading \"{n}\": {err}", 'ERROR'))
+
+                def _finish(cnt=loaded_count, tot=total):
+                    prog_f.destroy()
+                    _log(f"Auto-load complete: {cnt}/{tot} shows loaded",
+                         'SUCCESS')
+                    _refresh_preview()
+                win.after(0, _finish)
+
+            t = threading.Thread(target=_worker, daemon=True)
+            t.start()
 
         template_var = tk.StringVar(value=_saved_template)
 
@@ -10597,7 +10709,8 @@ class VideoConverterApp:
                 new_name = ''
                 is_movie = (isinstance(_all_shows.get(matched), dict)
                             and _all_shows.get(matched, {}).get('_is_movie'))
-                if matched and (is_movie or (s is not None and e is not None)):
+                has_ep = (s is not None and e is not None)
+                if matched and (is_movie or has_ep):
                     try:
                         new_name = _build_new_name(item, template, matched) or ''
                     except (KeyError, ValueError):
@@ -10610,9 +10723,38 @@ class VideoConverterApp:
                     tree.item(iid, tags=('nomatch',))
 
             tree.tag_configure('nomatch', foreground='#999')
+            # Update undo button state
+            try:
+                undo_btn.configure(
+                    state='normal' if _rename_history else 'disabled')
+            except Exception:
+                pass
 
         # ── Right-click context menu ──
         _tree_ctx = tk.Menu(tree, tearoff=0)
+
+        def _open_containing_folder():
+            """Open the folder containing the selected file."""
+            sel = tree.selection()
+            if not sel:
+                return
+            idx = tree.index(sel[0])
+            if idx < len(_file_items):
+                folder = os.path.dirname(_file_items[idx]['path'])
+                try:
+                    subprocess.Popen(['xdg-open', folder])
+                except Exception:
+                    pass
+
+        def _copy_new_name():
+            """Copy the new filename of the selected file to clipboard."""
+            sel = tree.selection()
+            if not sel:
+                return
+            vals = tree.item(sel[0], 'values')
+            if vals and len(vals) > 1 and vals[1]:
+                win.clipboard_clear()
+                win.clipboard_append(vals[1])
 
         def _on_tree_right_click(event):
             iid = tree.identify_row(event.y)
@@ -10622,8 +10764,25 @@ class VideoConverterApp:
             _tree_ctx.delete(0, 'end')
             sel = tree.selection()
             if sel:
-                # "Remove show" — unload the matched show for the selected file
                 idx = tree.index(sel[0])
+                # ── Per-file actions ──
+                _tree_ctx.add_command(
+                    label="Set Episode...",
+                    command=_set_episode_for_selected)
+                # Copy new name
+                vals = tree.item(sel[0], 'values')
+                if vals and len(vals) > 1 and vals[1]:
+                    _tree_ctx.add_command(
+                        label="Copy New Name",
+                        command=_copy_new_name)
+                _tree_ctx.add_command(
+                    label="Open Folder",
+                    command=_open_containing_folder)
+                _tree_ctx.add_separator()
+                _tree_ctx.add_command(
+                    label=f"Remove Selected ({len(sel)} file{'s' if len(sel) > 1 else ''})",
+                    command=_remove_selected_files)
+                # "Remove show" — unload the matched show for the selected file
                 if idx < len(_file_items):
                     show = _file_items[idx].get('matched_show')
                     if show:
@@ -10748,6 +10907,7 @@ class VideoConverterApp:
             renamed = 0
             skipped = 0
             errors = 0
+            batch_history = []  # [(old_path, new_path), ...]
             for item in _file_items:
                 try:
                     matched = item.get('matched_show')
@@ -10767,11 +10927,15 @@ class VideoConverterApp:
                         skipped += 1
                         continue
                     os.rename(old_path, new_path)
+                    batch_history.append((old_path, new_path))
                     item['path'] = new_path
                     renamed += 1
                 except Exception as e:
                     _log(f"Error renaming: {e}", 'ERROR')
                     errors += 1
+            # Save undo history
+            if batch_history:
+                _rename_history.append(batch_history)
             parts = [f"Renamed {renamed} files"]
             if skipped:
                 parts.append(f"{skipped} skipped (no match)")
@@ -10785,16 +10949,125 @@ class VideoConverterApp:
             else:
                 messagebox.showinfo("Rename Complete", msg, parent=win)
 
+        def _do_undo():
+            """Undo the last rename batch."""
+            if not _rename_history:
+                _log("Nothing to undo", 'WARNING')
+                return
+            batch = _rename_history.pop()
+            undone = 0
+            errors = 0
+            # Reverse in reverse order for safety
+            for old_path, new_path in reversed(batch):
+                try:
+                    if os.path.exists(new_path) and not os.path.exists(old_path):
+                        os.rename(new_path, old_path)
+                        # Update _file_items to reflect the old path
+                        for item in _file_items:
+                            if item['path'] == new_path:
+                                item['path'] = old_path
+                                break
+                        undone += 1
+                    else:
+                        _log(f"Cannot undo: {os.path.basename(new_path)}", 'WARNING')
+                        errors += 1
+                except Exception as e:
+                    _log(f"Undo error: {e}", 'ERROR')
+                    errors += 1
+            msg = f"Undone {undone} rename(s)"
+            if errors:
+                msg += f" ({errors} errors)"
+            _log(msg, 'SUCCESS' if not errors else 'WARNING')
+            _refresh_preview()
+
+        def _set_episode_for_selected():
+            """Open a dialog to manually set season/episode for selected files."""
+            sel = tree.selection()
+            if not sel:
+                return
+            idx = tree.index(sel[0])
+            if idx >= len(_file_items):
+                return
+            item = _file_items[idx]
+
+            dlg = tk.Toplevel(win)
+            dlg.title("Set Episode")
+            dlg.geometry("320x180")
+            dlg.resizable(False, False)
+            dlg.transient(win)
+            dlg.grab_set()
+            self._center_on_main(dlg)
+
+            f = ttk.Frame(dlg, padding=16)
+            f.pack(fill='both', expand=True)
+
+            ttk.Label(f, text=os.path.basename(item['path']),
+                      font=('Helvetica', 9), wraplength=280).grid(
+                          row=0, column=0, columnspan=2, sticky='w', pady=(0, 10))
+
+            cur_s = item.get('season')
+            cur_e = item.get('episode')
+            # For multi-episode, show the first episode
+            if isinstance(cur_e, list):
+                cur_e = cur_e[0] if cur_e else ''
+
+            ttk.Label(f, text="Season:").grid(row=1, column=0, sticky='w', pady=4)
+            s_var = tk.StringVar(value=str(cur_s) if cur_s is not None else '')
+            s_entry = ttk.Entry(f, textvariable=s_var, width=8)
+            s_entry.grid(row=1, column=1, sticky='w', padx=(8, 0), pady=4)
+
+            ttk.Label(f, text="Episode:").grid(row=2, column=0, sticky='w', pady=4)
+            e_var = tk.StringVar(value=str(cur_e) if cur_e is not None else '')
+            e_entry = ttk.Entry(f, textvariable=e_var, width=8)
+            e_entry.grid(row=2, column=1, sticky='w', padx=(8, 0), pady=4)
+
+            def _apply():
+                try:
+                    sv = s_var.get().strip()
+                    ev = e_var.get().strip()
+                    new_s = int(sv) if sv else None
+                    new_e = int(ev) if ev else None
+                except ValueError:
+                    messagebox.showwarning("Invalid", "Enter valid numbers.",
+                                           parent=dlg)
+                    return
+                # Apply to all selected files
+                for iid in sel:
+                    i = tree.index(iid)
+                    if i < len(_file_items):
+                        _file_items[i]['season'] = new_s
+                        _file_items[i]['episode'] = new_e
+                dlg.destroy()
+                _refresh_preview()
+
+            btn_f = ttk.Frame(f)
+            btn_f.grid(row=3, column=0, columnspan=2, sticky='e', pady=(12, 0))
+            ttk.Button(btn_f, text="Apply", command=_apply,
+                       width=8).pack(side='right', padx=(4, 0))
+            ttk.Button(btn_f, text="Cancel", command=dlg.destroy,
+                       width=8).pack(side='right')
+
+            s_entry.focus_set()
+            s_entry.select_range(0, 'end')
+            dlg.wait_window()
+
         rename_btn = ttk.Button(btn_f, text="✏ Rename All", command=_do_rename,
                                 width=12)
         rename_btn.pack(side='left', padx=2)
         _create_tooltip(rename_btn, "Rename all files to their new names")
 
+        undo_btn = ttk.Button(btn_f, text="↩ Undo", command=_do_undo,
+                              width=8, state='disabled')
+        undo_btn.pack(side='left', padx=2)
+        _create_tooltip(undo_btn, "Undo the last rename operation")
+
         def _clear_files():
             _file_items.clear()
             _all_shows.clear()
+            _rename_history.clear()
             tree.delete(*tree.get_children())
             _log("File list cleared")
+            undo_btn.configure(state='disabled')
 
         clear_btn = ttk.Button(btn_f, text="Clear", command=_clear_files, width=8)
         clear_btn.pack(side='left', padx=2)
@@ -10859,6 +11132,12 @@ class VideoConverterApp:
         # ── Edit menu ──
         edit_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Edit", menu=edit_menu)
+        edit_menu.add_command(label="Undo Rename", command=_do_undo,
+                              accelerator="Ctrl+Z")
+        edit_menu.add_separator()
+        edit_menu.add_command(label="Set Episode...",
+                              command=_set_episode_for_selected)
+        edit_menu.add_separator()
         edit_menu.add_command(label="Select All",
                               command=lambda: tree.selection_set(
                                   tree.get_children()),
@@ -11047,6 +11326,8 @@ class VideoConverterApp:
         win.bind('<Control-O>', lambda e: _browse_folder())
         win.bind('<Control-r>', lambda e: _do_rename())
         win.bind('<Control-R>', lambda e: _do_rename())
+        win.bind('<Control-z>', lambda e: _do_undo())
+        win.bind('<Control-Z>', lambda e: _do_undo())
         win.bind('<Control-w>', lambda e: win.destroy())
         win.bind('<Control-W>', lambda e: win.destroy())
         win.bind('<Control-a>', lambda e: tree.selection_set(
