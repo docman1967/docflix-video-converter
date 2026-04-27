@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -3100,6 +3100,37 @@ def _detect_gpu_name(backend_id, backend):
         pass
     return None
 
+
+def _short_gpu_name(raw_name, backend_id):
+    """Extract a concise GPU model name from detection output.
+
+    nvidia-smi returns e.g. 'NVIDIA GeForce RTX 3080' or 'Tesla T4'.
+    lspci returns e.g. 'NVIDIA Corporation GP106 [GeForce GTX 1060 6GB]'
+                   or  'Intel Corporation UHD Graphics 630 (Desktop)'
+                   or  'Advanced Micro Devices, Inc. [AMD/ATI] Navi 14 [Radeon RX 5500]'
+    """
+    name = raw_name.strip()
+
+    # If lspci format with brackets, prefer the bracketed model name
+    bracket = re.search(r'\[([^\]]+)\]\s*$', name)
+    if bracket:
+        name = bracket.group(1)
+
+    # Strip common vendor prefixes
+    name = re.sub(r'^(?:NVIDIA\s+(?:Corporation\s+)?|'
+                  r'Intel\s+(?:Corporation\s+)?|'
+                  r'Advanced Micro Devices,?\s*Inc\.?\s*|'
+                  r'\[?AMD/?ATI\]?\s*)', '', name, flags=re.IGNORECASE).strip()
+
+    # Strip trailing parenthetical like '(Desktop)' or '(rev 01)'
+    name = re.sub(r'\s*\((?:Desktop|Mobile|Server|rev\s+\w+)\)\s*$', '', name, flags=re.IGNORECASE).strip()
+
+    # Strip trailing chip IDs like 'GP106' if a model name follows
+    name = re.sub(r'^[A-Z]{2}\d{3,4}\s+', '', name).strip()
+
+    return name or raw_name.strip()
+
+
 # ============================================================================
 # Video Converter Class
 # ============================================================================
@@ -4190,7 +4221,13 @@ class VideoConverterApp:
         self._encoder_ids['cpu'] = cpu_label
         for bid in self.gpu_backends:
             backend = GPU_BACKENDS[bid]
-            lbl_text = backend['label']
+            gpu_name = self.gpu_backends[bid]
+            if gpu_name and gpu_name is not True:
+                # Extract short GPU model name from detection output
+                short_name = _short_gpu_name(gpu_name, bid)
+                lbl_text = f"{short_name} ({backend['short']})"
+            else:
+                lbl_text = backend['label']
             self._encoder_labels[lbl_text] = bid
             self._encoder_ids[bid] = lbl_text
 
@@ -16832,6 +16869,14 @@ class VideoConverterApp:
 
 def main():
     """Main entry point"""
+    # ── Info flags (print and exit) ──
+    if '--version' in sys.argv or '-v' in sys.argv:
+        print(f"{APP_NAME} v{APP_VERSION}")
+        sys.exit(0)
+    if '--which' in sys.argv:
+        print(os.path.realpath(__file__))
+        sys.exit(0)
+
     global GPU_TEST_MODE
     if '--gpu-test-mode' in sys.argv:
         GPU_TEST_MODE = True
