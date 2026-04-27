@@ -39,7 +39,7 @@ A batch video converter that encodes files to **H.265/HEVC** (and other codecs) 
 - ⌨️ **Keyboard shortcuts** panel
 - 🖥️ **Multi-monitor aware** — launches on the monitor containing the mouse
 - 🗂️ **"Open with" support** — appears in file manager right-click menu for video files
-- 📺 **TV Show Renamer** (Tools → TV Show Renamer) — batch rename video and subtitle files using TVDB episode data; auto-detects show names from filenames; multi-show support with disambiguation dialog; preserves subtitle language/forced/SDH tags; language detection from subtitle content via `langdetect`
+- 📺 **TV Show Renamer** (Tools → TV Show Renamer) — batch rename TV show and movie files using **TVDB or TMDB** metadata; auto-detects show/movie names from filenames; multi-show support with disambiguation dialog (poster thumbnails, synopsis); movie support (`Name (Year).ext`); menu bar with keyboard shortcuts; configurable filename template with presets; preserves subtitle language/forced/SDH tags; language detection from subtitle content via `langdetect`
 
 ### Media Processor (Tools → Media Processor)
 A standalone remux-only post-processing tool for already-encoded files — no re-encoding required (`-c:v copy`).
@@ -241,7 +241,7 @@ Options:
 
 ```
 docflix-video-converter/
-├── video_converter.py    # Desktop GUI application (~16,100 lines, Tkinter)
+├── video_converter.py    # Desktop GUI application (~16,900 lines, Tkinter)
 ├── convert_videos.sh     # Headless CLI batch converter
 ├── run_converter.sh      # Desktop GUI launcher (background + logging)
 ├── install.sh            # Installer / uninstaller

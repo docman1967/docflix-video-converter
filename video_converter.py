@@ -5549,6 +5549,8 @@ class VideoConverterApp:
         editor = tk.Toplevel(self.root)
         editor.title("Subtitle Editor")
         editor.geometry("950x650")
+        editor.transient(self.root)
+        editor.minsize(700, 500)
         editor.resizable(True, True)
         self._center_on_main(editor)
 
@@ -5821,42 +5823,92 @@ class VideoConverterApp:
             tmp_srt.close()
             cmd = ['ffmpeg', '-y', '-i', video_path,
                    '-map', f'0:{stream_index}', '-c:s', 'srt', tmp_srt.name]
-            try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-                if result.returncode != 0:
+
+            # ── Progress dialog during extraction ──
+            prog_dlg = tk.Toplevel(editor)
+            prog_dlg.title("Importing Subtitle")
+            prog_dlg.resizable(False, False)
+            prog_dlg.transient(editor)
+            prog_dlg.overrideredirect(False)
+
+            prog_f = ttk.Frame(prog_dlg, padding=20)
+            prog_f.pack(fill='both', expand=True)
+            ttk.Label(prog_f,
+                      text=f"Importing subtitle stream #{stream_index} "
+                           f"from {os.path.basename(video_path)}...",
+                      wraplength=350).pack(pady=(0, 10))
+            prog_bar = ttk.Progressbar(prog_f, mode='indeterminate', length=300)
+            prog_bar.pack(pady=(0, 5))
+            prog_bar.start(15)
+
+            self._center_on_main(prog_dlg)
+            prog_dlg.grab_set()
+            prog_dlg.protocol('WM_DELETE_WINDOW', lambda: None)  # prevent closing
+
+            extract_result = [None]  # (returncode, stderr) or Exception
+
+            def _run_extract():
+                try:
+                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                    extract_result[0] = ('ok', r.returncode, r.stderr)
+                except Exception as e:
+                    extract_result[0] = ('error', e)
+
+            t = threading.Thread(target=_run_extract, daemon=True)
+            t.start()
+
+            def _check_extract():
+                if t.is_alive():
+                    editor.after(50, _check_extract)
+                    return
+                prog_bar.stop()
+                prog_dlg.grab_release()
+                prog_dlg.destroy()
+
+                res = extract_result[0]
+                if res is None:
+                    os.unlink(tmp_srt.name)
+                    return
+                if res[0] == 'error':
+                    messagebox.showerror("Error",
+                        f"Extract error:\n{res[1]}", parent=editor)
+                    os.unlink(tmp_srt.name)
+                    return
+                _, returncode, stderr = res
+                if returncode != 0:
                     messagebox.showerror("Error",
                         f"Failed to extract subtitle stream #{stream_index}:\n"
-                        f"{result.stderr[-300:]}",
+                        f"{stderr[-300:]}",
                         parent=editor)
                     os.unlink(tmp_srt.name)
                     return
-            except Exception as e:
-                messagebox.showerror("Error", f"Extract error:\n{e}", parent=editor)
-                os.unlink(tmp_srt.name)
-                return
 
-            with open(tmp_srt.name, 'r', encoding='utf-8', errors='replace') as f:
-                srt_text = f.read()
+                with open(tmp_srt.name, 'r', encoding='utf-8',
+                          errors='replace') as f:
+                    srt_text = f.read()
 
-            # Build title
-            lang = chosen['language'] if chosen['language'] != 'und' else '?'
-            title_str = (f"Subtitle Editor — Stream #{stream_index} ({lang}) — "
-                         f"{os.path.basename(video_path)}")
+                # Build title
+                lang = chosen['language'] if chosen['language'] != 'und' else '?'
+                title_str = (f"Subtitle Editor — Stream #{stream_index} ({lang}) — "
+                             f"{os.path.basename(video_path)}")
 
-            if _load_cues_into_editor(srt_text, title_str, tmp_srt.name):
-                # Store video source info for re-muxing on save
-                video_source[0] = {
-                    'path': video_path,
-                    'stream_index': stream_index,
-                    'temp_srt': tmp_srt.name,
-                    'streams': streams,
-                    'stream_info': chosen,
-                }
-                self.add_log(f"Opened video subtitle: stream #{stream_index} ({lang}) "
-                             f"from {os.path.basename(video_path)} "
-                             f"({len(cues)} entries)", 'INFO')
-            else:
-                os.unlink(tmp_srt.name)
+                if _load_cues_into_editor(srt_text, title_str, tmp_srt.name):
+                    # Store video source info for re-muxing on save
+                    video_source[0] = {
+                        'path': video_path,
+                        'stream_index': stream_index,
+                        'temp_srt': tmp_srt.name,
+                        'streams': streams,
+                        'stream_info': chosen,
+                    }
+                    self.add_log(
+                        f"Opened video subtitle: stream #{stream_index} ({lang}) "
+                        f"from {os.path.basename(video_path)} "
+                        f"({len(cues)} entries)", 'INFO')
+                else:
+                    os.unlink(tmp_srt.name)
+
+            editor.after(50, _check_extract)
 
         def do_open_file():
             path = filedialog.askopenfilename(
@@ -9519,10 +9571,13 @@ class VideoConverterApp:
         import json as _json
 
         TVDB_BASE = 'https://api4.thetvdb.com/v4'
+        TMDB_BASE = 'https://api.themoviedb.org/3'
+        TMDB_IMG_BASE = 'https://image.tmdb.org/t/p'
 
         win = tk.Toplevel(self.root)
         win.title("📺 TV Show Renamer")
         win.geometry("960x650")
+        win.transient(self.root)
         win.minsize(800, 550)
         win.resizable(True, True)
         self._center_on_main(win)
@@ -9532,8 +9587,10 @@ class VideoConverterApp:
         _all_shows = {}      # {show_name: {(season, ep): ep_data, ...}}
         _file_items = []     # list of {'path': ..., 'season': N, 'episode': N, 'ext': ...}
 
-        # Load TVDB API key from preferences
+        # Load API keys and preferences
         _saved_key = getattr(self, '_tvdb_api_key', '')
+        _saved_tmdb_key = getattr(self, '_tmdb_api_key', '')
+        _saved_provider = getattr(self, '_tv_rename_provider', 'TVDB')
         _saved_template = getattr(self, '_tv_rename_template',
                                   '{show} S{season}E{episode} {title}')
 
@@ -9580,21 +9637,23 @@ class VideoConverterApp:
                 return False
 
         def _tvdb_search(query):
-            """Search TVDB for TV series."""
+            """Search TVDB for TV series and movies."""
             if not _tvdb_token[0]:
                 _log("No token — logging in...")
                 if not _tvdb_login():
                     _log("Login failed — cannot search", 'ERROR')
                     return []
             encoded_q = urllib.parse.quote(query)
-            url = f'/search?query={encoded_q}&type=series'
-            _log(f"Search URL: {TVDB_BASE}{url}")
+            # Search without type filter to get both series and movies
+            url = f'/search?query={encoded_q}'
             result = _tvdb_request('GET', url, token=_tvdb_token[0])
             if result:
-                _log(f"Search response status: {result.get('status')}")
                 if result.get('status') == 'success':
                     data = result.get('data', [])
-                    _log(f"Search returned {len(data)} results")
+                    # Filter to series and movies only
+                    data = [r for r in data
+                            if r.get('type') in ('series', 'movie', None)]
+                    _log(f"TVDB search returned {len(data)} results")
                     return data
                 else:
                     _log(f"Search error: {result.get('message', 'unknown')}", 'ERROR')
@@ -9631,6 +9690,160 @@ class VideoConverterApp:
                 else:
                     break
             return all_eps
+
+        # ── TMDB API helpers ──
+        def _tmdb_request(path):
+            """Make a TMDB v3 API GET request."""
+            key = tmdb_key_var.get().strip()
+            if not key:
+                return None
+            sep = '&' if '?' in path else '?'
+            url = f'{TMDB_BASE}{path}{sep}api_key={key}'
+            req = urllib.request.Request(url, headers={
+                'Accept': 'application/json',
+                'User-Agent': 'DocflixVideoConverter/1.9'})
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    return _json.loads(resp.read().decode())
+            except urllib.error.HTTPError as e:
+                try:
+                    err_body = e.read().decode()
+                    return _json.loads(err_body)
+                except Exception:
+                    return {'status_code': e.code, 'status_message': str(e)}
+            except Exception as e:
+                return {'status_code': 0, 'status_message': str(e)}
+
+        def _tmdb_search(query):
+            """Search TMDB for TV series and movies. Returns results
+            normalized to the same dict format as TVDB for the
+            disambiguation dialog."""
+            encoded_q = urllib.parse.quote(query)
+            normalized = []
+            seen_ids = set()
+
+            # Search TV series
+            tv_result = _tmdb_request(f'/search/tv?query={encoded_q}')
+            if tv_result and 'results' in tv_result:
+                for r in tv_result['results']:
+                    rid = ('tv', r.get('id', ''))
+                    if rid in seen_ids:
+                        continue
+                    seen_ids.add(rid)
+                    year = ''
+                    fad = r.get('first_air_date', '')
+                    if fad and len(fad) >= 4:
+                        year = fad[:4]
+                    countries = r.get('origin_country', [])
+                    country = countries[0] if countries else ''
+                    poster = r.get('poster_path', '')
+                    normalized.append({
+                        'name': r.get('name', ''),
+                        'year': year,
+                        'country': country,
+                        'network': 'TV Series',
+                        'overview': r.get('overview', ''),
+                        'thumbnail': (f'{TMDB_IMG_BASE}/w92{poster}'
+                                      if poster else ''),
+                        'image_url': (f'{TMDB_IMG_BASE}/w300{poster}'
+                                      if poster else ''),
+                        'id': r.get('id', ''),
+                        'tvdb_id': '',
+                        '_provider': 'tmdb',
+                        '_media_type': 'tv',
+                    })
+
+            # Search movies
+            movie_result = _tmdb_request(f'/search/movie?query={encoded_q}')
+            if movie_result and 'results' in movie_result:
+                for r in movie_result['results']:
+                    rid = ('movie', r.get('id', ''))
+                    if rid in seen_ids:
+                        continue
+                    seen_ids.add(rid)
+                    year = ''
+                    rd = r.get('release_date', '')
+                    if rd and len(rd) >= 4:
+                        year = rd[:4]
+                    poster = r.get('poster_path', '')
+                    normalized.append({
+                        'name': r.get('title', ''),
+                        'year': year,
+                        'country': '',
+                        'network': 'Movie',
+                        'overview': r.get('overview', ''),
+                        'thumbnail': (f'{TMDB_IMG_BASE}/w92{poster}'
+                                      if poster else ''),
+                        'image_url': (f'{TMDB_IMG_BASE}/w300{poster}'
+                                      if poster else ''),
+                        'id': r.get('id', ''),
+                        'tvdb_id': '',
+                        '_provider': 'tmdb',
+                        '_media_type': 'movie',
+                    })
+
+            if not normalized:
+                _log("TMDB search: no results", 'WARNING')
+            else:
+                _log(f"TMDB search returned {len(normalized)} results")
+            return normalized
+
+        def _tmdb_get_episodes(series_id):
+            """Get all episodes for a TMDB series. Fetches show details first
+            to get the number of seasons, then fetches each season.
+            Returns episodes normalized to TVDB episode dict format."""
+            # Get show details for season count
+            details = _tmdb_request(f'/tv/{series_id}')
+            if not details or 'number_of_seasons' not in details:
+                msg = (details.get('status_message', 'unknown')
+                       if details else 'No response')
+                _log(f"TMDB show details error: {msg}", 'ERROR')
+                return []
+            num_seasons = details['number_of_seasons']
+            all_eps = []
+            for sn in range(1, num_seasons + 1):
+                season_data = _tmdb_request(f'/tv/{series_id}/season/{sn}')
+                if not season_data or 'episodes' not in season_data:
+                    _log(f"  Season {sn}: no data")
+                    continue
+                for ep in season_data['episodes']:
+                    all_eps.append({
+                        'seasonNumber': ep.get('season_number', sn),
+                        'number': ep.get('episode_number'),
+                        'name': ep.get('name', ''),
+                        'year': (ep.get('air_date', '')[:4]
+                                 if ep.get('air_date') else ''),
+                    })
+                _log(f"  Season {sn}: {len(season_data['episodes'])} episodes")
+            return all_eps
+
+        # ── Provider-agnostic search & episode fetch ──
+        def _provider_search(query):
+            """Search the active provider for a TV series."""
+            prov = provider_var.get()
+            if prov == 'TMDB':
+                return _tmdb_search(query)
+            else:
+                return _tvdb_search(query)
+
+        def _provider_get_episodes(series_id, provider=None):
+            """Fetch episodes from the active (or specified) provider."""
+            prov = provider or provider_var.get()
+            if prov == 'TMDB':
+                return _tmdb_get_episodes(series_id)
+            else:
+                return _tvdb_get_episodes(series_id)
+
+        def _provider_get_series_id(result):
+            """Extract the series ID from a search result dict."""
+            prov = result.get('_provider', provider_var.get().lower())
+            if prov == 'tmdb':
+                return result.get('id', '')
+            else:
+                sid = result.get('tvdb_id', result.get('id', ''))
+                if isinstance(sid, str) and sid.startswith('series-'):
+                    sid = sid[7:]
+                return sid
 
         # ── Episode number parser ──
         def _parse_episode_info(filename):
@@ -9818,12 +10031,27 @@ class VideoConverterApp:
 
         def _build_new_name(item, template, show_name):
             """Build a new filename from template and episode data."""
+            if not show_name:
+                return None
+            show_data = _all_shows.get(show_name, {})
+
+            # ── Movie mode — no season/episode needed ──
+            if isinstance(show_data, dict) and show_data.get('_is_movie'):
+                year = show_data.get('_year', '')
+                # For movies, use show name + year as filename
+                name = f"{show_name} ({year})" if year else show_name
+                ext = item['ext']
+                sub_tags = ''
+                if ext in SUBTITLE_EXTENSIONS:
+                    sub_tags = _detect_sub_tags(item['path'])
+                return _sanitize_filename(name) + sub_tags + ext
+
+            # ── TV series mode — need season/episode ──
             s = item.get('season')
             e = item.get('episode')
-            if s is None or e is None or not show_name:
+            if s is None or e is None:
                 return None
-            show_eps = _all_shows.get(show_name, {})
-            ep_data = show_eps.get((s, e))
+            ep_data = show_data.get((s, e))
             title = ep_data.get('name', '') if ep_data else ''
 
             name = template.format(
@@ -9855,8 +10083,32 @@ class VideoConverterApp:
         main_f.pack(fill='both', expand=True)
         main_f.columnconfigure(1, weight=1)
 
-        # ── TVDB API key (hardcoded) ──
+        # ── API keys ──
         api_key_var = tk.StringVar(value='8903a14b-8b71-436e-a48a-d553884f2991')
+        tmdb_key_var = tk.StringVar(value='9375eb1401938b7615afd69988611a74')
+        provider_var = tk.StringVar(value=_saved_provider)
+
+        def _on_provider_change(*_args):
+            # Save preference
+            self._tv_rename_provider = provider_var.get()
+            self.save_preferences()
+            # Clear loaded shows when switching provider
+            if _all_shows:
+                _all_shows.clear()
+                _file_items_refresh_matches()
+
+        def _file_items_refresh_matches():
+            """Re-run matching and refresh preview after provider change."""
+            for item in _file_items:
+                item.pop('matched_show', None)
+            _refresh_preview()
+
+        provider_var.trace_add('write', _on_provider_change)
+
+        # Save TMDB key on change
+        def _save_tmdb_key(*_args):
+            self._tmdb_api_key = tmdb_key_var.get().strip()
+            self.save_preferences()
 
         # ── Row 0: Loaded Shows ──
 
@@ -9871,6 +10123,8 @@ class VideoConverterApp:
             # Truncate at common release tags
             name = re.sub(r'\s*(?:WEB|HDTV|BluRay|BDRip|DVDRip|REMUX|PROPER).*',
                           '', name, flags=re.IGNORECASE)
+            # Strip trailing year (e.g. "Rise Of The Conqueror 2026")
+            name = re.sub(r'\s+(?:19|20)\d{2}\s*$', '', name)
             return name.strip()
 
         def _remove_show_for_selected():
@@ -10116,14 +10370,15 @@ class VideoConverterApp:
             return chosen[0]
 
         def _load_show_by_name(query):
-            """Search TVDB for a show name and auto-load the best match.
-            Prompts the user if multiple shows share the same name.
+            """Search the active provider for a show name and auto-load the
+            best match. Prompts the user if multiple shows share the same name.
             Returns the loaded show name, or None on failure."""
             if not query:
                 return None
-            results = _tvdb_search(query)
+            prov = provider_var.get()
+            results = _provider_search(query)
             if not results:
-                _log(f"  No TVDB results for \"{query}\"", 'WARNING')
+                _log(f"  No {prov} results for \"{query}\"", 'WARNING')
                 return None
 
             # Check if there are multiple results with the same/similar name
@@ -10161,11 +10416,21 @@ class VideoConverterApp:
                 _log(f"  \"{show_name}\" already loaded")
                 return show_name
 
-            series_id = best.get('tvdb_id', best.get('id', ''))
-            if isinstance(series_id, str) and series_id.startswith('series-'):
-                series_id = series_id[7:]
+            series_id = _provider_get_series_id(best)
+            media_type = best.get('_media_type', best.get('type', 'series'))
 
-            eps = _tvdb_get_episodes(series_id)
+            if media_type == 'movie':
+                # Movies have no episodes — store a single entry
+                year = best.get('year', '')
+                _all_shows[show_name] = {
+                    '_is_movie': True,
+                    '_year': year,
+                    '_name': show_name,
+                }
+                _log(f"  Loaded movie \"{show_name}\" ({year})")
+                return show_name
+
+            eps = _provider_get_episodes(series_id)
             if not eps:
                 _log(f"  No episodes found for \"{show_name}\"", 'WARNING')
                 return None
@@ -10220,7 +10485,7 @@ class VideoConverterApp:
                 _refresh_preview()
                 return
 
-            _log(f"Auto-loading {len(to_search)} show(s) from TVDB...")
+            _log(f"Auto-loading {len(to_search)} show(s) from {provider_var.get()}...")
             win.update_idletasks()
 
             loaded_count = 0
@@ -10238,20 +10503,7 @@ class VideoConverterApp:
                  'SUCCESS')
             _refresh_preview()
 
-        # ── Row 0: Filename template ──
-        ttk.Label(main_f, text="Template:").grid(
-            row=0, column=0, sticky='w', padx=4, pady=2)
-        template_f = ttk.Frame(main_f)
-        template_f.grid(row=0, column=1, columnspan=2, sticky='ew', padx=4, pady=2)
         template_var = tk.StringVar(value=_saved_template)
-        template_entry = ttk.Entry(template_f, textvariable=template_var)
-        template_entry.pack(side='left', fill='x', expand=True)
-        _create_tooltip(template_entry,
-                        "Variables: {show} {season} {episode} {title} {year}")
-        ttk.Label(template_f,
-                  text="{show} {season} {episode} {title} {year}",
-                  foreground='gray', font=('Helvetica', 8)).pack(
-                      side='left', padx=8)
 
         # Save template on change
         def _on_template_change(*_):
@@ -10293,7 +10545,9 @@ class VideoConverterApp:
                 item['matched_show'] = matched
 
                 new_name = ''
-                if matched and s is not None and e is not None:
+                is_movie = (isinstance(_all_shows.get(matched), dict)
+                            and _all_shows.get(matched, {}).get('_is_movie'))
+                if matched and (is_movie or (s is not None and e is not None)):
                     try:
                         new_name = _build_new_name(item, template, matched) or ''
                     except (KeyError, ValueError):
@@ -10383,8 +10637,15 @@ class VideoConverterApp:
             _s = sum(1 for i in _file_items if i['ext'] in SUBTITLE_EXTENSIONS)
             _log(f"Added {added} files ({_v} video, {_s} subtitle)")
             # Auto-load any new shows detected from the added files
-            if added > 0 and api_key_var.get().strip():
+            has_key = (api_key_var.get().strip()
+                       if provider_var.get() == 'TVDB'
+                       else tmdb_key_var.get().strip())
+            if added > 0 and has_key:
                 _auto_load_shows()
+            elif added > 0 and provider_var.get() == 'TMDB' and not tmdb_key_var.get().strip():
+                _log("TMDB selected but no API key entered. "
+                     "Get a free key at themoviedb.org", 'WARNING')
+                _refresh_preview()
             else:
                 _refresh_preview()
 
@@ -10497,23 +10758,10 @@ class VideoConverterApp:
             if paths:
                 _add_paths(list(paths))
 
-        browse_btn = ttk.Button(btn_f, text="Add Files...", command=_browse_files,
-                                width=10)
-        browse_btn.pack(side='left', padx=2)
-        _create_tooltip(browse_btn, "Browse for video files to add")
-
         def _browse_folder():
             path = filedialog.askdirectory(parent=win, title="Select Folder")
             if path:
                 _add_paths([path])
-
-        folder_btn = ttk.Button(btn_f, text="Add Folder...", command=_browse_folder,
-                                width=10)
-        folder_btn.pack(side='left', padx=2)
-        _create_tooltip(folder_btn, "Browse for a folder of video files")
-
-        ttk.Button(btn_f, text="Close", command=win.destroy,
-                   width=6).pack(side='right', padx=2)
 
         # ── Row 3: Log ──
         log_f = ttk.LabelFrame(main_f, text="Log", padding=4)
@@ -10534,8 +10782,229 @@ class VideoConverterApp:
         clear_log_btn = ttk.Button(log_f, text="Clear Log", command=_clear_log, width=8)
         clear_log_btn.pack(side='bottom', anchor='e', pady=(4, 0))
 
-        _log("TV Show Renamer ready — drag and drop video files or folders")
-        _log("Add files and shows auto-load from TVDB")
+        # ══════════════════════════════════════════════════════════════
+        # Menu Bar
+        # ══════════════════════════════════════════════════════════════
+
+        menubar = tk.Menu(win)
+        win.configure(menu=menubar)
+
+        # ── File menu ──
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="Add Files...", command=_browse_files,
+                              accelerator="Ctrl+O")
+        file_menu.add_command(label="Add Folder...", command=_browse_folder,
+                              accelerator="Ctrl+Shift+O")
+        file_menu.add_separator()
+        file_menu.add_command(label="Rename All", command=_do_rename,
+                              accelerator="Ctrl+R")
+        file_menu.add_separator()
+        file_menu.add_command(label="Clear All", command=_clear_files)
+        file_menu.add_command(label="Clear Log", command=_clear_log)
+        file_menu.add_separator()
+        file_menu.add_command(label="Close", command=win.destroy,
+                              accelerator="Ctrl+W")
+
+        # ── Edit menu ──
+        edit_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Edit", menu=edit_menu)
+        edit_menu.add_command(label="Select All",
+                              command=lambda: tree.selection_set(
+                                  tree.get_children()),
+                              accelerator="Ctrl+A")
+        edit_menu.add_command(label="Remove Selected",
+                              command=_remove_selected_files,
+                              accelerator="Delete")
+
+        # ── Settings menu ──
+        settings_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Settings", menu=settings_menu)
+
+        # Provider submenu
+        provider_menu = tk.Menu(settings_menu, tearoff=0)
+        settings_menu.add_cascade(label="Provider", menu=provider_menu)
+        provider_menu.add_radiobutton(label="TVDB", variable=provider_var,
+                                       value='TVDB')
+        provider_menu.add_radiobutton(label="TMDB", variable=provider_var,
+                                       value='TMDB')
+
+        # Template dialog
+        def _open_template_settings():
+            dlg = tk.Toplevel(win)
+            dlg.title("Filename Template")
+            dlg.geometry("520x420")
+            dlg.minsize(450, 380)
+            dlg.resizable(True, True)
+            dlg.transient(win)
+            dlg.grab_set()
+            self._center_on_main(dlg)
+
+            f = ttk.Frame(dlg, padding=20)
+            f.pack(fill='both', expand=True)
+
+            ttk.Label(f, text="Filename template for TV episodes:",
+                      font=('Helvetica', 11)).grid(
+                          row=0, column=0, columnspan=2, sticky='w', pady=(0, 10))
+
+            ttk.Label(f, text="Template:").grid(
+                row=1, column=0, sticky='w', padx=(0, 8))
+            t_entry = ttk.Entry(f, textvariable=template_var, width=50,
+                                font=('Helvetica', 10))
+            t_entry.grid(row=1, column=1, sticky='ew')
+            f.columnconfigure(1, weight=1)
+
+            ttk.Label(f, text="Available variables:",
+                      font=('Helvetica', 10, 'bold')).grid(
+                          row=2, column=0, columnspan=2, sticky='w',
+                          pady=(16, 6))
+
+            vars_text = (
+                "{show}       — Show name\n"
+                "{season}     — Season number (zero-padded)\n"
+                "{episode}    — Episode number (zero-padded)\n"
+                "{title}      — Episode title\n"
+                "{year}       — Air year"
+            )
+            ttk.Label(f, text=vars_text, font=('Courier', 10),
+                      justify='left').grid(
+                          row=3, column=0, columnspan=2, sticky='w',
+                          padx=(15, 0))
+
+            # Preset templates
+            ttk.Label(f, text="Presets:",
+                      font=('Helvetica', 9, 'bold')).grid(
+                          row=4, column=0, columnspan=2, sticky='w',
+                          pady=(12, 4))
+
+            presets = [
+                ('{show} S{season}E{episode} {title}',
+                 'Show S01E01 Title'),
+                ('{show} - S{season}E{episode} - {title}',
+                 'Show - S01E01 - Title'),
+                ('{show} {season}x{episode} {title}',
+                 'Show 01x01 Title'),
+                ('{show} - {season}x{episode} - {title}',
+                 'Show - 01x01 - Title'),
+            ]
+            for i, (tmpl, desc) in enumerate(presets):
+                def _set(t=tmpl):
+                    template_var.set(t)
+                ttk.Button(f, text=desc, command=_set, width=30).grid(
+                    row=5 + i, column=0, columnspan=2, sticky='w',
+                    padx=(10, 0), pady=1)
+
+            ttk.Button(f, text="Close", command=dlg.destroy,
+                       width=8).grid(row=5 + len(presets), column=1,
+                                     sticky='e', pady=(12, 0))
+
+            dlg.wait_window()
+
+        settings_menu.add_command(label="Filename Template...",
+                                  command=_open_template_settings)
+
+        # TMDB Key dialog
+        def _open_api_key_settings():
+            dlg = tk.Toplevel(win)
+            dlg.title("API Keys")
+            dlg.geometry("520x320")
+            dlg.minsize(450, 280)
+            dlg.resizable(True, True)
+            dlg.transient(win)
+            dlg.grab_set()
+            self._center_on_main(dlg)
+
+            f = ttk.Frame(dlg, padding=20)
+            f.pack(fill='both', expand=True)
+            f.columnconfigure(1, weight=1)
+
+            # ── TVDB ──
+            ttk.Label(f, text="TVDB API Key:",
+                      font=('Helvetica', 10, 'bold')).grid(
+                          row=0, column=0, columnspan=2, sticky='w',
+                          pady=(0, 4))
+            tvdb_entry = ttk.Entry(f, textvariable=api_key_var, width=45)
+            tvdb_entry.grid(row=1, column=0, columnspan=2, sticky='ew',
+                            pady=(0, 2))
+
+            tvdb_link = ttk.Label(
+                f, text="Get a free key at thetvdb.com/dashboard/account/apikey",
+                foreground='#3a6ea5', font=('Helvetica', 9, 'underline'),
+                cursor='hand2')
+            tvdb_link.grid(row=2, column=0, columnspan=2, sticky='w',
+                           pady=(0, 16))
+            tvdb_link.bind('<Button-1>', lambda e: subprocess.Popen(
+                ['xdg-open', 'https://thetvdb.com/dashboard/account/apikey']))
+
+            # ── TMDB ──
+            ttk.Label(f, text="TMDB API Key (v3):",
+                      font=('Helvetica', 10, 'bold')).grid(
+                          row=3, column=0, columnspan=2, sticky='w',
+                          pady=(0, 4))
+            tmdb_entry = ttk.Entry(f, textvariable=tmdb_key_var, width=45)
+            tmdb_entry.grid(row=4, column=0, columnspan=2, sticky='ew',
+                            pady=(0, 2))
+
+            tmdb_link = ttk.Label(
+                f, text="Get a free key at themoviedb.org/settings/api",
+                foreground='#3a6ea5', font=('Helvetica', 9, 'underline'),
+                cursor='hand2')
+            tmdb_link.grid(row=5, column=0, columnspan=2, sticky='w',
+                           pady=(0, 16))
+            tmdb_link.bind('<Button-1>', lambda e: subprocess.Popen(
+                ['xdg-open', 'https://www.themoviedb.org/settings/api']))
+
+            def _save_and_close():
+                self._tvdb_api_key = api_key_var.get().strip()
+                self._tmdb_api_key = tmdb_key_var.get().strip()
+                self.save_preferences()
+                _log("API keys saved")
+                dlg.destroy()
+
+            btn_f = ttk.Frame(f)
+            btn_f.grid(row=6, column=0, columnspan=2, sticky='e',
+                       pady=(8, 0))
+            ttk.Button(btn_f, text="Save", command=_save_and_close,
+                       width=8).pack(side='right', padx=(4, 0))
+            ttk.Button(btn_f, text="Cancel", command=dlg.destroy,
+                       width=8).pack(side='right')
+
+            dlg.wait_window()
+
+        settings_menu.add_command(label="API Keys...",
+                                  command=_open_api_key_settings)
+
+        # ── Help menu ──
+        help_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Help", menu=help_menu)
+
+        def _show_about():
+            messagebox.showinfo("About TV Show Renamer",
+                f"TV Show Renamer\n"
+                f"Part of {APP_NAME} v{APP_VERSION}\n\n"
+                f"Rename video and subtitle files using\n"
+                f"episode data from TVDB or TMDB.\n\n"
+                f"Drag and drop files or folders to begin.",
+                parent=win)
+
+        help_menu.add_command(label="Template Variables...",
+                              command=_open_template_settings)
+        help_menu.add_separator()
+        help_menu.add_command(label="About...", command=_show_about)
+
+        # ── Keyboard shortcuts ──
+        win.bind('<Control-o>', lambda e: _browse_files())
+        win.bind('<Control-O>', lambda e: _browse_folder())
+        win.bind('<Control-r>', lambda e: _do_rename())
+        win.bind('<Control-R>', lambda e: _do_rename())
+        win.bind('<Control-w>', lambda e: win.destroy())
+        win.bind('<Control-W>', lambda e: win.destroy())
+        win.bind('<Control-a>', lambda e: tree.selection_set(
+            tree.get_children()))
+        win.bind('<Delete>', lambda e: _remove_selected_files())
+
+        _log(f"TV Show Renamer ready — provider: {provider_var.get()}")
+        _log("Drag and drop video files or folders to begin")
 
     def open_batch_filter(self):
         """Open a batch filter window to apply filters to multiple subtitle files at once."""
@@ -14312,6 +14781,8 @@ class VideoConverterApp:
             'custom_replacements':   self.custom_replacements,
             'custom_spell_words':    self.custom_spell_words,
             'tvdb_api_key':          getattr(self, '_tvdb_api_key', ''),
+            'tmdb_api_key':          getattr(self, '_tmdb_api_key', ''),
+            'tv_rename_provider':    getattr(self, '_tv_rename_provider', 'TVDB'),
             'tv_rename_template':    getattr(self, '_tv_rename_template', '{show} S{season}E{episode} {title}'),
         }
         try:
@@ -14369,6 +14840,8 @@ class VideoConverterApp:
             self.custom_spell_words = prefs.get('custom_spell_words', [])
             self.custom_replacements = prefs.get('custom_replacements', [])
             self._tvdb_api_key = prefs.get('tvdb_api_key', '')
+            self._tmdb_api_key = prefs.get('tmdb_api_key', '')
+            self._tv_rename_provider = prefs.get('tv_rename_provider', 'TVDB')
             self._tv_rename_template = prefs.get('tv_rename_template',
                                                   '{show} S{season}E{episode} {title}')
             self._rebuild_recent_menu()
