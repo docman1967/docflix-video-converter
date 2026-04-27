@@ -17,7 +17,14 @@ Requirements:
 
 Usage:
     python video_converter.py
+    python video_converter.py --gpu-test-mode   # skip GPU test encodes (detection only)
 """
+
+# ── GPU Test Mode ──
+# When True, GPU detection skips the test encode (Tier 2) and relies only on
+# ffmpeg encoder availability (Tier 1) + lspci identification (Tier 3).
+# Activated via --gpu-test-mode command-line flag.
+GPU_TEST_MODE = False
 
 import os
 import sys
@@ -3038,19 +3045,24 @@ def detect_gpu_backends():
     for bid, backend in GPU_BACKENDS.items():
         # Check if the key encoder(s) are present in ffmpeg output
         if any(enc in encoder_output for enc in backend['detect_encoders']):
-            # Verify the encoder actually works with a quick test
-            method = _verify_gpu_encoder(bid, backend)
-            if method:
-                # If QSV works via VAAPI backend, update hwaccel flags
-                if bid == 'qsv' and method == 'vaapi_backend':
-                    backend['hwaccel'] = [
-                        '-init_hw_device', 'vaapi=va:/dev/dri/renderD128',
-                        '-init_hw_device', 'qsv=qsv@va',
-                        '-hwaccel', 'qsv',
-                        '-hwaccel_output_format', 'qsv',
-                    ]
+            if GPU_TEST_MODE:
+                # Skip test encode — accept encoder as available based on ffmpeg listing alone
                 gpu_name = _detect_gpu_name(bid, backend)
                 available[bid] = gpu_name or True
+            else:
+                # Verify the encoder actually works with a quick test
+                method = _verify_gpu_encoder(bid, backend)
+                if method:
+                    # If QSV works via VAAPI backend, update hwaccel flags
+                    if bid == 'qsv' and method == 'vaapi_backend':
+                        backend['hwaccel'] = [
+                            '-init_hw_device', 'vaapi=va:/dev/dri/renderD128',
+                            '-init_hw_device', 'qsv=qsv@va',
+                            '-hwaccel', 'qsv',
+                            '-hwaccel_output_format', 'qsv',
+                        ]
+                    gpu_name = _detect_gpu_name(bid, backend)
+                    available[bid] = gpu_name or True
     return available
 
 
@@ -16820,6 +16832,12 @@ class VideoConverterApp:
 
 def main():
     """Main entry point"""
+    global GPU_TEST_MODE
+    if '--gpu-test-mode' in sys.argv:
+        GPU_TEST_MODE = True
+        sys.argv.remove('--gpu-test-mode')
+        print("*** GPU TEST MODE ENABLED — skipping GPU test encodes, detection only ***")
+
     root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
 
     # Hide window until fully built and positioned — prevents flicker/wrong-monitor flash
