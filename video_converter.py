@@ -3111,7 +3111,11 @@ def _short_gpu_name(raw_name, backend_id):
     """
     name = raw_name.strip()
 
-    # If lspci format with brackets, prefer the bracketed model name
+    # Strip trailing parenthetical like '(rev 01)' FIRST so bracket extraction works
+    name = re.sub(r'\s*\((?:Desktop|Mobile|Server|rev\s+\w+)\)\s*$', '', name, flags=re.IGNORECASE).strip()
+
+    # If lspci format with brackets, prefer the LAST bracketed model name
+    # (skips vendor brackets like [AMD/ATI] and grabs [GeForce RTX 4090])
     bracket = re.search(r'\[([^\]]+)\]\s*$', name)
     if bracket:
         name = bracket.group(1)
@@ -3121,9 +3125,6 @@ def _short_gpu_name(raw_name, backend_id):
                   r'Intel\s+(?:Corporation\s+)?|'
                   r'Advanced Micro Devices,?\s*Inc\.?\s*|'
                   r'\[?AMD/?ATI\]?\s*)', '', name, flags=re.IGNORECASE).strip()
-
-    # Strip trailing parenthetical like '(Desktop)' or '(rev 01)'
-    name = re.sub(r'\s*\((?:Desktop|Mobile|Server|rev\s+\w+)\)\s*$', '', name, flags=re.IGNORECASE).strip()
 
     # Strip trailing chip IDs like 'GP106' if a model name follows
     name = re.sub(r'^[A-Z]{2}\d{3,4}\s+', '', name).strip()
