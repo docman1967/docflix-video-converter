@@ -1539,7 +1539,8 @@ def open_tv_renamer(app):
         file_menu.add_command(label="Clear All", command=_clear_files)
         file_menu.add_command(label="Clear Log", command=_clear_log)
         file_menu.add_separator()
-        file_menu.add_command(label="Close", command=_close_window,
+        file_menu.add_command(label="Close",
+                              command=lambda: _close_window(),
                               accelerator="Ctrl+W")
 
         # ── Edit menu ──
