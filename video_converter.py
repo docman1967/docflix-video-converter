@@ -42,7 +42,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.9.0"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -5459,10 +5459,20 @@ class VideoConverterApp:
                 out_ext = ext_map.get(fmt, '.srt')
                 out_codec = fmt if fmt != 'extract only' else 'srt'
                 lang = s['language']
-                title_slug = s['title'].replace(' ', '_') if s['title'] else ''
+                title_raw = (s['title'] or '').strip()
+                # Filter out tag-only titles that duplicate flag-based suffixes
+                _TAG_TITLES = {'forced', 'sdh', 'cc', 'hi', 'default',
+                               'commentary', 'signs', 'songs',
+                               'signs & songs', 'signs and songs'}
+                title_slug = ''
+                if title_raw and title_raw.lower() not in _TAG_TITLES:
+                    title_slug = title_raw.replace(' ', '_')
+                is_sdh = (title_raw.lower() in ('sdh', 'cc', 'hi')
+                          or s.get('sdh', False))
                 out_name = f"{Path(filepath).stem}.{lang}"
                 if title_slug: out_name += f".{title_slug}"
                 if s['forced']: out_name += ".forced"
+                if is_sdh: out_name += ".sdh"
                 out_name += out_ext
                 out_path = str(out_dir / out_name)
 
@@ -9512,16 +9522,15 @@ class VideoConverterApp:
 
         win = tk.Toplevel(self.root)
         win.title("📺 TV Show Renamer")
-        win.geometry("820x600")
-        win.minsize(700, 500)
+        win.geometry("960x650")
+        win.minsize(800, 550)
         win.resizable(True, True)
         self._center_on_main(win)
 
         # ── State ──
         _tvdb_token = [None]
-        _episodes = {}       # {(season, episode): {'title': ..., ...}}
+        _all_shows = {}      # {show_name: {(season, ep): ep_data, ...}}
         _file_items = []     # list of {'path': ..., 'season': N, 'episode': N, 'ext': ...}
-        _series_name = [None]
 
         # Load TVDB API key from preferences
         _saved_key = getattr(self, '_tvdb_api_key', '')
@@ -9656,24 +9665,180 @@ class VideoConverterApp:
             name = name.rstrip('. ')
             return name
 
-        def _build_new_name(item, template):
+        def _match_file_to_show(item):
+            """Match a file to one of the loaded shows by filename."""
+            if not _all_shows:
+                return None
+            fname = os.path.splitext(os.path.basename(item['path']))[0]
+            cleaned = _clean_show_name(fname).lower()
+            if not cleaned:
+                return None
+
+            best_match = None
+            best_score = 0.0
+            for show_name in _all_shows:
+                show_lower = show_name.lower()
+                # Exact match
+                if show_lower == cleaned:
+                    return show_name
+                # Show name contained in filename
+                if show_lower in cleaned:
+                    score = len(show_lower) / max(len(cleaned), 1)
+                    if score > best_score:
+                        best_score = score
+                        best_match = show_name
+                # Filename contained in show name
+                elif cleaned in show_lower:
+                    score = len(cleaned) / max(len(show_lower), 1) * 0.8
+                    if score > best_score:
+                        best_score = score
+                        best_match = show_name
+
+            # Word-level overlap fallback
+            if best_score < 0.4:
+                cleaned_words = set(cleaned.split())
+                for show_name in _all_shows:
+                    show_words = set(show_name.lower().split())
+                    if show_words and cleaned_words:
+                        overlap = len(cleaned_words & show_words) / len(show_words)
+                        if overlap > best_score and overlap >= 0.5:
+                            best_score = overlap
+                            best_match = show_name
+
+            return best_match if best_score >= 0.3 else None
+
+        # ISO 639-1 → ISO 639-2/B (3-letter) mapping for subtitle language codes
+        _LANG_2TO3 = {
+            'en': 'eng', 'es': 'spa', 'fr': 'fre', 'de': 'ger', 'it': 'ita',
+            'pt': 'por', 'ja': 'jpn', 'ko': 'kor', 'zh': 'chi', 'ru': 'rus',
+            'ar': 'ara', 'hi': 'hin', 'nl': 'dut', 'sv': 'swe', 'da': 'dan',
+            'no': 'nor', 'fi': 'fin', 'pl': 'pol', 'cs': 'cze', 'el': 'gre',
+            'he': 'heb', 'tr': 'tur', 'th': 'tha', 'vi': 'vie', 'uk': 'ukr',
+            'ro': 'rum', 'hu': 'hun', 'bg': 'bul', 'hr': 'hrv', 'sk': 'slo',
+            'sl': 'slv', 'ms': 'may', 'id': 'ind', 'tl': 'fil', 'af': 'afr',
+            'ca': 'cat', 'cy': 'wel', 'et': 'est', 'ga': 'gle', 'lv': 'lav',
+            'lt': 'lit', 'mk': 'mac', 'mt': 'mlt', 'sq': 'alb', 'sr': 'srp',
+            'sw': 'swa', 'ta': 'tam', 'te': 'tel', 'ur': 'urd', 'bn': 'ben',
+        }
+
+        def _detect_language_from_content(filepath):
+            """Detect language from subtitle file content using langdetect.
+            Returns a 3-letter ISO 639-2 code, or None on failure."""
+            try:
+                from langdetect import detect
+                ext = os.path.splitext(filepath)[1].lower()
+                if ext not in ('.srt', '.ass', '.ssa', '.vtt', '.sub'):
+                    return None
+                # Read file, try common encodings
+                text = None
+                for enc in ('utf-8', 'latin-1', 'cp1252'):
+                    try:
+                        with open(filepath, 'r', encoding=enc) as f:
+                            text = f.read(8192)  # first 8KB is enough
+                        break
+                    except (UnicodeDecodeError, UnicodeError):
+                        continue
+                if not text:
+                    return None
+                # Strip SRT formatting (timestamps, tags, numbers)
+                cleaned = re.sub(r'\d+\s*\n\d{2}:\d{2}:\d{2}[.,]\d+ --> '
+                                 r'\d{2}:\d{2}:\d{2}[.,]\d+\s*\n', '', text)
+                cleaned = re.sub(r'<[^>]+>', '', cleaned)
+                cleaned = re.sub(r'\{[^}]+\}', '', cleaned)
+                cleaned = re.sub(r'♪[^\n]*', '', cleaned)
+                # Strip ASS header/style sections
+                cleaned = re.sub(r'\[Script Info\].*?\[Events\]',
+                                 '', cleaned, flags=re.DOTALL)
+                cleaned = re.sub(r'Dialogue:\s*\d+,\d[^,]*,\d[^,]*,[^,]*,'
+                                 r'[^,]*,\d+,\d+,\d+,[^,]*,', '', cleaned)
+                # Collapse whitespace
+                cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+                if len(cleaned) < 20:
+                    return None
+                lang_2 = detect(cleaned)
+                return _LANG_2TO3.get(lang_2, lang_2)
+            except Exception:
+                return None
+
+        def _detect_sub_tags(filename):
+            """Detect language, forced, and SDH tags from a subtitle filename.
+            Returns a string like '.eng.forced' or '.eng.sdh' to insert
+            before the extension. Language is detected from filename first,
+            then verified/detected from file content via langdetect."""
+            stem = os.path.splitext(os.path.basename(filename))[0].lower()
+            parts = stem.split('.')
+            tags = []
+            # Walk trailing dot-separated tokens for known tags
+            # Common patterns: .eng.forced.srt, .en.sdh.srt, .forced.srt
+            _LANG_CODES = {
+                'en', 'eng', 'es', 'spa', 'fr', 'fra', 'fre', 'de', 'deu',
+                'ger', 'it', 'ita', 'pt', 'por', 'ja', 'jpn', 'ko', 'kor',
+                'zh', 'zho', 'chi', 'ru', 'rus', 'ar', 'ara', 'hi', 'hin',
+                'nl', 'nld', 'dut', 'sv', 'swe', 'da', 'dan', 'no', 'nor',
+                'fi', 'fin', 'pl', 'pol', 'cs', 'ces', 'cze', 'el', 'ell',
+                'gre', 'he', 'heb', 'tr', 'tur', 'th', 'tha', 'vi', 'vie',
+                'uk', 'ukr', 'ro', 'ron', 'rum', 'hu', 'hun', 'bg', 'bul',
+                'hr', 'hrv', 'sk', 'slk', 'slo', 'sl', 'slv', 'ms', 'msa',
+                'may', 'id', 'ind', 'tl', 'fil', 'und',
+            }
+            _TAG_WORDS = {'forced', 'sdh', 'cc', 'hi'}
+            filename_lang = None
+            found_tags = []
+            # Scan from the end of the parts list
+            for part in reversed(parts):
+                p = part.strip().lower()
+                if p in _TAG_WORDS:
+                    found_tags.insert(0, p)
+                elif p in _LANG_CODES and filename_lang is None:
+                    filename_lang = p
+                else:
+                    break  # stop at first non-tag token
+
+            # Normalize 2-letter filename codes to 3-letter
+            if filename_lang and len(filename_lang) == 2:
+                filename_lang = _LANG_2TO3.get(filename_lang, filename_lang)
+
+            # Detect language from file content
+            content_lang = _detect_language_from_content(filename)
+
+            # Use content detection, fall back to filename, then default 'eng'
+            if content_lang:
+                lang = content_lang
+                if filename_lang and filename_lang != content_lang:
+                    _log(f"  Language: filename says '{filename_lang}', "
+                         f"content detected '{content_lang}' — "
+                         f"using '{content_lang}'")
+            else:
+                lang = filename_lang if filename_lang else 'eng'
+
+            tags.append(lang)
+            for t in found_tags:
+                tags.append(t)
+            return '.' + '.'.join(tags)
+
+        def _build_new_name(item, template, show_name):
             """Build a new filename from template and episode data."""
             s = item.get('season')
             e = item.get('episode')
-            if s is None or e is None:
+            if s is None or e is None or not show_name:
                 return None
-            ep_data = _episodes.get((s, e))
+            show_eps = _all_shows.get(show_name, {})
+            ep_data = show_eps.get((s, e))
             title = ep_data.get('name', '') if ep_data else ''
-            show = _series_name[0] or 'Unknown'
 
             name = template.format(
-                show=show,
+                show=show_name,
                 season=str(s).zfill(2),
                 episode=str(e).zfill(2),
                 title=title,
                 year=ep_data.get('year', '') if ep_data else '',
             )
-            return _sanitize_filename(name) + item['ext']
+            ext = item['ext']
+            # For subtitle files, preserve language/forced/SDH tags
+            sub_tags = ''
+            if ext in SUBTITLE_EXTENSIONS:
+                sub_tags = _detect_sub_tags(item['path'])
+            return _sanitize_filename(name) + sub_tags + ext
 
         # ── Logging ──
         def _log(msg, level='INFO'):
@@ -9690,31 +9855,10 @@ class VideoConverterApp:
         main_f.pack(fill='both', expand=True)
         main_f.columnconfigure(1, weight=1)
 
-        # ── Row 0: API Key ──
-        ttk.Label(main_f, text="TVDB API Key:").grid(
-            row=0, column=0, sticky='w', padx=4, pady=2)
-        api_key_var = tk.StringVar(value=_saved_key)
-        _key_entry = ttk.Entry(main_f, textvariable=api_key_var, width=40,
-                               show='•')
-        _key_entry.grid(row=0, column=1, sticky='ew', padx=4, pady=2)
-        _create_tooltip(_key_entry, "Your TVDB v4 API key (thetvdb.com/dashboard/account/apikey)")
+        # ── TVDB API key (hardcoded) ──
+        api_key_var = tk.StringVar(value='8903a14b-8b71-436e-a48a-d553884f2991')
 
-        def _toggle_key_vis():
-            _key_entry.configure(show='' if _key_entry.cget('show') == '•' else '•')
-        _eye_btn = ttk.Button(main_f, text="👁", width=3, command=_toggle_key_vis)
-        _eye_btn.grid(row=0, column=2, padx=2, pady=2)
-        _create_tooltip(_eye_btn, "Show / Hide API key")
-
-        # ── Row 1: Search ──
-        ttk.Label(main_f, text="Show:").grid(
-            row=1, column=0, sticky='w', padx=4, pady=2)
-        search_f = ttk.Frame(main_f)
-        search_f.grid(row=1, column=1, columnspan=2, sticky='ew', padx=4, pady=2)
-        search_var = tk.StringVar()
-        search_entry = ttk.Entry(search_f, textvariable=search_var)
-        search_entry.pack(side='left', fill='x', expand=True, padx=(0, 4))
-
-        series_results = [None]  # store search results
+        # ── Row 0: Loaded Shows ──
 
         def _clean_show_name(raw):
             """Strip episode info, quality tags, and release group from a show name."""
@@ -9729,114 +9873,376 @@ class VideoConverterApp:
                           '', name, flags=re.IGNORECASE)
             return name.strip()
 
-        def _do_search():
-            query = _clean_show_name(search_var.get())
-            if not query:
-                _log("Enter a show name to search", 'WARNING')
+        def _remove_show_for_selected():
+            """Remove the loaded show and all its matched files from the queue."""
+            sel = tree.selection()
+            if not sel:
                 return
-            # Update search field with cleaned name
-            search_var.set(query)
-            try:
-                _log(f"Searching TVDB for \"{query}\"...")
-                win.update_idletasks()
-                results = _tvdb_search(query)
-                if not results:
-                    _log("No results found", 'WARNING')
-                    return
-                series_results[0] = results
-
-                # Populate show dropdown
-                show_names = []
-                for r in results:
-                    name = r.get('name', r.get('objectName', ''))
-                    year = r.get('year', '')
-                    show_names.append(f"{name} ({year})" if year else name)
-                show_combo['values'] = show_names
-                if show_names:
-                    show_combo.current(0)
-                    _log(f"Found {len(show_names)} results")
-                    _on_show_selected(None)
-            except Exception as _e:
-                _log(f"Search error: {_e}", 'ERROR')
-                import traceback
-                _log(traceback.format_exc(), 'ERROR')
-
-        search_btn = ttk.Button(search_f, text="Search TVDB", command=_do_search, width=12)
-        search_btn.pack(side='left')
-        _create_tooltip(search_btn, "Search TVDB and load episodes (Enter)")
-        search_entry.bind('<Return>', lambda e: _do_search())
-
-        # ── Row 2: Show selection + Season ──
-        select_f = ttk.Frame(main_f)
-        select_f.grid(row=2, column=0, columnspan=3, sticky='ew', padx=4, pady=2)
-        select_f.columnconfigure(1, weight=1)
-
-        ttk.Label(select_f, text="Match:").grid(row=0, column=0, sticky='w', padx=(0, 4))
-        show_combo = ttk.Combobox(select_f, state='readonly', width=40)
-        show_combo.grid(row=0, column=1, sticky='ew', padx=4)
-
-        ttk.Label(select_f, text="Season:").grid(row=0, column=2, sticky='w', padx=(8, 4))
-        season_var = tk.StringVar(value='1')
-        season_spin = tk.Spinbox(select_f, textvariable=season_var,
-                                  from_=0, to=99, width=4)
-        season_spin.grid(row=0, column=3, padx=4)
-
-        def _on_show_selected(event):
-            """Fetch episodes when a show is selected."""
-            try:
-                if not series_results[0]:
-                    return
-                idx = show_combo.current()
-                if idx < 0 or idx >= len(series_results[0]):
-                    return
-                series = series_results[0][idx]
-                series_id = series.get('tvdb_id', series.get('id', ''))
-                # Strip "series-" prefix if present
-                if isinstance(series_id, str) and series_id.startswith('series-'):
-                    series_id = series_id[7:]
-                _series_name[0] = series.get('name', series.get('objectName', ''))
-                _log(f"Loading episodes for \"{_series_name[0]}\" (ID: {series_id})...")
-                win.update_idletasks()
-                eps = _tvdb_get_episodes(series_id)
-                if not eps:
-                    _log("No episodes found", 'WARNING')
-                    return
-
-                # Build episode lookup
-                _episodes.clear()
-                seasons = set()
-                for ep in eps:
-                    s = ep.get('seasonNumber')
-                    e = ep.get('number')
-                    if s is not None and e is not None:
-                        _episodes[(s, e)] = ep
-                        seasons.add(s)
-
-                # Update season spinner range (exclude season 0 specials from default)
-                real_seasons = {s for s in seasons if s > 0} or seasons
-                if real_seasons:
-                    season_spin.configure(from_=min(seasons), to=max(seasons))
-                    if 1 in real_seasons:
-                        season_var.set('1')
-                    else:
-                        season_var.set(str(min(real_seasons)))
-
-                _log(f"Loaded {len(eps)} episodes across "
-                     f"{len(real_seasons)} seasons "
-                     f"({len(seasons - real_seasons)} specials)")
+            removed = set()
+            for iid in sel:
+                idx = tree.index(iid)
+                if idx < len(_file_items):
+                    show = _file_items[idx].get('matched_show')
+                    if show and show not in removed:
+                        removed.add(show)
+            if removed:
+                # Remove files whose matched_show is in the removed set
+                before = len(_file_items)
+                _file_items[:] = [f for f in _file_items
+                                  if f.get('matched_show') not in removed]
+                count = before - len(_file_items)
+                # Now remove the show data
+                for name in removed:
+                    _all_shows.pop(name, None)
+                    _log(f"Removed \"{name}\" — {count} file(s) removed")
                 _refresh_preview()
-            except Exception as _e:
-                _log(f"Error fetching episodes: {_e}", 'ERROR')
-                import traceback
-                _log(traceback.format_exc(), 'ERROR')
 
-        show_combo.bind('<<ComboboxSelected>>', _on_show_selected)
+        def _clear_all_shows():
+            """Remove all loaded shows."""
+            _all_shows.clear()
+            _refresh_preview()
+            _log("All shows cleared")
 
-        # ── Row 3: Filename template ──
+        def _ask_user_pick_show(query, candidates):
+            """Show a dialog for the user to pick from multiple show matches.
+            candidates: list of dicts from TVDB search results.
+            Returns the chosen dict, or None if cancelled."""
+            dlg = tk.Toplevel(win)
+            dlg.title("Multiple Matches")
+            dlg.geometry("700x500")
+            dlg.minsize(500, 350)
+            dlg.resizable(True, True)
+            dlg.transient(win)
+            dlg.grab_set()
+
+            ttk.Label(dlg, text=f"Multiple shows found for \"{query}\":",
+                      font=('Helvetica', 11, 'bold'),
+                      padding=(10, 10, 10, 4)).pack(anchor='w')
+
+            # ── Scrollable list area ──
+            outer_f = ttk.Frame(dlg)
+            outer_f.pack(fill='both', expand=True, padx=10, pady=4)
+
+            canvas = tk.Canvas(outer_f, highlightthickness=0)
+            scrollbar = ttk.Scrollbar(outer_f, orient='vertical',
+                                       command=canvas.yview)
+            scroll_frame = ttk.Frame(canvas)
+
+            scroll_frame.bind('<Configure>',
+                              lambda e: canvas.configure(
+                                  scrollregion=canvas.bbox('all')))
+            canvas_win = canvas.create_window((0, 0), window=scroll_frame,
+                                               anchor='nw')
+            canvas.configure(yscrollcommand=scrollbar.set)
+
+            # Make scroll_frame fill canvas width on resize
+            def _on_canvas_resize(event):
+                canvas.itemconfig(canvas_win, width=event.width)
+            canvas.bind('<Configure>', _on_canvas_resize)
+
+            canvas.pack(side='left', fill='both', expand=True)
+            scrollbar.pack(side='right', fill='y')
+
+            # Mousewheel scrolling
+            def _on_mousewheel(event):
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+            def _on_button4(event):
+                canvas.yview_scroll(-3, 'units')
+            def _on_button5(event):
+                canvas.yview_scroll(3, 'units')
+            canvas.bind_all('<MouseWheel>', _on_mousewheel)
+            canvas.bind_all('<Button-4>', _on_button4)
+            canvas.bind_all('<Button-5>', _on_button5)
+
+            chosen = [None]
+            selected_idx = [0]
+            row_frames = []
+            _thumb_refs = []  # prevent GC of PhotoImages
+
+            def _select_row(idx):
+                """Highlight the selected row."""
+                selected_idx[0] = idx
+                for i, rf in enumerate(row_frames):
+                    if i == idx:
+                        rf.configure(style='Selected.TFrame')
+                        for child in rf.winfo_children():
+                            try:
+                                child.configure(style='Selected.TLabel')
+                            except Exception:
+                                pass
+                    else:
+                        rf.configure(style='TFrame')
+                        for child in rf.winfo_children():
+                            try:
+                                child.configure(style='TLabel')
+                            except Exception:
+                                pass
+
+            # Style for selected row
+            style = ttk.Style()
+            style.configure('Selected.TFrame', background='#3a6ea5')
+            style.configure('Selected.TLabel', background='#3a6ea5',
+                            foreground='white')
+
+            def _ok():
+                chosen[0] = candidates[selected_idx[0]]
+                dlg.destroy()
+
+            # ── Build show cards ──
+            for i, r in enumerate(candidates):
+                name = r.get('name', r.get('objectName', ''))
+                year = r.get('year', '')
+                country = r.get('country', '').upper()
+                network = r.get('network', '')
+                overview = r.get('overview', '')
+
+                title = f"{name} ({year})" if year else name
+                meta_parts = []
+                if country:
+                    meta_parts.append(country)
+                if network:
+                    meta_parts.append(network)
+                meta_line = '  |  '.join(meta_parts)
+
+                row_f = ttk.Frame(scroll_frame, padding=(8, 6),
+                                  relief='flat')
+                row_f.pack(fill='x', padx=2, pady=2)
+                row_f.columnconfigure(1, weight=1)
+                row_frames.append(row_f)
+
+                # Click to select
+                def _click(event, idx=i):
+                    _select_row(idx)
+                def _dblclick(event, idx=i):
+                    _select_row(idx)
+                    _ok()
+                row_f.bind('<Button-1>', _click)
+                row_f.bind('<Double-1>', _dblclick)
+
+                # Thumbnail placeholder (load async later)
+                thumb_label = ttk.Label(row_f, text='', width=10)
+                thumb_label.grid(row=0, column=0, rowspan=3, sticky='n',
+                                 padx=(0, 10), pady=2)
+                thumb_label.bind('<Button-1>', _click)
+                thumb_label.bind('<Double-1>', _dblclick)
+
+                # Title
+                title_lbl = ttk.Label(row_f, text=title,
+                                      font=('Helvetica', 11, 'bold'))
+                title_lbl.grid(row=0, column=1, sticky='w')
+                title_lbl.bind('<Button-1>', _click)
+                title_lbl.bind('<Double-1>', _dblclick)
+
+                # Meta line (country | network)
+                if meta_line:
+                    meta_lbl = ttk.Label(row_f, text=meta_line,
+                                         font=('Helvetica', 9),
+                                         foreground='#888')
+                    meta_lbl.grid(row=1, column=1, sticky='w')
+                    meta_lbl.bind('<Button-1>', _click)
+                    meta_lbl.bind('<Double-1>', _dblclick)
+
+                # Overview (show synopsis)
+                if overview:
+                    ov_lbl = ttk.Label(row_f, text=overview,
+                                       wraplength=500,
+                                       font=('Helvetica', 9),
+                                       justify='left')
+                    ov_lbl.grid(row=2, column=1, sticky='w', pady=(2, 0))
+                    ov_lbl.bind('<Button-1>', _click)
+                    ov_lbl.bind('<Double-1>', _dblclick)
+
+                # Separator between cards
+                if i < len(candidates) - 1:
+                    ttk.Separator(scroll_frame, orient='horizontal').pack(
+                        fill='x', padx=8, pady=0)
+
+            # Select first row
+            if row_frames:
+                _select_row(0)
+
+            # ── Load thumbnails in background ──
+            def _load_thumbs():
+                import io
+                for i, r in enumerate(candidates):
+                    thumb_url = r.get('thumbnail', '')
+                    if not thumb_url:
+                        continue
+                    try:
+                        req = urllib.request.Request(thumb_url, headers={
+                            'User-Agent': 'DocflixVideoConverter/1.8'})
+                        resp = urllib.request.urlopen(req, timeout=5)
+                        img_data = resp.read()
+                        # Schedule PhotoImage creation on the main thread
+                        dlg.after(0, _apply_thumb, i, img_data)
+                    except Exception:
+                        pass
+
+            def _apply_thumb(idx, img_data):
+                """Create PhotoImage and apply to widget (must run on main thread)."""
+                try:
+                    import io
+                    from PIL import Image, ImageTk
+                    img = Image.open(io.BytesIO(img_data))
+                    img.thumbnail((60, 90), Image.LANCZOS)
+                    photo = ImageTk.PhotoImage(img)
+                    _thumb_refs.append(photo)
+                    rf = row_frames[idx]
+                    for child in rf.grid_slaves(row=0, column=0):
+                        child.configure(image=photo, width=0)
+                        break
+                except Exception:
+                    pass
+
+            thumb_thread = threading.Thread(target=_load_thumbs, daemon=True)
+            thumb_thread.start()
+
+            # ── Buttons ──
+            btn_f = ttk.Frame(dlg, padding=(10, 6))
+            btn_f.pack(fill='x')
+            ttk.Button(btn_f, text="Load", command=_ok,
+                       width=10).pack(side='left', padx=4)
+
+            # Unbind mousewheel on close to prevent leaking into parent
+            def _on_close():
+                canvas.unbind_all('<MouseWheel>')
+                canvas.unbind_all('<Button-4>')
+                canvas.unbind_all('<Button-5>')
+                dlg.destroy()
+            dlg.protocol('WM_DELETE_WINDOW', _on_close)
+
+            self._center_on_main(dlg)
+            win.wait_window(dlg)
+            return chosen[0]
+
+        def _load_show_by_name(query):
+            """Search TVDB for a show name and auto-load the best match.
+            Prompts the user if multiple shows share the same name.
+            Returns the loaded show name, or None on failure."""
+            if not query:
+                return None
+            results = _tvdb_search(query)
+            if not results:
+                _log(f"  No TVDB results for \"{query}\"", 'WARNING')
+                return None
+
+            # Check if there are multiple results with the same/similar name
+            # First collect both exact matches AND close matches (name contains
+            # query or vice versa), then decide whether to prompt the user.
+            # This catches cases like "Ghosts" returning "Ghosts", "Ghosts (US)",
+            # "Ghosts (2019)", "Ghosts (DE)" — all should be presented.
+            query_lower = query.lower()
+            close_matches = []
+            seen_ids = set()
+            for r in results[:15]:  # limit to top 15
+                rname = r.get('name', r.get('objectName', '')).lower()
+                rid = r.get('tvdb_id', r.get('id', ''))
+                if rid in seen_ids:
+                    continue
+                if rname == query_lower or query_lower in rname or rname in query_lower:
+                    close_matches.append(r)
+                    seen_ids.add(rid)
+
+            if len(close_matches) > 1:
+                # Multiple shows match — ask the user to pick
+                _log(f"  Found {len(close_matches)} matches for \"{query}\" — asking...")
+                win.update_idletasks()
+                best = _ask_user_pick_show(query, close_matches)
+                if not best:
+                    _log(f"  Skipped \"{query}\"")
+                    return None
+            elif len(close_matches) == 1:
+                best = close_matches[0]
+            else:
+                best = results[0]
+
+            show_name = best.get('name', best.get('objectName', ''))
+            if show_name in _all_shows:
+                _log(f"  \"{show_name}\" already loaded")
+                return show_name
+
+            series_id = best.get('tvdb_id', best.get('id', ''))
+            if isinstance(series_id, str) and series_id.startswith('series-'):
+                series_id = series_id[7:]
+
+            eps = _tvdb_get_episodes(series_id)
+            if not eps:
+                _log(f"  No episodes found for \"{show_name}\"", 'WARNING')
+                return None
+
+            show_eps = {}
+            seasons = set()
+            for ep in eps:
+                s = ep.get('seasonNumber')
+                e = ep.get('number')
+                if s is not None and e is not None:
+                    show_eps[(s, e)] = ep
+                    seasons.add(s)
+
+            _all_shows[show_name] = show_eps
+            real_seasons = {s for s in seasons if s > 0} or seasons
+            _log(f"  Loaded \"{show_name}\" — {len(eps)} eps, "
+                 f"{len(real_seasons)} seasons")
+            return show_name
+
+        def _auto_load_shows():
+            """Detect unique show names from file list and load them all."""
+            if not _file_items:
+                _log("No files loaded — add files first", 'WARNING')
+                return
+
+            # Extract unique show names from filenames
+            show_names = set()
+            for item in _file_items:
+                fname = os.path.splitext(os.path.basename(item['path']))[0]
+                cleaned = _clean_show_name(fname).strip()
+                if cleaned:
+                    show_names.add(cleaned)
+
+            if not show_names:
+                _log("Could not detect any show names from filenames", 'WARNING')
+                return
+
+            # Filter out names that are already matched by a loaded show
+            to_search = set()
+            for name in show_names:
+                already = False
+                name_lower = name.lower()
+                for loaded in _all_shows:
+                    if loaded.lower() in name_lower or name_lower in loaded.lower():
+                        already = True
+                        break
+                if not already:
+                    to_search.add(name)
+
+            if not to_search:
+                _log(f"All {len(show_names)} detected shows are already loaded")
+                _refresh_preview()
+                return
+
+            _log(f"Auto-loading {len(to_search)} show(s) from TVDB...")
+            win.update_idletasks()
+
+            loaded_count = 0
+            for name in sorted(to_search):
+                _log(f"Searching: \"{name}\"...")
+                win.update_idletasks()
+                try:
+                    result = _load_show_by_name(name)
+                    if result:
+                        loaded_count += 1
+                except Exception as e:
+                    _log(f"  Error loading \"{name}\": {e}", 'ERROR')
+
+            _log(f"Auto-load complete: {loaded_count}/{len(to_search)} shows loaded",
+                 'SUCCESS')
+            _refresh_preview()
+
+        # ── Row 0: Filename template ──
         ttk.Label(main_f, text="Template:").grid(
-            row=3, column=0, sticky='w', padx=4, pady=2)
+            row=0, column=0, sticky='w', padx=4, pady=2)
         template_f = ttk.Frame(main_f)
-        template_f.grid(row=3, column=1, columnspan=2, sticky='ew', padx=4, pady=2)
+        template_f.grid(row=0, column=1, columnspan=2, sticky='ew', padx=4, pady=2)
         template_var = tk.StringVar(value=_saved_template)
         template_entry = ttk.Entry(template_f, textvariable=template_var)
         template_entry.pack(side='left', fill='x', expand=True)
@@ -9854,18 +10260,18 @@ class VideoConverterApp:
             _refresh_preview()
         template_var.trace_add('write', _on_template_change)
 
-        # ── Row 4: File list (treeview) ──
+        # ── Row 1: File list (treeview) ──
         tree_f = ttk.Frame(main_f)
-        tree_f.grid(row=4, column=0, columnspan=3, sticky='nsew', padx=4, pady=4)
-        main_f.rowconfigure(4, weight=1)
+        tree_f.grid(row=1, column=0, columnspan=3, sticky='nsew', padx=4, pady=4)
+        main_f.rowconfigure(1, weight=1)
 
         columns = ('current', 'new_name')
         tree = ttk.Treeview(tree_f, columns=columns, show='headings',
                             selectmode='extended')
         tree.heading('current', text='Current Filename')
         tree.heading('new_name', text='New Filename')
-        tree.column('current', width=300, minwidth=150)
-        tree.column('new_name', width=350, minwidth=150)
+        tree.column('current', width=350, minwidth=150)
+        tree.column('new_name', width=400, minwidth=150)
 
         tree_scroll = ttk.Scrollbar(tree_f, orient='vertical', command=tree.yview)
         tree.configure(yscrollcommand=tree_scroll.set)
@@ -9876,40 +10282,75 @@ class VideoConverterApp:
             """Update the treeview with current/new filenames."""
             tree.delete(*tree.get_children())
             template = template_var.get().strip()
-            season_filter = None
-            try:
-                season_filter = int(season_var.get())
-            except ValueError:
-                pass
 
             for item in _file_items:
                 cur_name = os.path.basename(item['path'])
                 s = item.get('season')
                 e = item.get('episode')
-                s_str = str(s) if s is not None else '?'
-                e_str = str(e) if e is not None else '?'
 
-                # Override season from spinner if not detected
-                if s is None and season_filter is not None:
-                    item['season'] = season_filter
-                    s = season_filter
-                    s_str = str(s)
+                # Match file to a loaded show
+                matched = _match_file_to_show(item)
+                item['matched_show'] = matched
 
                 new_name = ''
-                if _series_name[0] and s is not None and e is not None:
+                if matched and s is not None and e is not None:
                     try:
-                        new_name = _build_new_name(item, template) or ''
+                        new_name = _build_new_name(item, template, matched) or ''
                     except (KeyError, ValueError):
                         new_name = '(template error)'
 
-                iid = tree.insert('', 'end', values=(cur_name, new_name))
+                iid = tree.insert('', 'end',
+                                  values=(cur_name, new_name))
                 # Color rows without matches
                 if not new_name or new_name == '(template error)':
                     tree.item(iid, tags=('nomatch',))
 
             tree.tag_configure('nomatch', foreground='#999')
 
-        season_var.trace_add('write', lambda *_: _refresh_preview())
+        # ── Right-click context menu ──
+        _tree_ctx = tk.Menu(tree, tearoff=0)
+
+        def _on_tree_right_click(event):
+            iid = tree.identify_row(event.y)
+            if iid:
+                if iid not in tree.selection():
+                    tree.selection_set(iid)
+            _tree_ctx.delete(0, 'end')
+            sel = tree.selection()
+            if sel:
+                # "Remove show" — unload the matched show for the selected file
+                idx = tree.index(sel[0])
+                if idx < len(_file_items):
+                    show = _file_items[idx].get('matched_show')
+                    if show:
+                        _tree_ctx.add_command(
+                            label=f"Remove show \"{show}\"",
+                            command=_remove_show_for_selected)
+                _tree_ctx.add_separator()
+            _tree_ctx.add_command(label="Clear all files",
+                                 command=_clear_files)
+            _tree_ctx.tk_popup(event.x_root, event.y_root)
+
+        def _remove_selected_files():
+            """Remove selected files from the queue."""
+            sel = tree.selection()
+            if not sel:
+                return
+            # Get indices in reverse order to avoid shifting
+            indices = sorted([tree.index(iid) for iid in sel], reverse=True)
+            for idx in indices:
+                if idx < len(_file_items):
+                    _file_items.pop(idx)
+            _log(f"Removed {len(indices)} file(s)")
+            # Remove shows that no longer have any files matched
+            remaining_shows = {f.get('matched_show') for f in _file_items
+                               if f.get('matched_show')}
+            orphaned = [s for s in _all_shows if s not in remaining_shows]
+            for s in orphaned:
+                _all_shows.pop(s, None)
+            _refresh_preview()
+
+        tree.bind('<Button-3>', _on_tree_right_click)
 
         # ── Drag and drop ──
         _RENAME_EXTENSIONS = VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS
@@ -9941,25 +10382,11 @@ class VideoConverterApp:
             _v = sum(1 for i in _file_items if i['ext'] in VIDEO_EXTENSIONS)
             _s = sum(1 for i in _file_items if i['ext'] in SUBTITLE_EXTENSIONS)
             _log(f"Added {added} files ({_v} video, {_s} subtitle)")
-            # Try to auto-detect show name from folder or filename
-            if _file_items and not search_var.get().strip():
-                first = _file_items[0]['path']
-                folder = os.path.basename(os.path.dirname(first))
-                # Clean up folder name for search
-                clean = re.sub(r'[Ss]eason\s*\d+', '', folder)
-                clean = re.sub(r'[._\-]', ' ', clean).strip()
-                if not clean or clean == os.path.basename(os.path.expanduser('~')):
-                    # Fall back to filename — strip everything from S01E01 onward
-                    fname = os.path.splitext(os.path.basename(first))[0]
-                    fname = re.sub(r'[._\-]', ' ', fname)
-                    # Truncate at episode marker or quality tags
-                    fname = re.sub(r'\s*[Ss]\d{1,2}[Ee]\d.*', '', fname)
-                    fname = re.sub(r'\s*\d{1,2}[xX]\d.*', '', fname)
-                    fname = re.sub(r'\s*(?:720|1080|2160|480)[pPiI].*', '', fname)
-                    clean = fname.strip()
-                if clean:
-                    search_var.set(clean)
-            _refresh_preview()
+            # Auto-load any new shows detected from the added files
+            if added > 0 and api_key_var.get().strip():
+                _auto_load_shows()
+            else:
+                _refresh_preview()
 
         def _on_drop(event):
             raw = event.data
@@ -9996,9 +10423,9 @@ class VideoConverterApp:
         except Exception:
             pass
 
-        # ── Row 5: Buttons ──
+        # ── Row 2: Buttons ──
         btn_f = ttk.Frame(main_f)
-        btn_f.grid(row=5, column=0, columnspan=3, sticky='ew', padx=4, pady=(4, 0))
+        btn_f.grid(row=2, column=0, columnspan=3, sticky='ew', padx=4, pady=(4, 0))
 
         def _do_rename():
             """Rename all files with valid new names."""
@@ -10008,11 +10435,17 @@ class VideoConverterApp:
                                        parent=win)
                 return
             renamed = 0
+            skipped = 0
             errors = 0
             for item in _file_items:
                 try:
-                    new_name = _build_new_name(item, template)
+                    matched = item.get('matched_show')
+                    if not matched:
+                        skipped += 1
+                        continue
+                    new_name = _build_new_name(item, template, matched)
                     if not new_name:
+                        skipped += 1
                         continue
                     old_path = item['path']
                     new_path = os.path.join(os.path.dirname(old_path), new_name)
@@ -10020,6 +10453,7 @@ class VideoConverterApp:
                         continue
                     if os.path.exists(new_path):
                         _log(f"Skipped (exists): {new_name}", 'WARNING')
+                        skipped += 1
                         continue
                     os.rename(old_path, new_path)
                     item['path'] = new_path
@@ -10027,9 +10461,18 @@ class VideoConverterApp:
                 except Exception as e:
                     _log(f"Error renaming: {e}", 'ERROR')
                     errors += 1
-            _log(f"Renamed {renamed} files" +
-                 (f" ({errors} errors)" if errors else ""), 'SUCCESS')
+            parts = [f"Renamed {renamed} files"]
+            if skipped:
+                parts.append(f"{skipped} skipped (no match)")
+            if errors:
+                parts.append(f"{errors} errors")
+            msg = " — ".join(parts)
+            _log(msg, 'SUCCESS')
             _refresh_preview()
+            if errors:
+                messagebox.showwarning("Rename Complete", msg, parent=win)
+            else:
+                messagebox.showinfo("Rename Complete", msg, parent=win)
 
         rename_btn = ttk.Button(btn_f, text="✏ Rename All", command=_do_rename,
                                 width=12)
@@ -10038,6 +10481,7 @@ class VideoConverterApp:
 
         def _clear_files():
             _file_items.clear()
+            _all_shows.clear()
             tree.delete(*tree.get_children())
             _log("File list cleared")
 
@@ -10071,10 +10515,10 @@ class VideoConverterApp:
         ttk.Button(btn_f, text="Close", command=win.destroy,
                    width=6).pack(side='right', padx=2)
 
-        # ── Row 6: Log ──
+        # ── Row 3: Log ──
         log_f = ttk.LabelFrame(main_f, text="Log", padding=4)
-        log_f.grid(row=6, column=0, columnspan=3, sticky='nsew', padx=4, pady=(4, 0))
-        main_f.rowconfigure(6, weight=1)
+        log_f.grid(row=3, column=0, columnspan=3, sticky='nsew', padx=4, pady=(4, 0))
+        main_f.rowconfigure(3, weight=1)
         log_text = tk.Text(log_f, height=4, wrap='word', font=('Courier', 9),
                            state='disabled', bg='#1e1e1e', fg='#d4d4d4')
         log_scroll = ttk.Scrollbar(log_f, orient='vertical', command=log_text.yview)
@@ -10082,8 +10526,16 @@ class VideoConverterApp:
         log_text.pack(side='left', fill='both', expand=True)
         log_scroll.pack(side='right', fill='y')
 
+        def _clear_log():
+            log_text.configure(state='normal')
+            log_text.delete('1.0', 'end')
+            log_text.configure(state='disabled')
+
+        clear_log_btn = ttk.Button(log_f, text="Clear Log", command=_clear_log, width=8)
+        clear_log_btn.pack(side='bottom', anchor='e', pady=(4, 0))
+
         _log("TV Show Renamer ready — drag and drop video files or folders")
-        _log("1. Enter your TVDB API key  2. Search for the show  3. Rename")
+        _log("Add files and shows auto-load from TVDB")
 
     def open_batch_filter(self):
         """Open a batch filter window to apply filters to multiple subtitle files at once."""

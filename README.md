@@ -1,6 +1,6 @@
 # 🎬 Docflix Video Converter
 
-A batch video converter that encodes files to **H.265/HEVC** (and other codecs) using `ffmpeg`, with support for CPU and **multi-GPU** encoding (NVIDIA NVENC, Intel QSV, AMD VAAPI). Includes a full-featured desktop GUI, a standalone media processor for remux post-processing, a subtitle editor, and a headless CLI tool.
+A batch video converter that encodes files to **H.265/HEVC** (and other codecs) using `ffmpeg`, with support for CPU and **multi-GPU** encoding (NVIDIA NVENC, Intel QSV, AMD VAAPI). Includes a full-featured desktop GUI, a standalone media processor for remux post-processing, a subtitle editor with OCR and Whisper-based auto-sync, a TV show renamer, and a headless CLI tool.
 
 ---
 
@@ -39,6 +39,7 @@ A batch video converter that encodes files to **H.265/HEVC** (and other codecs) 
 - ⌨️ **Keyboard shortcuts** panel
 - 🖥️ **Multi-monitor aware** — launches on the monitor containing the mouse
 - 🗂️ **"Open with" support** — appears in file manager right-click menu for video files
+- 📺 **TV Show Renamer** (Tools → TV Show Renamer) — batch rename video and subtitle files using TVDB episode data; auto-detects show names from filenames; multi-show support with disambiguation dialog; preserves subtitle language/forced/SDH tags; language detection from subtitle content via `langdetect`
 
 ### Media Processor (Tools → Media Processor)
 A standalone remux-only post-processing tool for already-encoded files — no re-encoding required (`-c:v copy`).
@@ -54,8 +55,14 @@ A standalone remux-only post-processing tool for already-encoded files — no re
 ### Subtitle Editor (Tools → Subtitle Editor)
 - Standalone and integrated modes
 - Video subtitle extraction and re-mux (edit internal subtitles, save back without re-encoding)
-- Filters: Remove HI, Remove Tags, Remove Ads/Credits, Remove Music Notes, Remove Leading Dashes, Remove ALL CAPS HI, Remove Off-Screen Quotes, Remove Duplicates, Merge Short Cues, Fix ALL CAPS (with custom character names)
-- Search & Replace with wrap-around
+- Filters: Remove HI, Remove Tags, Remove Ads/Credits, Remove Stray Notes, Remove Leading Dashes, Remove ALL CAPS HI, Remove Off-Screen Quotes, Remove Duplicates, Merge Short Cues, Reduce to 2 Lines, Fix ALL CAPS (with custom character names)
+- Bitmap subtitle OCR (PGS/VobSub → SRT via Tesseract) with live monitor
+- **Smart Sync** — Whisper-based auto-sync with two engines:
+  - Standard (`faster-whisper`) — ~400ms accuracy
+  - Precise (`WhisperX`) — phoneme-level ~50ms accuracy with Direct Align mode and VAD boundary snapping
+- **Spell checker** with interactive correction and custom dictionary
+- Search & Replace with wrap-around; persistent Search/Replace List
+- **Quick Sync** — set first cue time with mpv player integration
 - Timing tools: offset and stretch
 - Split / Join / Insert cues
 - Undo/Redo
@@ -86,6 +93,13 @@ A standalone remux-only post-processing tool for already-encoded files — no re
 | `Pillow` | Desktop GUI (logo image) | `pip install Pillow` |
 | `zenity` | Folder dialogs, CLI popups (optional) | `sudo apt install zenity` |
 | `ccextractor` | CC extraction from .ts files (optional) | `sudo apt install ccextractor` |
+| `tesseract-ocr` | Bitmap subtitle OCR (optional) | `sudo apt install tesseract-ocr tesseract-ocr-eng` |
+| `pytesseract` | Python bindings for Tesseract (optional) | `pip install pytesseract` |
+| `pyspellchecker` | Subtitle spell checker (optional) | `pip install pyspellchecker` |
+| `faster-whisper` | Smart Sync — Standard engine (optional) | `pip install faster-whisper` |
+| `whisperx` | Smart Sync — Precise engine (optional) | `pip install whisperx 'transformers<4.45'` |
+| `langdetect` | Subtitle language detection (optional) | `pip install langdetect` |
+| `mpv` | Quick Sync — video playback (optional) | `sudo apt install mpv` |
 | NVIDIA driver + NVENC | NVIDIA GPU encoding (optional) | System-specific |
 | Intel media driver + QSV | Intel QSV encoding (optional) | System-specific |
 | Mesa VAAPI driver | AMD VAAPI encoding (optional) | System-specific |
@@ -227,7 +241,7 @@ Options:
 
 ```
 docflix-video-converter/
-├── video_converter.py    # Desktop GUI application (~10,300 lines, Tkinter)
+├── video_converter.py    # Desktop GUI application (~16,100 lines, Tkinter)
 ├── convert_videos.sh     # Headless CLI batch converter
 ├── run_converter.sh      # Desktop GUI launcher (background + logging)
 ├── install.sh            # Installer / uninstaller
