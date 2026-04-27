@@ -168,6 +168,22 @@ else
     success "pip3 found"
 fi
 
+# Optional: Tesseract OCR (for bitmap subtitle conversion)
+if command -v tesseract &>/dev/null; then
+    TESS_VER=$(tesseract --version 2>&1 | head -1)
+    success "tesseract found ($TESS_VER)"
+    # Check for English language data
+    if tesseract --list-langs 2>&1 | grep -q "^eng$"; then
+        success "tesseract English language pack found"
+    else
+        warn "tesseract English language pack not found"
+        MISSING_PKGS+=("tesseract-ocr-eng")
+    fi
+else
+    warn "tesseract-ocr not found (optional — needed for bitmap subtitle OCR)"
+    info "Install with: sudo apt install tesseract-ocr tesseract-ocr-eng"
+fi
+
 if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
     echo ""
     warn "Missing system packages: ${MISSING_PKGS[*]}"
@@ -202,6 +218,8 @@ install_pip_pkg() {
 
 install_pip_pkg "tkinterdnd2"
 install_pip_pkg "Pillow" "PIL"
+install_pip_pkg "pytesseract"
+install_pip_pkg "pyspellchecker" "spellchecker"
 
 #── 4. Create install directories ─────────────────────────────────────────────
 header "Creating directories..."

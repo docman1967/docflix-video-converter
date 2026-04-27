@@ -42,11 +42,14 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.8.0"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
 DEFAULT_GPU_PRESET = "p4"
+
+# Bitmap subtitle codecs that cannot be converted to text formats without OCR
+BITMAP_SUB_CODECS = frozenset({'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle', 'dvb_teletext', 'xsub'})
 
 # ── GPU Backend Definitions ──
 # Each backend defines its hwaccel flags, per-codec encoders, presets, quality
@@ -337,6 +340,20 @@ def get_subtitle_streams(filepath):
         for s in data.get('streams', []):
             tags = s.get('tags', {})
             disp = s.get('disposition', {})
+            # Detect empty tracks via muxer statistics
+            num_frames_str = (tags.get('NUMBER_OF_FRAMES') or
+                              tags.get('NUMBER_OF_FRAMES-eng') or '')
+            num_bytes_str = (tags.get('NUMBER_OF_BYTES') or
+                             tags.get('NUMBER_OF_BYTES-eng') or '')
+            try:
+                num_frames = int(num_frames_str) if num_frames_str else -1
+            except ValueError:
+                num_frames = -1
+            try:
+                num_bytes = int(num_bytes_str) if num_bytes_str else -1
+            except ValueError:
+                num_bytes = -1
+            is_empty = (num_frames == 0 or num_bytes == 0)
             streams.append({
                 'index':      s.get('index', 0),
                 'codec_name': s.get('codec_name', 'unknown'),
@@ -345,6 +362,8 @@ def get_subtitle_streams(filepath):
                 'forced':     bool(disp.get('forced', 0)),
                 'sdh':        bool(disp.get('hearing_impaired', 0)),
                 'default':    bool(disp.get('default', 0)),
+                'empty':      is_empty,
+                'num_frames': num_frames,
             })
         return streams
     except Exception:
@@ -375,6 +394,584 @@ def get_all_streams(filepath):
         ]
     except Exception:
         return []
+
+
+def get_audio_info(filepath):
+    """Return a list of audio stream dicts for the given file.
+    Each dict has: index, codec_name, codec_long_name, channels, sample_rate, bit_rate, language, title."""
+    try:
+        cmd = [
+            'ffprobe', '-v', 'quiet',
+            '-print_format', 'json',
+            '-show_streams',
+            '-select_streams', 'a',
+            filepath
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return []
+        data = json.loads(result.stdout)
+        streams = []
+        for s in data.get('streams', []):
+            tags = s.get('tags', {})
+            streams.append({
+                'index':          s.get('index', 0),
+                'codec_name':     s.get('codec_name', 'unknown'),
+                'codec_long_name': s.get('codec_long_name', ''),
+                'channels':       s.get('channels', 0),
+                'sample_rate':    s.get('sample_rate', ''),
+                'bit_rate':       s.get('bit_rate', ''),
+                'language':       tags.get('language', 'und'),
+                'title':          tags.get('title', ''),
+            })
+        return streams
+    except Exception:
+        return []
+
+
+def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
+                        progress_callback=None, frame_callback=None,
+                        cancel_event=None):
+    """OCR a bitmap subtitle stream (PGS/VobSub) to a list of SRT cues.
+
+    Uses ffmpeg to render each subtitle event as an image on a black canvas,
+    then Tesseract OCR to extract text from each image.
+
+    Args:
+        filepath: Path to the video file.
+        stream_index: Absolute ffmpeg stream index of the subtitle track.
+        language: ISO 639-2 language code (e.g. 'eng', 'fre').
+        progress_callback: Optional callable(message) for status updates.
+        frame_callback: Optional callable(frame_index, total, img_path,
+                        ocr_text, start_time, end_time) called after each frame.
+        cancel_event: Optional threading.Event — if set, OCR aborts early.
+
+    Returns:
+        List of dicts: [{'index': 1, 'start': '00:01:23,456',
+                         'end': '00:01:26,789', 'text': 'Hello'}, ...]
+        Returns empty list on failure.
+    """
+    import tempfile
+    try:
+        import pytesseract
+        from PIL import Image
+    except ImportError:
+        if progress_callback:
+            progress_callback("pytesseract or Pillow not installed — cannot OCR")
+        return []
+
+    if not shutil.which('tesseract'):
+        if progress_callback:
+            progress_callback("tesseract not found — install with: sudo apt install tesseract-ocr")
+        return []
+
+    # Map ISO 639-2/B → Tesseract language codes
+    LANG_MAP = {
+        'eng': 'eng', 'fre': 'fra', 'fra': 'fra', 'ger': 'deu', 'deu': 'deu',
+        'spa': 'spa', 'ita': 'ita', 'por': 'por', 'rus': 'rus', 'jpn': 'jpn',
+        'kor': 'kor', 'chi': 'chi_sim', 'zho': 'chi_sim', 'ara': 'ara',
+        'hin': 'hin', 'und': 'eng', 'nld': 'nld', 'pol': 'pol', 'tur': 'tur',
+        'swe': 'swe', 'nor': 'nor', 'dan': 'dan', 'fin': 'fin',
+    }
+    tess_lang = LANG_MAP.get(language, language)
+
+    # Check if Tesseract has the required language data
+    try:
+        langs_result = subprocess.run(['tesseract', '--list-langs'],
+                                       capture_output=True, text=True, timeout=10)
+        available = langs_result.stderr + langs_result.stdout  # varies by version
+        if tess_lang not in available:
+            if progress_callback:
+                progress_callback(f"Tesseract language pack '{tess_lang}' not installed — "
+                                  f"install with: sudo apt install tesseract-ocr-{tess_lang}")
+            return []
+    except Exception:
+        pass  # proceed anyway
+
+    tmpdir = tempfile.mkdtemp(prefix='docflix_ocr_')
+
+    try:
+        # ── Phase 1: Get subtitle packet timestamps via ffprobe ──
+        if progress_callback:
+            progress_callback("Probing subtitle packet timestamps...")
+
+        probe_cmd = [
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_entries', 'packet=pts_time,duration_time,size',
+            '-select_streams', str(stream_index),
+            filepath
+        ]
+        result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            if progress_callback:
+                progress_callback("ffprobe failed to read subtitle packets")
+            return []
+
+        all_packets = json.loads(result.stdout).get('packets', [])
+
+        # Filter out zero-size packets (PGS clear/end events) and build timing list
+        packets = []
+        for pkt in all_packets:
+            size = int(pkt.get('size', 0))
+            pts = pkt.get('pts_time')
+            if size > 0 and pts is not None:
+                try:
+                    pts_f = float(pts)
+                except (ValueError, TypeError):
+                    continue
+                dur = float(pkt.get('duration_time', 0) or 0)
+                packets.append({'pts': pts_f, 'duration': dur})
+
+        if not packets:
+            if progress_callback:
+                progress_callback("No subtitle packets found in stream")
+            return []
+
+        # Calculate durations from gaps where duration is missing
+        for i, pkt in enumerate(packets):
+            if pkt['duration'] <= 0:
+                if i + 1 < len(packets):
+                    pkt['duration'] = min(packets[i + 1]['pts'] - pkt['pts'], 10.0)
+                else:
+                    pkt['duration'] = 3.0
+            # Clamp to reasonable range
+            pkt['duration'] = max(0.5, min(pkt['duration'], 15.0))
+
+        total = len(packets)
+        if progress_callback:
+            progress_callback(f"Found {total} subtitle events — starting OCR...")
+
+        # ── Phase 2: Compute relative subtitle stream index ──
+        all_streams = get_all_streams(filepath)
+        rel_idx = 0
+        for s in all_streams:
+            if s['index'] == stream_index:
+                break
+            if s['codec_type'] == 'subtitle':
+                rel_idx += 1
+
+        # ── Phase 3: Batch-extract all subtitle images in one ffmpeg pass ──
+        # Overlay subtitle stream on a black canvas, use scene detection to
+        # output one frame per subtitle change (appear + disappear).
+        if progress_callback:
+            progress_callback("Rendering subtitle images (single pass)...")
+
+        # Get video duration for the lavfi color source
+        duration = get_video_duration(filepath) or 7200  # fallback 2h
+
+        img_pattern = os.path.join(tmpdir, 'frame_%05d.png')
+        extract_cmd = [
+            'ffmpeg', '-y', '-progress', 'pipe:1', '-stats_period', '1',
+            '-f', 'lavfi', '-i', f'color=c=black:s=1920x1080:r=10:d={int(duration) + 10}',
+            '-i', filepath,
+            '-filter_complex',
+            f"[0:v][1:s:{rel_idx}]overlay,select='gt(scene\\,0.001)',setpts=N/TB",
+            '-vsync', 'vfr',
+            img_pattern
+        ]
+        try:
+            proc = subprocess.Popen(extract_cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True, bufsize=1)
+            # Parse ffmpeg progress output in real-time
+            render_frames = [0]
+            while True:
+                if cancel_event and cancel_event.is_set():
+                    proc.terminate()
+                    if progress_callback:
+                        progress_callback("Rendering cancelled by user")
+                    return []
+                line = proc.stdout.readline()
+                if not line and proc.poll() is not None:
+                    break
+                if line.startswith('out_time_ms='):
+                    try:
+                        us = int(line.split('=')[1].strip())
+                        secs = us / 1_000_000
+                        pct = min(99, (secs / duration) * 100)
+                        if progress_callback:
+                            mins = int(secs) // 60
+                            s = int(secs) % 60
+                            progress_callback(f"Rendering subtitle images... "
+                                              f"{mins}m{s:02d}s / {int(duration)//60}m "
+                                              f"({pct:.0f}%)")
+                    except (ValueError, ZeroDivisionError):
+                        pass
+                elif line.startswith('frame='):
+                    try:
+                        render_frames[0] = int(line.split('=')[1].strip())
+                    except ValueError:
+                        pass
+            proc.wait()
+            if proc.returncode != 0:
+                stderr_out = proc.stderr.read()
+                if progress_callback:
+                    progress_callback(f"Failed to render subtitle images: {stderr_out[-300:]}")
+                return []
+            if progress_callback:
+                progress_callback(f"Rendering complete — {render_frames[0]} frames extracted")
+        except Exception as e:
+            if progress_callback:
+                progress_callback(f"Error during rendering: {e}")
+            return []
+
+        # Collect generated image files
+        import glob
+        img_files = sorted(glob.glob(os.path.join(tmpdir, 'frame_*.png')))
+
+        if not img_files:
+            if progress_callback:
+                progress_callback("No subtitle images were rendered")
+            return []
+
+        if progress_callback:
+            progress_callback(f"Rendered {len(img_files)} frames — filtering and running OCR...")
+
+        # ── Phase 4: Filter non-blank images, match to timestamps, OCR ──
+        # The scene-change filter produces frames for both subtitle-on and
+        # subtitle-off transitions.  We only want the subtitle-on frames
+        # (those with visible text, i.e. non-black content).
+        # Timestamps come from ffprobe packets; we filter to only the
+        # "display" packets (size > 100 bytes — clear events are ~30 bytes).
+        display_packets = [p for p in packets if p.get('_size', p.get('duration', 1)) >= 0]
+        # Use the filtered large packets for timing
+        large_packets = []
+        for pkt in all_packets:
+            size = int(pkt.get('size', 0))
+            pts = pkt.get('pts_time')
+            if size > 100 and pts is not None:
+                try:
+                    pts_f = float(pts)
+                except (ValueError, TypeError):
+                    continue
+                dur = float(pkt.get('duration_time', 0) or 0)
+                large_packets.append({'pts': pts_f, 'duration': dur})
+
+        # Recalculate durations for large packets
+        for i, pkt in enumerate(large_packets):
+            if pkt['duration'] <= 0:
+                if i + 1 < len(large_packets):
+                    pkt['duration'] = min(large_packets[i + 1]['pts'] - pkt['pts'], 10.0)
+                else:
+                    pkt['duration'] = 3.0
+            pkt['duration'] = max(0.5, min(pkt['duration'], 15.0))
+
+        # ── Pass A: Filter out blank frames (fast scan) ──
+        if progress_callback:
+            progress_callback("Filtering blank frames...")
+
+        non_blank = []  # list of (img_path, original_index)
+        total_all = len(img_files)
+        for i, img_path in enumerate(img_files):
+            if cancel_event and cancel_event.is_set():
+                if progress_callback:
+                    progress_callback("Cancelled during filtering")
+                return []
+            try:
+                img = Image.open(img_path).convert('L')
+                img.thumbnail((96, 54))  # fast resize for blank detection
+                lo, hi = img.getextrema()
+                if hi >= 30:
+                    non_blank.append((img_path, i))
+            except Exception:
+                pass
+            if progress_callback and (i % 50 == 0 or i == total_all - 1):
+                progress_callback(f"Filtering blank frames... {i+1}/{total_all} "
+                                  f"({len(non_blank)} with content)")
+
+        if progress_callback:
+            progress_callback(f"Found {len(non_blank)} non-blank frames out of "
+                              f"{total_all} — starting OCR...")
+
+        # Pair non-blank frames with display packet timestamps
+        total = len(non_blank)
+        ocr_jobs = []  # list of (img_path, pts, dur, original_index)
+        for j, (img_path, orig_idx) in enumerate(non_blank):
+            if j < len(large_packets):
+                pts = large_packets[j]['pts']
+                dur = large_packets[j]['duration']
+            else:
+                pts = 0
+                dur = 3.0
+            ocr_jobs.append((img_path, pts, dur, orig_idx))
+
+        # ── Pass B: Parallel OCR ──
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading as _thr
+
+        try:
+            max_workers = min(os.cpu_count() or 4, 8)
+        except Exception:
+            max_workers = 4
+
+        cues = []
+        cues_lock = _thr.Lock()
+        completed_count = [0]
+
+        def _ocr_one(job):
+            """OCR a single subtitle image. Returns (pts, dur, text, img_path) or None."""
+            img_path, pts, dur, orig_idx = job
+            try:
+                img = Image.open(img_path).convert('L')
+
+                # Invert if dark background (white-on-black subtitle)
+                lo, hi = img.getextrema()
+                if hi < 30:
+                    return (pts, dur, '', img_path)  # blank
+                # Use mean of extrema as a quick avg proxy
+                if (lo + hi) / 2 < 128:
+                    img = Image.eval(img, lambda x: 255 - x)
+
+                # Crop to bounding box of non-black content + padding
+                bbox = img.getbbox()
+                if bbox:
+                    pad = 8
+                    x1 = max(0, bbox[0] - pad)
+                    y1 = max(0, bbox[1] - pad)
+                    x2 = min(img.width, bbox[2] + pad)
+                    y2 = min(img.height, bbox[3] + pad)
+                    img = img.crop((x1, y1, x2, y2))
+
+                    # Save cropped version for preview in monitor window
+                    try:
+                        img.save(img_path)
+                    except Exception:
+                        pass
+
+                # Check if this is likely a music note frame
+                if _is_music_note_frame(img):
+                    return (pts, dur, '♪', img_path)
+
+                text = pytesseract.image_to_string(
+                    img, lang=tess_lang,
+                    config='--psm 6 -c tessedit_char_blacklist=|'
+                ).strip()
+                text = _fix_ocr_text(text)
+                return (pts, dur, text, img_path)
+            except Exception:
+                return (pts, dur, '', img_path)
+
+        if progress_callback:
+            progress_callback(f"OCR: {total} frames, {max_workers} parallel workers...")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_job = {}
+            for job in ocr_jobs:
+                if cancel_event and cancel_event.is_set():
+                    break
+                future = executor.submit(_ocr_one, job)
+                future_to_job[future] = job
+
+            # Collect results as they complete (but we'll sort by timestamp later)
+            raw_results = []
+            for future in as_completed(future_to_job):
+                if cancel_event and cancel_event.is_set():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    if progress_callback:
+                        progress_callback("OCR cancelled by user")
+                    break
+
+                completed_count[0] += 1
+                try:
+                    result = future.result()
+                    pts, dur, text, img_path = result
+                    raw_results.append(result)
+
+                    # Notify frame callback
+                    if frame_callback:
+                        frame_callback(completed_count[0] - 1, total,
+                                       img_path, text or '[empty]',
+                                       _seconds_to_srt_time(pts),
+                                       _seconds_to_srt_time(pts + dur))
+                except Exception:
+                    completed_count[0]  # already incremented
+
+        # Sort results by timestamp and build cue list
+        raw_results.sort(key=lambda r: r[0])  # sort by pts
+        for pts, dur, text, img_path in raw_results:
+            if text:
+                cues.append({
+                    'index': len(cues) + 1,
+                    'start': _seconds_to_srt_time(pts),
+                    'end': _seconds_to_srt_time(pts + dur),
+                    'text': text,
+                })
+
+        if progress_callback:
+            progress_callback(f"OCR complete: {len(cues)} cues extracted from {total} frames")
+
+        return cues
+
+    finally:
+        import shutil as _shutil_cleanup
+        _shutil_cleanup.rmtree(tmpdir, ignore_errors=True)
+
+
+def _seconds_to_srt_time(seconds):
+    """Convert seconds (float) to SRT timestamp format: HH:MM:SS,mmm"""
+    if seconds < 0:
+        seconds = 0
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int((seconds % 1) * 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def write_srt_file(cues, output_path):
+    """Write a list of SRT cue dicts to an SRT file.
+    Each cue: {'index': 1, 'start': '00:01:23,456', 'end': '00:01:26,789', 'text': 'Hello'}"""
+    with open(output_path, 'w', encoding='utf-8') as f:
+        for cue in cues:
+            f.write(f"{cue['index']}\n")
+            f.write(f"{cue['start']} --> {cue['end']}\n")
+            f.write(f"{cue['text']}\n\n")
+
+
+def _is_music_note_frame(img):
+    """Detect if a subtitle image likely contains only music notes (♪/♫).
+    Music note frames have small, isolated content with very few non-black pixels
+    compared to normal text subtitles."""
+    try:
+        w, h = img.size
+        total_pixels = w * h
+        if total_pixels == 0:
+            return False
+        # Count non-white pixels (after inversion, text is dark on white)
+        pixels = list(img.getdata())
+        dark_pixels = sum(1 for p in pixels if p < 128)
+        dark_ratio = dark_pixels / total_pixels
+        # Music notes: very small content area (< 3% of frame)
+        # and narrow width (< 15% of original 1920px frame)
+        if dark_ratio < 0.03 and w < 300:
+            return True
+        # Also check: very few dark pixels total (music notes are tiny)
+        if dark_pixels < 500 and w < 400:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _fix_ocr_text(text):
+    """Fix common Tesseract OCR mistakes in subtitle text."""
+    if not text:
+        return text
+
+    # Fix | and / first (convert to letters before I/l rules run)
+    # Replace | with I everywhere (pipe never appears in subtitles)
+    text = text.replace('|', 'I')
+
+    # Fix / and // misread as I, l, ll and /7 as I'l (7 = apostrophe shape)
+    # Order matters: fix multi-char patterns first, then single /
+
+    # Fix / and // misread as I, l, ll and /7 as I'l (7 = apostrophe shape)
+    # Order matters: fix longest/most-specific patterns first
+
+    # /17/ → I'll: So /17/ be back → So I'll be back
+    text = re.sub(r'/17/', "I'll", text)
+
+    # 17/I → I'll: And 17/I stand → And I'll stand
+    text = re.sub(r'17/I', "I'll", text)
+    # 17/ → I'll (1=I, 7=', /=l): And 17/ want → And I'll want
+    text = re.sub(r'17/', "I'll", text)
+
+    # /7/ → I'll: /7/ care → I'll care
+    text = re.sub(r'/7/', "I'll", text)
+    # /711 → I'll: /711 write → I'll write
+    text = re.sub(r'/711', "I'll", text)
+    # /71 → I'll
+    text = re.sub(r'/71\b', "I'll", text)
+    # /7 before space → I'll: /7 help → I'll help
+    text = re.sub(r'/7\s+', "I'll ", text)
+
+    # // → ll (double slash = double l): we// → well, ev//. → evil.
+    text = re.sub(r'//', 'll', text)
+
+    # /1 → Il
+    text = re.sub(r'/1', 'Il', text)
+
+    # /[ → I (bracket misread): /[s → Is
+    text = re.sub(r'/\[', 'I', text)
+
+    # /I → I (slash-I = garbled I): /I could → I could
+    text = re.sub(r'(?<![a-zA-Z0-9])/I\b', 'I', text)
+
+    # Standalone / as a word → I: "/ have" → "I have", "/ swear" → "I swear"
+    text = re.sub(r'(?<![a-zA-Z0-9/])/(?![a-zA-Z0-9/])', 'I', text)
+
+    # / after uppercase letter at word boundary → l: A/ → Al
+    text = re.sub(r'(?<=[A-Z])/(?=\s)', 'l', text)
+
+    # / between letters → l: G/inda → Glinda, specu/ation → speculation
+    text = re.sub(r'(?<=[a-zA-Z])/(?=[a-z])', 'l', text)
+    # / at start of word before lowercase → l (then l→I rules fix if needed)
+    text = re.sub(r'(?<![a-zA-Z0-9])/(?=[a-z])', 'l', text)
+
+    # Fix 1 misread as I — only in word/letter context, not in actual numbers
+    text = re.sub(r'(?<![0-9a-zA-Z])1(?![0-9a-zA-Z\-])', 'I', text)  # standalone
+    text = re.sub(r'(?<![0-9])1(?=[\'\']\s*[a-z])', 'I', text)       # 1'm → I'm
+    text = re.sub(r'^1(?= [a-z])', 'I', text, flags=re.MULTILINE)    # 1 am → I am
+    text = re.sub(r'(?<![0-9a-zA-Z])1(?=[tTfFnNsS][^0-9])', 'I', text)  # 1t → It
+    text = re.sub(r'(?<![0-9a-zA-Z])1(?=t\'s)', 'I', text)           # 1t's → It's
+
+    # Fix ! misread as I in common patterns
+    text = re.sub(r'!\s*(?=[\'\']\s*[a-z])', 'I', text)     # !'m !'ll !'ve !'d
+    text = re.sub(r'(?<!\w)!(?=[tf]\s)', 'I', text)          # !t !f at word boundary
+    text = re.sub(r'(?<!\w)!(?=t\'s)', 'I', text)            # !t's → It's
+    text = re.sub(r'(?<!\w)!(?=n\b)', 'I', text)             # !n → In
+    text = re.sub(r'(?<!\w)!(?=s\b)', 'I', text)             # !s → Is
+    text = re.sub(r'(?<!\w)!(?= [a-z])', 'I', text)          # ! followed by space + lowercase
+
+    # Fix l/I confusion — l at start of sentence or standalone should be I
+    text = re.sub(r'^l(?= [a-z])', 'I', text, flags=re.MULTILINE)     # l am → I am
+    text = re.sub(r'^l(?=[\'\']\s*[a-z])', 'I', text, flags=re.MULTILINE)  # l'm → I'm
+    text = re.sub(r'(?<!\w)l(?!\w)', 'I', text)              # standalone l → I
+    # l before common word-starts when l is at word boundary: lt's → It's, ls → Is, ln → In
+    text = re.sub(r'(?<!\w)l(?=t\')', 'I', text)             # lt's → It's
+    text = re.sub(r'(?<!\w)l(?=[snf]\b)', 'I', text)         # ls → Is, ln → In, lf → If
+    text = re.sub(r'(?<!\w)l(?=[snf] )', 'I', text)          # ls dead → Is dead
+
+    # Fix ™ misread as apostrophe: I'™m → I'm
+    text = re.sub(r"'™", "'", text)   # '™ → ' (avoid double apostrophe)
+    text = text.replace('™', "'")      # standalone ™ → '
+
+    # ── Music note (♪) detection ──
+    # Tesseract misreads ♪ as: 2 > $ & £ © » # * ? Sf D> P If at start/end of lines
+
+    # End-of-line garbled ♪: Sf, D>, P, If, f (various misreadings)
+    text = re.sub(r'\s+[SD][f>]\s*$', ' ♪', text, flags=re.MULTILINE)  # Sf, D>
+    text = re.sub(r'\s+P\s*$', ' ♪', text, flags=re.MULTILINE)         # trailing P
+    text = re.sub(r'\s+If\s*$', ' ♪', text, flags=re.MULTILINE)        # trailing If
+    text = re.sub(r'\s+f\s*$', ' ♪', text, flags=re.MULTILINE)         # trailing f
+
+    # Fix $f / £f ligature (garbled ♪♪ or ♪): replace with ♪
+    text = re.sub(r'[\$£]f\b', '♪', text)
+
+    # Fix -) at start of line (misread -♪)
+    text = re.sub(r'^-\)\s*', '-♪ ', text, flags=re.MULTILINE)
+
+    # Music note marker after [Speaker] brackets: [Ozians] $ text → [Ozians] ♪ text
+    text = re.sub(r'(\])\s*[2>$&£©»#*?]+\s*', r'\1 ♪ ', text)
+
+    # Start-of-line markers: 2, >, $, &, £, ©, », #, *, ? (with optional leading -)
+    # Allow marker to be directly attached to text (no space): >And → ♪ And
+    _MUSIC_START = r'^-?[2>$&£©»#*?]+\s*(?=[A-Za-z\'\'"/])'  # ♪ at start (optional space)
+    _MUSIC_END   = r'\s+[>£&©$»#*]\s*$'                 # ♪ at end of line
+
+    # Replace music note markers at start and end of lines
+    text = re.sub(_MUSIC_START, '♪ ', text, flags=re.MULTILINE)
+    text = re.sub(_MUSIC_END, ' ♪', text, flags=re.MULTILINE)
+
+    # Detect garbled music note OCR output — entire cue is just garbage chars
+    stripped = text.strip()
+    if len(stripped) <= 3 and stripped and all(c in 'Jjd}]){><%#@~^*_=2$&£©»♪ ' for c in stripped):
+        return '♪'
+
+    # Clean up common OCR artifacts
+    text = re.sub(r'\s{2,}', ' ', text)          # collapse multiple spaces
+    text = re.sub(r'^\s+|\s+$', '', text, flags=re.MULTILINE)  # trim lines
+
+    return text.strip()
 
 
 def detect_closed_captions(filepath):
@@ -529,10 +1126,10 @@ def filter_remove_hi(cues):
     def _speaker_replace(m):
         label = m.group(0).lstrip('- ')
         name_part = label.split(':')[0].strip()
+        # Protect pure numbers (e.g. timestamps like "2:30")
         if re.match(r'^\d+$', name_part):
             return m.group(0)
-        if re.search(r'\d$', name_part):
-            return m.group(0)
+        # Protect single-character labels
         if len(name_part) <= 1:
             return m.group(0)
         return m.group(1)
@@ -554,9 +1151,15 @@ def filter_remove_hi(cues):
         lines = text.split('\n')
         lines = [line for line in lines if not caps_hi_checker(line)]
         text = '\n'.join(lines)
-        # Clean up orphaned colons left after HI removal (e.g. "(gasps): " → ": ")
+        # Clean up orphaned colons left after HI removal
+        # "Speaker (description): text" → "Speaker : text" after (description) removed
+        # Remove "word(s) :" speaker label remnants where parens were stripped
+        text = re.sub(r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}\s+:\s*', r'\1', text, flags=re.MULTILINE)
+        # Colon at start of line: "(gasps): text" → ": text" → "text"
         text = re.sub(r'^\s*:\s*', '', text, flags=re.MULTILINE)
         text = re.sub(r'\n\s*:\s*', '\n', text)
+        # Dash + colon: "-(whispers): text" → "-: text" → "- text"
+        text = re.sub(r'^(-\s*):\s*', r'\1', text, flags=re.MULTILINE)
         # Clean up leftover whitespace and blank lines
         text = re.sub(r'^\s*-?\s*$', '', text, flags=re.MULTILINE)
         text = re.sub(r'\n{2,}', '\n', text)
@@ -1187,6 +1790,92 @@ def filter_merge_short(cues, max_gap_ms=1000):
     return result
 
 
+def filter_reduce_lines(cues, max_lines=2, max_chars=42):
+    """Reflow subtitle cues to max_lines, keeping sentences together where possible.
+
+    For each cue with more than max_lines:
+      1. If the cue has dialogue dashes (- Speaker), keeps each speaker on a line
+      2. Tries to split at sentence boundaries (. ! ?) with balanced line lengths
+      3. Falls back to splitting at the nearest word boundary to the midpoint
+      4. Short text (≤ max_chars) stays on one line
+    """
+    if not cues:
+        return cues
+
+    def _reflow(text):
+        lines = text.split('\n')
+        if len(lines) <= max_lines:
+            return text
+
+        # ── Dialogue: lines starting with "- " get one per line ──
+        # Join all lines, then re-split by dialogue dashes
+        flat = ' '.join(l.strip() for l in lines if l.strip())
+        if flat.startswith('- ') and '- ' in flat[2:]:
+            # Split on " - " that starts a new speaker turn
+            parts = re.split(r'(?<=\S) (?=- )', flat)
+            if len(parts) == max_lines:
+                return '\n'.join(p.strip() for p in parts)
+            elif len(parts) > max_lines:
+                # Too many speakers — combine overflow onto last line
+                kept = parts[:max_lines - 1]
+                kept.append(' '.join(parts[max_lines - 1:]))
+                return '\n'.join(p.strip() for p in kept)
+
+        # ── Short enough for one line ──
+        if len(flat) <= max_chars:
+            return flat
+
+        # ── Try sentence boundary split ──
+        # Find all positions after sentence-ending punctuation + space
+        split_points = []
+        for m in re.finditer(r'[.!?]+[\'"»\)]*\s+', flat):
+            pos = m.end()
+            if pos < len(flat):
+                split_points.append(pos)
+
+        # Pick the split point that best balances line lengths
+        best_split = None
+        best_diff = len(flat)
+        for pos in split_points:
+            line1 = flat[:pos].rstrip()
+            line2 = flat[pos:].lstrip()
+            # Both lines must be reasonable length
+            if max(len(line1), len(line2)) <= max_chars + 10:
+                diff = abs(len(line1) - len(line2))
+                if diff < best_diff:
+                    best_diff = diff
+                    best_split = pos
+
+        if best_split is not None:
+            return flat[:best_split].rstrip() + '\n' + flat[best_split:].lstrip()
+
+        # ── Fall back to word-boundary split near midpoint ──
+        mid = len(flat) // 2
+        # Search outward from midpoint for a space
+        best_pos = None
+        for offset in range(len(flat) // 2):
+            for pos in (mid + offset, mid - offset):
+                if 0 < pos < len(flat) and flat[pos] == ' ':
+                    best_pos = pos
+                    break
+            if best_pos is not None:
+                break
+
+        if best_pos is not None:
+            return flat[:best_pos] + '\n' + flat[best_pos + 1:]
+
+        # Last resort — just return the flattened text
+        return flat
+
+    result = []
+    for cue in cues:
+        text = cue['text']
+        if len(text.split('\n')) > max_lines:
+            text = _reflow(text)
+        result.append({**cue, 'text': text})
+    return result
+
+
 def shift_timestamps(cues, offset_ms):
     """Shift all cue timestamps by offset_ms (positive = later, negative = earlier)."""
     result = []
@@ -1216,6 +1905,850 @@ def stretch_timestamps(cues, factor):
             'end': ms_to_srt_ts(new_end)
         })
     return result
+
+
+def two_point_sync(cues, idx_a, correct_a_ms, idx_b, correct_b_ms):
+    """Linearly resync all timestamps using two reference points.
+
+    Given two cue indices and what their correct start times should be,
+    computes a linear transform (offset + scale) and applies it to all cues.
+    Fixes both fixed offset and gradual drift in one operation.
+
+    Args:
+        cues: list of cue dicts
+        idx_a: index of first reference cue (typically near the start)
+        correct_a_ms: what cue A's start time should be (in ms)
+        idx_b: index of second reference cue (typically near the end)
+        correct_b_ms: what cue B's start time should be (in ms)
+
+    Returns:
+        New list of cue dicts with adjusted timestamps.
+    """
+    if idx_a == idx_b or idx_a >= len(cues) or idx_b >= len(cues):
+        return cues
+
+    # Current timestamps of the two reference points
+    current_a = srt_ts_to_ms(cues[idx_a]['start'])
+    current_b = srt_ts_to_ms(cues[idx_b]['start'])
+
+    if current_a == current_b:
+        return cues  # can't compute slope from identical points
+
+    # Linear transform: correct = slope * current + intercept
+    slope = (correct_b_ms - correct_a_ms) / (current_b - current_a)
+    intercept = correct_a_ms - slope * current_a
+
+    result = []
+    for cue in cues:
+        old_start = srt_ts_to_ms(cue['start'])
+        old_end = srt_ts_to_ms(cue['end'])
+        new_start = int(slope * old_start + intercept)
+        new_end = int(slope * old_end + intercept)
+        if new_end > 0:
+            result.append({
+                **cue,
+                'start': ms_to_srt_ts(max(0, new_start)),
+                'end': ms_to_srt_ts(max(0, new_end))
+            })
+    return result
+
+
+def retime_subtitles(cues, matches):
+    """Re-time all subtitle cues using matched anchor points with interpolation.
+
+    For each matched cue, uses the Whisper-detected timestamp directly.
+    For unmatched cues, linearly interpolates from the nearest matched anchors.
+
+    Args:
+        cues: List of subtitle cue dicts.
+        matches: List of (cue_idx, whisper_time_ms, cue_time_ms, similarity, text)
+                 tuples from smart_sync.
+
+    Returns:
+        New list of cue dicts with adjusted timestamps.
+    """
+    if not matches or not cues:
+        return cues
+
+    # Build anchor points: sorted list of (old_time_ms, new_time_ms)
+    anchors = []
+    for ci, wt_ms, ct_ms, sim, _ in matches:
+        anchors.append((ct_ms, wt_ms))
+    anchors.sort(key=lambda x: x[0])
+
+    # Remove duplicate old_times (keep highest similarity match)
+    seen = {}
+    for old_t, new_t in anchors:
+        seen[old_t] = new_t  # later entries overwrite, but sorted so it's fine
+    anchors = sorted(seen.items())
+
+    if len(anchors) < 2:
+        # Only one anchor — fall back to simple offset
+        offset = anchors[0][1] - anchors[0][0]
+        return shift_timestamps(cues, offset)
+
+    def _interpolate(old_ms):
+        """Map an old timestamp to a new timestamp using piecewise linear interpolation."""
+        # Before first anchor — extrapolate from first two anchors
+        if old_ms <= anchors[0][0]:
+            old_a, new_a = anchors[0]
+            old_b, new_b = anchors[1]
+            if old_b == old_a:
+                return new_a + (old_ms - old_a)
+            slope = (new_b - new_a) / (old_b - old_a)
+            return int(new_a + slope * (old_ms - old_a))
+
+        # After last anchor — extrapolate from last two anchors
+        if old_ms >= anchors[-1][0]:
+            old_a, new_a = anchors[-2]
+            old_b, new_b = anchors[-1]
+            if old_b == old_a:
+                return new_b + (old_ms - old_b)
+            slope = (new_b - new_a) / (old_b - old_a)
+            return int(new_b + slope * (old_ms - old_b))
+
+        # Between two anchors — linear interpolation
+        for i in range(len(anchors) - 1):
+            old_a, new_a = anchors[i]
+            old_b, new_b = anchors[i + 1]
+            if old_a <= old_ms <= old_b:
+                if old_b == old_a:
+                    return new_a
+                t = (old_ms - old_a) / (old_b - old_a)
+                return int(new_a + t * (new_b - new_a))
+
+        # Fallback (shouldn't reach here)
+        return old_ms
+
+    result = []
+    for cue in cues:
+        old_start = srt_ts_to_ms(cue['start'])
+        old_end = srt_ts_to_ms(cue['end'])
+        new_start = _interpolate(old_start)
+        new_end = _interpolate(old_end)
+        # Preserve minimum cue duration
+        if new_end <= new_start:
+            new_end = new_start + max(500, old_end - old_start)
+        result.append({
+            **cue,
+            'start': ms_to_srt_ts(max(0, new_start)),
+            'end': ms_to_srt_ts(max(0, new_end)),
+        })
+    return result
+
+
+def smart_sync(video_path, cues, model_size='base', language=None,
+               num_segments=3, sample_minutes=5,
+               progress_callback=None, cancel_event=None,
+               engine='faster-whisper'):
+    """Auto-sync subtitles to video audio using Whisper speech recognition.
+
+    Transcribes the audio, matches Whisper segments to subtitle cues by text
+    similarity, and computes the optimal timestamp offset.
+
+    Args:
+        video_path: Path to the video file.
+        cues: List of subtitle cue dicts.
+        model_size: Whisper model size ('tiny', 'base', 'small', 'medium', 'large').
+        language: Language code (e.g. 'en'). None = auto-detect.
+        progress_callback: Optional callable(message) for status updates.
+        cancel_event: Optional threading.Event for cancellation.
+        engine: 'faster-whisper' (standard ~400ms accuracy) or
+                'whisperx' (precise ~50ms accuracy via forced alignment).
+
+    Returns:
+        dict with keys:
+            'offset_ms': int — median offset in milliseconds
+            'matches': list of (cue_idx, whisper_time_ms, cue_time_ms, similarity, text) tuples
+            'drift_ms': int — estimated drift (difference between first and last match offsets)
+            'whisper_segments': list of Whisper segment dicts
+        Returns None on failure.
+    """
+    import tempfile
+    from difflib import SequenceMatcher
+
+    if engine in ('whisperx', 'whisperx-align'):
+        try:
+            import whisperx
+            import torch
+        except ImportError as _imp_err:
+            if progress_callback:
+                _err_msg = str(_imp_err)
+                if 'is_offline_mode' in _err_msg:
+                    progress_callback(
+                        "WhisperX/transformers version conflict: " + _err_msg)
+                    progress_callback(
+                        "Fix: pip install --user 'transformers<4.45'")
+                else:
+                    progress_callback("whisperx not installed")
+            return None
+    else:
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
+            if progress_callback:
+                progress_callback("faster-whisper not installed")
+            return None
+
+    tmpdir = tempfile.mkdtemp(prefix='docflix_sync_')
+
+    try:
+        # ══════════════════════════════════════════════════════════════
+        # Direct Align mode — skip Whisper, align subtitle text directly
+        # against the audio waveform using wav2vec2 forced alignment.
+        # Every cue gets its own precise timestamp.
+        # ══════════════════════════════════════════════════════════════
+        if engine == 'whisperx-align':
+            duration = get_video_duration(video_path) or 7200
+
+            # ── Extract full audio ──
+            if progress_callback:
+                progress_callback(f"Extracting audio ({duration/60:.0f} min)...")
+            audio_path = os.path.join(tmpdir, 'audio_full.wav')
+            extract_timeout = max(120, int(duration / 60) * 2 + 60)
+            try:
+                _ext = subprocess.run(
+                    ['ffmpeg', '-y', '-i', video_path,
+                     '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1',
+                     audio_path],
+                    capture_output=True, text=True, timeout=extract_timeout)
+                if _ext.returncode != 0 or not os.path.exists(audio_path):
+                    if progress_callback:
+                        progress_callback("Audio extraction failed")
+                    return None
+            except subprocess.TimeoutExpired:
+                if progress_callback:
+                    progress_callback("Audio extraction timed out")
+                return None
+
+            if cancel_event and cancel_event.is_set():
+                return None
+
+            # ── Load alignment model only (no Whisper model needed) ──
+            _wx_device = "cuda" if torch.cuda.is_available() else "cpu"
+            _wx_lang = language or 'en'
+            if progress_callback:
+                _dev = 'GPU' if _wx_device == 'cuda' else 'CPU'
+                progress_callback(f"Loading alignment model for '{_wx_lang}' "
+                                  f"on {_dev}...")
+            try:
+                align_model, align_metadata = whisperx.load_align_model(
+                    language_code=_wx_lang, device=_wx_device)
+            except Exception as e:
+                if progress_callback:
+                    progress_callback(f"Failed to load alignment model: {e}")
+                return None
+
+            if cancel_event and cancel_event.is_set():
+                return None
+
+            # ── Build segments from subtitle cues ──
+            if progress_callback:
+                progress_callback(f"Aligning {len(cues)} cues against audio "
+                                  f"(forced alignment)...")
+            segments = []
+            for cue in cues:
+                text = cue['text'].replace('\n', ' ').strip()
+                # Skip empty / music-only / HI-only cues
+                clean = re.sub(r'[♪♫\[\]\(\)]', '', text).strip()
+                if not clean or len(clean) < 2:
+                    continue
+                segments.append({
+                    'start': srt_ts_to_ms(cue['start']) / 1000,
+                    'end': srt_ts_to_ms(cue['end']) / 1000,
+                    'text': text,
+                })
+
+            if not segments:
+                if progress_callback:
+                    progress_callback("No alignable subtitle cues found")
+                return None
+
+            # ── Forced alignment — subtitle text against audio ──
+            try:
+                audio_array = whisperx.load_audio(audio_path)
+                aligned = whisperx.align(
+                    segments, align_model, align_metadata,
+                    audio_array, _wx_device,
+                    return_char_alignments=True)
+            except Exception as e:
+                if progress_callback:
+                    progress_callback(f"Alignment failed: {e}")
+                return None
+
+            if cancel_event and cancel_event.is_set():
+                return None
+
+            # ── Build per-cue matches from aligned results ──
+            aligned_segs = aligned.get('segments', [])
+            if progress_callback:
+                progress_callback(f"Aligned {len(aligned_segs)}/{len(segments)} "
+                                  f"segments. Building matches...")
+
+            matches = []
+            whisper_segments = []
+            # Map aligned segments back to original cue indices
+            seg_idx = 0  # index into the segments list we built
+            for ci, cue in enumerate(cues):
+                text = cue['text'].replace('\n', ' ').strip()
+                clean = re.sub(r'[♪♫\[\]\(\)]', '', text).strip()
+                if not clean or len(clean) < 2:
+                    continue  # this cue was skipped during segment building
+
+                if seg_idx >= len(aligned_segs):
+                    break
+
+                aseg = aligned_segs[seg_idx]
+                seg_idx += 1
+
+                # Get precise start — prefer char-level, fall back to word, then segment
+                precise_start = None
+                chars = aseg.get('chars', [])
+                if chars:
+                    for c in chars:
+                        if 'start' in c:
+                            precise_start = c['start']
+                            break
+                if precise_start is None:
+                    words = aseg.get('words', [])
+                    if words:
+                        for w in words:
+                            if 'start' in w:
+                                precise_start = w['start']
+                                break
+                if precise_start is None:
+                    precise_start = aseg.get('start')
+                if precise_start is None:
+                    continue  # alignment failed for this segment
+
+                whisper_ms = int(precise_start * 1000)
+                cue_ms = srt_ts_to_ms(cue['start'])
+
+                matches.append((ci, whisper_ms, cue_ms, 1.0,
+                               cue['text'][:40].replace('\n', ' ')))
+                whisper_segments.append({
+                    'start': precise_start,
+                    'end': aseg.get('end', precise_start + 1),
+                    'text': aseg.get('text', '').strip(),
+                })
+
+            if not matches:
+                if progress_callback:
+                    progress_callback("Direct alignment produced no matches")
+                return None
+
+            # ── VAD boundary snapping ──
+            # Snap cue start times to actual speech onsets detected by Silero VAD.
+            # WhisperX alignment gives phoneme positions (~50ms); VAD detects the
+            # exact silence→speech transition (~20ms).
+            try:
+                import bisect
+                import wave as _wave
+                import numpy as _np
+                from faster_whisper.vad import get_speech_timestamps, VadOptions
+
+                if progress_callback:
+                    progress_callback("Running VAD for boundary snapping...")
+
+                # Load audio as float32 numpy array
+                with _wave.open(audio_path, 'r') as _wf:
+                    _frames = _wf.readframes(_wf.getnframes())
+                    _audio_np = _np.frombuffer(
+                        _frames, dtype=_np.int16).astype(_np.float32) / 32768.0
+
+                # Run VAD with tight parameters — no padding, detect short gaps
+                _vad_opts = VadOptions(
+                    min_silence_duration_ms=150,
+                    speech_pad_ms=0,
+                    threshold=0.5,
+                    min_speech_duration_ms=100,
+                )
+                _speech_ts = get_speech_timestamps(
+                    _audio_np, vad_options=_vad_opts)
+
+                if _speech_ts:
+                    # Build sorted onset/offset lists in ms (16 samples = 1ms at 16kHz)
+                    _onsets_ms = sorted(
+                        int(ts['start'] / 16) for ts in _speech_ts)
+                    _offsets_ms = sorted(
+                        int(ts['end'] / 16) for ts in _speech_ts)
+
+                    SNAP_WINDOW_MS = 150  # only snap if boundary within ±150ms
+                    _snapped = 0
+
+                    for i, (ci, wt_ms, ct_ms, sim, txt) in enumerate(matches):
+                        # Find nearest VAD speech onset to this cue's start
+                        idx = bisect.bisect_left(_onsets_ms, wt_ms)
+                        best_onset = None
+                        best_dist = SNAP_WINDOW_MS + 1
+                        for j in (idx - 1, idx):
+                            if 0 <= j < len(_onsets_ms):
+                                dist = abs(_onsets_ms[j] - wt_ms)
+                                if dist < best_dist:
+                                    best_dist = dist
+                                    best_onset = _onsets_ms[j]
+                        if best_onset is not None and best_dist <= SNAP_WINDOW_MS:
+                            matches[i] = (ci, best_onset, ct_ms, sim, txt)
+                            _snapped += 1
+
+                    if progress_callback:
+                        progress_callback(
+                            f"VAD snap: {_snapped}/{len(matches)} cue starts "
+                            f"snapped to speech onsets "
+                            f"({len(_onsets_ms)} speech segments detected)")
+                else:
+                    if progress_callback:
+                        progress_callback("VAD detected no speech — skipping snap")
+
+            except ImportError:
+                if progress_callback:
+                    progress_callback("VAD snap skipped — faster-whisper not installed")
+            except Exception as _vad_err:
+                if progress_callback:
+                    progress_callback(f"VAD snap skipped: {_vad_err}")
+
+            # ── Calculate offset ──
+            offsets = [wt - ct for _, wt, ct, _, _ in matches]
+            offsets.sort()
+            median_offset = offsets[len(offsets) // 2]
+
+            mid_time = srt_ts_to_ms(cues[len(cues)//2]['start'])
+            early = [wt - ct for _, wt, ct, _, _ in matches if ct < mid_time]
+            late = [wt - ct for _, wt, ct, _, _ in matches if ct >= mid_time]
+            drift = ((sum(late)/len(late)) - (sum(early)/len(early))) \
+                    if early and late else 0
+
+            if progress_callback:
+                progress_callback(f"Direct Align: {len(matches)}/{len(cues)} cues "
+                                  f"aligned. Offset: {median_offset:+d}ms, "
+                                  f"Drift: {drift:+.0f}ms")
+
+            return {
+                'offset_ms': median_offset,
+                'matches': matches,
+                'drift_ms': int(drift),
+                'whisper_segments': whisper_segments,
+            }
+
+        # ══════════════════════════════════════════════════════════════
+        # Standard / Precise mode — Whisper transcription + matching
+        # ══════════════════════════════════════════════════════════════
+
+        # ── Pre-check: Compare video and subtitle durations ──
+        duration = get_video_duration(video_path) or 7200
+        if cues:
+            last_cue_ms = srt_ts_to_ms(cues[-1]['end'])
+            sub_duration = last_cue_ms / 1000
+            diff_pct = abs(duration - sub_duration) / max(duration, 1) * 100
+            if diff_pct > 15:
+                if progress_callback:
+                    progress_callback(f"⚠ Duration mismatch: video is {duration/60:.0f} min, "
+                                      f"subtitles span {sub_duration/60:.0f} min "
+                                      f"({diff_pct:.0f}% difference). "
+                                      f"These may be different cuts.")
+
+        # ── Phase 1: Get video duration and plan sample segments ──
+        full_scan = (num_segments <= 0 or sample_minutes <= 0)
+
+        if full_scan:
+            # Full Scan — extract entire audio as one segment
+            samples = [(0, duration)]
+            if progress_callback:
+                progress_callback(f"Full Scan — extracting {duration/60:.0f} min of audio...")
+        else:
+            SAMPLE_LEN = sample_minutes * 60
+            n_segs = max(1, num_segments)
+            if duration <= SAMPLE_LEN * 2 or n_segs == 1:
+                samples = [(0, min(duration, SAMPLE_LEN) if n_segs == 1 else duration)]
+            else:
+                samples = []
+                for i in range(n_segs):
+                    center = duration * (i / (n_segs - 1)) if n_segs > 1 else 0
+                    seg_start = max(0, center - SAMPLE_LEN / 2)
+                    seg_end = min(duration, seg_start + SAMPLE_LEN)
+                    seg_start = max(0, seg_end - SAMPLE_LEN)
+                    samples.append((seg_start, seg_end))
+
+            if progress_callback:
+                total_sample = sum(e - s for s, e in samples)
+                progress_callback(f"Quick Scan — {len(samples)} segments "
+                                  f"({total_sample/60:.0f} min of {duration/60:.0f} min total)...")
+
+        # ── Phase 2: Extract audio samples ──
+        audio_paths = []
+        for si, (ss, se) in enumerate(samples):
+            if cancel_event and cancel_event.is_set():
+                return None
+            audio_path = os.path.join(tmpdir, f'audio_{si}.wav')
+            extract_cmd = [
+                'ffmpeg', '-y',
+                '-ss', f'{ss:.1f}', '-t', f'{se - ss:.1f}',
+                '-i', video_path,
+                '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1',
+                audio_path
+            ]
+            try:
+                seg_duration = se - ss
+                # Timeout: at least 120s, scale with segment length (~1s per minute of audio)
+                extract_timeout = max(120, int(seg_duration / 60) * 2 + 60)
+                if progress_callback:
+                    progress_callback(f"Extracting audio segment {si+1}/{len(samples)} "
+                                      f"({ss/60:.0f}m–{se/60:.0f}m)...")
+                result = subprocess.run(extract_cmd, capture_output=True,
+                                        text=True, timeout=extract_timeout)
+                if result.returncode == 0 and os.path.exists(audio_path):
+                    audio_paths.append((ss, audio_path))
+            except subprocess.TimeoutExpired:
+                continue
+
+        if not audio_paths:
+            if progress_callback:
+                progress_callback("Audio extraction failed for all segments")
+            return None
+
+        # ── Phase 3: Load Whisper model ──
+        if engine == 'whisperx':
+            if progress_callback:
+                _dev_label = 'GPU (CUDA)' if torch.cuda.is_available() else 'CPU'
+                progress_callback(f"Loading WhisperX model ({model_size}) on {_dev_label}...")
+            try:
+                _wx_device = "cuda" if torch.cuda.is_available() else "cpu"
+                _wx_compute = "float16" if _wx_device == "cuda" else "int8"
+                model = whisperx.load_model(model_size, _wx_device,
+                                            compute_type=_wx_compute)
+            except Exception as e:
+                if progress_callback:
+                    progress_callback(f"Failed to load WhisperX model: {e}")
+                    if 'is_offline_mode' in str(e) or 'transformers' in str(e):
+                        progress_callback(
+                            "Fix: pip install --user 'transformers<4.45'")
+                return None
+        else:
+            if progress_callback:
+                progress_callback(f"Loading Whisper model ({model_size})...")
+            try:
+                model = WhisperModel(model_size, device="cpu", compute_type="int8")
+            except Exception as e:
+                if progress_callback:
+                    progress_callback(f"Failed to load Whisper model: {e}")
+                return None
+
+        if cancel_event and cancel_event.is_set():
+            return None
+
+        # ── Phase 4: Transcribe each sample ──
+        whisper_segments = []
+
+        if engine == 'whisperx':
+            # ── WhisperX: batch transcription + forced alignment per segment ──
+            _wx_lang = language or 'en'
+            _align_model = None
+            _align_metadata = None
+
+            for si, (offset_s, apath) in enumerate(audio_paths):
+                if cancel_event and cancel_event.is_set():
+                    return None
+                if progress_callback:
+                    progress_callback(f"Transcribing segment {si+1}/{len(audio_paths)} "
+                                      f"(WhisperX)...")
+                try:
+                    audio_array = whisperx.load_audio(apath)
+                    tx_result = model.transcribe(audio_array, batch_size=16,
+                                                 language=_wx_lang)
+                    # Auto-detect language from first segment if not specified
+                    detected_lang = tx_result.get('language', _wx_lang)
+                    if not language and detected_lang:
+                        _wx_lang = detected_lang
+
+                    if cancel_event and cancel_event.is_set():
+                        return None
+
+                    # Load alignment model once (per language)
+                    if _align_model is None:
+                        if progress_callback:
+                            progress_callback(f"Loading alignment model for "
+                                              f"'{_wx_lang}'...")
+                        try:
+                            _align_model, _align_metadata = \
+                                whisperx.load_align_model(
+                                    language_code=_wx_lang,
+                                    device=_wx_device)
+                        except Exception as ae:
+                            if progress_callback:
+                                progress_callback(f"Alignment model failed: {ae}")
+                                progress_callback("Falling back to segment-level "
+                                                  "timestamps (less precise)")
+                            # Fall back: use unaligned segment timestamps
+                            for seg in tx_result.get('segments', []):
+                                whisper_segments.append({
+                                    'start': seg['start'] + offset_s,
+                                    'end': seg['end'] + offset_s,
+                                    'text': seg.get('text', '').strip(),
+                                })
+                            continue
+
+                    if cancel_event and cancel_event.is_set():
+                        return None
+
+                    # ── Forced alignment — phoneme-level precision ──
+                    if progress_callback:
+                        progress_callback(f"Aligning segment {si+1}/{len(audio_paths)} "
+                                          f"(forced alignment)...")
+                    aligned = whisperx.align(
+                        tx_result['segments'], _align_model, _align_metadata,
+                        audio_array, _wx_device,
+                        return_char_alignments=True)
+
+                    # Collect aligned segments — prefer char-level timestamps
+                    count = 0
+                    for seg in aligned.get('segments', []):
+                        precise_start = None
+                        # Char-level (most precise)
+                        chars = seg.get('chars', [])
+                        if chars:
+                            for c in chars:
+                                if 'start' in c:
+                                    precise_start = c['start'] + offset_s
+                                    break
+                        # Word-level fallback
+                        if precise_start is None:
+                            words = seg.get('words', [])
+                            if words:
+                                for w in words:
+                                    if 'start' in w:
+                                        precise_start = w['start'] + offset_s
+                                        break
+                        # Segment-level fallback
+                        if precise_start is None:
+                            precise_start = seg['start'] + offset_s
+
+                        whisper_segments.append({
+                            'start': precise_start,
+                            'end': seg['end'] + offset_s,
+                            'text': seg.get('text', '').strip(),
+                        })
+                        count += 1
+                        if progress_callback and count % 10 == 0:
+                            progress_callback(f"Segment {si+1}: {count} phrases "
+                                              f"(aligned)...")
+
+                except Exception as e:
+                    if progress_callback:
+                        progress_callback(f"WhisperX error in segment {si+1}: {e}")
+                    continue
+        else:
+            # ── faster-whisper: streaming transcription per segment ──
+            for si, (offset_s, apath) in enumerate(audio_paths):
+                if cancel_event and cancel_event.is_set():
+                    return None
+                if progress_callback:
+                    progress_callback(f"Transcribing segment {si+1}/{len(audio_paths)}...")
+                try:
+                    segments_gen, info = model.transcribe(
+                        apath,
+                        language=language,
+                        word_timestamps=True,
+                        vad_filter=True,
+                    )
+                    count = 0
+                    for seg in segments_gen:
+                        if cancel_event and cancel_event.is_set():
+                            return None
+                        # Use word-level timestamp for more precise start time
+                        # The first word's start is more accurate than the segment start
+                        words = seg.words if hasattr(seg, 'words') and seg.words else None
+                        if words:
+                            precise_start = words[0].start + offset_s
+                        else:
+                            precise_start = seg.start + offset_s
+                        whisper_segments.append({
+                            'start': precise_start,
+                            'end': seg.end + offset_s,
+                            'text': seg.text.strip(),
+                        })
+                        count += 1
+                        if progress_callback and count % 10 == 0:
+                            progress_callback(f"Segment {si+1}: {count} phrases "
+                                              f"({seg.end:.0f}s)...")
+                except Exception as e:
+                    if progress_callback:
+                        progress_callback(f"Transcription error in segment {si+1}: {e}")
+                    continue
+
+        if not whisper_segments:
+            if progress_callback:
+                progress_callback("Whisper produced no transcription")
+            return None
+
+        if progress_callback:
+            progress_callback(f"Transcribed {len(whisper_segments)} phrases from "
+                              f"{len(audio_paths)} segments. Matching to subtitles...")
+
+        # ── Phase 3: Two-pass matching ──
+        def _normalize(text):
+            """Normalize text for comparison: lowercase, strip punctuation,
+            remove speaker labels, HI annotations, and music notes."""
+            text = text.lower()
+            # Remove speaker labels: "JUNIOR: text" → "text"
+            text = re.sub(r'^[a-z][a-z\s\'\.]{0,25}:\s*', '', text, flags=re.MULTILINE)
+            # Remove HI annotations: [brackets] and (parentheses)
+            text = re.sub(r'\[.*?\]', '', text)
+            text = re.sub(r'\(.*?\)', '', text)
+            # Remove music notes
+            text = text.replace('♪', '').replace('♫', '')
+            # Strip punctuation and normalize whitespace
+            text = re.sub(r'[^\w\s]', '', text)
+            text = re.sub(r'\s+', ' ', text).strip()
+            return text
+
+        # Pre-normalize all Whisper segments for speed
+        norm_segments = []
+        for seg in whisper_segments:
+            nt = _normalize(seg['text'])
+            if nt and len(nt) >= 3:
+                norm_segments.append((seg, nt))
+
+        if progress_callback:
+            progress_callback(f"{len(norm_segments)} usable phrases "
+                              f"(of {len(whisper_segments)} total)")
+
+        total_cues = len(cues)
+
+        def _match_sequential():
+            """Sequential matching: walk through cues and Whisper segments in order.
+            Each match must come AFTER the previous match in the Whisper timeline.
+            This prevents cross-matching and handles different cuts/edits."""
+            matches = []
+            seg_start = 0  # start searching from this Whisper segment index
+            # Scale search window with segment density — Full Scan on long files
+            # can produce 1000+ segments; a fixed window of 100 (~5 min) loses
+            # sync after any extended gap (music, credits, silence).
+            # Use at least 100, scale up to cover ~1/3 of all segments.
+            SEARCH_WINDOW = max(100, len(norm_segments) // 3)
+            _consec_misses = 0  # track consecutive unmatched cues
+
+            for ci, cue in enumerate(cues):
+                if cancel_event and cancel_event.is_set():
+                    return None
+
+                if progress_callback and (ci % 10 == 0 or ci == total_cues - 1):
+                    progress_callback(f"Matching cue {ci+1}/{total_cues} "
+                                      f"({len(matches)} matched)...")
+
+                cue_text = _normalize(cue['text'])
+                if len(cue_text) < 3:
+                    continue
+
+                cue_start_ms = srt_ts_to_ms(cue['start'])
+                best_sim = 0
+                best_idx = None
+
+                # Only search forward from last match position
+                search_end = min(seg_start + SEARCH_WINDOW, len(norm_segments))
+                for si in range(seg_start, search_end):
+                    seg, seg_text = norm_segments[si]
+
+                    # Length ratio filter — relaxed to handle different
+                    # sentence splitting between subtitles and Whisper
+                    len_ratio = len(cue_text) / max(len(seg_text), 1)
+                    if len_ratio < 0.2 or len_ratio > 5.0:
+                        continue
+
+                    sim = SequenceMatcher(None, cue_text, seg_text).ratio()
+                    if sim > best_sim:
+                        best_sim = sim
+                        best_idx = si
+
+                if best_sim > 0.6 and best_idx is not None:
+                    seg = norm_segments[best_idx][0]
+                    whisper_ms = int(seg['start'] * 1000)
+                    this_offset = whisper_ms - cue_start_ms
+
+                    # Consistency check: reject if offset changes too dramatically
+                    # from recent matches (catches bad jumps from wrong matches)
+                    accept = True
+                    if matches:
+                        recent_offsets = [wt - ct for _, wt, ct, _, _ in matches[-5:]]
+                        avg_recent = sum(recent_offsets) / len(recent_offsets)
+                        # Allow up to 30 seconds of drift from recent average
+                        if abs(this_offset - avg_recent) > 30000:
+                            accept = False  # skip this suspicious match
+
+                    if accept:
+                        matches.append((ci, whisper_ms, cue_start_ms, best_sim,
+                                        cue['text'][:40].replace('\n', ' ')))
+                        # Advance search start past this match
+                        seg_start = best_idx + 1
+                        _consec_misses = 0
+                    else:
+                        _consec_misses += 1
+                else:
+                    _consec_misses += 1
+
+                # If we've gone 50+ cues without a match, try resetting the
+                # search position based on time — we may have lost sync
+                if _consec_misses >= 50 and norm_segments:
+                    # Estimate where in the segments we should be, based on
+                    # the cue's timestamp relative to total duration
+                    cue_frac = cue_start_ms / max(
+                        srt_ts_to_ms(cues[-1]['end']), 1)
+                    est_idx = int(cue_frac * len(norm_segments))
+                    # Only jump forward, never backward past confirmed matches
+                    if est_idx > seg_start:
+                        seg_start = max(seg_start, est_idx - SEARCH_WINDOW // 4)
+                        _consec_misses = 0
+                        if progress_callback:
+                            progress_callback(
+                                f"  Re-syncing search at segment {seg_start} "
+                                f"(cue {ci+1} had {_consec_misses} misses)...")
+
+            return matches
+
+        # ── Sequential matching ──
+        if progress_callback:
+            progress_callback("Matching subtitles to audio (sequential)...")
+
+        matches = _match_sequential()
+        if matches is None:
+            return None  # cancelled
+
+        if not matches:
+            if progress_callback:
+                progress_callback("No text matches found between subtitles and audio")
+            return None
+
+        # ── Phase 4: Calculate offset ──
+        try:
+            offsets = [wt - ct for (_, wt, ct, _, _) in matches]
+            offsets.sort()
+            median_offset = offsets[len(offsets) // 2]
+
+            mid_time = srt_ts_to_ms(cues[len(cues)//2]['start'])
+            early = [wt - ct for _, wt, ct, _, _ in matches if ct < mid_time]
+            late = [wt - ct for _, wt, ct, _, _ in matches if ct >= mid_time]
+            if early and late:
+                drift = (sum(late) / len(late)) - (sum(early) / len(early))
+            else:
+                drift = 0
+
+            if progress_callback:
+                progress_callback(f"Matched {len(matches)}/{len(cues)} cues. "
+                                  f"Offset: {median_offset:+d}ms, Drift: {drift:+.0f}ms")
+
+            return {
+                'offset_ms': median_offset,
+                'matches': matches,
+                'drift_ms': int(drift),
+                'whisper_segments': whisper_segments,
+            }
+        except Exception as e:
+            if progress_callback:
+                progress_callback(f"Error calculating offset: {e}")
+            return None
+
+    finally:
+        import shutil as _shutil_cleanup
+        _shutil_cleanup.rmtree(tmpdir, ignore_errors=True)
 
 
 # Max recommended characters per subtitle line for readability
@@ -2059,6 +3592,36 @@ class VideoConverter:
                     out_sub_idx += 1
                     self.log("Mapping extracted closed captions as subtitle track", 'INFO')
 
+            def _add_metadata_args(c):
+                """Add metadata cleanup and track metadata flags."""
+                # Strip chapters
+                if settings.get('strip_chapters', False):
+                    c.extend(['-map_chapters', '-1'])
+                    self.log("Stripping chapters from output", 'INFO')
+
+                # Strip global tags/metadata
+                if settings.get('strip_metadata_tags', False):
+                    c.extend(['-map_metadata', '-1'])
+                    self.log("Stripping global tags/metadata from output", 'INFO')
+
+                # Set track metadata (language, clear names/title)
+                if settings.get('set_track_metadata', False):
+                    video_lang = settings.get('meta_video_lang', 'und')
+                    audio_lang = settings.get('meta_audio_lang', 'eng')
+                    sub_lang   = settings.get('meta_sub_lang', 'eng')
+                    # Container title
+                    c.extend(['-metadata', 'title='])
+                    # Video track
+                    c.extend(['-metadata:s:v:0', f'language={video_lang}',
+                              '-metadata:s:v:0', 'title='])
+                    # Audio track
+                    c.extend(['-metadata:s:a:0', f'language={audio_lang}',
+                              '-metadata:s:a:0', 'title='])
+                    # First subtitle track
+                    c.extend(['-metadata:s:s:0', f'language={sub_lang}',
+                              '-metadata:s:s:0', f'title={sub_lang.upper() if len(sub_lang) <= 3 else sub_lang}'])
+                    self.log(f"Setting track metadata: video={video_lang}, audio={audio_lang}, sub={sub_lang}", 'INFO')
+
             # ── Log what we're about to do ──
             self.log(f"Video codec: {video_enc_name}", 'INFO')
             self.log(f"Mode: {mode}" + (" (two-pass)" if use_two_pass else " (GPU multipass)" if use_gpu_multipass else ""), 'INFO')
@@ -2093,6 +3656,7 @@ class VideoConverter:
                 _add_video_args(cmd2, pass_num=2)
                 _add_audio_args(cmd2)
                 _add_subtitle_args(cmd2)
+                _add_metadata_args(cmd2)
                 cmd2.append(output_path)
                 self.log(f"Pass 2 command: {' '.join(cmd2)}", 'INFO')
 
@@ -2115,6 +3679,7 @@ class VideoConverter:
                 _add_video_args(cmd)
                 _add_audio_args(cmd)
                 _add_subtitle_args(cmd)
+                _add_metadata_args(cmd)
                 cmd.append(output_path)
                 self.log(f"Command: {' '.join(cmd)}", 'INFO')
                 return self._run_process(cmd, input_path)
@@ -2326,6 +3891,7 @@ class VideoConverterApp:
         self.recent_folders = []  # list of Path strings, max 5
         self.custom_ad_patterns = []  # user-defined ad patterns for subtitle editor
         self.custom_cap_words = []   # user-defined names for Fix ALL CAPS filter
+        self.custom_spell_words = [] # user-defined words for spell checker dictionary
         self.custom_replacements = []  # list of [find, replace] pairs for batch S&R
         self.files = []
         self.converter = VideoConverter(
@@ -2363,6 +3929,14 @@ class VideoConverterApp:
         # Audio settings
         self.audio_codec = tk.StringVar(value='aac')
         self.audio_bitrate = tk.StringVar(value='128k')
+
+        # Metadata cleanup settings
+        self.strip_chapters = tk.BooleanVar(value=False)
+        self.strip_metadata_tags = tk.BooleanVar(value=False)
+        self.set_track_metadata = tk.BooleanVar(value=False)
+        self.meta_video_lang = tk.StringVar(value='und')
+        self.meta_audio_lang = tk.StringVar(value='eng')
+        self.meta_sub_lang = tk.StringVar(value='eng')
 
         # Check system capabilities
         self.has_ffmpeg, self.ffmpeg_version = check_ffmpeg()
@@ -2509,6 +4083,12 @@ class VideoConverterApp:
                                command=self.open_standalone_subtitle_editor)
         tools_menu.add_command(label="📦 Batch Filter Subtitles...",
                                command=self.open_batch_filter)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="🔧 Media Processor...",
+                               accelerator="Ctrl+M",
+                               command=self.open_media_processor)
+        tools_menu.add_command(label="📺 TV Show Renamer...",
+                               command=self.open_tv_renamer)
         # Help menu
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
@@ -2532,6 +4112,7 @@ class VideoConverterApp:
         self.root.bind('<Control-i>', lambda e: self.show_media_info())
         self.root.bind('<Control-t>', lambda e: self.test_encode())
         self.root.bind('<Control-F>', lambda e: self.open_output_folder())
+        self.root.bind('<Control-m>', lambda e: self.open_media_processor())
 
     def open_files(self):
         """Open a file picker and add selected video files to the queue."""
@@ -2866,6 +4447,37 @@ class VideoConverterApp:
         ttk.Checkbutton(self.check_frame, text="Remove existing subtitles",
                        variable=self.strip_internal_subs).pack(side='left', padx=5)
 
+        # Metadata cleanup options - Row 8
+        self.metadata_frame = ttk.Frame(settings_frame)
+        self.metadata_frame.grid(row=8, column=0, columnspan=2, sticky='w', pady=(0, 6))
+
+        ttk.Checkbutton(self.metadata_frame, text="Strip chapters",
+                       variable=self.strip_chapters).pack(side='left', padx=5)
+        ttk.Checkbutton(self.metadata_frame, text="Strip tags",
+                       variable=self.strip_metadata_tags).pack(side='left', padx=5)
+
+        self.meta_check = ttk.Checkbutton(self.metadata_frame, text="Set track metadata:",
+                       variable=self.set_track_metadata, command=self._on_metadata_toggle)
+        self.meta_check.pack(side='left', padx=5)
+
+        self.meta_detail_frame = ttk.Frame(self.metadata_frame)
+        self.meta_detail_frame.pack(side='left', padx=(0, 5))
+
+        ttk.Label(self.meta_detail_frame, text="V:").pack(side='left')
+        self.meta_video_entry = ttk.Entry(self.meta_detail_frame, textvariable=self.meta_video_lang, width=4)
+        self.meta_video_entry.pack(side='left', padx=(2, 6))
+
+        ttk.Label(self.meta_detail_frame, text="A:").pack(side='left')
+        self.meta_audio_entry = ttk.Entry(self.meta_detail_frame, textvariable=self.meta_audio_lang, width=4)
+        self.meta_audio_entry.pack(side='left', padx=(2, 6))
+
+        ttk.Label(self.meta_detail_frame, text="S:").pack(side='left')
+        self.meta_sub_entry = ttk.Entry(self.meta_detail_frame, textvariable=self.meta_sub_lang, width=4)
+        self.meta_sub_entry.pack(side='left', padx=(2, 0))
+
+        # Initial state
+        self._on_metadata_toggle()
+
 
     def setup_file_list(self, parent):
         """Setup file list section"""
@@ -3008,11 +4620,25 @@ class VideoConverterApp:
         ry = self.root.winfo_y()
         rw = self.root.winfo_width()
         rh = self.root.winfo_height()
-        dw = dlg.winfo_reqwidth()
-        dh = dlg.winfo_reqheight()
+        # Use actual window size if available, fall back to requested size
+        dw = dlg.winfo_width()
+        dh = dlg.winfo_height()
+        if dw <= 1 or dh <= 1:
+            # Window not yet mapped — parse from geometry string if set
+            geo = dlg.geometry()
+            try:
+                size_part = geo.split('+')[0]
+                if 'x' in size_part:
+                    dw, dh = map(int, size_part.split('x'))
+            except (ValueError, IndexError):
+                dw = dlg.winfo_reqwidth()
+                dh = dlg.winfo_reqheight()
         x = rx + (rw - dw) // 2
         y = ry + (rh - dh) // 2
-        dlg.geometry(f"+{x}+{y}")
+        # Ensure it stays on screen
+        x = max(0, x)
+        y = max(0, y)
+        dlg.geometry(f"{dw}x{dh}+{x}+{y}")
 
     def _get_selected_file_index(self):
         """Return (item_id, index) for the currently selected tree row, or (None, None)."""
@@ -3326,7 +4952,7 @@ class VideoConverterApp:
 
         dlg = tk.Toplevel(self.root)
         dlg.title(f"Override Settings — {os.path.basename(file_info['name'])}")
-        dlg.geometry("520x540")
+        dlg.geometry("520x640")
         dlg.transient(self.root)
         dlg.grab_set()
         self._center_on_main(dlg)
@@ -3463,6 +5089,41 @@ class VideoConverterApp:
         ttk.Checkbutton(check_frame, text="Skip existing",    variable=v_skip).pack(side='left', padx=4)
         ttk.Checkbutton(check_frame, text="Delete originals", variable=v_delete).pack(side='left', padx=4)
 
+        # ── Metadata cleanup ──
+        v_strip_chapters    = tk.BooleanVar(value=ov('strip_chapters',      self.strip_chapters.get()))
+        v_strip_meta_tags   = tk.BooleanVar(value=ov('strip_metadata_tags', self.strip_metadata_tags.get()))
+        v_set_track_meta    = tk.BooleanVar(value=ov('set_track_metadata',  self.set_track_metadata.get()))
+        v_meta_video_lang   = tk.StringVar(value=ov('meta_video_lang',      self.meta_video_lang.get()))
+        v_meta_audio_lang   = tk.StringVar(value=ov('meta_audio_lang',      self.meta_audio_lang.get()))
+        v_meta_sub_lang     = tk.StringVar(value=ov('meta_sub_lang',        self.meta_sub_lang.get()))
+
+        meta_frame = ttk.Frame(f)
+        meta_frame.grid(row=row, column=0, columnspan=2, sticky='w', **pad); row += 1
+        ttk.Checkbutton(meta_frame, text="Strip chapters",  variable=v_strip_chapters).pack(side='left', padx=4)
+        ttk.Checkbutton(meta_frame, text="Strip tags",      variable=v_strip_meta_tags).pack(side='left', padx=4)
+
+        meta_track_frame = ttk.Frame(f)
+        meta_track_frame.grid(row=row, column=0, columnspan=2, sticky='w', **pad); row += 1
+
+        def _toggle_ovr_meta():
+            st = 'normal' if v_set_track_meta.get() else 'disabled'
+            ovr_mv.configure(state=st)
+            ovr_ma.configure(state=st)
+            ovr_ms.configure(state=st)
+
+        ttk.Checkbutton(meta_track_frame, text="Set track metadata:",
+                       variable=v_set_track_meta, command=_toggle_ovr_meta).pack(side='left', padx=4)
+        ttk.Label(meta_track_frame, text="V:").pack(side='left')
+        ovr_mv = ttk.Entry(meta_track_frame, textvariable=v_meta_video_lang, width=4)
+        ovr_mv.pack(side='left', padx=(2, 6))
+        ttk.Label(meta_track_frame, text="A:").pack(side='left')
+        ovr_ma = ttk.Entry(meta_track_frame, textvariable=v_meta_audio_lang, width=4)
+        ovr_ma.pack(side='left', padx=(2, 6))
+        ttk.Label(meta_track_frame, text="S:").pack(side='left')
+        ovr_ms = ttk.Entry(meta_track_frame, textvariable=v_meta_sub_lang, width=4)
+        ovr_ms.pack(side='left', padx=(2, 0))
+        _toggle_ovr_meta()
+
         # ── Dynamic update helpers ──
         def _update_presets():
             info = VIDEO_CODEC_MAP.get(v_video_codec.get(), VIDEO_CODEC_MAP['H.265 / HEVC'])
@@ -3533,6 +5194,12 @@ class VideoConverterApp:
                 'skip_existing':     v_skip.get(),
                 'delete_originals':  v_delete.get(),
                 'hw_decode':         v_hw_decode.get(),
+                'strip_chapters':      v_strip_chapters.get(),
+                'strip_metadata_tags': v_strip_meta_tags.get(),
+                'set_track_metadata':  v_set_track_meta.get(),
+                'meta_video_lang':     v_meta_video_lang.get(),
+                'meta_audio_lang':     v_meta_audio_lang.get(),
+                'meta_sub_lang':       v_meta_sub_lang.get(),
             }
             file_info['overrides'] = overrides
             self._refresh_tree_row(item, file_info)
@@ -3611,6 +5278,9 @@ class VideoConverterApp:
         ttk.Label(top_bar, text=f"{len(streams)} subtitle track(s) found:",
                   font=('Helvetica', 10, 'bold')).pack(side='left')
 
+        # ── Subtitle output format options ──
+        SUB_FORMATS = ['copy', 'srt', 'ass', 'webvtt', 'ttml', 'extract only', 'drop']
+
         check_all_var = tk.BooleanVar(value=True)
         def on_check_all():
             for v in track_vars:
@@ -3618,8 +5288,16 @@ class VideoConverterApp:
         tk.Checkbutton(top_bar, text="Check All", variable=check_all_var,
                        command=on_check_all, relief='flat', bd=0).pack(side='right')
 
-        # ── Subtitle output format options ──
-        SUB_FORMATS = ['copy', 'srt', 'ass', 'webvtt', 'ttml', 'extract only', 'drop']
+        # ── Set All To: dropdown ──
+        set_all_var = tk.StringVar(value='copy')
+        def on_set_all():
+            fmt = set_all_var.get()
+            for _keep_var, fmt_var in track_vars:
+                fmt_var.set(fmt)
+        ttk.Button(top_bar, text="Apply", command=on_set_all, width=6).pack(side='right', padx=(4, 8))
+        ttk.Combobox(top_bar, textvariable=set_all_var,
+                     values=SUB_FORMATS, width=12, state='readonly').pack(side='right', padx=(2, 0))
+        ttk.Label(top_bar, text="Set All To:").pack(side='right', padx=(8, 2))
 
         # ── Column headers (outside scroll area so they stay fixed) ──
         COL_WIDTHS = [40, 60, 70, 100, 0, 120, 50]  # 0 = expand
@@ -3701,19 +5379,25 @@ class VideoConverterApp:
             flags = []
             if s['forced']: flags.append('Forced')
             if s['sdh']:    flags.append('SDH')
+            if s.get('empty'):  flags.append('⚠ EMPTY')
             title_text = s['title']
             if flags: title_text += f"  [{', '.join(flags)}]"
-            ttk.Label(list_frame, text=title_text, foreground='gray').grid(
+            title_fg = 'red' if s.get('empty') else 'gray'
+            ttk.Label(list_frame, text=title_text, foreground=title_fg).grid(
                 row=r, column=4, sticky='w', padx=4)
 
-            # Convert To dropdown
+            # Convert To dropdown — disable for empty tracks
+            is_empty = s.get('empty', False)
             fmt_combo = ttk.Combobox(list_frame, textvariable=fmt_var,
-                                     values=SUB_FORMATS, width=12, state='readonly')
+                                     values=SUB_FORMATS, width=12,
+                                     state='disabled' if is_empty else 'readonly')
             fmt_combo.grid(row=r, column=5, padx=4, pady=2)
+            if is_empty:
+                keep_var.set(False)  # uncheck by default
+                fmt_var.set('drop')
 
-            # Edit button (only for text-based subtitles)
-            _BITMAP_SUB_CODECS_SET = {'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle'}
-            if s['codec_name'] not in _BITMAP_SUB_CODECS_SET:
+            # Edit button (only for text-based, non-empty subtitles)
+            if s['codec_name'] not in BITMAP_SUB_CODECS and not is_empty:
                 edit_btn = ttk.Button(list_frame, text="✏️", width=3,
                     command=lambda si=s['index'], fi=file_info, fp=filepath: (
                         self.show_subtitle_editor(fp, si, fi)
@@ -3765,6 +5449,10 @@ class VideoConverterApp:
                     continue
                 if fmt in ('copy', 'drop'):
                     continue
+                # Skip empty tracks
+                if s.get('empty', False):
+                    self.add_log(f"Skipping empty subtitle track #{s['index']}", 'WARNING')
+                    continue
                 # Determine output extension
                 ext_map = {'srt': '.srt', 'ass': '.ass', 'webvtt': '.vtt',
                            'ttml': '.ttml', 'extract only': '.srt'}
@@ -3777,6 +5465,28 @@ class VideoConverterApp:
                 if s['forced']: out_name += ".forced"
                 out_name += out_ext
                 out_path = str(out_dir / out_name)
+
+                # ── Bitmap subtitle → text format requires OCR ──
+                is_bitmap = s['codec_name'] in BITMAP_SUB_CODECS
+                is_text_target = fmt in ('srt', 'ass', 'webvtt', 'ttml', 'extract only')
+
+                if is_bitmap and is_text_target:
+                    if not shutil.which('tesseract'):
+                        self.add_log(f"Tesseract not installed — cannot OCR #{s['index']}. "
+                                     "Install with: sudo apt install tesseract-ocr tesseract-ocr-eng", 'ERROR')
+                        continue
+
+                    self.add_log(f"OCR: bitmap subtitle #{s['index']} ({lang}) → {out_name}", 'INFO')
+
+                    # Launch OCR monitor window
+                    ocr_result = self._run_ocr_with_monitor(
+                        filepath, s['index'], lang, out_path, out_name, file_info)
+
+                    if ocr_result:
+                        extracted += 1
+                    continue
+
+                # ── Normal text subtitle extraction via ffmpeg ──
                 cmd = [
                     'ffmpeg', '-y', '-i', filepath,
                     '-map', f"0:{s['index']}",
@@ -3848,6 +5558,10 @@ class VideoConverterApp:
         TAG_TAGS = 'has_tags'
         TAG_LONG = 'long_line'
         TAG_SEARCH = 'search_match'
+        TAG_SPELL = 'has_spelling'
+
+        # ── Spell check state ──
+        spell_error_indices = set()
 
         # ── Undo / Redo ──
         def push_undo():
@@ -4422,7 +6136,7 @@ class VideoConverterApp:
             self.add_log("Subtitle edits reset to original", 'INFO')
 
         filter_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Filters", menu=filter_menu)
+        menubar.add_cascade(label="Tools", menu=filter_menu)
         filter_menu.add_command(label="Remove HI  [brackets] (parens) Speaker:",
                                 command=lambda: apply_remove_hi())
         filter_menu.add_command(label="Remove Tags  <i> {\\an8}",
@@ -4433,8 +6147,8 @@ class VideoConverterApp:
                          "Remove Ads")
 
         filter_menu.add_command(label="Remove Ads / Credits", command=apply_remove_ads)
-        filter_menu.add_command(label="Remove Music Notes  ♪ ♫",
-                                command=lambda: apply_filter(filter_remove_music_notes, "Remove Music Notes"))
+        filter_menu.add_command(label="Remove Stray Notes  ♪ ♫",
+                                command=lambda: apply_filter(filter_remove_music_notes, "Remove Stray Notes"))
         filter_menu.add_command(label="Remove Leading Dashes  -",
                                 command=lambda: apply_filter(filter_remove_leading_dashes, "Remove Leading Dashes"))
         filter_menu.add_command(label="Remove ALL CAPS HI  (UK style)",
@@ -4446,6 +6160,8 @@ class VideoConverterApp:
                                 command=lambda: apply_filter(filter_remove_duplicates, "Remove Duplicates"))
         filter_menu.add_command(label="Merge Short Cues",
                                 command=lambda: apply_filter(filter_merge_short, "Merge Short Cues"))
+        filter_menu.add_command(label="Reduce to 2 Lines",
+                                command=lambda: apply_filter(filter_reduce_lines, "Reduce to 2 Lines"))
         filter_menu.add_separator()
 
         # ── Fix ALL CAPS ──
@@ -4600,6 +6316,375 @@ class VideoConverterApp:
 
         filter_menu.add_command(label="Manage Ad Patterns...",
                                 command=show_ad_patterns_dialog)
+        filter_menu.add_separator()
+        filter_menu.add_command(label="Spell Check...",
+                                accelerator="F7",
+                                command=lambda: _show_spell_check())
+        filter_menu.add_separator()
+        filter_menu.add_command(label="Search/Replace List...",
+                                command=lambda: _show_saved_replacements())
+
+        def _show_saved_replacements():
+            """Show dialog to manage and apply persistent search & replace pairs."""
+            sd = tk.Toplevel(editor)
+            sd.title("Search/Replace List")
+            sd.geometry("550x450")
+            sd.resizable(True, True)
+            self._center_on_main(sd)
+            sd.attributes('-topmost', True)
+
+            f = ttk.Frame(sd, padding=12)
+            f.pack(fill='both', expand=True)
+            f.columnconfigure(0, weight=1)
+            f.rowconfigure(1, weight=1)
+
+            # ── Add new pair ──
+            add_f = ttk.LabelFrame(f, text="Add Replacement", padding=6)
+            add_f.grid(row=0, column=0, sticky='ew', pady=(0, 8))
+
+            af = ttk.Frame(add_f)
+            af.pack(fill='x')
+            ttk.Label(af, text="Find:").pack(side='left', padx=(0, 4))
+            sr_find = tk.StringVar()
+            sr_find_entry = ttk.Entry(af, textvariable=sr_find, width=18)
+            sr_find_entry.pack(side='left', padx=(0, 8))
+            ttk.Label(af, text="Replace:").pack(side='left', padx=(0, 4))
+            sr_repl = tk.StringVar()
+            sr_repl_entry = ttk.Entry(af, textvariable=sr_repl, width=18)
+            sr_repl_entry.pack(side='left', padx=(0, 8))
+            sr_case = tk.BooleanVar(value=False)
+            ttk.Checkbutton(af, text="Aa", variable=sr_case).pack(side='left', padx=(0, 4))
+
+            def _add_pair():
+                find = sr_find.get()
+                if not find:
+                    return
+                repl = sr_repl.get()
+                pair = [find, repl, sr_case.get()]
+                if pair not in self.custom_replacements:
+                    self.custom_replacements.append(pair)
+                    self.save_preferences()
+                _refresh_list()
+                sr_find.set('')
+                sr_repl.set('')
+
+            ttk.Button(af, text="Add", command=_add_pair, width=5).pack(side='left', padx=2)
+
+            # ── List ──
+            list_f = ttk.Frame(f)
+            list_f.grid(row=1, column=0, sticky='nsew')
+            list_f.columnconfigure(0, weight=1)
+            list_f.rowconfigure(0, weight=1)
+
+            columns = ('find', 'replace', 'case')
+            sr_tree = ttk.Treeview(list_f, columns=columns, show='headings', height=10)
+            sr_tree.grid(row=0, column=0, sticky='nsew')
+            sr_tree.heading('find', text='Find')
+            sr_tree.heading('replace', text='Replace With')
+            sr_tree.heading('case', text='Case')
+            sr_tree.column('find', width=180, minwidth=100)
+            sr_tree.column('replace', width=180, minwidth=100)
+            sr_tree.column('case', width=50, minwidth=40, anchor='center')
+
+            sr_scroll = ttk.Scrollbar(list_f, orient='vertical', command=sr_tree.yview)
+            sr_scroll.grid(row=0, column=1, sticky='ns')
+            sr_tree.configure(yscrollcommand=sr_scroll.set)
+
+            def _refresh_list():
+                sr_tree.delete(*sr_tree.get_children())
+                for i, pair in enumerate(self.custom_replacements):
+                    find, repl = pair[0], pair[1]
+                    case = 'Yes' if (len(pair) > 2 and pair[2]) else 'No'
+                    sr_tree.insert('', 'end', iid=str(i),
+                                  values=(find, repl, case))
+
+            def _remove_selected():
+                sel = sr_tree.selection()
+                if not sel:
+                    return
+                indices = sorted([int(s) for s in sel], reverse=True)
+                for idx in indices:
+                    if idx < len(self.custom_replacements):
+                        del self.custom_replacements[idx]
+                self.save_preferences()
+                _refresh_list()
+
+            def _clear_all():
+                if messagebox.askyesno("Clear All",
+                    "Remove all saved replacements?", parent=sd):
+                    self.custom_replacements.clear()
+                    self.save_preferences()
+                    _refresh_list()
+
+            # ── Buttons ──
+            btn_f = ttk.Frame(f)
+            btn_f.grid(row=2, column=0, sticky='ew', pady=(8, 0))
+
+            def _apply_all():
+                if not self.custom_replacements:
+                    messagebox.showinfo("No Replacements",
+                        "No saved replacements to apply.", parent=sd)
+                    return
+                push_undo()
+                total_count = 0
+                for pair in self.custom_replacements:
+                    find, repl = pair[0], pair[1]
+                    case_sensitive = len(pair) > 2 and pair[2]
+                    for cue in cues:
+                        old = cue['text']
+                        if case_sensitive:
+                            cue['text'] = cue['text'].replace(find, repl)
+                        else:
+                            cue['text'] = re.sub(re.escape(find), lambda m: repl,
+                                                 cue['text'], flags=re.IGNORECASE)
+                        if cue['text'] != old:
+                            total_count += 1
+                refresh_tree(cues)
+                self.add_log(f"Applied {len(self.custom_replacements)} replacement rule(s), "
+                             f"{total_count} cue(s) changed", 'INFO')
+                messagebox.showinfo("Replacements Applied",
+                    f"Applied {len(self.custom_replacements)} rule(s)\n"
+                    f"{total_count} cue(s) modified", parent=sd)
+
+            ttk.Button(btn_f, text="▶ Apply All", command=_apply_all).pack(side='left', padx=2)
+            ttk.Button(btn_f, text="Remove", command=_remove_selected).pack(side='left', padx=2)
+            ttk.Button(btn_f, text="Clear All", command=_clear_all).pack(side='left', padx=2)
+            ttk.Button(btn_f, text="Close", command=sd.destroy).pack(side='right', padx=2)
+
+            _refresh_list()
+
+        def _run_spell_check():
+            """Scan all cues for spelling errors. Returns errors dict or None."""
+            try:
+                from spellchecker import SpellChecker
+            except ImportError:
+                if messagebox.askyesno("Missing Package",
+                    "pyspellchecker is not installed.\n\n"
+                    "Would you like to install it now?",
+                    parent=editor):
+                    try:
+                        self.add_log("Installing pyspellchecker...", 'INFO')
+                        _pip_result = subprocess.run(
+                            [sys.executable, '-m', 'pip', 'install',
+                             '--user', '--break-system-packages', 'pyspellchecker'],
+                            capture_output=True, text=True, timeout=60)
+                        if _pip_result.returncode == 0:
+                            from spellchecker import SpellChecker
+                            self.add_log("pyspellchecker installed successfully", 'SUCCESS')
+                        else:
+                            messagebox.showerror("Install Failed",
+                                f"pip install failed:\n{_pip_result.stderr[-300:]}",
+                                parent=editor)
+                            return None
+                    except Exception as _e:
+                        messagebox.showerror("Install Failed",
+                            f"Could not install pyspellchecker:\n{_e}",
+                            parent=editor)
+                        return None
+                else:
+                    return None
+            spell = SpellChecker()
+            known = [w.lower() for w in self.custom_cap_words + self.custom_spell_words]
+            if known:
+                spell.word_frequency.load_words(known)
+            spell_error_indices.clear()
+            errors_by_cue = {}
+            for i, cue in enumerate(cues):
+                clean = re.sub(r'<[^>]+>|\{\\[^}]+\}|♪', '', cue['text'])
+                words = re.findall(r"[a-zA-Z]+(?:'[a-zA-Z]+)?", clean)
+                if not words:
+                    continue
+                unknown = spell.unknown(words)
+                if unknown:
+                    spell_error_indices.add(i)
+                    errors_by_cue[i] = []
+                    for w in words:
+                        if w.lower() in unknown or w in unknown:
+                            cands = spell.candidates(w)
+                            errors_by_cue[i].append((w, sorted(cands) if cands else []))
+            return errors_by_cue
+
+        def _show_spell_check():
+            """Run spell check and show interactive correction dialog."""
+            errors_by_cue = _run_spell_check()
+            if errors_by_cue is None:
+                return
+            if not errors_by_cue:
+                spell_error_indices.clear()
+                refresh_tree(cues)
+                messagebox.showinfo("Spell Check", "No spelling errors found!", parent=editor)
+                return
+            refresh_tree(cues)
+
+            error_list = []
+            for ci in sorted(errors_by_cue.keys()):
+                for word, cands in errors_by_cue[ci]:
+                    error_list.append((ci, word, cands))
+
+            current = [0]
+            ignored = set()
+
+            sd = tk.Toplevel(editor)
+            sd.title("Spell Check")
+            sd.geometry("500x440")
+            sd.resizable(True, True)
+            self._center_on_main(sd)
+            sd.attributes('-topmost', True)
+
+            sf = ttk.Frame(sd, padding=12)
+            sf.pack(fill='both', expand=True)
+            sf.columnconfigure(1, weight=1)
+            _sp = {'padx': 6, 'pady': 4}
+
+            stats_lbl = ttk.Label(sf, text=f"Found {len(error_list)} errors in {len(errors_by_cue)} cues",
+                                  font=('Helvetica', 9))
+            stats_lbl.grid(row=0, column=0, columnspan=2, sticky='w', **_sp)
+
+            ttk.Label(sf, text="Not in dictionary:", font=('Helvetica', 10, 'bold')).grid(
+                row=1, column=0, sticky='w', **_sp)
+            word_var = tk.StringVar()
+            ttk.Entry(sf, textvariable=word_var, state='readonly',
+                      font=('Courier', 12)).grid(row=1, column=1, sticky='ew', **_sp)
+
+            ttk.Label(sf, text="Context:").grid(row=2, column=0, sticky='nw', **_sp)
+            ctx_var = tk.StringVar()
+            ttk.Label(sf, textvariable=ctx_var, wraplength=380,
+                      font=('Helvetica', 9), foreground='gray').grid(row=2, column=1, sticky='w', **_sp)
+
+            ttk.Label(sf, text="Suggestions:").grid(row=3, column=0, sticky='nw', **_sp)
+            sug_fr = ttk.Frame(sf)
+            sug_fr.grid(row=3, column=1, sticky='nsew', **_sp)
+            sug_fr.rowconfigure(0, weight=1)
+            sug_fr.columnconfigure(0, weight=1)
+            sf.rowconfigure(3, weight=1)
+
+            sug_lb = tk.Listbox(sug_fr, height=6, font=('Courier', 10))
+            sug_lb.grid(row=0, column=0, sticky='nsew')
+            sug_sc = ttk.Scrollbar(sug_fr, orient='vertical', command=sug_lb.yview)
+            sug_sc.grid(row=0, column=1, sticky='ns')
+            sug_lb.configure(yscrollcommand=sug_sc.set)
+
+            replace_var = tk.StringVar()
+            def on_sug_sel(evt):
+                sel = sug_lb.curselection()
+                if sel:
+                    replace_var.set(sug_lb.get(sel[0]))
+            sug_lb.bind('<<ListboxSelect>>', on_sug_sel)
+
+            ttk.Label(sf, text="Replace with:").grid(row=4, column=0, sticky='w', **_sp)
+            ttk.Entry(sf, textvariable=replace_var, font=('Courier', 11)).grid(
+                row=4, column=1, sticky='ew', **_sp)
+
+            bf = ttk.Frame(sf)
+            bf.grid(row=5, column=0, columnspan=2, sticky='ew', pady=(8, 0))
+
+            def _show_err(idx):
+                while idx < len(error_list):
+                    ci, w, ca = error_list[idx]
+                    if w.lower() not in ignored:
+                        break
+                    idx += 1
+                else:
+                    spell_error_indices.clear()
+                    refresh_tree(cues)
+                    messagebox.showinfo("Spell Check", "Spell check complete!", parent=sd)
+                    sd.destroy()
+                    return
+                current[0] = idx
+                ci, w, ca = error_list[idx]
+                items = tree.get_children()
+                if ci < len(items):
+                    # Scroll so the match is near the middle, not at the edge
+                    ahead = min(ci + 5, len(items) - 1)
+                    tree.see(items[ahead])
+                    tree.selection_set(items[ci])
+                    tree.after(50, lambda: tree.see(items[ci]))
+                word_var.set(w)
+                ctx_var.set(cues[ci]['text'].replace('\n', ' / '))
+                stats_lbl.configure(text=f"Error {idx+1} of {len(error_list)} (cue #{ci+1})")
+                sug_lb.delete(0, 'end')
+                for c in ca:
+                    sug_lb.insert('end', c)
+                if ca:
+                    sug_lb.selection_set(0)
+                    replace_var.set(ca[0])
+                else:
+                    replace_var.set(w)
+
+            def _do_replace():
+                ci, w, _ = error_list[current[0]]
+                repl = replace_var.get().strip()
+                if not repl: return
+                push_undo()
+                # Use str.replace for safe, literal replacement (first occurrence only)
+                txt = cues[ci]['text']
+                pos = txt.find(w)
+                if pos == -1:
+                    # Try case-insensitive find
+                    pos = txt.lower().find(w.lower())
+                if pos >= 0:
+                    cues[ci]['text'] = txt[:pos] + repl + txt[pos + len(w):]
+                refresh_tree(cues)
+                _show_err(current[0] + 1)
+
+            def _do_replace_all():
+                _, w, _ = error_list[current[0]]
+                repl = replace_var.get().strip()
+                if not repl: return
+                push_undo()
+                for cue in cues:
+                    # Case-sensitive replace first, then case-insensitive fallback
+                    if w in cue['text']:
+                        cue['text'] = cue['text'].replace(w, repl)
+                    elif w.lower() in cue['text'].lower():
+                        cue['text'] = re.sub(re.escape(w), repl, cue['text'], flags=re.IGNORECASE)
+                refresh_tree(cues)
+                _show_err(current[0] + 1)
+
+            def _do_skip():
+                _show_err(current[0] + 1)
+
+            def _do_ignore():
+                _, w, _ = error_list[current[0]]
+                ignored.add(w.lower())
+                _show_err(current[0] + 1)
+
+            def _do_add_dict():
+                _, w, _ = error_list[current[0]]
+                if w.lower() not in [x.lower() for x in self.custom_spell_words]:
+                    self.custom_spell_words.append(w)
+                    self.save_preferences()
+                ignored.add(w.lower())
+                _show_err(current[0] + 1)
+
+            def _do_add_name():
+                _, w, _ = error_list[current[0]]
+                # Add to custom_cap_words (character names — used by Fix ALL CAPS + spell check)
+                if w not in self.custom_cap_words:
+                    self.custom_cap_words.append(w)
+                # Also add to spell words so it's never flagged
+                if w.lower() not in [x.lower() for x in self.custom_spell_words]:
+                    self.custom_spell_words.append(w)
+                self.save_preferences()
+                ignored.add(w.lower())
+                _show_err(current[0] + 1)
+
+            bf1 = ttk.Frame(bf)
+            bf1.pack(fill='x')
+            ttk.Button(bf1, text="Replace", command=_do_replace, width=10).pack(side='left', padx=2)
+            ttk.Button(bf1, text="Replace All", command=_do_replace_all, width=10).pack(side='left', padx=2)
+            ttk.Button(bf1, text="Skip", command=_do_skip, width=6).pack(side='left', padx=2)
+            ttk.Button(bf1, text="Ignore", command=_do_ignore, width=8).pack(side='left', padx=2)
+
+            bf2 = ttk.Frame(bf)
+            bf2.pack(fill='x', pady=(4, 0))
+            ttk.Button(bf2, text="Add to Dict", command=_do_add_dict, width=10).pack(side='left', padx=2)
+            ttk.Button(bf2, text="Add as Name", command=_do_add_name, width=10).pack(side='left', padx=2)
+            ttk.Button(bf2, text="Close", command=sd.destroy, width=6).pack(side='right', padx=2)
+
+            _show_err(0)
+
+        editor.bind('<F7>', lambda e: _show_spell_check())
 
         # ── Edit menu ──
         edit_menu = tk.Menu(menubar, tearoff=0)
@@ -4681,11 +6766,11 @@ class VideoConverterApp:
         def show_timing_dialog():
             td = tk.Toplevel(editor)
             td.title("Timing Adjustment")
-            td.geometry("320x180")
+            td.geometry("440x380")
             td.transient(editor)
-            td.grab_set()
             self._center_on_main(td)
             td.resizable(False, False)
+            td.attributes('-topmost', True)
 
             of = ttk.LabelFrame(td, text="Offset (shift all timestamps)", padding=8)
             of.pack(fill='x', padx=10, pady=(10, 5))
@@ -4738,11 +6823,1092 @@ class VideoConverterApp:
                 td.destroy()
 
             ttk.Button(sf, text="Apply", command=apply_stretch).pack(side='right')
+
+            # ── Two-Point Sync ──
+            tp = ttk.LabelFrame(td, text="Two-Point Sync (fix offset + drift)", padding=8)
+            tp.pack(fill='x', padx=10, pady=5)
+
+            ttk.Label(tp, text="Pick two cues and enter the correct start times.\n"
+                              "All timestamps will be linearly adjusted.",
+                      font=('Helvetica', 8), foreground='gray').pack(anchor='w')
+
+            tp_grid = ttk.Frame(tp)
+            tp_grid.pack(fill='x', pady=(4, 0))
+            tp_grid.columnconfigure(2, weight=1)
+
+            # Point A
+            ttk.Label(tp_grid, text="Point A — Cue #:").grid(row=0, column=0, sticky='w', padx=(0, 4), pady=2)
+            tp_a_cue = tk.StringVar(value="1")
+            ttk.Entry(tp_grid, textvariable=tp_a_cue, width=6).grid(row=0, column=1, sticky='w', pady=2)
+            ttk.Label(tp_grid, text="Correct time:").grid(row=0, column=2, sticky='e', padx=(8, 4), pady=2)
+            tp_a_time = tk.StringVar(value="00:00:00,000")
+            ttk.Entry(tp_grid, textvariable=tp_a_time, width=14).grid(row=0, column=3, sticky='w', pady=2)
+
+            # Point B
+            ttk.Label(tp_grid, text="Point B — Cue #:").grid(row=1, column=0, sticky='w', padx=(0, 4), pady=2)
+            tp_b_cue = tk.StringVar(value=str(len(cues)))
+            ttk.Entry(tp_grid, textvariable=tp_b_cue, width=6).grid(row=1, column=1, sticky='w', pady=2)
+            ttk.Label(tp_grid, text="Correct time:").grid(row=1, column=2, sticky='e', padx=(8, 4), pady=2)
+            tp_b_time = tk.StringVar(value="00:00:00,000")
+            ttk.Entry(tp_grid, textvariable=tp_b_time, width=14).grid(row=1, column=3, sticky='w', pady=2)
+
+            def _fill_current(var_cue, var_time):
+                """Fill the time field with the current start time of the selected cue."""
+                try:
+                    idx = int(var_cue.get()) - 1
+                    if 0 <= idx < len(cues):
+                        var_time.set(cues[idx]['start'])
+                        # Highlight the cue in the tree
+                        items = tree.get_children()
+                        if idx < len(items):
+                            tree.see(items[idx])
+                            tree.selection_set(items[idx])
+                except (ValueError, IndexError):
+                    pass
+
+            fill_f = ttk.Frame(tp)
+            fill_f.pack(fill='x', pady=(4, 0))
+            ttk.Button(fill_f, text="Get A", width=6,
+                       command=lambda: _fill_current(tp_a_cue, tp_a_time)).pack(side='left', padx=2)
+            ttk.Button(fill_f, text="Get B", width=6,
+                       command=lambda: _fill_current(tp_b_cue, tp_b_time)).pack(side='left', padx=2)
+            ttk.Label(fill_f, text="(fills current time for that cue)",
+                      font=('Helvetica', 8), foreground='gray').pack(side='left', padx=8)
+
+            def apply_two_point():
+                nonlocal cues
+                try:
+                    idx_a = int(tp_a_cue.get()) - 1
+                    idx_b = int(tp_b_cue.get()) - 1
+                except ValueError:
+                    messagebox.showwarning("Invalid", "Enter cue numbers.", parent=td)
+                    return
+                if idx_a < 0 or idx_a >= len(cues) or idx_b < 0 or idx_b >= len(cues):
+                    messagebox.showwarning("Invalid",
+                        f"Cue numbers must be between 1 and {len(cues)}.", parent=td)
+                    return
+                if idx_a == idx_b:
+                    messagebox.showwarning("Invalid",
+                        "Point A and B must be different cues.", parent=td)
+                    return
+                try:
+                    ms_a = srt_ts_to_ms(tp_a_time.get())
+                    ms_b = srt_ts_to_ms(tp_b_time.get())
+                except Exception:
+                    messagebox.showwarning("Invalid",
+                        "Enter times in SRT format: HH:MM:SS,mmm", parent=td)
+                    return
+                push_undo()
+                cues = two_point_sync(cues, idx_a, ms_a, idx_b, ms_b)
+                refresh_tree(cues)
+                self.add_log(f"Two-point sync: cue #{idx_a+1} → {tp_a_time.get()}, "
+                             f"cue #{idx_b+1} → {tp_b_time.get()}", 'INFO')
+                td.destroy()
+
+            ttk.Button(fill_f, text="Apply Sync", command=apply_two_point).pack(side='right', padx=2)
+
             ttk.Button(td, text="Close", command=td.destroy).pack(pady=(5, 10))
 
         timing_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Timing", menu=timing_menu)
         timing_menu.add_command(label="Offset / Stretch...", command=show_timing_dialog)
+        timing_menu.add_command(label="Smart Sync...",
+                                command=lambda: _show_smart_sync())
+
+        # ── Quick Sync submenu ──
+        quick_sync_menu = tk.Menu(timing_menu, tearoff=0)
+        timing_menu.add_cascade(label="Quick Sync", menu=quick_sync_menu)
+
+        def _quick_sync_first_cue():
+            """Shift all cues so the first cue starts at a user-specified time.
+            Includes an embedded mpv player for marking the exact time."""
+            if not cues:
+                messagebox.showinfo("No Subtitles", "Load subtitles first.",
+                                    parent=editor)
+                return
+
+            qd = tk.Toplevel(editor)
+            qd.title("Quick Sync — Set First Cue Time")
+            qd.geometry("720x620")
+            qd.minsize(640, 540)
+            qd.resizable(True, True)
+            self._center_on_main(qd)
+
+            f = ttk.Frame(qd, padding=10)
+            f.pack(fill='both', expand=True)
+            f.columnconfigure(1, weight=1)
+            f.rowconfigure(2, weight=1)  # video frame expands
+
+            first_cue = cues[0]
+            current_start = first_cue['start']
+            preview_text = first_cue['text'].replace('\n', ' ')
+            if len(preview_text) > 60:
+                preview_text = preview_text[:57] + '...'
+
+            # ── Video file ──
+            ttk.Label(f, text="Video file:").grid(
+                row=0, column=0, sticky='w', padx=4, pady=2)
+            _qs_vpath = tk.StringVar()
+            # Try to find video automatically
+            try:
+                if hasattr(editor, '_qs_last_video') and editor._qs_last_video:
+                    _qs_vpath.set(editor._qs_last_video)
+                elif current_path[0]:
+                    _sub_dir = os.path.dirname(current_path[0])
+                    _sub_stem = os.path.splitext(
+                        os.path.basename(current_path[0]))[0]
+                    for _i in range(3):
+                        _dot = _sub_stem.rfind('.')
+                        if _dot > 0:
+                            _sub_stem = _sub_stem[:_dot]
+                        else:
+                            break
+                    for ext in VIDEO_EXTENSIONS:
+                        _vp = os.path.join(_sub_dir, _sub_stem + ext)
+                        if os.path.isfile(_vp):
+                            _qs_vpath.set(_vp)
+                            break
+            except Exception:
+                pass
+
+            _vpath_entry = ttk.Entry(f, textvariable=_qs_vpath)
+            _vpath_entry.grid(row=0, column=1, sticky='ew', padx=4, pady=2)
+
+            def _qs_browse():
+                init_dir = os.path.dirname(_qs_vpath.get()) if _qs_vpath.get() \
+                    else (os.path.dirname(current_path[0]) if current_path[0] else '')
+                p = None
+                if shutil.which('zenity'):
+                    try:
+                        cmd = ['zenity', '--file-selection',
+                               '--title', 'Select Video File',
+                               '--file-filter',
+                               'Video files|*.mkv *.mp4 *.avi *.mov *.ts *.m2ts *.mts *.webm *.wmv *.flv',
+                               '--file-filter', 'All files|*']
+                        if init_dir:
+                            cmd += ['--filename', init_dir + '/']
+                        r = subprocess.run(cmd, capture_output=True,
+                                           text=True, timeout=120)
+                        if r.returncode == 0 and r.stdout.strip():
+                            p = r.stdout.strip()
+                    except Exception:
+                        pass
+                if not p:
+                    p = filedialog.askopenfilename(
+                        parent=qd, title="Select Video File",
+                        initialdir=init_dir or None,
+                        filetypes=[("Video files",
+                                    "*.mkv *.mp4 *.avi *.mov *.ts *.m2ts"),
+                                   ("All files", "*.*")])
+                if p:
+                    _qs_vpath.set(p)
+                    # Auto-load the video after browse selection
+                    qd.after(100, _play_video)
+            ttk.Button(f, text="Browse...", command=_qs_browse).grid(
+                row=0, column=2, padx=4, pady=2)
+
+            # ── Embedded video player frame ──
+            video_border = ttk.Frame(f, relief='sunken', borderwidth=2)
+            video_border.grid(row=2, column=0, columnspan=3,
+                              sticky='nsew', padx=4, pady=4)
+            video_frame = tk.Frame(video_border, bg='black',
+                                   width=640, height=360)
+            video_frame.pack(fill='both', expand=True)
+            video_frame.pack_propagate(False)
+
+            _placeholder_label = tk.Label(video_frame,
+                text="Drop a video file here or click Browse",
+                bg='black', fg='#666', font=('Helvetica', 12))
+
+            # ── Drag-and-drop support ──
+            def _on_qs_drop(event):
+                """Handle video files dropped onto the Quick Sync dialog."""
+                raw = event.data
+                paths = []
+                if 'file://' in raw:
+                    from urllib.parse import unquote, urlparse
+                    for line in raw.splitlines():
+                        line = line.strip()
+                        if line.startswith('file://'):
+                            decoded = unquote(urlparse(line).path)
+                            if decoded:
+                                paths.append(decoded)
+                else:
+                    i = 0
+                    while i < len(raw):
+                        if raw[i] == '{':
+                            end = raw.find('}', i)
+                            paths.append(raw[i + 1:end])
+                            i = end + 2
+                        elif raw[i] == ' ':
+                            i += 1
+                        else:
+                            end = raw.find(' ', i)
+                            if end == -1:
+                                end = len(raw)
+                            paths.append(raw[i:end])
+                            i = end + 1
+
+                # Find first video file in dropped paths
+                for p in paths:
+                    if os.path.isfile(p):
+                        ext = os.path.splitext(p)[1].lower()
+                        if ext in VIDEO_EXTENSIONS:
+                            _qs_vpath.set(p)
+                            qd.after(100, _play_video)
+                            return
+
+            try:
+                qd.drop_target_register(DND_FILES)
+                qd.dnd_bind('<<Drop>>', _on_qs_drop)
+            except Exception:
+                pass  # tkinterdnd2 not available
+            _placeholder_label.place(relx=0.5, rely=0.5, anchor='center')
+
+            # ── mpv player integration ──
+            import tempfile as _qs_tempfile
+            import socket as _qs_socket
+            import json as _qs_json
+
+            _mpv_proc = [None]
+            _mpv_socket_path = os.path.join(
+                _qs_tempfile.gettempdir(),
+                f'docflix_mpv_{os.getpid()}')
+
+            def _mpv_cmd(command_list):
+                """Send a command to mpv via IPC and return the response."""
+                try:
+                    sock = _qs_socket.socket(
+                        _qs_socket.AF_UNIX, _qs_socket.SOCK_STREAM)
+                    sock.settimeout(2)
+                    sock.connect(_mpv_socket_path)
+                    payload = _qs_json.dumps(
+                        {"command": command_list}) + '\n'
+                    sock.sendall(payload.encode())
+                    data = sock.recv(4096).decode()
+                    sock.close()
+                    return _qs_json.loads(data)
+                except Exception:
+                    return None
+
+            def _play_video():
+                vp = _qs_vpath.get().strip()
+                if not vp or not os.path.isfile(vp):
+                    messagebox.showwarning("No Video",
+                        "Select a video file first.", parent=qd)
+                    return
+
+                # Kill previous mpv instance if running
+                if _mpv_proc[0] and _mpv_proc[0].poll() is None:
+                    _mpv_proc[0].terminate()
+                    _mpv_proc[0].wait(timeout=5)
+
+                # Clean up old socket
+                if os.path.exists(_mpv_socket_path):
+                    try:
+                        os.unlink(_mpv_socket_path)
+                    except OSError:
+                        pass
+
+                # Hide placeholder
+                _placeholder_label.place_forget()
+
+                # Get the X11 window ID for embedding
+                video_frame.update_idletasks()
+                wid = str(video_frame.winfo_id())
+
+                # Launch mpv embedded in the video frame
+                try:
+                    _mpv_proc[0] = subprocess.Popen([
+                        'mpv',
+                        f'--input-ipc-server={_mpv_socket_path}',
+                        f'--wid={wid}',
+                        '--pause',
+                        '--osd-level=2',
+                        '--osd-fractions',
+                        '--keep-open=yes',
+                        '--no-border',
+                        '--cursor-autohide=1000',
+                        vp
+                    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    mark_btn.configure(state='normal')
+                    _mute_btn.configure(text="🔊")
+                    _vol_var.set(100)
+                    editor._qs_last_video = vp
+                except FileNotFoundError:
+                    messagebox.showerror("mpv Not Found",
+                        "mpv is not installed.\n\n"
+                        "Install with: sudo apt install mpv", parent=qd)
+                    _placeholder_label.place(relx=0.5, rely=0.5, anchor='center')
+                except Exception as e:
+                    messagebox.showerror("Player Error",
+                        f"Could not launch mpv:\n{e}", parent=qd)
+                    _placeholder_label.place(relx=0.5, rely=0.5, anchor='center')
+
+            def _mark_time():
+                """Query mpv for current playback position and fill the time field."""
+                if not _mpv_proc[0] or _mpv_proc[0].poll() is not None:
+                    messagebox.showinfo("Player Closed",
+                        "Load the video first.", parent=qd)
+                    mark_btn.configure(state='disabled')
+                    pass  # player closed
+                    return
+
+                resp = _mpv_cmd(["get_property", "playback-time"])
+                if resp and 'data' in resp and resp['data'] is not None:
+                    seconds = resp['data']
+                    ms = int(seconds * 1000)
+                    time_var.set(ms_to_srt_ts(ms))
+                    time_entry.select_range(0, 'end')
+                else:
+                    messagebox.showwarning("Could Not Read Time",
+                        "Could not get playback position from mpv.\n"
+                        "Make sure the video is loaded.", parent=qd)
+
+            def _mpv_seek(amount):
+                """Seek mpv by amount in seconds."""
+                if not _mpv_proc[0] or _mpv_proc[0].poll() is not None:
+                    return
+                _mpv_cmd(["seek", str(amount), "relative+exact"])
+
+            def _mpv_frame_step(direction='forward'):
+                """Step one frame forward or backward."""
+                if not _mpv_proc[0] or _mpv_proc[0].poll() is not None:
+                    return
+                if direction == 'forward':
+                    _mpv_cmd(["frame-step"])
+                else:
+                    _mpv_cmd(["frame-back-step"])
+
+            def _mpv_pause_toggle():
+                """Toggle play/pause."""
+                if not _mpv_proc[0] or _mpv_proc[0].poll() is not None:
+                    return
+                _mpv_cmd(["cycle", "pause"])
+
+            def _on_close():
+                # Kill mpv and clean up socket
+                if _mpv_proc[0] and _mpv_proc[0].poll() is None:
+                    _mpv_proc[0].terminate()
+                    try:
+                        _mpv_proc[0].wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        _mpv_proc[0].kill()
+                _mpv_proc[0] = None
+                if os.path.exists(_mpv_socket_path):
+                    try:
+                        os.unlink(_mpv_socket_path)
+                    except OSError:
+                        pass
+                # Reset state so next open starts fresh
+                editor._qs_last_video = None
+                qd.destroy()
+
+            qd.protocol("WM_DELETE_WINDOW", _on_close)
+
+            # ── Transport controls ──
+            transport_f = ttk.Frame(f)
+            transport_f.grid(row=3, column=0, columnspan=3, sticky='ew', pady=(4, 0))
+
+            _tb_w = 3
+            _transport_btns = [
+                ("⏮",  lambda: _mpv_seek(-5),               "Rewind 5 seconds"),
+                ("◀◀", lambda: _mpv_seek(-1),               "Rewind 1 second"),
+                ("◀",  lambda: _mpv_seek(-0.1),             "Rewind 100ms"),
+                ("|◀", lambda: _mpv_frame_step('backward'), "Back 1 frame"),
+                ("⏯",  _mpv_pause_toggle,                   "Play / Pause"),
+                ("▶|", lambda: _mpv_frame_step('forward'),  "Forward 1 frame"),
+                ("▶",  lambda: _mpv_seek(0.1),              "Forward 100ms"),
+                ("▶▶", lambda: _mpv_seek(1),                "Forward 1 second"),
+                ("⏭",  lambda: _mpv_seek(5),                "Forward 5 seconds"),
+            ]
+            for _sym, _cmd, _tip in _transport_btns:
+                _px = 2 if _sym == "⏯" else 1
+                _b = ttk.Button(transport_f, text=_sym, width=_tb_w, command=_cmd)
+                _b.pack(side='left', padx=_px)
+                _create_tooltip(_b, _tip)
+
+            mark_btn = ttk.Button(transport_f, text="⏱ Mark",
+                                  command=_mark_time, width=6,
+                                  state='disabled')
+            mark_btn.pack(side='left', padx=(6, 0))
+            _create_tooltip(mark_btn, "Capture current playback time")
+
+            # ── Volume controls ──
+            def _mpv_toggle_mute():
+                if not _mpv_proc[0] or _mpv_proc[0].poll() is not None:
+                    return
+                _mpv_cmd(["cycle", "mute"])
+                # Update mute button label
+                resp = _mpv_cmd(["get_property", "mute"])
+                if resp and 'data' in resp:
+                    _mute_btn.configure(text="🔇" if resp['data'] else "🔊")
+
+            def _mpv_set_volume(val):
+                if not _mpv_proc[0] or _mpv_proc[0].poll() is not None:
+                    return
+                _mpv_cmd(["set_property", "volume", float(val)])
+
+            _mute_btn = ttk.Button(transport_f, text="🔊", width=2,
+                                   command=_mpv_toggle_mute)
+            _mute_btn.pack(side='right', padx=(4, 0))
+            _create_tooltip(_mute_btn, "Mute / Unmute")
+
+            _vol_var = tk.DoubleVar(value=100)
+            _vol_scale = ttk.Scale(transport_f, from_=0, to=100,
+                                   orient='horizontal', length=80,
+                                   variable=_vol_var,
+                                   command=_mpv_set_volume)
+            _vol_scale.pack(side='right', padx=2)
+            _create_tooltip(_vol_scale, "Volume")
+
+            # ── Sync controls ──
+            ttk.Separator(f, orient='horizontal').grid(
+                row=4, column=0, columnspan=3, sticky='ew', pady=6)
+
+            sync_f = ttk.Frame(f)
+            sync_f.grid(row=5, column=0, columnspan=3, sticky='ew', padx=4)
+            sync_f.columnconfigure(1, weight=1)
+
+            ttk.Label(sync_f, text="First cue:",
+                      font=('Helvetica', 9, 'bold')).grid(
+                          row=0, column=0, sticky='w', pady=1)
+            ttk.Label(sync_f, text=f'"{preview_text}"',
+                      font=('Helvetica', 9), foreground='gray').grid(
+                          row=0, column=1, columnspan=2, sticky='w', padx=8, pady=1)
+
+            ttk.Label(sync_f, text="Current:").grid(
+                row=1, column=0, sticky='w', pady=1)
+            ttk.Label(sync_f, text=current_start,
+                      font=('Courier', 10)).grid(
+                          row=1, column=1, sticky='w', padx=8, pady=1)
+
+            ttk.Label(sync_f, text="New start:").grid(
+                row=2, column=0, sticky='w', pady=2)
+            time_var = tk.StringVar(value=current_start)
+            _time_f = ttk.Frame(sync_f)
+            _time_f.grid(row=2, column=1, columnspan=2, sticky='w', padx=8, pady=2)
+            time_entry = ttk.Entry(_time_f, textvariable=time_var, width=16,
+                                   font=('Courier', 10))
+            time_entry.pack(side='left')
+            ttk.Label(_time_f, text="HH:MM:SS,mmm",
+                      foreground='gray', font=('Helvetica', 8)).pack(
+                          side='left', padx=8)
+
+            offset_var = tk.StringVar(value="Offset: 0ms")
+            ttk.Label(sync_f, textvariable=offset_var,
+                      font=('Helvetica', 9), foreground='#666').grid(
+                          row=3, column=0, columnspan=3, sticky='w', pady=1)
+
+            def _update_offset(*_args):
+                try:
+                    new_ms = srt_ts_to_ms(time_var.get().strip())
+                    old_ms = srt_ts_to_ms(current_start)
+                    diff = new_ms - old_ms
+                    sign = '+' if diff >= 0 else ''
+                    offset_var.set(f"Offset: {sign}{diff}ms ({sign}{diff/1000:.1f}s)")
+                except Exception:
+                    offset_var.set("Offset: (invalid time format)")
+            time_var.trace_add('write', _update_offset)
+
+            # ── Action buttons ──
+            btn_f = ttk.Frame(f)
+            btn_f.grid(row=6, column=0, columnspan=3, sticky='ew', pady=(8, 0))
+
+            def _apply_first_cue():
+                nonlocal cues
+                try:
+                    new_ms = srt_ts_to_ms(time_var.get().strip())
+                except Exception:
+                    messagebox.showwarning("Invalid Time",
+                        "Enter time in SRT format: HH:MM:SS,mmm", parent=qd)
+                    return
+                old_ms = srt_ts_to_ms(current_start)
+                offset = new_ms - old_ms
+                if offset == 0:
+                    _on_close()
+                    return
+                push_undo()
+                cues = shift_timestamps(cues, offset)
+                refresh_tree(cues)
+                sign = '+' if offset > 0 else ''
+                self.add_log(f"Quick Sync: shifted all cues {sign}{offset}ms "
+                             f"(first cue → {time_var.get().strip()})", 'SUCCESS')
+                _on_close()
+
+            time_entry.bind('<Return>', lambda e: _apply_first_cue())
+            _apply_btn = ttk.Button(btn_f, text="Apply",
+                                    command=_apply_first_cue, width=8)
+            _apply_btn.pack(side='left', padx=2)
+            _create_tooltip(_apply_btn, "Shift all cues by the offset and close")
+            _cancel_btn = ttk.Button(btn_f, text="Cancel",
+                                     command=_on_close, width=8)
+            _cancel_btn.pack(side='left', padx=2)
+            _create_tooltip(_cancel_btn, "Close without applying changes")
+
+            # Auto-load video if one was detected
+            if _qs_vpath.get().strip() and os.path.isfile(_qs_vpath.get().strip()):
+                qd.after(300, _play_video)
+
+        quick_sync_menu.add_command(label="Set First Cue Time...",
+                                    command=_quick_sync_first_cue)
+
+        def _find_video_for_subtitle():
+            """Try to find the video file for the current subtitle."""
+            vpath = None
+            if video_source and video_source[0]:
+                vpath = video_source[0].get('path')
+            if not vpath and current_path[0]:
+                sub_dir = os.path.dirname(current_path[0])
+                sub_stem = os.path.splitext(os.path.basename(current_path[0]))[0]
+                for _ in range(3):
+                    if '.' in sub_stem:
+                        sub_stem = sub_stem.rsplit('.', 1)[0]
+                for ext in VIDEO_EXTENSIONS:
+                    candidate = os.path.join(sub_dir, sub_stem + ext)
+                    if os.path.isfile(candidate):
+                        return candidate
+                for ext in VIDEO_EXTENSIONS:
+                    for fp in Path(sub_dir).glob(f'*{ext}'):
+                        if fp.is_file():
+                            return str(fp)
+            return vpath
+
+        def _show_smart_sync():
+            """Auto-sync subtitles using Whisper speech recognition."""
+            import threading
+
+            if not cues:
+                messagebox.showinfo("No Subtitles", "Load subtitles first.", parent=editor)
+                return
+
+            # Check faster-whisper availability
+            try:
+                from faster_whisper import WhisperModel
+            except ImportError:
+                if messagebox.askyesno("Missing Package",
+                    "faster-whisper is not installed.\n\n"
+                    "Would you like to install it now?\n"
+                    "(This may take a few minutes — downloads ~200MB)",
+                    parent=editor):
+                    try:
+                        self.add_log("Installing faster-whisper...", 'INFO')
+                        _pip_result = subprocess.run(
+                            [sys.executable, '-m', 'pip', 'install',
+                             '--user', '--break-system-packages', 'faster-whisper'],
+                            capture_output=True, text=True, timeout=300)
+                        if _pip_result.returncode == 0:
+                            self.add_log("faster-whisper installed successfully", 'SUCCESS')
+                        else:
+                            messagebox.showerror("Install Failed",
+                                f"pip install failed:\n{_pip_result.stderr[-300:]}",
+                                parent=editor)
+                            return
+                    except Exception as _e:
+                        messagebox.showerror("Install Failed",
+                            f"Could not install:\n{_e}", parent=editor)
+                        return
+                else:
+                    return
+
+            vpath = _find_video_for_subtitle()
+
+            sd = tk.Toplevel(editor)
+            sd.title("Smart Sync")
+            sd.geometry("560x580")
+            sd.resizable(True, True)
+            self._center_on_main(sd)
+
+            f = ttk.Frame(sd, padding=12)
+            f.pack(fill='both', expand=True)
+            f.columnconfigure(1, weight=1)
+            _sp = {'padx': 6, 'pady': 4}
+
+            # ── Video file ──
+            ttk.Label(f, text="Video file:").grid(row=0, column=0, sticky='w', **_sp)
+            vpath_var = tk.StringVar(value=vpath or '')
+            ttk.Entry(f, textvariable=vpath_var).grid(row=0, column=1, sticky='ew', **_sp)
+            def _browse_vid():
+                # Start in the subtitle's folder if available
+                init_dir = ''
+                if vpath_var.get():
+                    init_dir = os.path.dirname(vpath_var.get())
+                elif current_path[0]:
+                    init_dir = os.path.dirname(current_path[0])
+                # Try zenity first (better sizing), fall back to tkinter
+                p = None
+                if shutil.which('zenity'):
+                    try:
+                        cmd = ['zenity', '--file-selection',
+                               '--title', 'Select Video File',
+                               '--file-filter', 'Video files|*.mkv *.mp4 *.avi *.mov *.ts *.m2ts *.mts *.webm *.wmv *.flv',
+                               '--file-filter', 'All files|*']
+                        if init_dir:
+                            cmd += ['--filename', init_dir + '/']
+                        result = subprocess.run(cmd, capture_output=True,
+                                                text=True, timeout=120)
+                        if result.returncode == 0 and result.stdout.strip():
+                            p = result.stdout.strip()
+                    except Exception:
+                        pass
+                if not p:
+                    p = filedialog.askopenfilename(
+                        parent=sd,
+                        title="Select Video File",
+                        initialdir=init_dir or None,
+                        filetypes=[("Video files", "*.mkv *.mp4 *.avi *.mov *.ts *.m2ts"),
+                                   ("All files", "*.*")])
+                if p:
+                    vpath_var.set(p)
+            ttk.Button(f, text="Browse...", command=_browse_vid).grid(row=0, column=2, **_sp)
+
+            # ── Model selection ──
+            model_label = ttk.Label(f, text="Whisper model:")
+            model_label.grid(row=1, column=0, sticky='w', **_sp)
+            model_f = ttk.Frame(f)
+            model_f.grid(row=1, column=1, columnspan=2, sticky='w', **_sp)
+            model_var = tk.StringVar(value='base')
+            for m, tip in [('tiny', '~75MB, fastest'),
+                           ('base', '~150MB, good balance'),
+                           ('small', '~500MB, more accurate')]:
+                ttk.Radiobutton(model_f, text=f"{m} ({tip})",
+                               variable=model_var, value=m).pack(anchor='w')
+
+            # ── Language ──
+            ttk.Label(f, text="Language:").grid(row=2, column=0, sticky='w', **_sp)
+            lang_var = tk.StringVar(value='en')
+            lang_f = ttk.Frame(f)
+            lang_f.grid(row=2, column=1, columnspan=2, sticky='w', **_sp)
+            ttk.Entry(lang_f, textvariable=lang_var, width=5).pack(side='left')
+            ttk.Label(lang_f, text="(en, fr, es, de, etc. — blank = auto-detect)",
+                      foreground='gray', font=('Helvetica', 8)).pack(side='left', padx=8)
+
+            # ── Engine selection ──
+            ttk.Label(f, text="Engine:").grid(row=3, column=0, sticky='w', **_sp)
+            engine_f = ttk.Frame(f)
+            engine_f.grid(row=3, column=1, columnspan=2, sticky='w', **_sp)
+            engine_var = tk.StringVar(value='faster-whisper')
+
+            def _on_engine_change():
+                eng = engine_var.get()
+                if eng == 'whisperx':
+                    finetune_var.set('200')
+                    finetune_hint.config(
+                        text="ms  (phoneme onset is ~200ms before perceived speech)")
+                    direct_rb.configure(state='normal')
+                else:
+                    finetune_var.set('400')
+                    finetune_hint.config(
+                        text="ms  (applied after sync — compensates for Whisper timing)")
+                    # Direct Align requires WhisperX — switch away if selected
+                    if scan_mode_var.get() == 'direct':
+                        scan_mode_var.set('quick')
+                    direct_rb.configure(state='disabled')
+                _on_scan_mode_change()
+
+            ttk.Radiobutton(engine_f, text="Standard (faster-whisper)",
+                           variable=engine_var, value='faster-whisper',
+                           command=_on_engine_change).pack(anchor='w')
+            ttk.Radiobutton(engine_f,
+                           text="Precise (WhisperX) — phoneme-level alignment",
+                           variable=engine_var, value='whisperx',
+                           command=_on_engine_change).pack(anchor='w')
+
+            # ── Scan mode ──
+            ttk.Label(f, text="Scan mode:").grid(row=4, column=0, sticky='w', **_sp)
+            scan_f = ttk.Frame(f)
+            scan_f.grid(row=4, column=1, columnspan=2, sticky='w', **_sp)
+            scan_mode_var = tk.StringVar(value='quick')
+
+            def _on_scan_mode_change():
+                mode = scan_mode_var.get()
+                if mode == 'quick':
+                    seg_label.grid()
+                    sample_f.grid()
+                    model_label.grid()
+                    model_f.grid()
+                elif mode == 'full':
+                    seg_label.grid_remove()
+                    sample_f.grid_remove()
+                    model_label.grid()
+                    model_f.grid()
+                else:  # direct
+                    seg_label.grid_remove()
+                    sample_f.grid_remove()
+                    model_label.grid_remove()
+                    model_f.grid_remove()
+
+            ttk.Radiobutton(scan_f, text="Quick Scan", variable=scan_mode_var,
+                           value='quick', command=_on_scan_mode_change).pack(side='left', padx=(0, 8))
+            ttk.Radiobutton(scan_f, text="Full Scan (for Re-time)",
+                           variable=scan_mode_var, value='full',
+                           command=_on_scan_mode_change).pack(side='left', padx=(0, 8))
+            direct_rb = ttk.Radiobutton(scan_f,
+                           text="Direct Align",
+                           variable=scan_mode_var, value='direct',
+                           command=_on_scan_mode_change, state='disabled')
+            direct_rb.pack(side='left')
+
+            seg_label = ttk.Label(f, text="Segments:")
+            seg_label.grid(row=5, column=0, sticky='w', **_sp)
+            sample_f = ttk.Frame(f)
+            sample_f.grid(row=5, column=1, columnspan=2, sticky='w', **_sp)
+            segments_var = tk.StringVar(value='3')
+            seg_spin = tk.Spinbox(sample_f, textvariable=segments_var, from_=1, to=20,
+                        width=3)
+            seg_spin.pack(side='left')
+            ttk.Label(sample_f, text="× ").pack(side='left')
+            sample_len_var = tk.StringVar(value='5')
+            len_spin = tk.Spinbox(sample_f, textvariable=sample_len_var, from_=1, to=30,
+                        width=3)
+            len_spin.pack(side='left')
+            ttk.Label(sample_f, text="min each",
+                      foreground='gray', font=('Helvetica', 8)).pack(side='left', padx=4)
+
+            # ── Offset adjustment ──
+            ttk.Label(f, text="Fine-tune:").grid(row=6, column=0, sticky='w', **_sp)
+            finetune_f = ttk.Frame(f)
+            finetune_f.grid(row=6, column=1, columnspan=2, sticky='w', **_sp)
+            finetune_var = tk.StringVar(value='400')
+            tk.Spinbox(finetune_f, textvariable=finetune_var, from_=-2000, to=2000,
+                       increment=50, width=6).pack(side='left')
+            finetune_hint = ttk.Label(finetune_f,
+                      text="ms  (applied after sync — compensates for Whisper timing)",
+                      foreground='gray', font=('Helvetica', 8))
+            finetune_hint.pack(side='left', padx=4)
+
+            # ── Progress ──
+            status_var = tk.StringVar(value="Ready — click Start to begin")
+            ttk.Label(f, textvariable=status_var, wraplength=450,
+                      font=('Helvetica', 9)).grid(row=7, column=0, columnspan=3, sticky='w', **_sp)
+
+            progress_var = tk.DoubleVar(value=0)
+            ttk.Progressbar(f, variable=progress_var, maximum=100,
+                           mode='determinate').grid(row=8, column=0, columnspan=3,
+                                                      sticky='ew', **_sp)
+
+            # ── Results ──
+            result_frame = ttk.LabelFrame(f, text="Results", padding=6)
+            result_frame.grid(row=9, column=0, columnspan=3, sticky='nsew', **_sp)
+            result_frame.columnconfigure(0, weight=1)
+            result_frame.rowconfigure(0, weight=1)
+            f.rowconfigure(9, weight=1)
+
+            result_text = tk.Text(result_frame, height=8, wrap='word',
+                                 font=('Courier', 9), state='disabled',
+                                 bg='#1e1e1e', fg='#d4d4d4')
+            result_text.grid(row=0, column=0, sticky='nsew')
+            r_scroll = ttk.Scrollbar(result_frame, orient='vertical', command=result_text.yview)
+            r_scroll.grid(row=0, column=1, sticky='ns')
+            result_text.configure(yscrollcommand=r_scroll.set)
+
+            def _rlog(msg, color='#d4d4d4'):
+                result_text.configure(state='normal')
+                result_text.insert('end', msg + '\n')
+                result_text.see('end')
+                result_text.configure(state='disabled')
+
+            # ── Buttons ──
+            btn_f = ttk.Frame(f)
+            btn_f.grid(row=10, column=0, columnspan=3, sticky='ew', pady=(8, 0))
+
+            cancel_event = threading.Event()
+            sync_result = [None]
+            pre_sync_cues = [None]  # snapshot before sync — for repeatable Re-time
+
+            def _start():
+                vp = vpath_var.get().strip()
+                if not vp or not os.path.isfile(vp):
+                    messagebox.showwarning("No Video", "Select a video file.", parent=sd)
+                    return
+
+                # Save cues before sync so Re-time/Apply can repeat with different fine-tune
+                import copy as _copy
+                pre_sync_cues[0] = _copy.deepcopy(cues)
+
+                # ── Engine-aware dependency check ──
+                _engine = engine_var.get()
+                if _engine == 'whisperx':
+                    try:
+                        import whisperx
+                    except ImportError:
+                        if messagebox.askyesno("Missing Package",
+                            "WhisperX is not installed.\n\n"
+                            "Would you like to install it now?\n"
+                            "(Requires PyTorch — downloads ~2GB)",
+                            parent=sd):
+                            # Run pip install in background thread with progress
+                            start_btn.configure(state='disabled')
+                            status_var.set("Installing whisperx (downloading ~2GB)...")
+                            self.add_log("Installing whisperx...", 'INFO')
+                            _rlog("Installing whisperx — this may take several minutes...")
+                            # Switch progress bar to indeterminate mode
+                            _install_pbar = None
+                            for _w in f.winfo_children():
+                                if isinstance(_w, ttk.Progressbar):
+                                    _install_pbar = _w
+                                    break
+                            if _install_pbar:
+                                _install_pbar.configure(mode='indeterminate')
+                                _install_pbar.start(15)
+
+                            def _do_whisperx_install():
+                                try:
+                                    proc = subprocess.Popen(
+                                        [sys.executable, '-m', 'pip', 'install',
+                                         '--user', '--break-system-packages',
+                                         '--progress-bar', 'off',
+                                         'whisperx', 'transformers<4.45'],
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT,
+                                        text=True)
+                                    for line in proc.stdout:
+                                        line = line.rstrip()
+                                        if line:
+                                            sd.after(0, lambda l=line:
+                                                     status_var.set(l[:80]))
+                                            sd.after(0, lambda l=line: _rlog(l))
+                                    proc.wait(timeout=600)
+                                    if proc.returncode == 0:
+                                        sd.after(0, lambda: status_var.set(
+                                            "whisperx installed — click Start"))
+                                        sd.after(0, lambda: _rlog(
+                                            "whisperx installed successfully"))
+                                        sd.after(0, lambda: self.add_log(
+                                            "whisperx installed successfully",
+                                            'SUCCESS'))
+                                    else:
+                                        sd.after(0, lambda: status_var.set(
+                                            "whisperx install failed"))
+                                        sd.after(0, lambda: _rlog(
+                                            "Install failed — check log above"))
+                                except Exception as _e:
+                                    sd.after(0, lambda: status_var.set(
+                                        f"Install error: {_e}"))
+                                    sd.after(0, lambda: _rlog(f"Error: {_e}"))
+                                finally:
+                                    def _reset_after_install():
+                                        start_btn.configure(state='normal')
+                                        if _install_pbar:
+                                            _install_pbar.stop()
+                                            _install_pbar.configure(
+                                                mode='determinate')
+                                            progress_var.set(0)
+                                    sd.after(0, _reset_after_install)
+
+                            import threading as _inst_threading
+                            _inst_threading.Thread(
+                                target=_do_whisperx_install,
+                                daemon=True).start()
+                            return  # exit _start(); user clicks Start after install
+                        else:
+                            return
+
+                start_btn.configure(state='disabled')
+                apply_btn.configure(state='disabled')
+                cancel_event.clear()
+                # Capture Tk variables on main thread before entering background thread
+                lang = lang_var.get().strip() or None
+                model = model_var.get()
+                _scan_mode = scan_mode_var.get()
+                if _scan_mode == 'direct':
+                    engine_value = 'whisperx-align'
+                else:
+                    engine_value = engine_var.get()
+                is_full_scan = _scan_mode == 'full'
+                _seg_str = segments_var.get().strip()
+                _len_str = sample_len_var.get().strip()
+                n_segs = int(_seg_str) if _seg_str.isdigit() else 3
+                s_mins = int(_len_str) if _len_str.isdigit() else 5
+                _ft_str = finetune_var.get().strip().lstrip('+')
+                finetune_ms = int(_ft_str) if _ft_str.lstrip('-').isdigit() else 400
+                if is_full_scan or _scan_mode == 'direct':
+                    n_segs = 0  # signal for full scan
+                    s_mins = 0
+
+                import time as _sync_time
+                _last_ui_update = [0]
+
+                def _progress(msg):
+                    # Throttle UI updates to max 4 per second to avoid flooding Tk event queue
+                    now = _sync_time.monotonic()
+                    is_milestone = ('segment' in msg.lower() and '/' in msg) or \
+                                   'Matched' in msg or 'Loading' in msg or \
+                                   'Extracting' in msg or 'Transcribed' in msg or \
+                                   'Aligning' in msg or 'alignment' in msg.lower() or \
+                                   'WhisperX' in msg or 'Falling back' in msg or \
+                                   'failed' in msg.lower() or 'complete' in msg.lower() or \
+                                   'error' in msg.lower() or 'RESULT' in msg or \
+                                   'Done' in msg or '===' in msg or 'Drift' in msg or \
+                                   'Sync' in msg
+                    if not is_milestone and (now - _last_ui_update[0]) < 0.25:
+                        return
+                    _last_ui_update[0] = now
+
+                    def _do_update():
+                        status_var.set(msg)
+                        _rlog(msg)
+                        import re as _re
+                        m = _re.search(r'segment (\d+)/(\d+)', msg, _re.IGNORECASE)
+                        if m:
+                            seg_n, seg_t = int(m.group(1)), int(m.group(2))
+                            progress_var.set((seg_n / seg_t) * 100)
+                        m2 = _re.search(r'Matching cue (\d+)/(\d+)', msg)
+                        if m2:
+                            mc, mt = int(m2.group(1)), int(m2.group(2))
+                            progress_var.set((mc / mt) * 100)
+                        elif 'Extracting audio' in msg:
+                            progress_var.set(0)
+                    sd.after(0, _do_update)
+
+                def _set_start_enabled():
+                    start_btn.configure(state='normal')
+                def _set_apply_enabled():
+                    apply_btn.configure(state='normal')
+                    progress_var.set(100)
+
+                def _run():
+                    try:
+                        result = smart_sync(vp, cues, model_size=model,
+                                            language=lang,
+                                            num_segments=n_segs,
+                                            sample_minutes=s_mins,
+                                            progress_callback=_progress,
+                                            cancel_event=cancel_event,
+                                            engine=engine_value)
+                    except Exception as _e:
+                        _progress(f"Error: {_e}")
+                        result = None
+                    sync_result[0] = result
+
+                    # Display results via _progress (proven reliable)
+                    import time as _t
+                    _t.sleep(0.3)  # let queued UI updates flush
+
+                    if cancel_event.is_set():
+                        _progress("Sync cancelled by user")
+                    elif result:
+                        try:
+                            ro = result['offset_ms']
+                            rd = result['drift_ms']
+                            rm = result['matches']
+                            sign = '+' if ro > 0 else ''
+                            _progress(f"{'='*40}")
+                            _progress(f"RESULT: Offset: {sign}{ro}ms ({sign}{ro/1000:.1f}s)")
+                            _progress(f"Drift: {rd:+d}ms")
+                            _progress(f"Matched: {len(rm)}/{len(cues)} cues")
+                            _progress(f"{'='*40}")
+                            for ci, wt, ct, sim, txt in rm[:10]:
+                                _progress(f"  #{ci+1} sim={sim:.0%} "
+                                          f"sub={ms_to_srt_ts(ct)[:8]} "
+                                          f"audio={ms_to_srt_ts(wt)[:8]} "
+                                          f"\"{txt}\"")
+                            _progress(f"Done — click Apply Sync to apply {sign}{ro}ms offset")
+                            sd.after(0, lambda: apply_btn.configure(state='normal'))
+                            sd.after(0, lambda: retime_btn.configure(state='normal'))
+                            sd.after(0, lambda: progress_var.set(100))
+                        except Exception as _e:
+                            _progress(f"Error displaying results: {_e}")
+                    else:
+                        _progress("Sync failed — no results")
+
+                    sd.after(0, _set_start_enabled)
+
+                t = threading.Thread(target=_run, daemon=True)
+                t.start()
+
+            def _get_finetune():
+                _ft = finetune_var.get().strip().lstrip('+')
+                return int(_ft) if _ft.lstrip('-').isdigit() else 400
+
+            def _do_backup():
+                backup_path = None
+                if current_path[0] and os.path.isfile(current_path[0]):
+                    base, ext = os.path.splitext(current_path[0])
+                    backup_path = f"{base}_presync{ext}"
+                    try:
+                        write_srt_file(cues, backup_path)
+                        _rlog(f"Backup saved: {os.path.basename(backup_path)}")
+                        self.add_log(f"Pre-sync backup: {backup_path}", 'INFO')
+                    except Exception as e:
+                        _rlog(f"Warning: could not save backup: {e}")
+                return backup_path
+
+            def _apply():
+                nonlocal cues
+                if not sync_result[0]:
+                    return
+                offset = sync_result[0]['offset_ms']
+                ft = _get_finetune()
+                total_offset = offset + ft
+
+                backup_path = _do_backup()
+
+                # Always apply from the pre-sync snapshot so fine-tune is repeatable
+                import copy as _copy
+                push_undo()
+                if pre_sync_cues[0] is not None:
+                    cues = _copy.deepcopy(pre_sync_cues[0])
+                cues = shift_timestamps(cues, total_offset)
+                refresh_tree(cues)
+                sign = '+' if total_offset > 0 else ''
+                self.add_log(f"Smart Sync applied: {sign}{total_offset}ms "
+                             f"(offset {offset:+d}ms + fine-tune {ft:+d}ms)", 'SUCCESS')
+                _rlog(f"\nApplied: {sign}{total_offset}ms (offset {offset:+d} + fine-tune {ft:+d})")
+                if backup_path:
+                    _rlog(f"Original saved as: {os.path.basename(backup_path)}")
+                status_var.set(f"Sync applied: {sign}{total_offset}ms")
+
+            def _retime():
+                nonlocal cues
+                if not sync_result[0]:
+                    return
+                result = sync_result[0]
+                matched = result['matches']
+                ft = _get_finetune()
+
+                backup_path = _do_backup()
+
+                # Always retime from the pre-sync snapshot so fine-tune is repeatable
+                import copy as _copy
+                push_undo()
+                if pre_sync_cues[0] is not None:
+                    cues = _copy.deepcopy(pre_sync_cues[0])
+                cues = retime_subtitles(cues, matched)
+                # Apply fine-tune offset after re-timing
+                if ft != 0:
+                    cues = shift_timestamps(cues, ft)
+                refresh_tree(cues)
+                ft_msg = f" + fine-tune {ft:+d}ms" if ft else ""
+                self.add_log(f"Re-timed {len(cues)} cues using {len(matched)} anchors{ft_msg}",
+                             'SUCCESS')
+                _rlog(f"\nRe-timed {len(cues)} cues using {len(matched)} anchors{ft_msg}")
+                if backup_path:
+                    _rlog(f"Original saved as: {os.path.basename(backup_path)}")
+                status_var.set(f"Re-timed using {len(matched)} anchors{ft_msg}")
+
+            def _cancel():
+                cancel_event.set()
+                status_var.set("Cancelling...")
+
+            start_btn = ttk.Button(btn_f, text="▶ Start", command=_start, width=8)
+            start_btn.pack(side='left', padx=2)
+            apply_btn = ttk.Button(btn_f, text="Apply Sync", command=_apply,
+                                    width=10, state='disabled')
+            apply_btn.pack(side='left', padx=2)
+            retime_btn = ttk.Button(btn_f, text="Re-time All", command=_retime,
+                                     width=10, state='disabled')
+            retime_btn.pack(side='left', padx=2)
+            ttk.Button(btn_f, text="Cancel", command=_cancel, width=8).pack(side='left', padx=2)
+
+            def _save_from_sync():
+                do_save_file()
+                _rlog("Saved.")
+                status_var.set("Saved")
+
+            ttk.Button(btn_f, text="💾 Save", command=_save_from_sync,
+                       width=6).pack(side='right', padx=2)
+            ttk.Button(btn_f, text="Close", command=sd.destroy, width=6).pack(side='right', padx=2)
 
         # ══════════════════════════════════════════════════════════════════════
         # Placeholder — shown when no file is loaded
@@ -4788,8 +7954,16 @@ class VideoConverterApp:
                     pass
             refresh_tree(cues, search_indices=matches)
             if matches:
-                tree.see(str(matches[0]))
-                tree.selection_set(str(matches[0]))
+                first_idx = matches[0]
+                first = str(first_idx)
+                def _scroll_to_match():
+                    tree.selection_set(first)
+                    # Scroll so the match is near the middle of the view, not at the edge
+                    # Aim a few rows past the match so it's comfortably visible
+                    ahead = min(first_idx + 5, len(cues) - 1)
+                    tree.see(str(ahead))
+                    tree.after(50, lambda: (tree.see(first), tree.selection_set(first)))
+                tree.after_idle(_scroll_to_match)
             self.add_log(f"Search: {len(matches)} matches for '{term}'", 'INFO')
 
         def do_replace_one():
@@ -4809,12 +7983,15 @@ class VideoConverterApp:
                 old_text = cues[i]['text']
                 try:
                     if use_regex.get():
-                        new_text = re.sub(term, repl, old_text, count=1,
+                        new_text = re.sub(term, lambda m: repl, old_text, count=1,
                                           flags=re.IGNORECASE)
                     else:
-                        pat = re.escape(term)
-                        new_text = re.sub(pat, repl, old_text, count=1,
-                                          flags=re.IGNORECASE)
+                        # Case-insensitive literal find + replace (preserves rest of line)
+                        pos = old_text.lower().find(term.lower())
+                        if pos >= 0:
+                            new_text = old_text[:pos] + repl + old_text[pos + len(term):]
+                        else:
+                            new_text = old_text
                 except re.error:
                     continue
                 if new_text != old_text:
@@ -4858,10 +8035,23 @@ class VideoConverterApp:
                 old_text = cue['text']
                 try:
                     if use_regex.get():
-                        new_text = re.sub(term, repl, old_text, flags=re.IGNORECASE)
+                        new_text = re.sub(term, lambda m: repl, old_text, flags=re.IGNORECASE)
                     else:
-                        pattern = re.escape(term)
-                        new_text = re.sub(pattern, repl, old_text, flags=re.IGNORECASE)
+                        # Case-insensitive literal replace all
+                        new_text = old_text
+                        lower_text = new_text.lower()
+                        lower_term = term.lower()
+                        result = []
+                        pos = 0
+                        while True:
+                            idx = lower_text.find(lower_term, pos)
+                            if idx == -1:
+                                result.append(new_text[pos:])
+                                break
+                            result.append(new_text[pos:idx])
+                            result.append(repl)
+                            pos = idx + len(term)
+                        new_text = ''.join(result)
                 except re.error:
                     continue
                 if new_text != old_text:
@@ -4941,6 +8131,7 @@ class VideoConverterApp:
         tree.tag_configure(TAG_TAGS, background='#f8d7da')
         tree.tag_configure(TAG_LONG, background='#ffe0b2')
         tree.tag_configure(TAG_SEARCH, background='#c8e6c9')
+        tree.tag_configure(TAG_SPELL, background='#f5c6cb')
 
         # Mousewheel scrolling
         def on_tree_mousewheel(event):
@@ -5175,6 +8366,8 @@ class VideoConverterApp:
                     ctags.add(TAG_SEARCH)
                 if TAG_SEARCH in ctags:
                     row_tag = TAG_SEARCH
+                elif i in spell_error_indices:
+                    row_tag = TAG_SPELL
                 elif TAG_MODIFIED in ctags:
                     row_tag = TAG_MODIFIED
                 elif TAG_HI in ctags:
@@ -5235,6 +8428,1662 @@ class VideoConverterApp:
         editor.protocol('WM_DELETE_WINDOW', on_editor_close)
 
         editor.wait_window()
+
+    # ── Media Processor ──────────────────────────────────────────────────────
+
+    def open_media_processor(self):
+        """Open the standalone Media Processor window for remux-only post-processing."""
+        import time as _time
+        import tempfile
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        win = tk.Toplevel(self.root)
+        win.title("🔧 Media Processor")
+        win.geometry("880x780")
+        win.transient(self.root)
+        win.minsize(750, 600)
+        self._center_on_main(win)
+
+        # ── State ──
+        mp_files = []        # list of dicts
+        mp_processing = [False]
+        mp_stop = [False]
+        mp_lock = threading.Lock()  # protects mp_files during parallel access
+
+        # ── Options ──
+        opt_convert_audio  = tk.BooleanVar(value=True)
+        opt_audio_codec    = tk.StringVar(value='ac3 (Dolby Digital)')
+        opt_audio_bitrate  = tk.StringVar(value='384k')
+
+        # Map display names → ffmpeg codec names (subset for remux use)
+        mp_audio_codec_map = {
+            'aac': 'aac',
+            'ac3 (Dolby Digital)': 'ac3',
+            'eac3 (Dolby Digital+)': 'eac3',
+            'mp3': 'mp3',
+            'opus': 'opus',
+            'flac': 'flac',
+            'copy (no re-encode)': 'copy',
+        }
+        mp_audio_codec_reverse = {v: k for k, v in mp_audio_codec_map.items()}
+        opt_strip_chapters = tk.BooleanVar(value=True)
+        opt_strip_tags     = tk.BooleanVar(value=True)
+        opt_strip_subs     = tk.BooleanVar(value=True)
+        opt_set_metadata   = tk.BooleanVar(value=True)
+        opt_meta_video     = tk.StringVar(value='und')
+        opt_meta_audio     = tk.StringVar(value='eng')
+        opt_meta_sub       = tk.StringVar(value='eng')
+        opt_mux_subs       = tk.BooleanVar(value=True)
+        opt_sub_lang       = tk.StringVar(value='eng')
+        opt_output_mode    = tk.StringVar(value='inplace')  # 'inplace' or 'folder'
+        opt_output_folder  = tk.StringVar(value='')
+        opt_container      = tk.StringVar(value='.mkv')
+        opt_parallel       = tk.BooleanVar(value=True)
+        try:
+            _cpu_count = os.cpu_count() or 4
+        except Exception:
+            _cpu_count = 4
+        opt_max_jobs       = tk.IntVar(value=min(_cpu_count, 8))
+
+        # ── Layout ──
+        main_frame = ttk.Frame(win, padding=10)
+        main_frame.pack(fill='both', expand=True)
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(1, weight=1)   # file list
+        main_frame.rowconfigure(4, weight=1)   # log
+
+        # ── Toolbar ──
+        toolbar = ttk.Frame(main_frame)
+        toolbar.grid(row=0, column=0, sticky='ew', pady=(0, 6))
+
+        def _add_files():
+            paths = filedialog.askopenfilenames(
+                title="Select Video Files",
+                filetypes=[("Video files", "*.mkv *.mp4 *.avi *.mov *.wmv *.flv *.webm *.ts *.m2ts *.mts"),
+                           ("All files", "*.*")])
+            for p in paths:
+                _add_one_file(p)
+            _rebuild_tree()
+
+        def _add_folder():
+            folder = self._ask_directory(title="Select Folder with Video Files")
+            if not folder:
+                return
+            count = 0
+            for ext in VIDEO_EXTENSIONS:
+                for fp in Path(folder).glob(f'*{ext}'):
+                    if fp.is_file():
+                        _add_one_file(str(fp))
+                        count += 1
+            _rebuild_tree()
+            _log(f"Scanned folder: {count} video file(s) found", 'INFO')
+
+        def _detect_ext_subs(filepath):
+            """Detect matching subtitle files alongside a video file.
+            Uses the configured subtitle language code."""
+            base = os.path.splitext(filepath)[0]
+            lang = opt_sub_lang.get().strip() or 'eng'
+            ext_subs_found = []
+            # Try language-specific patterns first
+            main_srt = f"{base}.{lang}.srt"
+            forced_srt = f"{base}.{lang}.forced.srt"
+            # Fallback: bare .srt (no language code)
+            bare_srt = f"{base}.srt"
+            if os.path.isfile(main_srt):
+                ext_subs_found.append(('main', main_srt))
+            elif os.path.isfile(bare_srt):
+                ext_subs_found.append(('main', bare_srt))
+            if os.path.isfile(forced_srt):
+                ext_subs_found.append(('forced', forced_srt))
+            return ext_subs_found
+
+        def _add_one_file(filepath):
+            # Skip duplicates
+            for f in mp_files:
+                if f['path'] == filepath:
+                    return
+            name = os.path.basename(filepath)
+            size = os.path.getsize(filepath)
+            audio = get_audio_info(filepath)
+            subs = get_subtitle_streams(filepath)
+            ext_subs_found = _detect_ext_subs(filepath)
+            # Audio codec display
+            if audio:
+                acodec = audio[0]['codec_name'].upper()
+                if acodec in ('AC3', 'EAC3'):
+                    acodec += ' ✓'
+            else:
+                acodec = '—'
+            mp_files.append({
+                'path': filepath,
+                'name': name,
+                'size': size,
+                'audio_info': audio,
+                'audio_display': acodec,
+                'sub_count': len(subs),
+                'ext_subs': ext_subs_found,
+                'status': 'Ready',
+                'overrides': {},  # per-file operation overrides
+            })
+
+        def _clear_files():
+            mp_files.clear()
+            _rebuild_tree()
+
+        def _rescan_subs():
+            """Re-detect external subtitle files for all files using current language setting."""
+            for f in mp_files:
+                f['ext_subs'] = _detect_ext_subs(f['path'])
+            _rebuild_tree()
+            _log(f"Re-scanned subtitles with language code: {opt_sub_lang.get()}", 'INFO')
+
+        ttk.Button(toolbar, text="📂 Add Files...", command=_add_files).pack(side='left', padx=2)
+        ttk.Button(toolbar, text="📁 Add Folder...", command=_add_folder).pack(side='left', padx=2)
+        ttk.Button(toolbar, text="🗑️ Clear", command=_clear_files).pack(side='left', padx=2)
+
+        # ── File list (Treeview) ──
+        tree_frame = ttk.LabelFrame(main_frame, text="Files", padding=5)
+        tree_frame.grid(row=1, column=0, sticky='nsew', pady=(0, 6))
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
+
+        columns = ('name', 'audio', 'subs', 'ext_subs', 'size', 'status')
+        tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=6)
+        tree.grid(row=0, column=0, sticky='nsew')
+
+        tree.heading('name',     text='Filename')
+        tree.heading('audio',    text='Audio')
+        tree.heading('subs',     text='Int Subs')
+        tree.heading('ext_subs', text='Ext Subs')
+        tree.heading('size',     text='Size')
+        tree.heading('status',   text='Status')
+
+        tree.column('name',     width=280, minwidth=150)
+        tree.column('audio',    width=80,  minwidth=60,  anchor='center')
+        tree.column('subs',     width=60,  minwidth=40,  anchor='center')
+        tree.column('ext_subs', width=80,  minwidth=60,  anchor='center')
+        tree.column('size',     width=80,  minwidth=60,  anchor='e')
+        tree.column('status',   width=120, minwidth=80,  anchor='center')
+
+        scrollbar = ttk.Scrollbar(tree_frame, orient='vertical', command=tree.yview)
+        scrollbar.grid(row=0, column=1, sticky='ns')
+        tree.configure(yscrollcommand=scrollbar.set)
+
+        def _rebuild_tree():
+            tree.delete(*tree.get_children())
+            for f in mp_files:
+                size_mb = f'{f["size"] / (1024*1024):.1f} MB'
+                ext_str = ', '.join(t for t, _ in f['ext_subs']) if f['ext_subs'] else '—'
+                name_display = f['name']
+                if f.get('overrides'):
+                    name_display = '⚙️ ' + name_display
+                tree.insert('', 'end', values=(
+                    name_display, f['audio_display'], f['sub_count'],
+                    ext_str, size_mb, f['status']
+                ))
+
+        def _update_tree_status(index, status):
+            items = tree.get_children()
+            if index < len(items):
+                mp_files[index]['status'] = status
+                tree.set(items[index], 'status', status)
+
+        def _update_tree_row(index):
+            """Refresh a single row's display data (after re-probe)."""
+            items = tree.get_children()
+            if index < len(items):
+                f = mp_files[index]
+                size_mb = f'{f["size"] / (1024*1024):.1f} MB'
+                ext_str = ', '.join(t for t, _ in f['ext_subs']) if f['ext_subs'] else '—'
+                name_display = f['name']
+                if f.get('overrides'):
+                    name_display = '⚙️ ' + name_display
+                tree.set(items[index], 'name', name_display)
+                tree.set(items[index], 'audio', f['audio_display'])
+                tree.set(items[index], 'subs', f['sub_count'])
+                tree.set(items[index], 'ext_subs', ext_str)
+                tree.set(items[index], 'size', size_mb)
+
+        # ── Delete key to remove selected ──
+        def _on_delete(evt):
+            sel = tree.selection()
+            if not sel or mp_processing[0]:
+                return
+            items = tree.get_children()
+            indices = sorted([list(items).index(s) for s in sel], reverse=True)
+            for idx in indices:
+                del mp_files[idx]
+            _rebuild_tree()
+        tree.bind('<Delete>', _on_delete)
+
+        # ── Right-click context menu (per-file overrides + subtitle management) ──
+        def _show_context_menu(event):
+            item = tree.identify_row(event.y)
+            if not item or mp_processing[0]:
+                return
+            tree.selection_set(item)
+            items = tree.get_children()
+            index = list(items).index(item)
+
+            ctx = tk.Menu(win, tearoff=0)
+            ctx.add_command(label="⚙️ Override Settings...",
+                           command=lambda: _show_file_override(index))
+            ctx.add_command(label="📎 Manage Subtitles...",
+                           command=lambda: _show_sub_manager(index))
+            ctx.add_separator()
+            ctx.add_command(label="🔄 Re-probe File",
+                           command=lambda: _reprobe_file(index))
+            ctx.add_command(label="❌ Clear Override",
+                           command=lambda: _clear_override(index))
+            ctx.add_separator()
+            ctx.add_command(label="🗑️ Remove from List",
+                           command=lambda: _remove_file(index))
+            ctx.tk_popup(event.x_root, event.y_root)
+
+        tree.bind('<Button-3>', _show_context_menu)
+
+        def _remove_file(index):
+            del mp_files[index]
+            _rebuild_tree()
+
+        def _clear_override(index):
+            mp_files[index]['overrides'] = {}
+            _rebuild_tree()
+            _log(f"Cleared overrides for: {mp_files[index]['name']}", 'INFO')
+
+        def _reprobe_file(index):
+            """Re-probe a file's audio and subtitle info and update the tree."""
+            f = mp_files[index]
+            audio = get_audio_info(f['path'])
+            subs = get_subtitle_streams(f['path'])
+            f['audio_info'] = audio
+            f['sub_count'] = len(subs)
+            f['size'] = os.path.getsize(f['path']) if os.path.exists(f['path']) else 0
+            f['ext_subs'] = _detect_ext_subs(f['path'])
+            if audio:
+                acodec = audio[0]['codec_name'].upper()
+                if acodec in ('AC3', 'EAC3'):
+                    acodec += ' ✓'
+                f['audio_display'] = acodec
+            else:
+                f['audio_display'] = '—'
+            win.after(0, lambda: _update_tree_row(index))
+            _log(f"Re-probed: {f['name']} — audio={f['audio_display']}, subs={f['sub_count']}", 'INFO')
+
+        def _show_file_override(index):
+            """Show per-file override dialog."""
+            f = mp_files[index]
+            ov = f.get('overrides', {})
+
+            dlg = tk.Toplevel(win)
+            dlg.title(f"Override — {f['name']}")
+            dlg.geometry("480x400")
+            dlg.transient(win)
+            dlg.grab_set()
+            dlg.resizable(False, False)
+            self._center_on_main(dlg)
+
+            fr = ttk.Frame(dlg, padding=12)
+            fr.pack(fill='both', expand=True)
+            pad = {'padx': 8, 'pady': 4}
+            row = 0
+
+            # ── Convert audio ──
+            v_conv_audio = tk.BooleanVar(value=ov.get('convert_audio', opt_convert_audio.get()))
+            ttk.Checkbutton(fr, text="Convert audio:", variable=v_conv_audio).grid(
+                row=row, column=0, sticky='w', **pad)
+            v_acodec = tk.StringVar(value=ov.get('audio_codec_display',
+                mp_audio_codec_reverse.get(ov.get('audio_codec', ''), mp_ac_combo.get())))
+            acodec_combo = ttk.Combobox(fr, textvariable=v_acodec,
+                values=list(mp_audio_codec_map.keys()), width=18, state='readonly')
+            acodec_combo.grid(row=row, column=1, sticky='w', **pad)
+            row += 1
+            ttk.Label(fr, text="Audio bitrate:").grid(row=row, column=0, sticky='w', **pad)
+            v_abitrate = tk.StringVar(value=ov.get('audio_bitrate', opt_audio_bitrate.get()))
+            ttk.Combobox(fr, textvariable=v_abitrate,
+                values=('128k','192k','256k','320k','384k','448k','512k','640k'),
+                width=7, state='readonly').grid(row=row, column=1, sticky='w', **pad)
+            row += 1
+
+            # ── Strip options ──
+            v_strip_ch = tk.BooleanVar(value=ov.get('strip_chapters', opt_strip_chapters.get()))
+            v_strip_tg = tk.BooleanVar(value=ov.get('strip_tags', opt_strip_tags.get()))
+            v_strip_sb = tk.BooleanVar(value=ov.get('strip_subs', opt_strip_subs.get()))
+            cf = ttk.Frame(fr)
+            cf.grid(row=row, column=0, columnspan=2, sticky='w', **pad); row += 1
+            ttk.Checkbutton(cf, text="Strip chapters", variable=v_strip_ch).pack(side='left', padx=4)
+            ttk.Checkbutton(cf, text="Strip tags", variable=v_strip_tg).pack(side='left', padx=4)
+            ttk.Checkbutton(cf, text="Strip subs", variable=v_strip_sb).pack(side='left', padx=4)
+
+            # ── Mux subs ──
+            v_mux = tk.BooleanVar(value=ov.get('mux_subs', opt_mux_subs.get()))
+            ttk.Checkbutton(fr, text="Mux external subtitles", variable=v_mux).grid(
+                row=row, column=0, columnspan=2, sticky='w', **pad); row += 1
+
+            # ── Metadata ──
+            v_meta = tk.BooleanVar(value=ov.get('set_metadata', opt_set_metadata.get()))
+            ttk.Checkbutton(fr, text="Set track metadata", variable=v_meta).grid(
+                row=row, column=0, columnspan=2, sticky='w', **pad); row += 1
+
+            mf = ttk.Frame(fr)
+            mf.grid(row=row, column=0, columnspan=2, sticky='w', **pad); row += 1
+            ttk.Label(mf, text="V:").pack(side='left')
+            v_mv = tk.StringVar(value=ov.get('meta_video', opt_meta_video.get()))
+            ttk.Entry(mf, textvariable=v_mv, width=4).pack(side='left', padx=(2,6))
+            ttk.Label(mf, text="A:").pack(side='left')
+            v_ma = tk.StringVar(value=ov.get('meta_audio', opt_meta_audio.get()))
+            ttk.Entry(mf, textvariable=v_ma, width=4).pack(side='left', padx=(2,6))
+            ttk.Label(mf, text="S:").pack(side='left')
+            v_ms = tk.StringVar(value=ov.get('meta_sub', opt_meta_sub.get()))
+            ttk.Entry(mf, textvariable=v_ms, width=4).pack(side='left', padx=(2,0))
+
+            # ── Container ──
+            ttk.Label(fr, text="Output container:").grid(row=row, column=0, sticky='w', **pad)
+            v_ctr = tk.StringVar(value=ov.get('container', opt_container.get()))
+            ttk.Combobox(fr, textvariable=v_ctr, values=('.mkv', '.mp4'),
+                         width=6, state='readonly').grid(row=row, column=1, sticky='w', **pad)
+            row += 1
+
+            # ── Buttons ──
+            bf = ttk.Frame(dlg, padding=(12,0,12,12))
+            bf.pack(fill='x')
+            def _save_ovr():
+                f['overrides'] = {
+                    'convert_audio': v_conv_audio.get(),
+                    'audio_codec': mp_audio_codec_map.get(v_acodec.get(), v_acodec.get()),
+                    'audio_codec_display': v_acodec.get(),
+                    'audio_bitrate': v_abitrate.get(),
+                    'strip_chapters': v_strip_ch.get(),
+                    'strip_tags': v_strip_tg.get(),
+                    'strip_subs': v_strip_sb.get(),
+                    'mux_subs': v_mux.get(),
+                    'set_metadata': v_meta.get(),
+                    'meta_video': v_mv.get(),
+                    'meta_audio': v_ma.get(),
+                    'meta_sub': v_ms.get(),
+                    'container': v_ctr.get(),
+                }
+                _rebuild_tree()
+                _log(f"Override saved for: {f['name']}", 'INFO')
+                dlg.destroy()
+            ttk.Button(bf, text="Save Override", command=_save_ovr).pack(side='right', padx=(4,0))
+            ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(side='right')
+
+        def _show_sub_manager(index):
+            """Show subtitle file manager for a single file."""
+            f = mp_files[index]
+            dlg = tk.Toplevel(win)
+            dlg.title(f"Subtitles — {f['name']}")
+            dlg.geometry("500x300")
+            dlg.transient(win)
+            dlg.grab_set()
+            dlg.resizable(True, True)
+            self._center_on_main(dlg)
+
+            subs = list(f['ext_subs'])  # work on a copy
+
+            fr = ttk.Frame(dlg, padding=12)
+            fr.pack(fill='both', expand=True)
+            fr.columnconfigure(0, weight=1)
+            fr.rowconfigure(0, weight=1)
+
+            sub_list = tk.Listbox(fr, height=6)
+            sub_list.grid(row=0, column=0, sticky='nsew')
+
+            def _refresh():
+                sub_list.delete(0, 'end')
+                for stype, spath in subs:
+                    sub_list.insert('end', f"[{stype}] {os.path.basename(spath)}")
+
+            def _add_sub():
+                paths = filedialog.askopenfilenames(
+                    title="Select Subtitle Files",
+                    filetypes=[("Subtitle files", "*.srt *.ass *.ssa *.vtt *.sub"),
+                               ("All files", "*.*")])
+                for p in paths:
+                    # Guess type from filename
+                    bn = os.path.basename(p).lower()
+                    if 'forced' in bn:
+                        stype = 'forced'
+                    else:
+                        stype = 'main'
+                    subs.append((stype, p))
+                _refresh()
+
+            def _remove_sub():
+                sel = sub_list.curselection()
+                if sel:
+                    for i in sorted(sel, reverse=True):
+                        del subs[i]
+                    _refresh()
+
+            def _toggle_type():
+                sel = sub_list.curselection()
+                if sel:
+                    i = sel[0]
+                    stype, spath = subs[i]
+                    new_type = 'forced' if stype == 'main' else 'main'
+                    subs[i] = (new_type, spath)
+                    _refresh()
+
+            def _move_up():
+                sel = sub_list.curselection()
+                if sel and sel[0] > 0:
+                    i = sel[0]
+                    subs[i-1], subs[i] = subs[i], subs[i-1]
+                    _refresh()
+                    sub_list.selection_set(i-1)
+
+            def _move_down():
+                sel = sub_list.curselection()
+                if sel and sel[0] < len(subs) - 1:
+                    i = sel[0]
+                    subs[i], subs[i+1] = subs[i+1], subs[i]
+                    _refresh()
+                    sub_list.selection_set(i+1)
+
+            btn_fr = ttk.Frame(fr)
+            btn_fr.grid(row=1, column=0, sticky='ew', pady=(6,0))
+            ttk.Button(btn_fr, text="Add...", command=_add_sub).pack(side='left', padx=2)
+            ttk.Button(btn_fr, text="Remove", command=_remove_sub).pack(side='left', padx=2)
+            ttk.Button(btn_fr, text="Toggle Main/Forced", command=_toggle_type).pack(side='left', padx=2)
+            ttk.Separator(btn_fr, orient='vertical').pack(side='left', fill='y', padx=6)
+            ttk.Button(btn_fr, text="⬆ Up", command=_move_up, width=4).pack(side='left', padx=2)
+            ttk.Button(btn_fr, text="⬇ Down", command=_move_down, width=5).pack(side='left', padx=2)
+
+            bot = ttk.Frame(dlg, padding=(12,0,12,12))
+            bot.pack(fill='x')
+            def _save_subs():
+                f['ext_subs'] = list(subs)
+                _rebuild_tree()
+                _log(f"Subtitles updated for: {f['name']} ({len(subs)} file(s))", 'INFO')
+                dlg.destroy()
+            ttk.Button(bot, text="Save", command=_save_subs).pack(side='right', padx=(4,0))
+            ttk.Button(bot, text="Cancel", command=dlg.destroy).pack(side='right')
+            _refresh()
+
+        # Double-click opens override dialog
+        def _on_double_click(event):
+            item = tree.identify_row(event.y)
+            if item and not mp_processing[0]:
+                items = tree.get_children()
+                index = list(items).index(item)
+                _show_file_override(index)
+        tree.bind('<Double-1>', _on_double_click)
+
+        # ── Operations panel ──
+        ops_frame = ttk.LabelFrame(main_frame, text="Operations", padding=8)
+        ops_frame.grid(row=2, column=0, sticky='ew', pady=(0, 6))
+
+        # Row 1: Audio + strip options
+        ops_row1 = ttk.Frame(ops_frame)
+        ops_row1.pack(fill='x', pady=2)
+
+        def _toggle_audio_controls():
+            st = 'readonly' if opt_convert_audio.get() else 'disabled'
+            mp_ac_combo.configure(state=st)
+            mp_br_combo.configure(state=st)
+
+        ttk.Checkbutton(ops_row1, text="Convert audio:",
+                       variable=opt_convert_audio, command=_toggle_audio_controls).pack(side='left', padx=(0, 4))
+        mp_ac_combo = ttk.Combobox(ops_row1, textvariable=opt_audio_codec,
+                                   width=18, state='readonly')
+        mp_ac_combo['values'] = list(mp_audio_codec_map.keys())
+        mp_ac_combo.set('ac3 (Dolby Digital)')
+        mp_ac_combo.pack(side='left', padx=(0, 8))
+        ttk.Label(ops_row1, text="Bitrate:").pack(side='left', padx=(0, 2))
+        mp_br_combo = ttk.Combobox(ops_row1, textvariable=opt_audio_bitrate,
+                                   values=('128k', '192k', '256k', '320k', '384k', '448k', '512k', '640k'),
+                                   width=6, state='readonly')
+        mp_br_combo.pack(side='left', padx=(0, 16))
+
+        ttk.Checkbutton(ops_row1, text="Strip chapters",
+                       variable=opt_strip_chapters).pack(side='left', padx=4)
+        ttk.Checkbutton(ops_row1, text="Strip tags",
+                       variable=opt_strip_tags).pack(side='left', padx=4)
+
+        # Row 2: Strip subs + mux subs + sub language
+        ops_row2 = ttk.Frame(ops_frame)
+        ops_row2.pack(fill='x', pady=2)
+
+        ttk.Checkbutton(ops_row2, text="Strip existing subtitles",
+                       variable=opt_strip_subs).pack(side='left', padx=(0, 4))
+        ttk.Checkbutton(ops_row2, text="Mux external subtitles",
+                       variable=opt_mux_subs).pack(side='left', padx=(16, 4))
+        ttk.Label(ops_row2, text="Lang:").pack(side='left', padx=(8, 2))
+        sub_lang_entry = ttk.Entry(ops_row2, textvariable=opt_sub_lang, width=4)
+        sub_lang_entry.pack(side='left', padx=(0, 4))
+        ttk.Button(ops_row2, text="🔄 Rescan", command=_rescan_subs, width=8).pack(side='left', padx=4)
+
+        # Row 3: Track metadata
+        ops_row3 = ttk.Frame(ops_frame)
+        ops_row3.pack(fill='x', pady=2)
+
+        def _toggle_meta_fields():
+            st = 'normal' if opt_set_metadata.get() else 'disabled'
+            mp_mv.configure(state=st)
+            mp_ma.configure(state=st)
+            mp_ms.configure(state=st)
+
+        ttk.Checkbutton(ops_row3, text="Set track metadata:",
+                       variable=opt_set_metadata, command=_toggle_meta_fields).pack(side='left', padx=(0, 4))
+        ttk.Label(ops_row3, text="V:").pack(side='left')
+        mp_mv = ttk.Entry(ops_row3, textvariable=opt_meta_video, width=4)
+        mp_mv.pack(side='left', padx=(2, 6))
+        ttk.Label(ops_row3, text="A:").pack(side='left')
+        mp_ma = ttk.Entry(ops_row3, textvariable=opt_meta_audio, width=4)
+        mp_ma.pack(side='left', padx=(2, 6))
+        ttk.Label(ops_row3, text="S:").pack(side='left')
+        mp_ms = ttk.Entry(ops_row3, textvariable=opt_meta_sub, width=4)
+        mp_ms.pack(side='left', padx=(2, 0))
+
+        _toggle_meta_fields()
+
+        # Row 4: Output + parallel + container
+        ops_row4 = ttk.Frame(ops_frame)
+        ops_row4.pack(fill='x', pady=2)
+
+        ttk.Label(ops_row4, text="Output:").pack(side='left', padx=(0, 4))
+        ttk.Radiobutton(ops_row4, text="Replace in-place", variable=opt_output_mode,
+                        value='inplace', command=lambda: _toggle_output_folder()).pack(side='left', padx=(0, 4))
+        ttk.Radiobutton(ops_row4, text="Save to folder:", variable=opt_output_mode,
+                        value='folder', command=lambda: _toggle_output_folder()).pack(side='left', padx=(0, 4))
+        mp_out_entry = ttk.Entry(ops_row4, textvariable=opt_output_folder, width=24, state='disabled')
+        mp_out_entry.pack(side='left', padx=(0, 4))
+        mp_out_btn = ttk.Button(ops_row4, text="Browse…", state='disabled',
+            command=lambda: opt_output_folder.set(
+                self._ask_directory(title="Select Output Folder") or opt_output_folder.get()))
+        mp_out_btn.pack(side='left', padx=(0, 12))
+
+        ttk.Label(ops_row4, text="Container:").pack(side='left', padx=(0, 2))
+        ttk.Combobox(ops_row4, textvariable=opt_container,
+                     values=('.mkv', '.mp4'), width=5, state='readonly').pack(side='left', padx=(0, 12))
+
+        ttk.Checkbutton(ops_row4, text="Parallel",
+                       variable=opt_parallel).pack(side='left', padx=(0, 2))
+        ttk.Label(ops_row4, text="Jobs:").pack(side='left', padx=(0, 2))
+        ttk.Spinbox(ops_row4, textvariable=opt_max_jobs, from_=1, to=32,
+                    width=3).pack(side='left')
+
+        def _toggle_output_folder():
+            st = 'normal' if opt_output_mode.get() == 'folder' else 'disabled'
+            mp_out_entry.configure(state=st)
+            mp_out_btn.configure(state=st)
+        _toggle_output_folder()
+
+        # ── Progress bar ──
+        progress_frame = ttk.Frame(main_frame)
+        progress_frame.grid(row=3, column=0, sticky='ew', pady=(0, 6))
+        progress_frame.columnconfigure(1, weight=1)
+
+        mp_progress_var = tk.DoubleVar(value=0)
+        mp_progress_label = ttk.Label(progress_frame, text="Ready")
+        mp_progress_label.grid(row=0, column=0, sticky='w', padx=(0, 8))
+        mp_progress_bar = ttk.Progressbar(progress_frame, variable=mp_progress_var,
+                                          maximum=100, mode='determinate')
+        mp_progress_bar.grid(row=0, column=1, sticky='ew')
+
+        # ── Action buttons ──
+        btn_frame = ttk.Frame(progress_frame)
+        btn_frame.grid(row=0, column=2, padx=(8, 0))
+        process_btn = ttk.Button(btn_frame, text="▶ Process All", command=lambda: _start_processing())
+        process_btn.pack(side='left', padx=2)
+        stop_btn = ttk.Button(btn_frame, text="⏹ Stop", command=lambda: _stop_processing(), state='disabled')
+        stop_btn.pack(side='left', padx=2)
+
+        # ── Log ──
+        log_frame = ttk.LabelFrame(main_frame, text="Log", padding=5)
+        log_frame.grid(row=4, column=0, sticky='nsew')
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
+
+        log_text = tk.Text(log_frame, height=8, wrap='word', font=('Courier', 9),
+                          state='disabled', bg='#1e1e1e', fg='#d4d4d4')
+        log_text.grid(row=0, column=0, sticky='nsew')
+        log_scroll = ttk.Scrollbar(log_frame, orient='vertical', command=log_text.yview)
+        log_scroll.grid(row=0, column=1, sticky='ns')
+        log_text.configure(yscrollcommand=log_scroll.set)
+
+        def _clear_log():
+            log_text.configure(state='normal')
+            log_text.delete('1.0', 'end')
+            log_text.configure(state='disabled')
+
+        ttk.Button(log_frame, text="Clear Log", command=_clear_log).grid(row=1, column=0, sticky='w', pady=(4, 0))
+
+        # Log color tags
+        log_text.tag_configure('INFO',    foreground='#d4d4d4')
+        log_text.tag_configure('SUCCESS', foreground='#4ec9b0')
+        log_text.tag_configure('WARNING', foreground='#dcdcaa')
+        log_text.tag_configure('ERROR',   foreground='#f44747')
+        log_text.tag_configure('SKIP',    foreground='#569cd6')
+
+        def _log(msg, level='INFO'):
+            def _do():
+                log_text.configure(state='normal')
+                ts = datetime.now().strftime('%H:%M:%S')
+                log_text.insert('end', f"[{ts}] [{level}] {msg}\n", level)
+                log_text.see('end')
+                log_text.configure(state='disabled')
+            # Safe to call from any thread
+            win.after(0, _do)
+
+        # ── Preflight check ──
+        def _preflight():
+            """Validate files before processing. Returns True if OK to proceed."""
+            errors = 0
+            warnings = 0
+            _log("═" * 50, 'INFO')
+            _log("Pre-flight check", 'INFO')
+            _log("═" * 50, 'INFO')
+
+            for i, f in enumerate(mp_files):
+                filepath = f['path']
+                name = f['name']
+                ov = f.get('overrides', {})
+
+                # Readable?
+                if not os.access(filepath, os.R_OK):
+                    _log(f"  {name}: File is not readable", 'ERROR')
+                    errors += 1; continue
+
+                # Empty?
+                if os.path.getsize(filepath) == 0:
+                    _log(f"  {name}: File is empty (0 bytes)", 'ERROR')
+                    errors += 1; continue
+
+                # Missing subtitle files?
+                do_mux = ov.get('mux_subs', opt_mux_subs.get())
+                if do_mux and not f['ext_subs']:
+                    lang = opt_sub_lang.get()
+                    _log(f"  {name}: No .{lang}.srt found alongside file", 'WARNING')
+                    warnings += 1
+
+                # Audio info?
+                if not f['audio_info']:
+                    _log(f"  {name}: Could not read audio stream", 'WARNING')
+                    warnings += 1
+
+            if errors > 0:
+                _log(f"Pre-flight FAILED — {errors} error(s), {warnings} warning(s)", 'ERROR')
+                return False
+            elif warnings > 0:
+                _log(f"Pre-flight PASSED with {warnings} warning(s)", 'WARNING')
+            else:
+                _log("Pre-flight PASSED — all checks OK", 'SUCCESS')
+
+            _log("═" * 50, 'INFO')
+            return True
+
+        # ── Resolve effective setting (per-file override > global) ──
+        def _ov(f, key, global_var):
+            """Get effective value: per-file override if set, else global."""
+            ov = f.get('overrides', {})
+            if key in ov:
+                return ov[key]
+            if isinstance(global_var, (tk.BooleanVar, tk.StringVar, tk.IntVar)):
+                return global_var.get()
+            return global_var
+
+        # ── Build ffmpeg command for one file ──
+        def _build_cmd(f):
+            """Build a single ffmpeg remux command for the given file dict.
+            Returns (cmd_list, output_path) or (None, None) on error."""
+            input_path = f['path']
+            base, ext = os.path.splitext(input_path)
+            ov = f.get('overrides', {})
+
+            # Determine output container
+            out_ext = _ov(f, 'container', opt_container)
+
+            # Determine output path
+            if opt_output_mode.get() == 'folder' and opt_output_folder.get():
+                out_dir = opt_output_folder.get()
+                out_name = os.path.join(out_dir, os.path.basename(base) + out_ext)
+            else:
+                # In-place: write to temp, replace on success
+                out_name = f"{base}_mp_tmp{out_ext}"
+
+            cmd = ['ffmpeg', '-y', '-i', input_path]
+
+            # Additional inputs: external subtitle files
+            sub_inputs = []
+            do_mux = _ov(f, 'mux_subs', opt_mux_subs)
+            if do_mux:
+                for stype, spath in f['ext_subs']:
+                    cmd.extend(['-i', spath])
+                    sub_inputs.append((stype, spath))
+
+            # ── Mapping ──
+            cmd.extend(['-map', '0:v:0?', '-map', '0:a?'])
+
+            # Subtitle mapping
+            do_strip_subs = _ov(f, 'strip_subs', opt_strip_subs)
+            if do_strip_subs:
+                pass  # Don't map source subtitles
+            else:
+                cmd.extend(['-map', '0:s?'])
+
+            # Map external subtitle inputs
+            for idx, (stype, spath) in enumerate(sub_inputs):
+                input_idx = 1 + idx
+                cmd.extend(['-map', f'{input_idx}:0'])
+
+            # ── Video: always copy (remux only) ──
+            cmd.extend(['-c:v', 'copy'])
+
+            # ── Audio ──
+            do_convert_audio = _ov(f, 'convert_audio', opt_convert_audio)
+            if do_convert_audio:
+                # Resolve codec
+                if 'audio_codec' in ov:
+                    target_codec = ov['audio_codec']
+                else:
+                    selected_display = opt_audio_codec.get()
+                    target_codec = mp_audio_codec_map.get(selected_display, selected_display)
+
+                audio_bitrate = _ov(f, 'audio_bitrate', opt_audio_bitrate)
+
+                if target_codec == 'copy':
+                    cmd.extend(['-c:a', 'copy'])
+                else:
+                    audio = f.get('audio_info', [])
+                    src_codec = audio[0]['codec_name'] if audio else ''
+                    codec_aliases = {
+                        'ac3': ('ac3', 'eac3'),
+                        'eac3': ('eac3',),
+                        'aac': ('aac',),
+                        'mp3': ('mp3',),
+                        'opus': ('opus',),
+                        'flac': ('flac',),
+                    }
+                    match_set = codec_aliases.get(target_codec, (target_codec,))
+                    if src_codec in match_set:
+                        cmd.extend(['-c:a', 'copy'])
+                        _log(f"  Audio: already {src_codec.upper()}, copying", 'SKIP')
+                    else:
+                        LOSSLESS = {'flac'}
+                        EXPERIMENTAL = {'opus', 'vorbis'}
+                        cmd.extend(['-c:a', target_codec])
+                        if target_codec in EXPERIMENTAL:
+                            cmd.extend(['-strict', '-2'])
+                        if target_codec not in LOSSLESS:
+                            cmd.extend(['-b:a', audio_bitrate])
+            else:
+                cmd.extend(['-c:a', 'copy'])
+
+            # ── Subtitles codec ──
+            if not do_strip_subs:
+                # Handle container compatibility for internal subs
+                if out_ext == '.mp4':
+                    cmd.extend(['-c:s', 'mov_text'])
+                else:
+                    cmd.extend(['-c:s', 'copy'])
+            # External subs
+            out_sub_idx = 0
+            if not do_strip_subs:
+                out_sub_idx = f.get('sub_count', 0)
+
+            do_set_meta = _ov(f, 'set_metadata', opt_set_metadata)
+            s_lang = _ov(f, 'meta_sub', opt_meta_sub)
+            for idx, (stype, spath) in enumerate(sub_inputs):
+                si = out_sub_idx + idx
+                sub_codec = 'mov_text' if out_ext == '.mp4' else 'srt'
+                cmd.extend([f'-c:s:{si}', sub_codec])
+                sub_lang = s_lang if do_set_meta else opt_sub_lang.get()
+                cmd.extend([f'-metadata:s:s:{si}', f'language={sub_lang}'])
+                if stype == 'main':
+                    cmd.extend([f'-metadata:s:s:{si}', 'title=English'])
+                    cmd.extend([f'-disposition:s:{si}', 'default'])
+                elif stype == 'forced':
+                    cmd.extend([f'-metadata:s:s:{si}', 'title=Forced'])
+                    cmd.extend([f'-disposition:s:{si}', 'forced'])
+
+            # ── Chapters ──
+            if _ov(f, 'strip_chapters', opt_strip_chapters):
+                cmd.extend(['-map_chapters', '-1'])
+
+            # ── Tags ──
+            if _ov(f, 'strip_tags', opt_strip_tags):
+                cmd.extend(['-map_metadata', '-1'])
+
+            # ── Track metadata ──
+            if do_set_meta:
+                v_lang = _ov(f, 'meta_video', opt_meta_video)
+                a_lang = _ov(f, 'meta_audio', opt_meta_audio)
+                cmd.extend(['-metadata', 'title='])
+                cmd.extend(['-metadata:s:v:0', f'language={v_lang}', '-metadata:s:v:0', 'title='])
+                cmd.extend(['-metadata:s:a:0', f'language={a_lang}', '-metadata:s:a:0', 'title='])
+                if (not do_strip_subs and f.get('sub_count', 0) > 0) or sub_inputs:
+                    if not sub_inputs:
+                        cmd.extend([f'-metadata:s:s:0', f'language={s_lang}'])
+
+            cmd.append(out_name)
+            return cmd, out_name
+
+        # ── Process a single file (called from thread pool or sequential loop) ──
+        def _process_one(i, f):
+            """Process a single file. Returns ('done'|'failed'|'skipped', index)."""
+            if mp_stop[0]:
+                return ('stopped', i)
+
+            name = f['name']
+            win.after(0, lambda idx=i: _update_tree_status(idx, '⏳ Processing'))
+
+            _log(f"── {name} ──", 'INFO')
+
+            try:
+                cmd, out_path = _build_cmd(f)
+                if cmd is None:
+                    _log(f"  Skipped (could not build command)", 'WARNING')
+                    win.after(0, lambda idx=i: _update_tree_status(idx, '⏭️ Skipped'))
+                    return ('skipped', i)
+
+                _log(f"  Command: {' '.join(cmd)}", 'INFO')
+
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1)
+
+                last_lines = []
+                for line in proc.stdout:
+                    if mp_stop[0]:
+                        proc.terminate()
+                        return ('stopped', i)
+                    line = line.strip()
+                    if line:
+                        last_lines.append(line)
+                        if len(last_lines) > 5:
+                            last_lines.pop(0)
+
+                proc.wait()
+
+                if proc.returncode == 0:
+                    # In-place mode: replace original
+                    is_inplace = opt_output_mode.get() == 'inplace' or not opt_output_folder.get()
+                    if is_inplace:
+                        original = f['path']
+                        try:
+                            os.replace(out_path, original)
+                        except OSError as e:
+                            _log(f"  Warning: could not replace original: {e}", 'WARNING')
+                        final_path = original
+                    else:
+                        final_path = out_path
+
+                    out_size = os.path.getsize(final_path) if os.path.exists(final_path) else 0
+                    out_mb = f'{out_size / (1024*1024):.1f} MB' if out_size else '?'
+                    _log(f"  ✅ Done — output: {out_mb}", 'SUCCESS')
+                    win.after(0, lambda idx=i: _update_tree_status(idx, '✅ Done'))
+                    return ('done', i)
+                else:
+                    _log(f"  ❌ Failed (exit code {proc.returncode})", 'ERROR')
+                    for ll in last_lines:
+                        _log(f"    {ll}", 'ERROR')
+                    win.after(0, lambda idx=i: _update_tree_status(idx, '❌ Failed'))
+                    # Clean up partial output
+                    if os.path.exists(out_path):
+                        try:
+                            os.remove(out_path)
+                        except OSError:
+                            pass
+                    return ('failed', i)
+
+            except Exception as e:
+                _log(f"  ❌ Error: {e}", 'ERROR')
+                win.after(0, lambda idx=i: _update_tree_status(idx, '❌ Error'))
+                return ('failed', i)
+
+        # ── Processing thread (orchestrator) ──
+        def _process_files():
+            mp_processing[0] = True
+            mp_stop[0] = False
+            total = len(mp_files)
+            completed = [0]
+            failed = [0]
+            processed_count = [0]
+
+            win.after(0, lambda: process_btn.configure(state='disabled'))
+            win.after(0, lambda: stop_btn.configure(state='normal'))
+
+            use_parallel = opt_parallel.get()
+            max_jobs = opt_max_jobs.get()
+
+            mode_label = f"parallel ({max_jobs} jobs)" if use_parallel else "sequential"
+            _log(f"Processing {total} file(s) — {mode_label}", 'INFO')
+
+            def _on_result(result, idx):
+                status, _ = result
+                with mp_lock:
+                    processed_count[0] += 1
+                    if status == 'done':
+                        completed[0] += 1
+                    elif status == 'failed':
+                        failed[0] += 1
+                    pct = (processed_count[0] / total) * 100
+                win.after(0, lambda p=pct: mp_progress_var.set(p))
+                win.after(0, lambda c=processed_count[0]: mp_progress_label.configure(
+                    text=f"Processing {c}/{total}"))
+
+            if use_parallel and max_jobs > 1:
+                with ThreadPoolExecutor(max_workers=max_jobs) as executor:
+                    futures = {}
+                    for i, f in enumerate(mp_files):
+                        if mp_stop[0]:
+                            break
+                        future = executor.submit(_process_one, i, f)
+                        futures[future] = i
+
+                    for future in as_completed(futures):
+                        idx = futures[future]
+                        try:
+                            result = future.result()
+                            _on_result(result, idx)
+                        except Exception as e:
+                            _log(f"  ❌ Unexpected error: {e}", 'ERROR')
+                            with mp_lock:
+                                processed_count[0] += 1
+                                failed[0] += 1
+            else:
+                for i, f in enumerate(mp_files):
+                    if mp_stop[0]:
+                        _log("Processing stopped by user", 'WARNING')
+                        break
+                    result = _process_one(i, f)
+                    _on_result(result, i)
+
+            # Done
+            _log("═" * 50, 'INFO')
+            _log(f"Complete — {completed[0]} succeeded, {failed[0]} failed, "
+                 f"{total - completed[0] - failed[0]} skipped/stopped", 'SUCCESS')
+            _log("═" * 50, 'INFO')
+
+            # Clean up .srt files if muxing was enabled
+            if opt_mux_subs.get() and completed[0] > 0:
+                cleaned = 0
+                for f in mp_files:
+                    if f['status'] == '✅ Done':
+                        for stype, spath in f.get('ext_subs', []):
+                            if os.path.exists(spath):
+                                try:
+                                    os.remove(spath)
+                                    cleaned += 1
+                                except OSError:
+                                    pass
+                if cleaned:
+                    _log(f"Cleaned up {cleaned} subtitle file(s)", 'INFO')
+
+            # Re-probe completed files to update display
+            if completed[0] > 0:
+                _log("Re-probing completed files...", 'INFO')
+                for i, f in enumerate(mp_files):
+                    if f['status'] == '✅ Done' and os.path.exists(f['path']):
+                        _reprobe_file(i)
+
+            win.after(0, lambda: process_btn.configure(state='normal'))
+            win.after(0, lambda: stop_btn.configure(state='disabled'))
+            win.after(0, lambda: mp_progress_label.configure(
+                text=f"Done — {completed[0]}/{total} processed"))
+            mp_processing[0] = False
+
+        def _start_processing():
+            if not mp_files:
+                _log("No files to process", 'WARNING')
+                return
+            if mp_processing[0]:
+                return
+
+            # Validate output folder if using folder mode
+            if opt_output_mode.get() == 'folder':
+                folder = opt_output_folder.get().strip()
+                if not folder:
+                    _log("Output folder not set — select a folder or use in-place mode", 'ERROR')
+                    return
+                os.makedirs(folder, exist_ok=True)
+
+            # Run preflight
+            if not _preflight():
+                return
+
+            # Start in thread
+            t = threading.Thread(target=_process_files, daemon=True)
+            t.start()
+
+        def _stop_processing():
+            mp_stop[0] = True
+
+        # ── Drag and drop support ──
+        try:
+            win.drop_target_register('DND_Files')
+            def _on_drop(event):
+                raw = event.data
+                # Parse file:// URIs and space-separated paths
+                paths = []
+                if 'file://' in raw:
+                    from urllib.parse import unquote, urlparse
+                    for token in raw.split():
+                        token = token.strip()
+                        if token.startswith('file://'):
+                            parsed = urlparse(token)
+                            paths.append(unquote(parsed.path))
+                elif raw.startswith('{') and raw.endswith('}'):
+                    # Tcl list format for paths with spaces
+                    paths = [p.strip('{}') for p in re.findall(r'\{[^}]+\}|[^\s]+', raw)]
+                else:
+                    paths = raw.split()
+
+                added = 0
+                for p in paths:
+                    if os.path.isfile(p) and os.path.splitext(p)[1].lower() in VIDEO_EXTENSIONS:
+                        _add_one_file(p)
+                        added += 1
+                    elif os.path.isdir(p):
+                        for ext in VIDEO_EXTENSIONS:
+                            for fp in Path(p).glob(f'*{ext}'):
+                                if fp.is_file():
+                                    _add_one_file(str(fp))
+                                    added += 1
+                if added:
+                    _rebuild_tree()
+                    _log(f"Added {added} file(s) via drag-and-drop", 'INFO')
+
+            win.dnd_bind('<<Drop>>', _on_drop)
+        except Exception:
+            pass  # tkinterdnd2 not available
+
+        # ── Close button ──
+        close_frame = ttk.Frame(main_frame)
+        close_frame.grid(row=5, column=0, sticky='e', pady=(6, 0))
+        ttk.Button(close_frame, text="Close", command=win.destroy).pack(side='right')
+
+        _log("Media Processor ready — add files and click Process All", 'INFO')
+        _log("Tip: drag and drop video files onto this window", 'INFO')
+        _log(f"Subtitle matching: *.{opt_sub_lang.get()}.srt / *.{opt_sub_lang.get()}.forced.srt", 'INFO')
+
+    # ── TV Show Renamer ────────────────────────────────────────────────────
+    def open_tv_renamer(self):
+        """Open the TV Show Renamer tool with TVDB integration."""
+        import urllib.request
+        import urllib.parse
+        import json as _json
+
+        TVDB_BASE = 'https://api4.thetvdb.com/v4'
+
+        win = tk.Toplevel(self.root)
+        win.title("📺 TV Show Renamer")
+        win.geometry("820x600")
+        win.minsize(700, 500)
+        win.resizable(True, True)
+        self._center_on_main(win)
+
+        # ── State ──
+        _tvdb_token = [None]
+        _episodes = {}       # {(season, episode): {'title': ..., ...}}
+        _file_items = []     # list of {'path': ..., 'season': N, 'episode': N, 'ext': ...}
+        _series_name = [None]
+
+        # Load TVDB API key from preferences
+        _saved_key = getattr(self, '_tvdb_api_key', '')
+        _saved_template = getattr(self, '_tv_rename_template',
+                                  '{show} S{season}E{episode} {title}')
+
+        # ── TVDB API helpers ──
+        def _tvdb_request(method, path, body=None, token=None):
+            """Make a TVDB v4 API request."""
+            url = TVDB_BASE + path
+            headers = {'Content-Type': 'application/json'}
+            if token:
+                headers['Authorization'] = f'Bearer {token}'
+            data = _json.dumps(body).encode() if body else None
+            req = urllib.request.Request(url, data=data, headers=headers,
+                                         method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    return _json.loads(resp.read().decode())
+            except urllib.error.HTTPError as e:
+                try:
+                    err_body = e.read().decode()
+                    return _json.loads(err_body)
+                except Exception:
+                    return {'status': 'error', 'message': str(e)}
+            except Exception as e:
+                return {'status': 'error', 'message': str(e)}
+
+        def _tvdb_login():
+            """Authenticate with TVDB and store token."""
+            key = api_key_var.get().strip()
+            if not key:
+                _log("Enter your TVDB API key", 'WARNING')
+                return False
+            _log(f"Logging in to TVDB (key: {key[:8]}...)")
+            result = _tvdb_request('POST', '/login', {'apikey': key})
+            _log(f"Login response: {result.get('status') if result else 'None'}")
+            if result and result.get('status') == 'success':
+                _tvdb_token[0] = result['data']['token']
+                _log("TVDB login successful")
+                self._tvdb_api_key = key
+                self.save_preferences()
+                return True
+            else:
+                msg = result.get('message', 'Login failed') if result else 'No response'
+                _log(f"TVDB login failed: {msg}", 'ERROR')
+                return False
+
+        def _tvdb_search(query):
+            """Search TVDB for TV series."""
+            if not _tvdb_token[0]:
+                _log("No token — logging in...")
+                if not _tvdb_login():
+                    _log("Login failed — cannot search", 'ERROR')
+                    return []
+            encoded_q = urllib.parse.quote(query)
+            url = f'/search?query={encoded_q}&type=series'
+            _log(f"Search URL: {TVDB_BASE}{url}")
+            result = _tvdb_request('GET', url, token=_tvdb_token[0])
+            if result:
+                _log(f"Search response status: {result.get('status')}")
+                if result.get('status') == 'success':
+                    data = result.get('data', [])
+                    _log(f"Search returned {len(data)} results")
+                    return data
+                else:
+                    _log(f"Search error: {result.get('message', 'unknown')}", 'ERROR')
+            else:
+                _log("Search returned no response", 'ERROR')
+            return []
+
+        def _tvdb_get_episodes(series_id):
+            """Get all episodes for a series."""
+            if not _tvdb_token[0]:
+                _log("No token — cannot fetch episodes", 'ERROR')
+                return []
+            all_eps = []
+            page = 0
+            while True:
+                url = f'/series/{series_id}/episodes/default?page={page}'
+                _log(f"Fetching: {TVDB_BASE}{url}")
+                result = _tvdb_request('GET', url, token=_tvdb_token[0])
+                if not result:
+                    _log("No response from episodes endpoint", 'ERROR')
+                    break
+                if result.get('status') != 'success':
+                    _log(f"Episodes error: {result.get('message', 'unknown')}", 'ERROR')
+                    break
+                eps = result.get('data', {}).get('episodes', [])
+                if not eps:
+                    _log(f"No episodes on page {page}")
+                    break
+                all_eps.extend(eps)
+                # Check if there are more pages
+                links = result.get('links', {})
+                if links.get('next'):
+                    page += 1
+                else:
+                    break
+            return all_eps
+
+        # ── Episode number parser ──
+        def _parse_episode_info(filename):
+            """Extract season and episode numbers from a filename."""
+            name = os.path.basename(filename)
+            # S01E01, s1e1, S01E01E02 (multi-episode)
+            m = re.search(r'[Ss](\d{1,2})\s*[Ee](\d{1,3})', name)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+            # 1x01, 01x01
+            m = re.search(r'(\d{1,2})[xX](\d{1,3})', name)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+            # Season 1 Episode 1
+            m = re.search(r'[Ss]eason\s*(\d+).*?[Ee]pisode\s*(\d+)', name)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+            # E01 or Ep01 (season assumed from folder or default 1)
+            m = re.search(r'[Ee](?:p|pisode)?\s*(\d{1,3})', name)
+            if m:
+                return None, int(m.group(1))
+            return None, None
+
+        def _sanitize_filename(name):
+            """Remove characters not allowed in filenames."""
+            # Replace : with - (common in episode titles), strip others
+            name = name.replace(':', ' -').replace('/', '-').replace('\\', '-')
+            name = re.sub(r'[<>"|?*]', '', name)
+            # Collapse multiple spaces
+            name = re.sub(r'\s+', ' ', name).strip()
+            # Remove trailing dots/spaces (Windows compatibility)
+            name = name.rstrip('. ')
+            return name
+
+        def _build_new_name(item, template):
+            """Build a new filename from template and episode data."""
+            s = item.get('season')
+            e = item.get('episode')
+            if s is None or e is None:
+                return None
+            ep_data = _episodes.get((s, e))
+            title = ep_data.get('name', '') if ep_data else ''
+            show = _series_name[0] or 'Unknown'
+
+            name = template.format(
+                show=show,
+                season=str(s).zfill(2),
+                episode=str(e).zfill(2),
+                title=title,
+                year=ep_data.get('year', '') if ep_data else '',
+            )
+            return _sanitize_filename(name) + item['ext']
+
+        # ── Logging ──
+        def _log(msg, level='INFO'):
+            log_text.configure(state='normal')
+            log_text.insert('end', msg + '\n')
+            log_text.see('end')
+            log_text.configure(state='disabled')
+
+        # ══════════════════════════════════════════════════════════════
+        # UI Layout
+        # ══════════════════════════════════════════════════════════════
+
+        main_f = ttk.Frame(win, padding=8)
+        main_f.pack(fill='both', expand=True)
+        main_f.columnconfigure(1, weight=1)
+
+        # ── Row 0: API Key ──
+        ttk.Label(main_f, text="TVDB API Key:").grid(
+            row=0, column=0, sticky='w', padx=4, pady=2)
+        api_key_var = tk.StringVar(value=_saved_key)
+        _key_entry = ttk.Entry(main_f, textvariable=api_key_var, width=40,
+                               show='•')
+        _key_entry.grid(row=0, column=1, sticky='ew', padx=4, pady=2)
+        _create_tooltip(_key_entry, "Your TVDB v4 API key (thetvdb.com/dashboard/account/apikey)")
+
+        def _toggle_key_vis():
+            _key_entry.configure(show='' if _key_entry.cget('show') == '•' else '•')
+        _eye_btn = ttk.Button(main_f, text="👁", width=3, command=_toggle_key_vis)
+        _eye_btn.grid(row=0, column=2, padx=2, pady=2)
+        _create_tooltip(_eye_btn, "Show / Hide API key")
+
+        # ── Row 1: Search ──
+        ttk.Label(main_f, text="Show:").grid(
+            row=1, column=0, sticky='w', padx=4, pady=2)
+        search_f = ttk.Frame(main_f)
+        search_f.grid(row=1, column=1, columnspan=2, sticky='ew', padx=4, pady=2)
+        search_var = tk.StringVar()
+        search_entry = ttk.Entry(search_f, textvariable=search_var)
+        search_entry.pack(side='left', fill='x', expand=True, padx=(0, 4))
+
+        series_results = [None]  # store search results
+
+        def _clean_show_name(raw):
+            """Strip episode info, quality tags, and release group from a show name."""
+            name = re.sub(r'[._\-]', ' ', raw).strip()
+            # Truncate at episode markers
+            name = re.sub(r'\s*[Ss]\d{1,2}\s*[Ee]\d.*', '', name)
+            name = re.sub(r'\s*\d{1,2}[xX]\d.*', '', name)
+            # Truncate at quality/resolution tags
+            name = re.sub(r'\s*(?:720|1080|2160|480)[pPiI].*', '', name)
+            # Truncate at common release tags
+            name = re.sub(r'\s*(?:WEB|HDTV|BluRay|BDRip|DVDRip|REMUX|PROPER).*',
+                          '', name, flags=re.IGNORECASE)
+            return name.strip()
+
+        def _do_search():
+            query = _clean_show_name(search_var.get())
+            if not query:
+                _log("Enter a show name to search", 'WARNING')
+                return
+            # Update search field with cleaned name
+            search_var.set(query)
+            try:
+                _log(f"Searching TVDB for \"{query}\"...")
+                win.update_idletasks()
+                results = _tvdb_search(query)
+                if not results:
+                    _log("No results found", 'WARNING')
+                    return
+                series_results[0] = results
+
+                # Populate show dropdown
+                show_names = []
+                for r in results:
+                    name = r.get('name', r.get('objectName', ''))
+                    year = r.get('year', '')
+                    show_names.append(f"{name} ({year})" if year else name)
+                show_combo['values'] = show_names
+                if show_names:
+                    show_combo.current(0)
+                    _log(f"Found {len(show_names)} results")
+                    _on_show_selected(None)
+            except Exception as _e:
+                _log(f"Search error: {_e}", 'ERROR')
+                import traceback
+                _log(traceback.format_exc(), 'ERROR')
+
+        search_btn = ttk.Button(search_f, text="Search TVDB", command=_do_search, width=12)
+        search_btn.pack(side='left')
+        _create_tooltip(search_btn, "Search TVDB and load episodes (Enter)")
+        search_entry.bind('<Return>', lambda e: _do_search())
+
+        # ── Row 2: Show selection + Season ──
+        select_f = ttk.Frame(main_f)
+        select_f.grid(row=2, column=0, columnspan=3, sticky='ew', padx=4, pady=2)
+        select_f.columnconfigure(1, weight=1)
+
+        ttk.Label(select_f, text="Match:").grid(row=0, column=0, sticky='w', padx=(0, 4))
+        show_combo = ttk.Combobox(select_f, state='readonly', width=40)
+        show_combo.grid(row=0, column=1, sticky='ew', padx=4)
+
+        ttk.Label(select_f, text="Season:").grid(row=0, column=2, sticky='w', padx=(8, 4))
+        season_var = tk.StringVar(value='1')
+        season_spin = tk.Spinbox(select_f, textvariable=season_var,
+                                  from_=0, to=99, width=4)
+        season_spin.grid(row=0, column=3, padx=4)
+
+        def _on_show_selected(event):
+            """Fetch episodes when a show is selected."""
+            try:
+                if not series_results[0]:
+                    return
+                idx = show_combo.current()
+                if idx < 0 or idx >= len(series_results[0]):
+                    return
+                series = series_results[0][idx]
+                series_id = series.get('tvdb_id', series.get('id', ''))
+                # Strip "series-" prefix if present
+                if isinstance(series_id, str) and series_id.startswith('series-'):
+                    series_id = series_id[7:]
+                _series_name[0] = series.get('name', series.get('objectName', ''))
+                _log(f"Loading episodes for \"{_series_name[0]}\" (ID: {series_id})...")
+                win.update_idletasks()
+                eps = _tvdb_get_episodes(series_id)
+                if not eps:
+                    _log("No episodes found", 'WARNING')
+                    return
+
+                # Build episode lookup
+                _episodes.clear()
+                seasons = set()
+                for ep in eps:
+                    s = ep.get('seasonNumber')
+                    e = ep.get('number')
+                    if s is not None and e is not None:
+                        _episodes[(s, e)] = ep
+                        seasons.add(s)
+
+                # Update season spinner range (exclude season 0 specials from default)
+                real_seasons = {s for s in seasons if s > 0} or seasons
+                if real_seasons:
+                    season_spin.configure(from_=min(seasons), to=max(seasons))
+                    if 1 in real_seasons:
+                        season_var.set('1')
+                    else:
+                        season_var.set(str(min(real_seasons)))
+
+                _log(f"Loaded {len(eps)} episodes across "
+                     f"{len(real_seasons)} seasons "
+                     f"({len(seasons - real_seasons)} specials)")
+                _refresh_preview()
+            except Exception as _e:
+                _log(f"Error fetching episodes: {_e}", 'ERROR')
+                import traceback
+                _log(traceback.format_exc(), 'ERROR')
+
+        show_combo.bind('<<ComboboxSelected>>', _on_show_selected)
+
+        # ── Row 3: Filename template ──
+        ttk.Label(main_f, text="Template:").grid(
+            row=3, column=0, sticky='w', padx=4, pady=2)
+        template_f = ttk.Frame(main_f)
+        template_f.grid(row=3, column=1, columnspan=2, sticky='ew', padx=4, pady=2)
+        template_var = tk.StringVar(value=_saved_template)
+        template_entry = ttk.Entry(template_f, textvariable=template_var)
+        template_entry.pack(side='left', fill='x', expand=True)
+        _create_tooltip(template_entry,
+                        "Variables: {show} {season} {episode} {title} {year}")
+        ttk.Label(template_f,
+                  text="{show} {season} {episode} {title} {year}",
+                  foreground='gray', font=('Helvetica', 8)).pack(
+                      side='left', padx=8)
+
+        # Save template on change
+        def _on_template_change(*_):
+            self._tv_rename_template = template_var.get()
+            self.save_preferences()
+            _refresh_preview()
+        template_var.trace_add('write', _on_template_change)
+
+        # ── Row 4: File list (treeview) ──
+        tree_f = ttk.Frame(main_f)
+        tree_f.grid(row=4, column=0, columnspan=3, sticky='nsew', padx=4, pady=4)
+        main_f.rowconfigure(4, weight=1)
+
+        columns = ('current', 'new_name')
+        tree = ttk.Treeview(tree_f, columns=columns, show='headings',
+                            selectmode='extended')
+        tree.heading('current', text='Current Filename')
+        tree.heading('new_name', text='New Filename')
+        tree.column('current', width=300, minwidth=150)
+        tree.column('new_name', width=350, minwidth=150)
+
+        tree_scroll = ttk.Scrollbar(tree_f, orient='vertical', command=tree.yview)
+        tree.configure(yscrollcommand=tree_scroll.set)
+        tree.pack(side='left', fill='both', expand=True)
+        tree_scroll.pack(side='right', fill='y')
+
+        def _refresh_preview():
+            """Update the treeview with current/new filenames."""
+            tree.delete(*tree.get_children())
+            template = template_var.get().strip()
+            season_filter = None
+            try:
+                season_filter = int(season_var.get())
+            except ValueError:
+                pass
+
+            for item in _file_items:
+                cur_name = os.path.basename(item['path'])
+                s = item.get('season')
+                e = item.get('episode')
+                s_str = str(s) if s is not None else '?'
+                e_str = str(e) if e is not None else '?'
+
+                # Override season from spinner if not detected
+                if s is None and season_filter is not None:
+                    item['season'] = season_filter
+                    s = season_filter
+                    s_str = str(s)
+
+                new_name = ''
+                if _series_name[0] and s is not None and e is not None:
+                    try:
+                        new_name = _build_new_name(item, template) or ''
+                    except (KeyError, ValueError):
+                        new_name = '(template error)'
+
+                iid = tree.insert('', 'end', values=(cur_name, new_name))
+                # Color rows without matches
+                if not new_name or new_name == '(template error)':
+                    tree.item(iid, tags=('nomatch',))
+
+            tree.tag_configure('nomatch', foreground='#999')
+
+        season_var.trace_add('write', lambda *_: _refresh_preview())
+
+        # ── Drag and drop ──
+        _RENAME_EXTENSIONS = VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS
+
+        def _add_paths(paths):
+            """Add files/folders to the file list. Recursively scans folders."""
+            added = 0
+            for p in paths:
+                if os.path.isdir(p):
+                    for root_dir, _dirs, files in os.walk(p):
+                        _dirs.sort()
+                        for f in sorted(files):
+                            fp = os.path.join(root_dir, f)
+                            ext = os.path.splitext(f)[1].lower()
+                            if ext in _RENAME_EXTENSIONS:
+                                s, e = _parse_episode_info(f)
+                                _file_items.append({
+                                    'path': fp, 'season': s,
+                                    'episode': e, 'ext': ext})
+                                added += 1
+                elif os.path.isfile(p):
+                    ext = os.path.splitext(p)[1].lower()
+                    if ext in _RENAME_EXTENSIONS:
+                        s, e = _parse_episode_info(p)
+                        _file_items.append({
+                            'path': p, 'season': s,
+                            'episode': e, 'ext': ext})
+                        added += 1
+            _v = sum(1 for i in _file_items if i['ext'] in VIDEO_EXTENSIONS)
+            _s = sum(1 for i in _file_items if i['ext'] in SUBTITLE_EXTENSIONS)
+            _log(f"Added {added} files ({_v} video, {_s} subtitle)")
+            # Try to auto-detect show name from folder or filename
+            if _file_items and not search_var.get().strip():
+                first = _file_items[0]['path']
+                folder = os.path.basename(os.path.dirname(first))
+                # Clean up folder name for search
+                clean = re.sub(r'[Ss]eason\s*\d+', '', folder)
+                clean = re.sub(r'[._\-]', ' ', clean).strip()
+                if not clean or clean == os.path.basename(os.path.expanduser('~')):
+                    # Fall back to filename — strip everything from S01E01 onward
+                    fname = os.path.splitext(os.path.basename(first))[0]
+                    fname = re.sub(r'[._\-]', ' ', fname)
+                    # Truncate at episode marker or quality tags
+                    fname = re.sub(r'\s*[Ss]\d{1,2}[Ee]\d.*', '', fname)
+                    fname = re.sub(r'\s*\d{1,2}[xX]\d.*', '', fname)
+                    fname = re.sub(r'\s*(?:720|1080|2160|480)[pPiI].*', '', fname)
+                    clean = fname.strip()
+                if clean:
+                    search_var.set(clean)
+            _refresh_preview()
+
+        def _on_drop(event):
+            raw = event.data
+            paths = []
+            if 'file://' in raw:
+                from urllib.parse import unquote, urlparse
+                for line in raw.splitlines():
+                    line = line.strip()
+                    if line.startswith('file://'):
+                        decoded = unquote(urlparse(line).path)
+                        if decoded:
+                            paths.append(decoded)
+            else:
+                i = 0
+                while i < len(raw):
+                    if raw[i] == '{':
+                        end = raw.find('}', i)
+                        paths.append(raw[i + 1:end])
+                        i = end + 2
+                    elif raw[i] == ' ':
+                        i += 1
+                    else:
+                        end = raw.find(' ', i)
+                        if end == -1:
+                            end = len(raw)
+                        paths.append(raw[i:end])
+                        i = end + 1
+            if paths:
+                _add_paths(paths)
+
+        try:
+            win.drop_target_register(DND_FILES)
+            win.dnd_bind('<<Drop>>', _on_drop)
+        except Exception:
+            pass
+
+        # ── Row 5: Buttons ──
+        btn_f = ttk.Frame(main_f)
+        btn_f.grid(row=5, column=0, columnspan=3, sticky='ew', padx=4, pady=(4, 0))
+
+        def _do_rename():
+            """Rename all files with valid new names."""
+            template = template_var.get().strip()
+            if not template:
+                messagebox.showwarning("No Template", "Enter a filename template.",
+                                       parent=win)
+                return
+            renamed = 0
+            errors = 0
+            for item in _file_items:
+                try:
+                    new_name = _build_new_name(item, template)
+                    if not new_name:
+                        continue
+                    old_path = item['path']
+                    new_path = os.path.join(os.path.dirname(old_path), new_name)
+                    if old_path == new_path:
+                        continue
+                    if os.path.exists(new_path):
+                        _log(f"Skipped (exists): {new_name}", 'WARNING')
+                        continue
+                    os.rename(old_path, new_path)
+                    item['path'] = new_path
+                    renamed += 1
+                except Exception as e:
+                    _log(f"Error renaming: {e}", 'ERROR')
+                    errors += 1
+            _log(f"Renamed {renamed} files" +
+                 (f" ({errors} errors)" if errors else ""), 'SUCCESS')
+            _refresh_preview()
+
+        rename_btn = ttk.Button(btn_f, text="✏ Rename All", command=_do_rename,
+                                width=12)
+        rename_btn.pack(side='left', padx=2)
+        _create_tooltip(rename_btn, "Rename all files to their new names")
+
+        def _clear_files():
+            _file_items.clear()
+            tree.delete(*tree.get_children())
+            _log("File list cleared")
+
+        clear_btn = ttk.Button(btn_f, text="Clear", command=_clear_files, width=8)
+        clear_btn.pack(side='left', padx=2)
+        _create_tooltip(clear_btn, "Remove all files from the list")
+
+        def _browse_files():
+            paths = filedialog.askopenfilenames(
+                parent=win, title="Select Video Files",
+                filetypes=[("Video files", "*.mkv *.mp4 *.avi *.mov *.ts *.m2ts"),
+                           ("All files", "*.*")])
+            if paths:
+                _add_paths(list(paths))
+
+        browse_btn = ttk.Button(btn_f, text="Add Files...", command=_browse_files,
+                                width=10)
+        browse_btn.pack(side='left', padx=2)
+        _create_tooltip(browse_btn, "Browse for video files to add")
+
+        def _browse_folder():
+            path = filedialog.askdirectory(parent=win, title="Select Folder")
+            if path:
+                _add_paths([path])
+
+        folder_btn = ttk.Button(btn_f, text="Add Folder...", command=_browse_folder,
+                                width=10)
+        folder_btn.pack(side='left', padx=2)
+        _create_tooltip(folder_btn, "Browse for a folder of video files")
+
+        ttk.Button(btn_f, text="Close", command=win.destroy,
+                   width=6).pack(side='right', padx=2)
+
+        # ── Row 6: Log ──
+        log_f = ttk.LabelFrame(main_f, text="Log", padding=4)
+        log_f.grid(row=6, column=0, columnspan=3, sticky='nsew', padx=4, pady=(4, 0))
+        main_f.rowconfigure(6, weight=1)
+        log_text = tk.Text(log_f, height=4, wrap='word', font=('Courier', 9),
+                           state='disabled', bg='#1e1e1e', fg='#d4d4d4')
+        log_scroll = ttk.Scrollbar(log_f, orient='vertical', command=log_text.yview)
+        log_text.configure(yscrollcommand=log_scroll.set)
+        log_text.pack(side='left', fill='both', expand=True)
+        log_scroll.pack(side='right', fill='y')
+
+        _log("TV Show Renamer ready — drag and drop video files or folders")
+        _log("1. Enter your TVDB API key  2. Search for the show  3. Rename")
 
     def open_batch_filter(self):
         """Open a batch filter window to apply filters to multiple subtitle files at once."""
@@ -5363,12 +10212,13 @@ class VideoConverterApp:
             ('remove_tags',    "Remove Tags  <i> {\\an8}",        filter_remove_tags),
             ('remove_ads',     "Remove Ads / Credits",
              lambda c: filter_remove_ads(c, self.custom_ad_patterns)),
-            ('remove_music',   "Remove Music Notes  ♪ ♫",        filter_remove_music_notes),
+            ('remove_music',   "Remove Stray Notes  ♪ ♫",        filter_remove_music_notes),
             ('remove_dashes',  "Remove Leading Dashes  -",        filter_remove_leading_dashes),
             ('remove_caps_hi', "Remove ALL CAPS HI (UK style)",   filter_remove_caps_hi),
             ('remove_quotes',  "Remove Off-Screen Quotes ' ' (UK style)", filter_remove_offscreen_quotes),
             ('remove_dupes',   "Remove Duplicates",               filter_remove_duplicates),
             ('merge_short',    "Merge Short Cues",                filter_merge_short),
+            ('reduce_lines',   "Reduce to 2 Lines",               filter_reduce_lines),
             ('fix_caps',       "Fix ALL CAPS",
              lambda c: filter_fix_caps(c, self.custom_cap_words)),
         ]
@@ -5756,6 +10606,232 @@ class VideoConverterApp:
 
         win.wait_window()
 
+    def _run_ocr_with_monitor(self, filepath, stream_index, language,
+                              out_path, out_name, file_info):
+        """Run bitmap subtitle OCR with a live monitor window.
+        Returns True if OCR succeeded and cues were written."""
+        import threading
+        import time as _time
+        from PIL import Image, ImageTk
+
+        # ── State ──
+        cancel_event = threading.Event()
+        ocr_result = [None]  # [list of cues] or None
+        ocr_done = [False]
+
+        # ── Monitor window ──
+        mon = tk.Toplevel(self.root)
+        mon.title(f"OCR — {os.path.basename(filepath)}")
+        mon.geometry("750x580")
+        mon.transient(self.root)
+        mon.minsize(600, 450)
+        self._center_on_main(mon)
+
+        main_f = ttk.Frame(mon, padding=10)
+        main_f.pack(fill='both', expand=True)
+        main_f.columnconfigure(0, weight=1)
+        main_f.rowconfigure(2, weight=1)  # cue list
+
+        # ── Top: progress bar + stats ──
+        top_f = ttk.Frame(main_f)
+        top_f.grid(row=0, column=0, sticky='ew', pady=(0, 8))
+        top_f.columnconfigure(1, weight=1)
+
+        progress_var = tk.DoubleVar(value=0)
+        status_label = ttk.Label(top_f, text="Initializing OCR...")
+        status_label.grid(row=0, column=0, sticky='w', padx=(0, 8))
+        progress_bar = ttk.Progressbar(top_f, variable=progress_var,
+                                        maximum=100, mode='determinate')
+        progress_bar.grid(row=0, column=1, sticky='ew')
+
+        stats_label = ttk.Label(top_f, text="")
+        stats_label.grid(row=1, column=0, columnspan=2, sticky='w', pady=(4, 0))
+
+        # ── Middle: image preview + OCR text ──
+        mid_f = ttk.LabelFrame(main_f, text="Current Frame", padding=6)
+        mid_f.grid(row=1, column=0, sticky='ew', pady=(0, 8))
+        mid_f.columnconfigure(1, weight=1)
+
+        # Image preview (resized to fit)
+        img_label = ttk.Label(mid_f, text="[waiting]", anchor='center',
+                              width=40, relief='sunken')
+        img_label.grid(row=0, column=0, sticky='nsew', padx=(0, 8))
+        img_label._photo = None  # prevent GC
+
+        # OCR text result
+        text_frame = ttk.Frame(mid_f)
+        text_frame.grid(row=0, column=1, sticky='nsew')
+        text_frame.rowconfigure(0, weight=1)
+        text_frame.columnconfigure(0, weight=1)
+
+        ttk.Label(text_frame, text="OCR Text:", font=('Helvetica', 9, 'bold')).grid(
+            row=0, column=0, sticky='nw')
+        ocr_text_var = tk.StringVar(value="")
+        ocr_text_label = ttk.Label(text_frame, textvariable=ocr_text_var,
+                                    wraplength=350, justify='left',
+                                    font=('Courier', 11))
+        ocr_text_label.grid(row=1, column=0, sticky='nw')
+
+        time_label = ttk.Label(text_frame, text="", foreground='gray')
+        time_label.grid(row=2, column=0, sticky='sw', pady=(4, 0))
+
+        # ── Bottom: scrolling cue list ──
+        cue_frame = ttk.LabelFrame(main_f, text="Extracted Cues", padding=5)
+        cue_frame.grid(row=2, column=0, sticky='nsew')
+        cue_frame.columnconfigure(0, weight=1)
+        cue_frame.rowconfigure(0, weight=1)
+
+        cue_columns = ('idx', 'time', 'text')
+        cue_tree = ttk.Treeview(cue_frame, columns=cue_columns,
+                                show='headings', height=8)
+        cue_tree.grid(row=0, column=0, sticky='nsew')
+
+        cue_tree.heading('idx',  text='#')
+        cue_tree.heading('time', text='Time')
+        cue_tree.heading('text', text='Text')
+        cue_tree.column('idx',  width=40,  minwidth=30, anchor='center')
+        cue_tree.column('time', width=180, minwidth=140)
+        cue_tree.column('text', width=400, minwidth=200)
+
+        cue_scroll = ttk.Scrollbar(cue_frame, orient='vertical', command=cue_tree.yview)
+        cue_scroll.grid(row=0, column=1, sticky='ns')
+        cue_tree.configure(yscrollcommand=cue_scroll.set)
+
+        # ── Cancel button ──
+        btn_f = ttk.Frame(main_f)
+        btn_f.grid(row=3, column=0, sticky='e', pady=(8, 0))
+        cancel_btn = ttk.Button(btn_f, text="Cancel OCR",
+                                command=lambda: cancel_event.set())
+        cancel_btn.pack(side='right')
+
+        # ── Track timing ──
+        start_time = [_time.monotonic()]
+        cue_count = [0]
+
+        # ── Frame callback (called from OCR thread for each frame) ──
+        def _on_frame(frame_idx, total, img_path, text, start_t, end_t):
+            def _update():
+                # Progress
+                pct = ((frame_idx + 1) / total) * 100
+                progress_var.set(pct)
+                status_label.configure(text=f"Frame {frame_idx + 1} / {total}")
+
+                # Elapsed + ETA
+                elapsed = _time.monotonic() - start_time[0]
+                if frame_idx > 0:
+                    per_frame = elapsed / (frame_idx + 1)
+                    remaining = per_frame * (total - frame_idx - 1)
+                    eta_m, eta_s = divmod(int(remaining), 60)
+                    elapsed_m, elapsed_s = divmod(int(elapsed), 60)
+                    stats_label.configure(
+                        text=f"Elapsed: {elapsed_m}m {elapsed_s}s  |  "
+                             f"ETA: {eta_m}m {eta_s}s  |  "
+                             f"Cues found: {cue_count[0]}")
+                else:
+                    stats_label.configure(text=f"Starting...")
+
+                # Image preview
+                if img_path and os.path.exists(img_path):
+                    try:
+                        pil_img = Image.open(img_path)
+                        # Resize to fit preview (max 320x80)
+                        pil_img.thumbnail((320, 80), Image.LANCZOS)
+                        photo = ImageTk.PhotoImage(pil_img)
+                        img_label.configure(image=photo, text='')
+                        img_label._photo = photo  # prevent GC
+                    except Exception:
+                        img_label.configure(image='', text='[error]')
+                else:
+                    img_label.configure(image='', text='[no image]')
+
+                # OCR text
+                ocr_text_var.set(text if text else '[empty]')
+                time_label.configure(text=f"{start_t} → {end_t}")
+
+                # Add to cue list if it's real text (not a status marker)
+                if text and not text.startswith('['):
+                    cue_count[0] += 1
+                    cue_tree.insert('', 'end', values=(
+                        cue_count[0], f"{start_t} → {end_t}", text))
+                    # Auto-scroll to bottom
+                    children = cue_tree.get_children()
+                    if children:
+                        cue_tree.see(children[-1])
+
+            mon.after(0, _update)
+
+        def _on_progress(msg):
+            def _do():
+                status_label.configure(text=msg)
+                # Extract percentage from messages like "... (30%)" or "... 40/1932 ..."
+                import re as _re
+                pct_match = _re.search(r'\((\d+)%\)', msg)
+                if pct_match:
+                    progress_var.set(float(pct_match.group(1)))
+                else:
+                    frac_match = _re.search(r'(\d+)/(\d+)', msg)
+                    if frac_match:
+                        n, t = int(frac_match.group(1)), int(frac_match.group(2))
+                        if t > 0:
+                            progress_var.set((n / t) * 100)
+            mon.after(0, _do)
+
+        # ── OCR thread ──
+        def _ocr_thread():
+            cues = ocr_bitmap_subtitle(
+                filepath, stream_index, language,
+                progress_callback=_on_progress,
+                frame_callback=_on_frame,
+                cancel_event=cancel_event
+            )
+            ocr_result[0] = cues
+            ocr_done[0] = True
+
+            def _finish():
+                elapsed = _time.monotonic() - start_time[0]
+                elapsed_m, elapsed_s = divmod(int(elapsed), 60)
+
+                if cues:
+                    write_srt_file(cues, out_path)
+                    self.add_log(f"OCR complete: {out_name} ({len(cues)} cues, "
+                                 f"{elapsed_m}m {elapsed_s}s)", 'SUCCESS')
+                    status_label.configure(text=f"Done — {len(cues)} cues extracted "
+                                                f"in {elapsed_m}m {elapsed_s}s")
+                    progress_var.set(100)
+                    cancel_btn.configure(text="Close", command=mon.destroy)
+
+                    # Add buttons for next steps
+                    ttk.Button(btn_f, text="Open in Editor",
+                               command=lambda: (
+                                   mon.destroy(),
+                                   self.show_subtitle_editor(
+                                       filepath, stream_index, file_info,
+                                       external_sub_path=out_path)
+                               )).pack(side='right', padx=(0, 8))
+                else:
+                    status_label.configure(text="OCR produced no output")
+                    self.add_log(f"OCR produced no output for stream #{stream_index}",
+                                 'WARNING')
+                    cancel_btn.configure(text="Close", command=mon.destroy)
+
+            mon.after(0, _finish)
+
+        t = threading.Thread(target=_ocr_thread, daemon=True)
+        t.start()
+
+        # Handle window close = cancel
+        def _on_close():
+            if not ocr_done[0]:
+                cancel_event.set()
+            mon.destroy()
+        mon.protocol('WM_DELETE_WINDOW', _on_close)
+
+        # Block until window closes
+        mon.grab_set()
+        mon.wait_window()
+
+        return bool(ocr_result[0])
+
     def show_subtitle_editor(self, filepath, stream_index, file_info,
                                 external_sub_path=None):
         """Show subtitle text editor for a subtitle stream or external file.
@@ -5888,6 +10964,10 @@ class VideoConverterApp:
         TAG_TAGS = 'has_tags'
         TAG_LONG = 'long_line'
         TAG_SEARCH = 'search_match'
+        TAG_SPELL = 'has_spelling'
+
+        # ── Spell check state ──
+        spell_error_indices = set()
 
         def _classify_cue(cue, orig_text=None):
             """Return set of tag names for a cue based on its content."""
@@ -5933,6 +11013,8 @@ class VideoConverterApp:
                 # Priority: search > modified > hi > tags > long
                 if TAG_SEARCH in ctags:
                     row_tag = TAG_SEARCH
+                elif i in spell_error_indices:
+                    row_tag = TAG_SPELL
                 elif TAG_MODIFIED in ctags:
                     row_tag = TAG_MODIFIED
                 elif TAG_HI in ctags:
@@ -6162,8 +11244,16 @@ class VideoConverterApp:
                     pass
             refresh_tree(cues, search_indices=matches)
             if matches:
-                tree.see(str(matches[0]))
-                tree.selection_set(str(matches[0]))
+                first_idx = matches[0]
+                first = str(first_idx)
+                def _scroll_to_match():
+                    tree.selection_set(first)
+                    # Scroll so the match is near the middle of the view, not at the edge
+                    # Aim a few rows past the match so it's comfortably visible
+                    ahead = min(first_idx + 5, len(cues) - 1)
+                    tree.see(str(ahead))
+                    tree.after(50, lambda: (tree.see(first), tree.selection_set(first)))
+                tree.after_idle(_scroll_to_match)
             self.add_log(f"Search: {len(matches)} matches for '{term}'", 'INFO')
 
         def do_replace_one():
@@ -6253,7 +11343,7 @@ class VideoConverterApp:
 
         # ── Filters menu ──
         filter_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Filters", menu=filter_menu)
+        menubar.add_cascade(label="Tools", menu=filter_menu)
         filter_menu.add_command(label="Remove HI  [brackets] (parens) Speaker:",
                                 command=lambda: apply_remove_hi())
         filter_menu.add_command(label="Remove Tags  <i> {\\an8}",
@@ -6263,8 +11353,8 @@ class VideoConverterApp:
                          "Remove Ads")
 
         filter_menu.add_command(label="Remove Ads / Credits", command=apply_remove_ads)
-        filter_menu.add_command(label="Remove Music Notes  ♪ ♫",
-                                command=lambda: apply_filter(filter_remove_music_notes, "Remove Music Notes"))
+        filter_menu.add_command(label="Remove Stray Notes  ♪ ♫",
+                                command=lambda: apply_filter(filter_remove_music_notes, "Remove Stray Notes"))
         filter_menu.add_command(label="Remove Leading Dashes  -",
                                 command=lambda: apply_filter(filter_remove_leading_dashes, "Remove Leading Dashes"))
         filter_menu.add_command(label="Remove ALL CAPS HI  (UK style)",
@@ -6276,6 +11366,8 @@ class VideoConverterApp:
                                 command=lambda: apply_filter(filter_remove_duplicates, "Remove Duplicates"))
         filter_menu.add_command(label="Merge Short Cues",
                                 command=lambda: apply_filter(filter_merge_short, "Merge Short Cues"))
+        filter_menu.add_command(label="Reduce to 2 Lines",
+                                command=lambda: apply_filter(filter_reduce_lines, "Reduce to 2 Lines"))
         filter_menu.add_separator()
 
         # ── Fix ALL CAPS ──
@@ -6438,6 +11530,375 @@ class VideoConverterApp:
 
         filter_menu.add_command(label="Manage Ad Patterns...",
                                 command=show_ad_patterns_dialog)
+        filter_menu.add_separator()
+        filter_menu.add_command(label="Spell Check...",
+                                accelerator="F7",
+                                command=lambda: _show_spell_check())
+        filter_menu.add_separator()
+        filter_menu.add_command(label="Search/Replace List...",
+                                command=lambda: _show_saved_replacements())
+
+        def _show_saved_replacements():
+            """Show dialog to manage and apply persistent search & replace pairs."""
+            sd = tk.Toplevel(editor)
+            sd.title("Search/Replace List")
+            sd.geometry("550x450")
+            sd.resizable(True, True)
+            self._center_on_main(sd)
+            sd.attributes('-topmost', True)
+
+            f = ttk.Frame(sd, padding=12)
+            f.pack(fill='both', expand=True)
+            f.columnconfigure(0, weight=1)
+            f.rowconfigure(1, weight=1)
+
+            # ── Add new pair ──
+            add_f = ttk.LabelFrame(f, text="Add Replacement", padding=6)
+            add_f.grid(row=0, column=0, sticky='ew', pady=(0, 8))
+
+            af = ttk.Frame(add_f)
+            af.pack(fill='x')
+            ttk.Label(af, text="Find:").pack(side='left', padx=(0, 4))
+            sr_find = tk.StringVar()
+            sr_find_entry = ttk.Entry(af, textvariable=sr_find, width=18)
+            sr_find_entry.pack(side='left', padx=(0, 8))
+            ttk.Label(af, text="Replace:").pack(side='left', padx=(0, 4))
+            sr_repl = tk.StringVar()
+            sr_repl_entry = ttk.Entry(af, textvariable=sr_repl, width=18)
+            sr_repl_entry.pack(side='left', padx=(0, 8))
+            sr_case = tk.BooleanVar(value=False)
+            ttk.Checkbutton(af, text="Aa", variable=sr_case).pack(side='left', padx=(0, 4))
+
+            def _add_pair():
+                find = sr_find.get()
+                if not find:
+                    return
+                repl = sr_repl.get()
+                pair = [find, repl, sr_case.get()]
+                if pair not in self.custom_replacements:
+                    self.custom_replacements.append(pair)
+                    self.save_preferences()
+                _refresh_list()
+                sr_find.set('')
+                sr_repl.set('')
+
+            ttk.Button(af, text="Add", command=_add_pair, width=5).pack(side='left', padx=2)
+
+            # ── List ──
+            list_f = ttk.Frame(f)
+            list_f.grid(row=1, column=0, sticky='nsew')
+            list_f.columnconfigure(0, weight=1)
+            list_f.rowconfigure(0, weight=1)
+
+            columns = ('find', 'replace', 'case')
+            sr_tree = ttk.Treeview(list_f, columns=columns, show='headings', height=10)
+            sr_tree.grid(row=0, column=0, sticky='nsew')
+            sr_tree.heading('find', text='Find')
+            sr_tree.heading('replace', text='Replace With')
+            sr_tree.heading('case', text='Case')
+            sr_tree.column('find', width=180, minwidth=100)
+            sr_tree.column('replace', width=180, minwidth=100)
+            sr_tree.column('case', width=50, minwidth=40, anchor='center')
+
+            sr_scroll = ttk.Scrollbar(list_f, orient='vertical', command=sr_tree.yview)
+            sr_scroll.grid(row=0, column=1, sticky='ns')
+            sr_tree.configure(yscrollcommand=sr_scroll.set)
+
+            def _refresh_list():
+                sr_tree.delete(*sr_tree.get_children())
+                for i, pair in enumerate(self.custom_replacements):
+                    find, repl = pair[0], pair[1]
+                    case = 'Yes' if (len(pair) > 2 and pair[2]) else 'No'
+                    sr_tree.insert('', 'end', iid=str(i),
+                                  values=(find, repl, case))
+
+            def _remove_selected():
+                sel = sr_tree.selection()
+                if not sel:
+                    return
+                indices = sorted([int(s) for s in sel], reverse=True)
+                for idx in indices:
+                    if idx < len(self.custom_replacements):
+                        del self.custom_replacements[idx]
+                self.save_preferences()
+                _refresh_list()
+
+            def _clear_all():
+                if messagebox.askyesno("Clear All",
+                    "Remove all saved replacements?", parent=sd):
+                    self.custom_replacements.clear()
+                    self.save_preferences()
+                    _refresh_list()
+
+            # ── Buttons ──
+            btn_f = ttk.Frame(f)
+            btn_f.grid(row=2, column=0, sticky='ew', pady=(8, 0))
+
+            def _apply_all():
+                if not self.custom_replacements:
+                    messagebox.showinfo("No Replacements",
+                        "No saved replacements to apply.", parent=sd)
+                    return
+                push_undo()
+                total_count = 0
+                for pair in self.custom_replacements:
+                    find, repl = pair[0], pair[1]
+                    case_sensitive = len(pair) > 2 and pair[2]
+                    for cue in cues:
+                        old = cue['text']
+                        if case_sensitive:
+                            cue['text'] = cue['text'].replace(find, repl)
+                        else:
+                            cue['text'] = re.sub(re.escape(find), lambda m: repl,
+                                                 cue['text'], flags=re.IGNORECASE)
+                        if cue['text'] != old:
+                            total_count += 1
+                refresh_tree(cues)
+                self.add_log(f"Applied {len(self.custom_replacements)} replacement rule(s), "
+                             f"{total_count} cue(s) changed", 'INFO')
+                messagebox.showinfo("Replacements Applied",
+                    f"Applied {len(self.custom_replacements)} rule(s)\n"
+                    f"{total_count} cue(s) modified", parent=sd)
+
+            ttk.Button(btn_f, text="▶ Apply All", command=_apply_all).pack(side='left', padx=2)
+            ttk.Button(btn_f, text="Remove", command=_remove_selected).pack(side='left', padx=2)
+            ttk.Button(btn_f, text="Clear All", command=_clear_all).pack(side='left', padx=2)
+            ttk.Button(btn_f, text="Close", command=sd.destroy).pack(side='right', padx=2)
+
+            _refresh_list()
+
+        def _run_spell_check():
+            """Scan all cues for spelling errors. Returns errors dict or None."""
+            try:
+                from spellchecker import SpellChecker
+            except ImportError:
+                if messagebox.askyesno("Missing Package",
+                    "pyspellchecker is not installed.\n\n"
+                    "Would you like to install it now?",
+                    parent=editor):
+                    try:
+                        self.add_log("Installing pyspellchecker...", 'INFO')
+                        _pip_result = subprocess.run(
+                            [sys.executable, '-m', 'pip', 'install',
+                             '--user', '--break-system-packages', 'pyspellchecker'],
+                            capture_output=True, text=True, timeout=60)
+                        if _pip_result.returncode == 0:
+                            from spellchecker import SpellChecker
+                            self.add_log("pyspellchecker installed successfully", 'SUCCESS')
+                        else:
+                            messagebox.showerror("Install Failed",
+                                f"pip install failed:\n{_pip_result.stderr[-300:]}",
+                                parent=editor)
+                            return None
+                    except Exception as _e:
+                        messagebox.showerror("Install Failed",
+                            f"Could not install pyspellchecker:\n{_e}",
+                            parent=editor)
+                        return None
+                else:
+                    return None
+            spell = SpellChecker()
+            known = [w.lower() for w in self.custom_cap_words + self.custom_spell_words]
+            if known:
+                spell.word_frequency.load_words(known)
+            spell_error_indices.clear()
+            errors_by_cue = {}
+            for i, cue in enumerate(cues):
+                clean = re.sub(r'<[^>]+>|\{\\[^}]+\}|♪', '', cue['text'])
+                words = re.findall(r"[a-zA-Z]+(?:'[a-zA-Z]+)?", clean)
+                if not words:
+                    continue
+                unknown = spell.unknown(words)
+                if unknown:
+                    spell_error_indices.add(i)
+                    errors_by_cue[i] = []
+                    for w in words:
+                        if w.lower() in unknown or w in unknown:
+                            cands = spell.candidates(w)
+                            errors_by_cue[i].append((w, sorted(cands) if cands else []))
+            return errors_by_cue
+
+        def _show_spell_check():
+            """Run spell check and show interactive correction dialog."""
+            errors_by_cue = _run_spell_check()
+            if errors_by_cue is None:
+                return
+            if not errors_by_cue:
+                spell_error_indices.clear()
+                refresh_tree(cues)
+                messagebox.showinfo("Spell Check", "No spelling errors found!", parent=editor)
+                return
+            refresh_tree(cues)
+
+            error_list = []
+            for ci in sorted(errors_by_cue.keys()):
+                for word, cands in errors_by_cue[ci]:
+                    error_list.append((ci, word, cands))
+
+            current = [0]
+            ignored = set()
+
+            sd = tk.Toplevel(editor)
+            sd.title("Spell Check")
+            sd.geometry("500x440")
+            sd.resizable(True, True)
+            self._center_on_main(sd)
+            sd.attributes('-topmost', True)
+
+            sf = ttk.Frame(sd, padding=12)
+            sf.pack(fill='both', expand=True)
+            sf.columnconfigure(1, weight=1)
+            _sp = {'padx': 6, 'pady': 4}
+
+            stats_lbl = ttk.Label(sf, text=f"Found {len(error_list)} errors in {len(errors_by_cue)} cues",
+                                  font=('Helvetica', 9))
+            stats_lbl.grid(row=0, column=0, columnspan=2, sticky='w', **_sp)
+
+            ttk.Label(sf, text="Not in dictionary:", font=('Helvetica', 10, 'bold')).grid(
+                row=1, column=0, sticky='w', **_sp)
+            word_var = tk.StringVar()
+            ttk.Entry(sf, textvariable=word_var, state='readonly',
+                      font=('Courier', 12)).grid(row=1, column=1, sticky='ew', **_sp)
+
+            ttk.Label(sf, text="Context:").grid(row=2, column=0, sticky='nw', **_sp)
+            ctx_var = tk.StringVar()
+            ttk.Label(sf, textvariable=ctx_var, wraplength=380,
+                      font=('Helvetica', 9), foreground='gray').grid(row=2, column=1, sticky='w', **_sp)
+
+            ttk.Label(sf, text="Suggestions:").grid(row=3, column=0, sticky='nw', **_sp)
+            sug_fr = ttk.Frame(sf)
+            sug_fr.grid(row=3, column=1, sticky='nsew', **_sp)
+            sug_fr.rowconfigure(0, weight=1)
+            sug_fr.columnconfigure(0, weight=1)
+            sf.rowconfigure(3, weight=1)
+
+            sug_lb = tk.Listbox(sug_fr, height=6, font=('Courier', 10))
+            sug_lb.grid(row=0, column=0, sticky='nsew')
+            sug_sc = ttk.Scrollbar(sug_fr, orient='vertical', command=sug_lb.yview)
+            sug_sc.grid(row=0, column=1, sticky='ns')
+            sug_lb.configure(yscrollcommand=sug_sc.set)
+
+            replace_var = tk.StringVar()
+            def on_sug_sel(evt):
+                sel = sug_lb.curselection()
+                if sel:
+                    replace_var.set(sug_lb.get(sel[0]))
+            sug_lb.bind('<<ListboxSelect>>', on_sug_sel)
+
+            ttk.Label(sf, text="Replace with:").grid(row=4, column=0, sticky='w', **_sp)
+            ttk.Entry(sf, textvariable=replace_var, font=('Courier', 11)).grid(
+                row=4, column=1, sticky='ew', **_sp)
+
+            bf = ttk.Frame(sf)
+            bf.grid(row=5, column=0, columnspan=2, sticky='ew', pady=(8, 0))
+
+            def _show_err(idx):
+                while idx < len(error_list):
+                    ci, w, ca = error_list[idx]
+                    if w.lower() not in ignored:
+                        break
+                    idx += 1
+                else:
+                    spell_error_indices.clear()
+                    refresh_tree(cues)
+                    messagebox.showinfo("Spell Check", "Spell check complete!", parent=sd)
+                    sd.destroy()
+                    return
+                current[0] = idx
+                ci, w, ca = error_list[idx]
+                items = tree.get_children()
+                if ci < len(items):
+                    # Scroll so the match is near the middle, not at the edge
+                    ahead = min(ci + 5, len(items) - 1)
+                    tree.see(items[ahead])
+                    tree.selection_set(items[ci])
+                    tree.after(50, lambda: tree.see(items[ci]))
+                word_var.set(w)
+                ctx_var.set(cues[ci]['text'].replace('\n', ' / '))
+                stats_lbl.configure(text=f"Error {idx+1} of {len(error_list)} (cue #{ci+1})")
+                sug_lb.delete(0, 'end')
+                for c in ca:
+                    sug_lb.insert('end', c)
+                if ca:
+                    sug_lb.selection_set(0)
+                    replace_var.set(ca[0])
+                else:
+                    replace_var.set(w)
+
+            def _do_replace():
+                ci, w, _ = error_list[current[0]]
+                repl = replace_var.get().strip()
+                if not repl: return
+                push_undo()
+                # Use str.replace for safe, literal replacement (first occurrence only)
+                txt = cues[ci]['text']
+                pos = txt.find(w)
+                if pos == -1:
+                    # Try case-insensitive find
+                    pos = txt.lower().find(w.lower())
+                if pos >= 0:
+                    cues[ci]['text'] = txt[:pos] + repl + txt[pos + len(w):]
+                refresh_tree(cues)
+                _show_err(current[0] + 1)
+
+            def _do_replace_all():
+                _, w, _ = error_list[current[0]]
+                repl = replace_var.get().strip()
+                if not repl: return
+                push_undo()
+                for cue in cues:
+                    # Case-sensitive replace first, then case-insensitive fallback
+                    if w in cue['text']:
+                        cue['text'] = cue['text'].replace(w, repl)
+                    elif w.lower() in cue['text'].lower():
+                        cue['text'] = re.sub(re.escape(w), repl, cue['text'], flags=re.IGNORECASE)
+                refresh_tree(cues)
+                _show_err(current[0] + 1)
+
+            def _do_skip():
+                _show_err(current[0] + 1)
+
+            def _do_ignore():
+                _, w, _ = error_list[current[0]]
+                ignored.add(w.lower())
+                _show_err(current[0] + 1)
+
+            def _do_add_dict():
+                _, w, _ = error_list[current[0]]
+                if w.lower() not in [x.lower() for x in self.custom_spell_words]:
+                    self.custom_spell_words.append(w)
+                    self.save_preferences()
+                ignored.add(w.lower())
+                _show_err(current[0] + 1)
+
+            def _do_add_name():
+                _, w, _ = error_list[current[0]]
+                # Add to custom_cap_words (character names — used by Fix ALL CAPS + spell check)
+                if w not in self.custom_cap_words:
+                    self.custom_cap_words.append(w)
+                # Also add to spell words so it's never flagged
+                if w.lower() not in [x.lower() for x in self.custom_spell_words]:
+                    self.custom_spell_words.append(w)
+                self.save_preferences()
+                ignored.add(w.lower())
+                _show_err(current[0] + 1)
+
+            bf1 = ttk.Frame(bf)
+            bf1.pack(fill='x')
+            ttk.Button(bf1, text="Replace", command=_do_replace, width=10).pack(side='left', padx=2)
+            ttk.Button(bf1, text="Replace All", command=_do_replace_all, width=10).pack(side='left', padx=2)
+            ttk.Button(bf1, text="Skip", command=_do_skip, width=6).pack(side='left', padx=2)
+            ttk.Button(bf1, text="Ignore", command=_do_ignore, width=8).pack(side='left', padx=2)
+
+            bf2 = ttk.Frame(bf)
+            bf2.pack(fill='x', pady=(4, 0))
+            ttk.Button(bf2, text="Add to Dict", command=_do_add_dict, width=10).pack(side='left', padx=2)
+            ttk.Button(bf2, text="Add as Name", command=_do_add_name, width=10).pack(side='left', padx=2)
+            ttk.Button(bf2, text="Close", command=sd.destroy, width=6).pack(side='right', padx=2)
+
+            _show_err(0)
+
+        editor.bind('<F7>', lambda e: _show_spell_check())
 
         # ── Edit menu ──
         edit_menu = tk.Menu(menubar, tearoff=0)
@@ -6454,6 +11915,950 @@ class VideoConverterApp:
         timing_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Timing", menu=timing_menu)
         timing_menu.add_command(label="Offset / Stretch...", command=show_timing_dialog)
+        timing_menu.add_command(label="Smart Sync...",
+                                command=lambda: _show_smart_sync())
+
+        # ── Quick Sync submenu ──
+        quick_sync_menu = tk.Menu(timing_menu, tearoff=0)
+        timing_menu.add_cascade(label="Quick Sync", menu=quick_sync_menu)
+
+        def _quick_sync_first_cue():
+            """Shift all cues so the first cue starts at a user-specified time.
+            Includes an embedded mpv player for marking the exact time."""
+            if not cues:
+                messagebox.showinfo("No Subtitles", "Load subtitles first.",
+                                    parent=editor)
+                return
+
+            qd = tk.Toplevel(editor)
+            qd.title("Quick Sync — Set First Cue Time")
+            qd.geometry("720x620")
+            qd.minsize(640, 540)
+            qd.resizable(True, True)
+            self._center_on_main(qd)
+
+            f = ttk.Frame(qd, padding=10)
+            f.pack(fill='both', expand=True)
+            f.columnconfigure(1, weight=1)
+            f.rowconfigure(2, weight=1)  # video frame expands
+
+            first_cue = cues[0]
+            current_start = first_cue['start']
+            preview_text = first_cue['text'].replace('\n', ' ')
+            if len(preview_text) > 60:
+                preview_text = preview_text[:57] + '...'
+
+            # ── Video file ──
+            ttk.Label(f, text="Video file:").grid(
+                row=0, column=0, sticky='w', padx=4, pady=2)
+            _qs_vpath = tk.StringVar()
+            # Try to find video automatically
+            try:
+                if hasattr(editor, '_qs_last_video') and editor._qs_last_video:
+                    _qs_vpath.set(editor._qs_last_video)
+                elif current_path[0]:
+                    _sub_dir = os.path.dirname(current_path[0])
+                    _sub_stem = os.path.splitext(
+                        os.path.basename(current_path[0]))[0]
+                    for _i in range(3):
+                        _dot = _sub_stem.rfind('.')
+                        if _dot > 0:
+                            _sub_stem = _sub_stem[:_dot]
+                        else:
+                            break
+                    for ext in VIDEO_EXTENSIONS:
+                        _vp = os.path.join(_sub_dir, _sub_stem + ext)
+                        if os.path.isfile(_vp):
+                            _qs_vpath.set(_vp)
+                            break
+            except Exception:
+                pass
+
+            _vpath_entry = ttk.Entry(f, textvariable=_qs_vpath)
+            _vpath_entry.grid(row=0, column=1, sticky='ew', padx=4, pady=2)
+
+            def _qs_browse():
+                init_dir = os.path.dirname(_qs_vpath.get()) if _qs_vpath.get() \
+                    else (os.path.dirname(current_path[0]) if current_path[0] else '')
+                p = None
+                if shutil.which('zenity'):
+                    try:
+                        cmd = ['zenity', '--file-selection',
+                               '--title', 'Select Video File',
+                               '--file-filter',
+                               'Video files|*.mkv *.mp4 *.avi *.mov *.ts *.m2ts *.mts *.webm *.wmv *.flv',
+                               '--file-filter', 'All files|*']
+                        if init_dir:
+                            cmd += ['--filename', init_dir + '/']
+                        r = subprocess.run(cmd, capture_output=True,
+                                           text=True, timeout=120)
+                        if r.returncode == 0 and r.stdout.strip():
+                            p = r.stdout.strip()
+                    except Exception:
+                        pass
+                if not p:
+                    p = filedialog.askopenfilename(
+                        parent=qd, title="Select Video File",
+                        initialdir=init_dir or None,
+                        filetypes=[("Video files",
+                                    "*.mkv *.mp4 *.avi *.mov *.ts *.m2ts"),
+                                   ("All files", "*.*")])
+                if p:
+                    _qs_vpath.set(p)
+                    # Auto-load the video after browse selection
+                    qd.after(100, _play_video)
+            ttk.Button(f, text="Browse...", command=_qs_browse).grid(
+                row=0, column=2, padx=4, pady=2)
+
+            # ── Embedded video player frame ──
+            video_border = ttk.Frame(f, relief='sunken', borderwidth=2)
+            video_border.grid(row=2, column=0, columnspan=3,
+                              sticky='nsew', padx=4, pady=4)
+            video_frame = tk.Frame(video_border, bg='black',
+                                   width=640, height=360)
+            video_frame.pack(fill='both', expand=True)
+            video_frame.pack_propagate(False)
+
+            _placeholder_label = tk.Label(video_frame,
+                text="Drop a video file here or click Browse",
+                bg='black', fg='#666', font=('Helvetica', 12))
+
+            # ── Drag-and-drop support ──
+            def _on_qs_drop(event):
+                """Handle video files dropped onto the Quick Sync dialog."""
+                raw = event.data
+                paths = []
+                if 'file://' in raw:
+                    from urllib.parse import unquote, urlparse
+                    for line in raw.splitlines():
+                        line = line.strip()
+                        if line.startswith('file://'):
+                            decoded = unquote(urlparse(line).path)
+                            if decoded:
+                                paths.append(decoded)
+                else:
+                    i = 0
+                    while i < len(raw):
+                        if raw[i] == '{':
+                            end = raw.find('}', i)
+                            paths.append(raw[i + 1:end])
+                            i = end + 2
+                        elif raw[i] == ' ':
+                            i += 1
+                        else:
+                            end = raw.find(' ', i)
+                            if end == -1:
+                                end = len(raw)
+                            paths.append(raw[i:end])
+                            i = end + 1
+
+                # Find first video file in dropped paths
+                for p in paths:
+                    if os.path.isfile(p):
+                        ext = os.path.splitext(p)[1].lower()
+                        if ext in VIDEO_EXTENSIONS:
+                            _qs_vpath.set(p)
+                            qd.after(100, _play_video)
+                            return
+
+            try:
+                qd.drop_target_register(DND_FILES)
+                qd.dnd_bind('<<Drop>>', _on_qs_drop)
+            except Exception:
+                pass  # tkinterdnd2 not available
+            _placeholder_label.place(relx=0.5, rely=0.5, anchor='center')
+
+            # ── mpv player integration ──
+            import tempfile as _qs_tempfile
+            import socket as _qs_socket
+            import json as _qs_json
+
+            _mpv_proc = [None]
+            _mpv_socket_path = os.path.join(
+                _qs_tempfile.gettempdir(),
+                f'docflix_mpv_{os.getpid()}')
+
+            def _mpv_cmd(command_list):
+                """Send a command to mpv via IPC and return the response."""
+                try:
+                    sock = _qs_socket.socket(
+                        _qs_socket.AF_UNIX, _qs_socket.SOCK_STREAM)
+                    sock.settimeout(2)
+                    sock.connect(_mpv_socket_path)
+                    payload = _qs_json.dumps(
+                        {"command": command_list}) + '\n'
+                    sock.sendall(payload.encode())
+                    data = sock.recv(4096).decode()
+                    sock.close()
+                    return _qs_json.loads(data)
+                except Exception:
+                    return None
+
+            def _play_video():
+                vp = _qs_vpath.get().strip()
+                if not vp or not os.path.isfile(vp):
+                    messagebox.showwarning("No Video",
+                        "Select a video file first.", parent=qd)
+                    return
+
+                # Kill previous mpv instance if running
+                if _mpv_proc[0] and _mpv_proc[0].poll() is None:
+                    _mpv_proc[0].terminate()
+                    _mpv_proc[0].wait(timeout=5)
+
+                # Clean up old socket
+                if os.path.exists(_mpv_socket_path):
+                    try:
+                        os.unlink(_mpv_socket_path)
+                    except OSError:
+                        pass
+
+                # Hide placeholder
+                _placeholder_label.place_forget()
+
+                # Get the X11 window ID for embedding
+                video_frame.update_idletasks()
+                wid = str(video_frame.winfo_id())
+
+                # Launch mpv embedded in the video frame
+                try:
+                    _mpv_proc[0] = subprocess.Popen([
+                        'mpv',
+                        f'--input-ipc-server={_mpv_socket_path}',
+                        f'--wid={wid}',
+                        '--pause',
+                        '--osd-level=2',
+                        '--osd-fractions',
+                        '--keep-open=yes',
+                        '--no-border',
+                        '--cursor-autohide=1000',
+                        vp
+                    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    mark_btn.configure(state='normal')
+                    _mute_btn.configure(text="🔊")
+                    _vol_var.set(100)
+                    editor._qs_last_video = vp
+                except FileNotFoundError:
+                    messagebox.showerror("mpv Not Found",
+                        "mpv is not installed.\n\n"
+                        "Install with: sudo apt install mpv", parent=qd)
+                    _placeholder_label.place(relx=0.5, rely=0.5, anchor='center')
+                except Exception as e:
+                    messagebox.showerror("Player Error",
+                        f"Could not launch mpv:\n{e}", parent=qd)
+                    _placeholder_label.place(relx=0.5, rely=0.5, anchor='center')
+
+            def _mark_time():
+                """Query mpv for current playback position and fill the time field."""
+                if not _mpv_proc[0] or _mpv_proc[0].poll() is not None:
+                    messagebox.showinfo("Player Closed",
+                        "Load the video first.", parent=qd)
+                    mark_btn.configure(state='disabled')
+                    pass  # player closed
+                    return
+
+                resp = _mpv_cmd(["get_property", "playback-time"])
+                if resp and 'data' in resp and resp['data'] is not None:
+                    seconds = resp['data']
+                    ms = int(seconds * 1000)
+                    time_var.set(ms_to_srt_ts(ms))
+                    time_entry.select_range(0, 'end')
+                else:
+                    messagebox.showwarning("Could Not Read Time",
+                        "Could not get playback position from mpv.\n"
+                        "Make sure the video is loaded.", parent=qd)
+
+            def _mpv_seek(amount):
+                """Seek mpv by amount in seconds."""
+                if not _mpv_proc[0] or _mpv_proc[0].poll() is not None:
+                    return
+                _mpv_cmd(["seek", str(amount), "relative+exact"])
+
+            def _mpv_frame_step(direction='forward'):
+                """Step one frame forward or backward."""
+                if not _mpv_proc[0] or _mpv_proc[0].poll() is not None:
+                    return
+                if direction == 'forward':
+                    _mpv_cmd(["frame-step"])
+                else:
+                    _mpv_cmd(["frame-back-step"])
+
+            def _mpv_pause_toggle():
+                """Toggle play/pause."""
+                if not _mpv_proc[0] or _mpv_proc[0].poll() is not None:
+                    return
+                _mpv_cmd(["cycle", "pause"])
+
+            def _on_close():
+                # Kill mpv and clean up socket
+                if _mpv_proc[0] and _mpv_proc[0].poll() is None:
+                    _mpv_proc[0].terminate()
+                    try:
+                        _mpv_proc[0].wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        _mpv_proc[0].kill()
+                _mpv_proc[0] = None
+                if os.path.exists(_mpv_socket_path):
+                    try:
+                        os.unlink(_mpv_socket_path)
+                    except OSError:
+                        pass
+                # Reset state so next open starts fresh
+                editor._qs_last_video = None
+                qd.destroy()
+
+            qd.protocol("WM_DELETE_WINDOW", _on_close)
+
+            # ── Transport controls ──
+            transport_f = ttk.Frame(f)
+            transport_f.grid(row=3, column=0, columnspan=3, sticky='ew', pady=(4, 0))
+
+            _tb_w = 3
+            _transport_btns = [
+                ("⏮",  lambda: _mpv_seek(-5),               "Rewind 5 seconds"),
+                ("◀◀", lambda: _mpv_seek(-1),               "Rewind 1 second"),
+                ("◀",  lambda: _mpv_seek(-0.1),             "Rewind 100ms"),
+                ("|◀", lambda: _mpv_frame_step('backward'), "Back 1 frame"),
+                ("⏯",  _mpv_pause_toggle,                   "Play / Pause"),
+                ("▶|", lambda: _mpv_frame_step('forward'),  "Forward 1 frame"),
+                ("▶",  lambda: _mpv_seek(0.1),              "Forward 100ms"),
+                ("▶▶", lambda: _mpv_seek(1),                "Forward 1 second"),
+                ("⏭",  lambda: _mpv_seek(5),                "Forward 5 seconds"),
+            ]
+            for _sym, _cmd, _tip in _transport_btns:
+                _px = 2 if _sym == "⏯" else 1
+                _b = ttk.Button(transport_f, text=_sym, width=_tb_w, command=_cmd)
+                _b.pack(side='left', padx=_px)
+                _create_tooltip(_b, _tip)
+
+            mark_btn = ttk.Button(transport_f, text="⏱ Mark",
+                                  command=_mark_time, width=6,
+                                  state='disabled')
+            mark_btn.pack(side='left', padx=(6, 0))
+            _create_tooltip(mark_btn, "Capture current playback time")
+
+            # ── Volume controls ──
+            def _mpv_toggle_mute():
+                if not _mpv_proc[0] or _mpv_proc[0].poll() is not None:
+                    return
+                _mpv_cmd(["cycle", "mute"])
+                # Update mute button label
+                resp = _mpv_cmd(["get_property", "mute"])
+                if resp and 'data' in resp:
+                    _mute_btn.configure(text="🔇" if resp['data'] else "🔊")
+
+            def _mpv_set_volume(val):
+                if not _mpv_proc[0] or _mpv_proc[0].poll() is not None:
+                    return
+                _mpv_cmd(["set_property", "volume", float(val)])
+
+            _mute_btn = ttk.Button(transport_f, text="🔊", width=2,
+                                   command=_mpv_toggle_mute)
+            _mute_btn.pack(side='right', padx=(4, 0))
+            _create_tooltip(_mute_btn, "Mute / Unmute")
+
+            _vol_var = tk.DoubleVar(value=100)
+            _vol_scale = ttk.Scale(transport_f, from_=0, to=100,
+                                   orient='horizontal', length=80,
+                                   variable=_vol_var,
+                                   command=_mpv_set_volume)
+            _vol_scale.pack(side='right', padx=2)
+            _create_tooltip(_vol_scale, "Volume")
+
+            # ── Sync controls ──
+            ttk.Separator(f, orient='horizontal').grid(
+                row=4, column=0, columnspan=3, sticky='ew', pady=6)
+
+            sync_f = ttk.Frame(f)
+            sync_f.grid(row=5, column=0, columnspan=3, sticky='ew', padx=4)
+            sync_f.columnconfigure(1, weight=1)
+
+            ttk.Label(sync_f, text="First cue:",
+                      font=('Helvetica', 9, 'bold')).grid(
+                          row=0, column=0, sticky='w', pady=1)
+            ttk.Label(sync_f, text=f'"{preview_text}"',
+                      font=('Helvetica', 9), foreground='gray').grid(
+                          row=0, column=1, columnspan=2, sticky='w', padx=8, pady=1)
+
+            ttk.Label(sync_f, text="Current:").grid(
+                row=1, column=0, sticky='w', pady=1)
+            ttk.Label(sync_f, text=current_start,
+                      font=('Courier', 10)).grid(
+                          row=1, column=1, sticky='w', padx=8, pady=1)
+
+            ttk.Label(sync_f, text="New start:").grid(
+                row=2, column=0, sticky='w', pady=2)
+            time_var = tk.StringVar(value=current_start)
+            _time_f = ttk.Frame(sync_f)
+            _time_f.grid(row=2, column=1, columnspan=2, sticky='w', padx=8, pady=2)
+            time_entry = ttk.Entry(_time_f, textvariable=time_var, width=16,
+                                   font=('Courier', 10))
+            time_entry.pack(side='left')
+            ttk.Label(_time_f, text="HH:MM:SS,mmm",
+                      foreground='gray', font=('Helvetica', 8)).pack(
+                          side='left', padx=8)
+
+            offset_var = tk.StringVar(value="Offset: 0ms")
+            ttk.Label(sync_f, textvariable=offset_var,
+                      font=('Helvetica', 9), foreground='#666').grid(
+                          row=3, column=0, columnspan=3, sticky='w', pady=1)
+
+            def _update_offset(*_args):
+                try:
+                    new_ms = srt_ts_to_ms(time_var.get().strip())
+                    old_ms = srt_ts_to_ms(current_start)
+                    diff = new_ms - old_ms
+                    sign = '+' if diff >= 0 else ''
+                    offset_var.set(f"Offset: {sign}{diff}ms ({sign}{diff/1000:.1f}s)")
+                except Exception:
+                    offset_var.set("Offset: (invalid time format)")
+            time_var.trace_add('write', _update_offset)
+
+            # ── Action buttons ──
+            btn_f = ttk.Frame(f)
+            btn_f.grid(row=6, column=0, columnspan=3, sticky='ew', pady=(8, 0))
+
+            def _apply_first_cue():
+                nonlocal cues
+                try:
+                    new_ms = srt_ts_to_ms(time_var.get().strip())
+                except Exception:
+                    messagebox.showwarning("Invalid Time",
+                        "Enter time in SRT format: HH:MM:SS,mmm", parent=qd)
+                    return
+                old_ms = srt_ts_to_ms(current_start)
+                offset = new_ms - old_ms
+                if offset == 0:
+                    _on_close()
+                    return
+                push_undo()
+                cues = shift_timestamps(cues, offset)
+                refresh_tree(cues)
+                sign = '+' if offset > 0 else ''
+                self.add_log(f"Quick Sync: shifted all cues {sign}{offset}ms "
+                             f"(first cue → {time_var.get().strip()})", 'SUCCESS')
+                _on_close()
+
+            time_entry.bind('<Return>', lambda e: _apply_first_cue())
+            _apply_btn = ttk.Button(btn_f, text="Apply",
+                                    command=_apply_first_cue, width=8)
+            _apply_btn.pack(side='left', padx=2)
+            _create_tooltip(_apply_btn, "Shift all cues by the offset and close")
+            _cancel_btn = ttk.Button(btn_f, text="Cancel",
+                                     command=_on_close, width=8)
+            _cancel_btn.pack(side='left', padx=2)
+            _create_tooltip(_cancel_btn, "Close without applying changes")
+
+            # Auto-load video if one was detected
+            if _qs_vpath.get().strip() and os.path.isfile(_qs_vpath.get().strip()):
+                qd.after(300, _play_video)
+
+        quick_sync_menu.add_command(label="Set First Cue Time...",
+                                    command=_quick_sync_first_cue)
+
+        def _show_smart_sync():
+            """Auto-sync subtitles using Whisper speech recognition."""
+            import threading
+
+            if not cues:
+                messagebox.showinfo("No Subtitles", "Load subtitles first.", parent=editor)
+                return
+
+            # Check faster-whisper
+            try:
+                from faster_whisper import WhisperModel
+            except ImportError:
+                if messagebox.askyesno("Missing Package",
+                    "faster-whisper is not installed.\n\n"
+                    "Would you like to install it now?\n"
+                    "(This may take a few minutes — downloads ~200MB)",
+                    parent=editor):
+                    try:
+                        self.add_log("Installing faster-whisper...", 'INFO')
+                        _pip_result = subprocess.run(
+                            [sys.executable, '-m', 'pip', 'install',
+                             '--user', '--break-system-packages', 'faster-whisper'],
+                            capture_output=True, text=True, timeout=300)
+                        if _pip_result.returncode == 0:
+                            self.add_log("faster-whisper installed", 'SUCCESS')
+                        else:
+                            messagebox.showerror("Install Failed",
+                                f"pip install failed:\n{_pip_result.stderr[-300:]}",
+                                parent=editor)
+                            return
+                    except Exception as _e:
+                        messagebox.showerror("Install Failed", str(_e), parent=editor)
+                        return
+                else:
+                    return
+
+            vpath = filepath  # internal editor always has a video file path
+
+            sd = tk.Toplevel(editor)
+            sd.title("Smart Sync")
+            sd.geometry("560x580")
+            sd.resizable(True, True)
+            self._center_on_main(sd)
+
+            f = ttk.Frame(sd, padding=12)
+            f.pack(fill='both', expand=True)
+            f.columnconfigure(1, weight=1)
+            _sp = {'padx': 6, 'pady': 4}
+
+            ttk.Label(f, text="Video file:").grid(row=0, column=0, sticky='w', **_sp)
+            vpath_var = tk.StringVar(value=vpath or '')
+            ttk.Entry(f, textvariable=vpath_var).grid(row=0, column=1, sticky='ew', **_sp)
+            def _browse_vid():
+                # Start in the subtitle's folder if available
+                init_dir = ''
+                if vpath_var.get():
+                    init_dir = os.path.dirname(vpath_var.get())
+                elif current_path[0]:
+                    init_dir = os.path.dirname(current_path[0])
+                # Try zenity first (better sizing), fall back to tkinter
+                p = None
+                if shutil.which('zenity'):
+                    try:
+                        cmd = ['zenity', '--file-selection',
+                               '--title', 'Select Video File',
+                               '--file-filter', 'Video files|*.mkv *.mp4 *.avi *.mov *.ts *.m2ts *.mts *.webm *.wmv *.flv',
+                               '--file-filter', 'All files|*']
+                        if init_dir:
+                            cmd += ['--filename', init_dir + '/']
+                        result = subprocess.run(cmd, capture_output=True,
+                                                text=True, timeout=120)
+                        if result.returncode == 0 and result.stdout.strip():
+                            p = result.stdout.strip()
+                    except Exception:
+                        pass
+                if not p:
+                    p = filedialog.askopenfilename(
+                        parent=sd,
+                        title="Select Video File",
+                        initialdir=init_dir or None,
+                        filetypes=[("Video files", "*.mkv *.mp4 *.avi *.mov *.ts *.m2ts"),
+                                   ("All files", "*.*")])
+                if p:
+                    vpath_var.set(p)
+            ttk.Button(f, text="Browse...", command=_browse_vid).grid(row=0, column=2, **_sp)
+
+            model_label = ttk.Label(f, text="Whisper model:")
+            model_label.grid(row=1, column=0, sticky='w', **_sp)
+            model_f = ttk.Frame(f)
+            model_f.grid(row=1, column=1, columnspan=2, sticky='w', **_sp)
+            model_var = tk.StringVar(value='base')
+            for m, tip in [('tiny', '~75MB, fastest'),
+                           ('base', '~150MB, good balance'),
+                           ('small', '~500MB, more accurate')]:
+                ttk.Radiobutton(model_f, text=f"{m} ({tip})",
+                               variable=model_var, value=m).pack(anchor='w')
+
+            ttk.Label(f, text="Language:").grid(row=2, column=0, sticky='w', **_sp)
+            lang_var = tk.StringVar(value='en')
+            lang_f = ttk.Frame(f)
+            lang_f.grid(row=2, column=1, columnspan=2, sticky='w', **_sp)
+            ttk.Entry(lang_f, textvariable=lang_var, width=5).pack(side='left')
+            ttk.Label(lang_f, text="(en, fr, es, de, etc. — blank = auto-detect)",
+                      foreground='gray', font=('Helvetica', 8)).pack(side='left', padx=8)
+
+            # ── Engine selection ──
+            ttk.Label(f, text="Engine:").grid(row=3, column=0, sticky='w', **_sp)
+            engine_f = ttk.Frame(f)
+            engine_f.grid(row=3, column=1, columnspan=2, sticky='w', **_sp)
+            engine_var = tk.StringVar(value='faster-whisper')
+
+            def _on_engine_change():
+                eng = engine_var.get()
+                if eng == 'whisperx':
+                    finetune_var.set('200')
+                    finetune_hint.config(
+                        text="ms  (phoneme onset is ~200ms before perceived speech)")
+                    direct_rb.configure(state='normal')
+                else:
+                    finetune_var.set('400')
+                    finetune_hint.config(
+                        text="ms  (applied after sync — compensates for Whisper timing)")
+                    # Direct Align requires WhisperX — switch away if selected
+                    if scan_mode_var.get() == 'direct':
+                        scan_mode_var.set('quick')
+                    direct_rb.configure(state='disabled')
+                _on_scan_mode_change()
+
+            ttk.Radiobutton(engine_f, text="Standard (faster-whisper)",
+                           variable=engine_var, value='faster-whisper',
+                           command=_on_engine_change).pack(anchor='w')
+            ttk.Radiobutton(engine_f,
+                           text="Precise (WhisperX) — phoneme-level alignment",
+                           variable=engine_var, value='whisperx',
+                           command=_on_engine_change).pack(anchor='w')
+
+            # ── Scan mode ──
+            ttk.Label(f, text="Scan mode:").grid(row=4, column=0, sticky='w', **_sp)
+            scan_f = ttk.Frame(f)
+            scan_f.grid(row=4, column=1, columnspan=2, sticky='w', **_sp)
+            scan_mode_var = tk.StringVar(value='quick')
+
+            def _on_scan_mode_change():
+                mode = scan_mode_var.get()
+                if mode == 'quick':
+                    seg_label.grid()
+                    sample_f.grid()
+                    model_label.grid()
+                    model_f.grid()
+                elif mode == 'full':
+                    seg_label.grid_remove()
+                    sample_f.grid_remove()
+                    model_label.grid()
+                    model_f.grid()
+                else:  # direct
+                    seg_label.grid_remove()
+                    sample_f.grid_remove()
+                    model_label.grid_remove()
+                    model_f.grid_remove()
+
+            ttk.Radiobutton(scan_f, text="Quick Scan", variable=scan_mode_var,
+                           value='quick', command=_on_scan_mode_change).pack(side='left', padx=(0, 8))
+            ttk.Radiobutton(scan_f, text="Full Scan (for Re-time)",
+                           variable=scan_mode_var, value='full',
+                           command=_on_scan_mode_change).pack(side='left', padx=(0, 8))
+            direct_rb = ttk.Radiobutton(scan_f,
+                           text="Direct Align",
+                           variable=scan_mode_var, value='direct',
+                           command=_on_scan_mode_change, state='disabled')
+            direct_rb.pack(side='left')
+
+            seg_label = ttk.Label(f, text="Segments:")
+            seg_label.grid(row=5, column=0, sticky='w', **_sp)
+            sample_f = ttk.Frame(f)
+            sample_f.grid(row=5, column=1, columnspan=2, sticky='w', **_sp)
+            segments_var = tk.StringVar(value='3')
+            seg_spin = tk.Spinbox(sample_f, textvariable=segments_var, from_=1, to=20,
+                        width=3)
+            seg_spin.pack(side='left')
+            ttk.Label(sample_f, text="× ").pack(side='left')
+            sample_len_var = tk.StringVar(value='5')
+            len_spin = tk.Spinbox(sample_f, textvariable=sample_len_var, from_=1, to=30,
+                        width=3)
+            len_spin.pack(side='left')
+            ttk.Label(sample_f, text="min each",
+                      foreground='gray', font=('Helvetica', 8)).pack(side='left', padx=4)
+
+            # ── Offset adjustment ──
+            ttk.Label(f, text="Fine-tune:").grid(row=6, column=0, sticky='w', **_sp)
+            finetune_f = ttk.Frame(f)
+            finetune_f.grid(row=6, column=1, columnspan=2, sticky='w', **_sp)
+            finetune_var = tk.StringVar(value='400')
+            tk.Spinbox(finetune_f, textvariable=finetune_var, from_=-2000, to=2000,
+                       increment=50, width=6).pack(side='left')
+            finetune_hint = ttk.Label(finetune_f,
+                      text="ms  (applied after sync — compensates for Whisper timing)",
+                      foreground='gray', font=('Helvetica', 8))
+            finetune_hint.pack(side='left', padx=4)
+
+            status_var = tk.StringVar(value="Ready — click Start to begin")
+            ttk.Label(f, textvariable=status_var, wraplength=450,
+                      font=('Helvetica', 9)).grid(row=7, column=0, columnspan=3, sticky='w', **_sp)
+
+            progress_var = tk.DoubleVar(value=0)
+            ttk.Progressbar(f, variable=progress_var, maximum=100,
+                           mode='determinate').grid(row=8, column=0, columnspan=3,
+                                                      sticky='ew', **_sp)
+
+            result_frame = ttk.LabelFrame(f, text="Results", padding=6)
+            result_frame.grid(row=9, column=0, columnspan=3, sticky='nsew', **_sp)
+            result_frame.columnconfigure(0, weight=1)
+            result_frame.rowconfigure(0, weight=1)
+            f.rowconfigure(9, weight=1)
+
+            result_text = tk.Text(result_frame, height=8, wrap='word',
+                                 font=('Courier', 9), state='disabled',
+                                 bg='#1e1e1e', fg='#d4d4d4')
+            result_text.grid(row=0, column=0, sticky='nsew')
+            r_scroll = ttk.Scrollbar(result_frame, orient='vertical', command=result_text.yview)
+            r_scroll.grid(row=0, column=1, sticky='ns')
+            result_text.configure(yscrollcommand=r_scroll.set)
+
+            def _rlog(msg):
+                result_text.configure(state='normal')
+                result_text.insert('end', msg + '\n')
+                result_text.see('end')
+                result_text.configure(state='disabled')
+
+            btn_f = ttk.Frame(f)
+            btn_f.grid(row=10, column=0, columnspan=3, sticky='ew', pady=(8, 0))
+
+            cancel_event = threading.Event()
+            sync_result = [None]
+            pre_sync_cues = [None]  # snapshot before sync — for repeatable Re-time
+
+            def _start():
+                vp = vpath_var.get().strip()
+                if not vp or not os.path.isfile(vp):
+                    messagebox.showwarning("No Video", "Select a video file.", parent=sd)
+                    return
+
+                # Save cues before sync so Re-time/Apply can repeat with different fine-tune
+                import copy as _copy
+                pre_sync_cues[0] = _copy.deepcopy(cues)
+
+                # ── Engine-aware dependency check ──
+                _engine = engine_var.get()
+                if _engine == 'whisperx':
+                    try:
+                        import whisperx
+                    except ImportError:
+                        if messagebox.askyesno("Missing Package",
+                            "WhisperX is not installed.\n\n"
+                            "Would you like to install it now?\n"
+                            "(Requires PyTorch — downloads ~2GB)",
+                            parent=sd):
+                            # Run pip install in background thread with progress
+                            start_btn.configure(state='disabled')
+                            status_var.set("Installing whisperx (downloading ~2GB)...")
+                            self.add_log("Installing whisperx...", 'INFO')
+                            _rlog("Installing whisperx — this may take several minutes...")
+                            # Switch progress bar to indeterminate mode
+                            _install_pbar = None
+                            for _w in f.winfo_children():
+                                if isinstance(_w, ttk.Progressbar):
+                                    _install_pbar = _w
+                                    break
+                            if _install_pbar:
+                                _install_pbar.configure(mode='indeterminate')
+                                _install_pbar.start(15)
+
+                            def _do_whisperx_install():
+                                try:
+                                    proc = subprocess.Popen(
+                                        [sys.executable, '-m', 'pip', 'install',
+                                         '--user', '--break-system-packages',
+                                         '--progress-bar', 'off',
+                                         'whisperx', 'transformers<4.45'],
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT,
+                                        text=True)
+                                    for line in proc.stdout:
+                                        line = line.rstrip()
+                                        if line:
+                                            sd.after(0, lambda l=line:
+                                                     status_var.set(l[:80]))
+                                            sd.after(0, lambda l=line: _rlog(l))
+                                    proc.wait(timeout=600)
+                                    if proc.returncode == 0:
+                                        sd.after(0, lambda: status_var.set(
+                                            "whisperx installed — click Start"))
+                                        sd.after(0, lambda: _rlog(
+                                            "whisperx installed successfully"))
+                                        sd.after(0, lambda: self.add_log(
+                                            "whisperx installed successfully",
+                                            'SUCCESS'))
+                                    else:
+                                        sd.after(0, lambda: status_var.set(
+                                            "whisperx install failed"))
+                                        sd.after(0, lambda: _rlog(
+                                            "Install failed — check log above"))
+                                except Exception as _e:
+                                    sd.after(0, lambda: status_var.set(
+                                        f"Install error: {_e}"))
+                                    sd.after(0, lambda: _rlog(f"Error: {_e}"))
+                                finally:
+                                    def _reset_after_install():
+                                        start_btn.configure(state='normal')
+                                        if _install_pbar:
+                                            _install_pbar.stop()
+                                            _install_pbar.configure(
+                                                mode='determinate')
+                                            progress_var.set(0)
+                                    sd.after(0, _reset_after_install)
+
+                            import threading as _inst_threading
+                            _inst_threading.Thread(
+                                target=_do_whisperx_install,
+                                daemon=True).start()
+                            return  # exit _start(); user clicks Start after install
+                        else:
+                            return
+
+                start_btn.configure(state='disabled')
+                apply_btn.configure(state='disabled')
+                cancel_event.clear()
+                # Capture Tk variables on main thread before entering background thread
+                lang = lang_var.get().strip() or None
+                model = model_var.get()
+                _scan_mode = scan_mode_var.get()
+                if _scan_mode == 'direct':
+                    engine_value = 'whisperx-align'
+                else:
+                    engine_value = engine_var.get()
+                is_full_scan = _scan_mode == 'full'
+                _seg_str = segments_var.get().strip()
+                _len_str = sample_len_var.get().strip()
+                n_segs = int(_seg_str) if _seg_str.isdigit() else 3
+                s_mins = int(_len_str) if _len_str.isdigit() else 5
+                _ft_str = finetune_var.get().strip().lstrip('+')
+                finetune_ms = int(_ft_str) if _ft_str.lstrip('-').isdigit() else 400
+                if is_full_scan or _scan_mode == 'direct':
+                    n_segs = 0  # signal for full scan
+                    s_mins = 0
+
+                import time as _sync_time
+                _last_ui_update = [0]
+
+                def _progress(msg):
+                    # Throttle UI updates to max 4 per second to avoid flooding Tk event queue
+                    now = _sync_time.monotonic()
+                    is_milestone = ('segment' in msg.lower() and '/' in msg) or \
+                                   'Matched' in msg or 'Loading' in msg or \
+                                   'Extracting' in msg or 'Transcribed' in msg or \
+                                   'Aligning' in msg or 'alignment' in msg.lower() or \
+                                   'WhisperX' in msg or 'Falling back' in msg or \
+                                   'failed' in msg.lower() or 'complete' in msg.lower() or \
+                                   'error' in msg.lower() or 'RESULT' in msg or \
+                                   'Done' in msg or '===' in msg or 'Drift' in msg or \
+                                   'Sync' in msg
+                    if not is_milestone and (now - _last_ui_update[0]) < 0.25:
+                        return
+                    _last_ui_update[0] = now
+
+                    def _do_update():
+                        status_var.set(msg)
+                        _rlog(msg)
+                        import re as _re
+                        m = _re.search(r'segment (\d+)/(\d+)', msg, _re.IGNORECASE)
+                        if m:
+                            seg_n, seg_t = int(m.group(1)), int(m.group(2))
+                            progress_var.set((seg_n / seg_t) * 100)
+                        m2 = _re.search(r'Matching cue (\d+)/(\d+)', msg)
+                        if m2:
+                            mc, mt = int(m2.group(1)), int(m2.group(2))
+                            progress_var.set((mc / mt) * 100)
+                        elif 'Extracting audio' in msg:
+                            progress_var.set(0)
+                    sd.after(0, _do_update)
+
+                def _set_start_enabled():
+                    start_btn.configure(state='normal')
+                def _set_apply_enabled():
+                    apply_btn.configure(state='normal')
+                    progress_var.set(100)
+
+                def _run():
+                    try:
+                        result = smart_sync(vp, cues, model_size=model,
+                                            language=lang,
+                                            num_segments=n_segs,
+                                            sample_minutes=s_mins,
+                                            progress_callback=_progress,
+                                            cancel_event=cancel_event,
+                                            engine=engine_value)
+                    except Exception as _e:
+                        _progress(f"Error: {_e}")
+                        result = None
+                    sync_result[0] = result
+
+                    import time as _t
+                    _t.sleep(0.3)
+
+                    if cancel_event.is_set():
+                        _progress("Sync cancelled by user")
+                    elif result:
+                        try:
+                            ro = result['offset_ms']
+                            rd = result['drift_ms']
+                            rm = result['matches']
+                            sign = '+' if ro > 0 else ''
+                            _progress(f"{'='*40}")
+                            _progress(f"RESULT: Offset: {sign}{ro}ms ({sign}{ro/1000:.1f}s)")
+                            _progress(f"Drift: {rd:+d}ms")
+                            _progress(f"Matched: {len(rm)}/{len(cues)} cues")
+                            _progress(f"{'='*40}")
+                            for ci, wt, ct, sim, txt in rm[:10]:
+                                _progress(f"  #{ci+1} sim={sim:.0%} "
+                                          f"sub={ms_to_srt_ts(ct)[:8]} "
+                                          f"audio={ms_to_srt_ts(wt)[:8]} "
+                                          f"\"{txt}\"")
+                            _progress(f"Done — click Apply Sync to apply {sign}{ro}ms offset")
+                            sd.after(0, lambda: apply_btn.configure(state='normal'))
+                            sd.after(0, lambda: retime_btn.configure(state='normal'))
+                            sd.after(0, lambda: progress_var.set(100))
+                        except Exception as _e:
+                            _progress(f"Error displaying results: {_e}")
+                    else:
+                        _progress("Sync failed — no results")
+
+                    sd.after(0, _set_start_enabled)
+
+                t = threading.Thread(target=_run, daemon=True)
+                t.start()
+
+            def _apply():
+                nonlocal cues
+                if not sync_result[0]:
+                    return
+                offset = sync_result[0]['offset_ms']
+                _ft = finetune_var.get().strip().lstrip('+')
+                ft = int(_ft) if _ft.lstrip('-').isdigit() else 400
+                total_offset = offset + ft
+
+                # Always apply from the pre-sync snapshot so fine-tune is repeatable
+                import copy as _copy
+                push_undo()
+                if pre_sync_cues[0] is not None:
+                    cues = _copy.deepcopy(pre_sync_cues[0])
+                cues = shift_timestamps(cues, total_offset)
+                refresh_tree(cues)
+                sign = '+' if total_offset > 0 else ''
+                self.add_log(f"Smart Sync applied: {sign}{total_offset}ms "
+                             f"(offset {offset:+d}ms + fine-tune {ft:+d}ms)", 'SUCCESS')
+                _rlog(f"\nApplied: {sign}{total_offset}ms (offset {offset:+d} + fine-tune {ft:+d})")
+                status_var.set(f"Sync applied: {sign}{total_offset}ms")
+
+            def _retime():
+                nonlocal cues
+                if not sync_result[0]:
+                    return
+                result = sync_result[0]
+                matched = result['matches']
+                _ft = finetune_var.get().strip().lstrip('+')
+                ft = int(_ft) if _ft.lstrip('-').isdigit() else 400
+
+                # Always retime from the pre-sync snapshot so fine-tune is repeatable
+                import copy as _copy
+                push_undo()
+                if pre_sync_cues[0] is not None:
+                    cues = _copy.deepcopy(pre_sync_cues[0])
+                cues = retime_subtitles(cues, matched)
+                if ft != 0:
+                    cues = shift_timestamps(cues, ft)
+                refresh_tree(cues)
+                ft_msg = f" + fine-tune {ft:+d}ms" if ft else ""
+                self.add_log(f"Re-timed {len(cues)} cues using {len(matched)} anchors{ft_msg}",
+                             'SUCCESS')
+                _rlog(f"\nRe-timed {len(cues)} cues using {len(matched)} anchors{ft_msg}")
+                status_var.set(f"Re-timed using {len(matched)} anchors{ft_msg}")
+
+            def _cancel():
+                cancel_event.set()
+                status_var.set("Cancelling...")
+
+            start_btn = ttk.Button(btn_f, text="▶ Start", command=_start, width=8)
+            start_btn.pack(side='left', padx=2)
+            apply_btn = ttk.Button(btn_f, text="Apply Sync", command=_apply,
+                                    width=10, state='disabled')
+            apply_btn.pack(side='left', padx=2)
+            retime_btn = ttk.Button(btn_f, text="Re-time All", command=_retime,
+                                     width=10, state='disabled')
+            retime_btn.pack(side='left', padx=2)
+            ttk.Button(btn_f, text="Cancel", command=_cancel, width=8).pack(side='left', padx=2)
+
+            def _save_from_sync():
+                do_save_file()
+                _rlog("Saved.")
+                status_var.set("Saved")
+
+            ttk.Button(btn_f, text="💾 Save", command=_save_from_sync,
+                       width=6).pack(side='right', padx=2)
+            ttk.Button(btn_f, text="Close", command=sd.destroy, width=6).pack(side='right', padx=2)
 
         # ══════════════════════════════════════════════════════════════════════
         # Search & Replace toolbar (compact single row)
@@ -6531,6 +12936,7 @@ class VideoConverterApp:
         tree.tag_configure(TAG_TAGS, background='#f8d7da')       # pink — has tags
         tree.tag_configure(TAG_LONG, background='#ffe0b2')       # orange — long lines
         tree.tag_configure(TAG_SEARCH, background='#c8e6c9')     # green — search match
+        tree.tag_configure(TAG_SPELL, background='#f5c6cb')      # red/salmon — spelling errors
 
         # ── Mousewheel scrolling (consume events to prevent bleed-through) ──
         def on_tree_mousewheel(event):
@@ -7426,7 +13832,6 @@ class VideoConverterApp:
             'container':            self.container_format.get(),
             'transcode_mode':       self.transcode_mode.get(),
             'quality_mode':         self.quality_mode.get(),
-            'bitrate':              self.bitrate.get(),
             'crf':                  self.crf.get(),
             'cpu_preset':           self.cpu_preset.get(),
             'gpu_preset':           self.gpu_preset.get(),
@@ -7444,9 +13849,18 @@ class VideoConverterApp:
             'default_video_folder':  str(self.working_dir),
             'default_output_folder': str(self.output_dir) if self.output_dir else '',
             'recent_folders':        self.recent_folders,
+            'strip_chapters':        self.strip_chapters.get(),
+            'strip_metadata_tags':   self.strip_metadata_tags.get(),
+            'set_track_metadata':    self.set_track_metadata.get(),
+            'meta_video_lang':       self.meta_video_lang.get(),
+            'meta_audio_lang':       self.meta_audio_lang.get(),
+            'meta_sub_lang':         self.meta_sub_lang.get(),
             'custom_ad_patterns':    self.custom_ad_patterns,
             'custom_cap_words':      self.custom_cap_words,
             'custom_replacements':   self.custom_replacements,
+            'custom_spell_words':    self.custom_spell_words,
+            'tvdb_api_key':          getattr(self, '_tvdb_api_key', ''),
+            'tv_rename_template':    getattr(self, '_tv_rename_template', '{show} S{season}E{episode} {title}'),
         }
         try:
             self._prefs_path().parent.mkdir(parents=True, exist_ok=True)
@@ -7475,7 +13889,8 @@ class VideoConverterApp:
             # Always start in video-only mode regardless of saved preference
             self.transcode_mode.set('video')
             self.quality_mode.set(prefs.get('quality_mode',     self.quality_mode.get()))
-            self.bitrate.set(prefs.get('bitrate',               self.bitrate.get()))
+            # Bitrate intentionally not saved/loaded — always starts at default (2.0M)
+            # to avoid hidden mismatches between saved value and UI slider position
             self.crf.set(prefs.get('crf',                       self.crf.get()))
             self.cpu_preset.set(prefs.get('cpu_preset',         self.cpu_preset.get()))
             self.gpu_preset.set(prefs.get('gpu_preset',         self.gpu_preset.get()))
@@ -7486,6 +13901,12 @@ class VideoConverterApp:
             self.hw_decode.set(prefs.get('hw_decode',           self.hw_decode.get()))
             self.strip_internal_subs.set(prefs.get('strip_internal_subs', self.strip_internal_subs.get()))
             self.two_pass.set(prefs.get('two_pass',             self.two_pass.get()))
+            self.strip_chapters.set(prefs.get('strip_chapters', self.strip_chapters.get()))
+            self.strip_metadata_tags.set(prefs.get('strip_metadata_tags', self.strip_metadata_tags.get()))
+            self.set_track_metadata.set(prefs.get('set_track_metadata', self.set_track_metadata.get()))
+            self.meta_video_lang.set(prefs.get('meta_video_lang', self.meta_video_lang.get()))
+            self.meta_audio_lang.set(prefs.get('meta_audio_lang', self.meta_audio_lang.get()))
+            self.meta_sub_lang.set(prefs.get('meta_sub_lang', self.meta_sub_lang.get()))
             self.verify_output.set(prefs.get('verify_output',   self.verify_output.get()))
             self.notify_sound.set(prefs.get('notify_sound',     self.notify_sound.get()))
             self.notify_sound_file.set(prefs.get('notify_sound_file', self.notify_sound_file.get()))
@@ -7493,7 +13914,11 @@ class VideoConverterApp:
             self.recent_folders = prefs.get('recent_folders', [])
             self.custom_ad_patterns = prefs.get('custom_ad_patterns', [])
             self.custom_cap_words = prefs.get('custom_cap_words', [])
+            self.custom_spell_words = prefs.get('custom_spell_words', [])
             self.custom_replacements = prefs.get('custom_replacements', [])
+            self._tvdb_api_key = prefs.get('tvdb_api_key', '')
+            self._tv_rename_template = prefs.get('tv_rename_template',
+                                                  '{show} S{season}E{episode} {title}')
             self._rebuild_recent_menu()
             self.default_player.set(prefs.get('default_player', 'auto'))
             dvf = prefs.get('default_video_folder', '')
@@ -7530,6 +13955,13 @@ class VideoConverterApp:
         self.verify_output.set(True)
         self.notify_sound.set(True)
         self.notify_sound_file.set('complete')
+        self.strip_chapters.set(False)
+        self.strip_metadata_tags.set(False)
+        self.set_track_metadata.set(False)
+        self.meta_video_lang.set('und')
+        self.meta_audio_lang.set('eng')
+        self.meta_sub_lang.set('eng')
+        self._on_metadata_toggle()
         # Refresh UI state
         self.on_encoder_change(silent=True)
         self.on_video_codec_change()
@@ -7566,6 +13998,7 @@ class VideoConverterApp:
                 ("Ctrl+I",         "Media Info"),
                 ("Ctrl+T",         "Test Encode (30s)"),
                 ("Ctrl+Shift+F",   "Open Output Folder"),
+                ("Ctrl+M",         "Media Processor"),
             ]),
             ("File List", [
                 ("Delete",         "Remove selected file from list"),
@@ -8700,6 +15133,13 @@ class VideoConverterApp:
             self.preset_label.grid_remove()
             self.preset_combo.grid_remove()
 
+    def _on_metadata_toggle(self):
+        """Enable/disable the track language fields based on the Set track metadata checkbox."""
+        state = 'normal' if self.set_track_metadata.get() else 'disabled'
+        self.meta_video_entry.configure(state=state)
+        self.meta_audio_entry.configure(state=state)
+        self.meta_sub_entry.configure(state=state)
+
     def on_two_pass_change(self):
         """Notify user when two-pass is enabled on GPU."""
         encoder = self.encoder_mode.get()
@@ -9116,6 +15556,12 @@ class VideoConverterApp:
             'subtitle_settings': {},  # per-file override below
             'external_subs': [],     # per-file — populated from file_info
             'container': self.container_format.get(),
+            'strip_chapters':      self.strip_chapters.get(),
+            'strip_metadata_tags': self.strip_metadata_tags.get(),
+            'set_track_metadata':  self.set_track_metadata.get(),
+            'meta_video_lang':     self.meta_video_lang.get(),
+            'meta_audio_lang':     self.meta_audio_lang.get(),
+            'meta_sub_lang':       self.meta_sub_lang.get(),
         }
 
         renamed_candidates = []  # (output_path, original_input_path) for files whose originals were deleted
@@ -9162,6 +15608,12 @@ class VideoConverterApp:
                 'container':         ov.get('container', self.container_format.get()),
                 'has_closed_captions': file_info.get('has_closed_captions', False),
                 'extract_cc':          file_info.get('extract_cc', False),
+                'strip_chapters':      ov.get('strip_chapters',      settings['strip_chapters']),
+                'strip_metadata_tags': ov.get('strip_metadata_tags', settings['strip_metadata_tags']),
+                'set_track_metadata':  ov.get('set_track_metadata',  settings['set_track_metadata']),
+                'meta_video_lang':     ov.get('meta_video_lang',     settings['meta_video_lang']),
+                'meta_audio_lang':     ov.get('meta_audio_lang',     settings['meta_audio_lang']),
+                'meta_sub_lang':       ov.get('meta_sub_lang',       settings['meta_sub_lang']),
             }
 
             transcode_mode = file_settings['transcode_mode']

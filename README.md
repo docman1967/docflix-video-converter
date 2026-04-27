@@ -1,6 +1,6 @@
 # 🎬 Docflix Video Converter
 
-A batch video converter that encodes files to **H.265/HEVC** using `ffmpeg`, with support for both CPU (`libx265`) and NVIDIA GPU (`hevc_nvenc`) encoding. Includes a full-featured desktop GUI and a headless CLI tool for scripted/automated use.
+A batch video converter that encodes files to **H.265/HEVC** (and other codecs) using `ffmpeg`, with support for CPU and **multi-GPU** encoding (NVIDIA NVENC, Intel QSV, AMD VAAPI). Includes a full-featured desktop GUI, a standalone media processor for remux post-processing, a subtitle editor, and a headless CLI tool.
 
 ---
 
@@ -15,23 +15,58 @@ A batch video converter that encodes files to **H.265/HEVC** using `ffmpeg`, wit
 ### Desktop GUI
 - 🖱️ **Drag-and-drop** file queuing
 - ⚙️ **Per-file settings overrides** — different encoder settings per file
-- 🎞️ **Subtitle track** detection and extraction
+- 🎛️ **Multi-GPU encoding** — auto-detects and supports:
+  - NVIDIA NVENC (presets p1–p7)
+  - Intel Quick Sync Video / QSV (presets veryfast–veryslow)
+  - AMD VAAPI (bitrate/QP quality control)
+  - CPU fallback (libx265, libx264, libsvtav1, libvpx-vp9)
+- 🔁 **Two-pass encoding** support (CPU two-pass and GPU multipass)
+- 🖥️ **HW Decode** — hardware-accelerated decoding (auto-disabled for burn-in subtitles)
+- 📺 **MPEG Transport Stream (.ts)** support — input/output, ATSC A53 closed caption detection, CC passthrough, CC extraction to SRT via `ccextractor`
+- 📝 **External subtitle support** — drag-and-drop `.srt`, `.ass`, `.ssa`, `.vtt`, `.sub`, `.idx`, `.sup`; auto-matches by filename; embed or burn-in modes; language/default/forced flags
+- 🎞️ **Internal subtitle management** — per-stream format control, codec conversion
+- ✏️ **Subtitle editor** — full-featured editor with filters (Remove HI, Fix ALL CAPS, Remove Ads, etc.), search & replace, timing tools, batch processing, video preview
+- 🧹 **Metadata cleanup** — strip chapters, strip tags, set track metadata (language codes for video/audio/subtitle tracks, clear container title)
 - 📊 **Media info** panel — codec, resolution, duration, streams
 - 🔬 **Test encode** — 30-second preview clip before full conversion
 - 📐 **Estimated output size** before conversion starts
+- ⏱️ **Batch ETA** — real-time estimated time remaining for the entire batch
 - ▶️ **Playback** of source and output files via configurable media player
 - 📁 **Open output folder** in system file manager
-- 🔁 **Two-pass encoding** support
-- 🔔 **Sound notification** on completion (preview-able)
-- 💾 **Auto-saved preferences** — encoder, quality, output folder, player, sounds
+- 🔔 **Sound notification** on completion
+- 💾 **Auto-saved preferences**
 - 📂 **Recent folders** menu
 - ⌨️ **Keyboard shortcuts** panel
-- 🎮 **GPU auto-detection** with per-codec preset switching
 - 🖥️ **Multi-monitor aware** — launches on the monitor containing the mouse
+- 🗂️ **"Open with" support** — appears in file manager right-click menu for video files
+
+### Media Processor (Tools → Media Processor)
+A standalone remux-only post-processing tool for already-encoded files — no re-encoding required (`-c:v copy`).
+
+- 🔊 **Convert audio** — codec dropdown (aac, ac3, eac3, mp3, opus, flac, copy) + bitrate; auto-skips if source already matches target
+- 🧹 **Strip chapters / tags / existing subtitles**
+- 📝 **Mux external subtitles** — auto-detects `*.eng.srt` and `*.eng.forced.srt` alongside videos; sets disposition flags and track titles
+- 🏷️ **Set track metadata** — per-track language codes, clear container title and track names
+- ✅ **Preflight check** — validates files before processing
+- All operations combined into a single ffmpeg command per file
+- Drag-and-drop, progress bar, color-coded log
+
+### Subtitle Editor (Tools → Subtitle Editor)
+- Standalone and integrated modes
+- Video subtitle extraction and re-mux (edit internal subtitles, save back without re-encoding)
+- Filters: Remove HI, Remove Tags, Remove Ads/Credits, Remove Music Notes, Remove Leading Dashes, Remove ALL CAPS HI, Remove Off-Screen Quotes, Remove Duplicates, Merge Short Cues, Fix ALL CAPS (with custom character names)
+- Search & Replace with wrap-around
+- Timing tools: offset and stretch
+- Split / Join / Insert cues
+- Undo/Redo
+- Batch filter for multiple files
+- Batch Search & Replace with persistent pairs
+- Color-coded rows, video preview via ffplay
 
 ### CLI (`convert_videos.sh`)
-- Batch converts all MKV files in the current directory
-- CPU and GPU encoding modes
+- Batch converts all video files in the current directory
+- Supports `.mkv`, `.mp4`, `.avi`, `.mov`, `.wmv`, `.flv`, `.webm`, `.ts`, `.m2ts`, `.mts`
+- CPU, NVIDIA NVENC, Intel QSV, and AMD VAAPI encoding
 - Bitrate and CRF quality modes
 - Configurable output filename suffix
 - Optional cleanup of originals after successful conversion
@@ -44,13 +79,16 @@ A batch video converter that encodes files to **H.265/HEVC** using `ffmpeg`, wit
 
 | Dependency | Required By | Install |
 |------------|-------------|---------|
-| `ffmpeg` | Both | `sudo apt install ffmpeg` |
+| `ffmpeg` | All | `sudo apt install ffmpeg` |
 | `python3` | Desktop GUI | `sudo apt install python3` |
 | `tkinter` | Desktop GUI | `sudo apt install python3-tk` |
 | `tkinterdnd2` | Desktop GUI (drag & drop) | `pip install tkinterdnd2` |
 | `Pillow` | Desktop GUI (logo image) | `pip install Pillow` |
-| `zenity` | CLI notifications (optional) | `sudo apt install zenity` |
-| NVIDIA driver + NVENC | GPU encoding (optional) | System-specific |
+| `zenity` | Folder dialogs, CLI popups (optional) | `sudo apt install zenity` |
+| `ccextractor` | CC extraction from .ts files (optional) | `sudo apt install ccextractor` |
+| NVIDIA driver + NVENC | NVIDIA GPU encoding (optional) | System-specific |
+| Intel media driver + QSV | Intel QSV encoding (optional) | System-specific |
+| Mesa VAAPI driver | AMD VAAPI encoding (optional) | System-specific |
 
 ---
 
@@ -90,7 +128,10 @@ No `sudo` required.
 # Desktop GUI (foreground)
 python3 video_converter.py
 
-# CLI — run from the folder containing your MKV files
+# Open a specific video file
+docflix /path/to/video.mkv
+
+# CLI — run from the folder containing your video files
 cd /path/to/your/videos
 /path/to/docflix-video-converter/convert_videos.sh
 ```
@@ -107,7 +148,9 @@ Options:
   -q, --crf VALUE         CRF quality value — disables bitrate mode (0–51)
   -p, --preset PRESET     CPU encoding preset (default: ultrafast)
   -g, --gpu               Use NVIDIA GPU encoding (hevc_nvenc)
-  -P, --gpu-preset P1-P7  GPU preset (default: p1)
+  --qsv                   Use Intel Quick Sync Video (hevc_qsv)
+  --vaapi                 Use VAAPI encoding (hevc_vaapi)
+  -P, --gpu-preset PRESET GPU preset (NVENC: p1–p7, QSV: veryfast–veryslow)
   -s, --suffix SUFFIX     Output filename suffix (default: -2mbps-UF_265)
   -o, --overwrite         Overwrite existing output files
   -c, --cleanup           Delete originals after successful conversion
@@ -121,10 +164,16 @@ Options:
 # CPU encoding, default bitrate (2M), ultrafast preset
 ./convert_videos.sh
 
-# GPU encoding, fastest preset
+# GPU encoding (NVIDIA), fastest preset
 ./convert_videos.sh --gpu
 
-# CRF quality mode (visually lossless)
+# Intel QSV encoding
+./convert_videos.sh --qsv
+
+# AMD VAAPI encoding
+./convert_videos.sh --vaapi
+
+# CRF quality mode
 ./convert_videos.sh --crf 22
 
 # GPU, high quality preset, overwrite existing files
@@ -145,16 +194,32 @@ Options:
 **Presets (fastest → best quality):**
 `ultrafast` · `superfast` · `veryfast` · `faster` · `fast` · `medium` · `slow` · `slower` · `veryslow`
 
-### GPU (`hevc_nvenc`)
+### NVIDIA GPU (`hevc_nvenc`)
 
 | Mode | Flag | Recommended Range |
 |------|------|-------------------|
 | Bitrate | `-b:v` | `1M` – `8M`+ |
 | CQ | `-cq` | `15`–`25` (lower = better quality) |
 
-**Presets (fastest → best quality):** `p1` · `p2` · `p3` · `p4` · `p5` · `p6` · `p7`
+**Presets:** `p1` · `p2` · `p3` · `p4` · `p5` · `p6` · `p7`
 
-> **Note:** GPU encoding is significantly faster but may produce slightly larger files at equivalent quality settings. Audio is always stream-copied (no re-encoding).
+### Intel GPU (`hevc_qsv`)
+
+| Mode | Flag | Recommended Range |
+|------|------|-------------------|
+| Bitrate | `-b:v` | `1M` – `8M`+ |
+| Quality | `-global_quality` | `15`–`25` (lower = better quality) |
+
+**Presets:** `veryfast` · `faster` · `fast` · `medium` · `slow` · `slower` · `veryslow`
+
+### AMD GPU (`hevc_vaapi`)
+
+| Mode | Flag | Recommended Range |
+|------|------|-------------------|
+| Bitrate | `-b:v` | `1M` – `8M`+ |
+| Quality | `-qp` | `15`–`25` (lower = better quality) |
+
+> **Note:** GPU encoding is significantly faster but may produce slightly larger files at equivalent quality settings.
 
 ---
 
@@ -162,14 +227,35 @@ Options:
 
 ```
 docflix-video-converter/
-├── video_converter.py    # Desktop GUI application (Tkinter)
+├── video_converter.py    # Desktop GUI application (~10,300 lines, Tkinter)
 ├── convert_videos.sh     # Headless CLI batch converter
 ├── run_converter.sh      # Desktop GUI launcher (background + logging)
 ├── install.sh            # Installer / uninstaller
+├── scripts/
+│   └── media-process.sh  # Reference bash script for remux pipeline
 ├── logo.png              # App icon
 ├── LICENSE               # MIT License
 └── README.md             # This file
 ```
+
+---
+
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+O` | Open File(s) |
+| `Ctrl+Shift+O` | Open Folder |
+| `Ctrl+P` | Play Source File |
+| `Ctrl+Shift+P` | Play Output File |
+| `Ctrl+I` | Media Info |
+| `Ctrl+T` | Test Encode (30s) |
+| `Ctrl+M` | Media Processor |
+| `Ctrl+Shift+F` | Open Output Folder |
+| `Ctrl+L` | Show/Hide Log |
+| `Ctrl+Shift+S` | Show/Hide Settings Panel |
+| `F1` | Keyboard Shortcuts |
+| `Ctrl+Q` | Exit |
 
 ---
 
