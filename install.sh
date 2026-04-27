@@ -36,6 +36,13 @@ APP_FILES=(
     "logo.png"
 )
 
+# Standalone tool commands (name -> module entry point)
+TOOL_CMDS=(
+    "docflix-subs:subtitle_editor"
+    "docflix-rename:tv_renamer"
+    "docflix-media:media_processor"
+)
+
 #───────────────────────────────────────────────────────────────────────────────
 # Helpers
 #───────────────────────────────────────────────────────────────────────────────
@@ -87,6 +94,17 @@ uninstall() {
         found=1
     fi
 
+    # Remove standalone tool commands
+    for entry in "${TOOL_CMDS[@]}"; do
+        local cmd_name="${entry%%:*}"
+        local cmd_path="$BIN_DIR/$cmd_name"
+        if [[ -f "$cmd_path" ]]; then
+            rm -f "$cmd_path"
+            success "Removed command: $cmd_path"
+            found=1
+        fi
+    done
+
     # Refresh desktop database
     if command -v update-desktop-database &>/dev/null; then
         update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
@@ -126,6 +144,10 @@ for f in "${APP_FILES[@]}"; do
         missing=1
     fi
 done
+if [[ ! -d "$SCRIPT_DIR/video_converter" ]] || [[ ! -f "$SCRIPT_DIR/video_converter/__init__.py" ]]; then
+    error "Missing video_converter/ package directory"
+    missing=1
+fi
 if [[ $missing -eq 1 ]]; then
     echo ""
     error "One or more required files are missing. Please run install.sh from the project directory."
@@ -239,6 +261,17 @@ for f in "${APP_FILES[@]}"; do
     success "Copied $f"
 done
 
+# Copy the video_converter package directory
+if [[ -d "$SCRIPT_DIR/video_converter" ]]; then
+    # Remove old package copy first (clean update)
+    rm -rf "$INSTALL_DIR/video_converter"
+    cp -r "$SCRIPT_DIR/video_converter" "$INSTALL_DIR/video_converter"
+    # Remove __pycache__ from installed copy
+    find "$INSTALL_DIR/video_converter" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+    PKG_COUNT=$(find "$INSTALL_DIR/video_converter" -name '*.py' | wc -l)
+    success "Copied video_converter/ package ($PKG_COUNT modules)"
+fi
+
 # Ensure scripts are executable
 chmod +x "$INSTALL_DIR/run_converter.sh"
 chmod +x "$INSTALL_DIR/video_converter.py"
@@ -301,9 +334,10 @@ if command -v update-desktop-database &>/dev/null; then
     success "Desktop database updated"
 fi
 
-#── 8. Create terminal command ─────────────────────────────────────────────────
-header "Creating terminal command..."
+#── 8. Create terminal commands ────────────────────────────────────────────────
+header "Creating terminal commands..."
 
+# Main app command
 cat > "$BIN_FILE" <<EOF
 #!/usr/bin/env bash
 exec bash "$INSTALL_DIR/run_converter.sh" "\$@"
@@ -311,6 +345,20 @@ EOF
 
 chmod +x "$BIN_FILE"
 success "Terminal command created: $BIN_FILE"
+
+# Standalone tool commands
+for entry in "${TOOL_CMDS[@]}"; do
+    cmd_name="${entry%%:*}"
+    module_name="${entry##*:}"
+    cmd_path="$BIN_DIR/$cmd_name"
+    cat > "$cmd_path" <<EOF
+#!/usr/bin/env bash
+cd "$INSTALL_DIR"
+exec python3 -c "from video_converter.$module_name import main; main()" "\$@"
+EOF
+    chmod +x "$cmd_path"
+    success "Tool command created: $cmd_path"
+done
 
 #── Done ───────────────────────────────────────────────────────────────────────
 echo ""
@@ -322,7 +370,11 @@ echo "  Launch options:"
 echo "    • Search your app menu for \"Docflix Video Converter\""
 echo "    • Or run from a terminal:  docflix"
 echo ""
+echo "  Standalone tools:"
+echo "    • docflix-subs     Subtitle Editor"
+echo "    • docflix-rename   TV Show Renamer"
+echo "    • docflix-media    Media Processor"
+echo ""
 echo "  To uninstall:"
 echo "    $SCRIPT_DIR/install.sh --uninstall"
-echo "    (or from anywhere: bash $INSTALL_DIR/../docflix_uninstall.sh)"
 echo ""

@@ -45,6 +45,9 @@ echo "Log file: $LOG_FILE"
 echo ""
 
 # Launch in background; stdout and stderr both go to the log file
+# Uses the monolith directly (video_converter.py) for now.
+# After full migration, this will change to:
+#   python3 -m video_converter "$@"
 nohup python3 "$SCRIPT_DIR/video_converter.py" "$@" >> "$LOG_FILE" 2>&1 &
 APP_PID=$!
 
