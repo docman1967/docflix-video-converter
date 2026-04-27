@@ -3085,7 +3085,7 @@ def _detect_gpu_name(backend_id, backend):
             vendor_patterns = {
                 'nvenc': 'NVIDIA',
                 'qsv':   'Intel.*(?:Graphics|Iris|UHD|Arc)',
-                'vaapi':  'AMD|ATI|Radeon',
+                'vaapi':  r'AMD|\bATI\b|Radeon',
             }
             pattern = vendor_patterns.get(backend_id)
             if pattern:
