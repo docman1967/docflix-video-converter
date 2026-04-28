@@ -400,10 +400,12 @@ class VideoConverter:
                     lang = es.get('language', 'und')
                     if lang and lang != 'und':
                         c.extend([f'-metadata:s:s:{out_sub_idx}', f'language={lang}'])
-                    # Disposition flags (default / forced)
+                    # Disposition flags (default / forced / hearing_impaired)
                     disp_parts = []
                     if es.get('default'):
                         disp_parts.append('default')
+                    if es.get('sdh'):
+                        disp_parts.append('hearing_impaired')
                     if es.get('forced'):
                         disp_parts.append('forced')
                     if disp_parts:
@@ -417,6 +419,8 @@ class VideoConverter:
                                 lang_name = ln
                                 break
                         title_parts.append(lang_name)
+                    if es.get('sdh'):
+                        title_parts.append('SDH')
                     if es.get('forced'):
                         title_parts.append('Forced')
                     if title_parts:

@@ -69,6 +69,8 @@ def open_batch_filter(app):
             sub_exts = {'.srt', '.ass', '.ssa', '.vtt', '.sub'}
             added = 0
             for p in paths:
+                if os.path.basename(p).startswith('.'):
+                    continue
                 if Path(p).suffix.lower() in sub_exts and p not in file_paths:
                     file_paths.append(p)
                     file_listbox.insert('end', os.path.basename(p))

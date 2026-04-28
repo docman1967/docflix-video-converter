@@ -127,6 +127,14 @@ def create_standalone_root(title, geometry="960x650", minsize=(800, 550)):
     root.geometry(geometry)
     root.minsize(*minsize)
 
+    # Hide dotfiles in Tk file dialogs by default
+    try:
+        root.tk.call('catch', 'tk_getOpenFile foo bar')
+        root.tk.call('set', '::tk::dialog::file::showHiddenVar', '0')
+        root.tk.call('set', '::tk::dialog::file::showHiddenBtn', '1')
+    except Exception:
+        pass
+
     # Apply theme
     try:
         style = ttk.Style()

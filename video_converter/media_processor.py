@@ -36,8 +36,6 @@ def open_media_processor(app):
         win = tk.Toplevel(app.root)
         win.title("🔧 Media Processor")
         win.geometry("880x780")
-        if not getattr(app, '_standalone_mode', False):
-            win.transient(app.root)
         win.minsize(750, 600)
         app._center_on_main(win)
 
@@ -110,7 +108,7 @@ def open_media_processor(app):
             count = 0
             for ext in VIDEO_EXTENSIONS:
                 for fp in Path(folder).glob(f'*{ext}'):
-                    if fp.is_file():
+                    if fp.is_file() and not fp.name.startswith('.'):
                         _add_one_file(str(fp))
                         count += 1
             _rebuild_tree()
@@ -1079,7 +1077,7 @@ def open_media_processor(app):
                     elif os.path.isdir(p):
                         for ext in VIDEO_EXTENSIONS:
                             for fp in Path(p).glob(f'*{ext}'):
-                                if fp.is_file():
+                                if fp.is_file() and not fp.name.startswith('.'):
                                     _add_one_file(str(fp))
                                     added += 1
                 if added:

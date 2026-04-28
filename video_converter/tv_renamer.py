@@ -38,8 +38,6 @@ def open_tv_renamer(app):
         win = tk.Toplevel(app.root)
         win.title("📺 TV Show Renamer")
         win.geometry("960x650")
-        if not getattr(app, '_standalone_mode', False):
-            win.transient(app.root)
         win.minsize(800, 550)
         win.resizable(True, True)
         app._center_on_main(win)
@@ -274,6 +272,7 @@ def open_tv_renamer(app):
                         'seasonNumber': ep.get('season_number', sn),
                         'number': ep.get('episode_number'),
                         'name': ep.get('name', ''),
+                        'aired': ep.get('air_date', ''),
                         'year': (ep.get('air_date', '')[:4]
                                  if ep.get('air_date') else ''),
                     })
@@ -311,8 +310,9 @@ def open_tv_renamer(app):
         # ── Episode number parser ──
         def _parse_episode_info(filename):
             """Extract season and episode numbers from a filename.
-            Returns (season, episode) for single-episode files, or
-            (season, [ep1, ep2, ...]) for multi-episode files."""
+            Returns (season, episode) for single-episode files,
+            (season, [ep1, ep2, ...]) for multi-episode files,
+            or sets item['air_date'] = 'YYYY-MM-DD' for date-based episodes."""
             name = os.path.basename(filename)
             # S01E01E02, S01E01-E03, S01E01E02E03 (multi-episode)
             m = re.search(r'[Ss](\d{1,2})\s*[Ee](\d{1,3})(?:\s*-?\s*[Ee](\d{1,3}))+', name)
@@ -338,6 +338,11 @@ def open_tv_renamer(app):
             m = re.search(r'[Ss]eason\s*(\d+).*?[Ee]pisode\s*(\d+)', name)
             if m:
                 return int(m.group(1)), int(m.group(2))
+            # Date-based: 2026.04.22, 2026-04-22, 2026 04 22
+            m = re.search(r'((?:19|20)\d{2})[.\-\s](0[1-9]|1[0-2])[.\-\s](0[1-9]|[12]\d|3[01])', name)
+            if m:
+                # Return a special marker — date stored in item dict later
+                return 'date', f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
             # E01 or Ep01 (season assumed from folder or default 1)
             m = re.search(r'[Ee](?:p|pisode)?\s*(\d{1,3})', name)
             if m:
@@ -347,7 +352,7 @@ def open_tv_renamer(app):
         def _sanitize_filename(name):
             """Remove characters not allowed in filenames."""
             # Replace : with - (common in episode titles), strip others
-            name = name.replace(':', ' -').replace('/', '-').replace('\\', '-')
+            name = name.replace(':', ' ').replace('/', '-').replace('\\', '-')
             name = re.sub(r'[<>"|?*]', '', name)
             # Collapse multiple spaces
             name = re.sub(r'\s+', ' ', name).strip()
@@ -523,6 +528,30 @@ def open_tv_renamer(app):
                     sub_tags = _detect_sub_tags(item['path'])
                 return _sanitize_filename(name) + sub_tags + ext
 
+            # ── Date-based episode mode ──
+            air_date = item.get('air_date')
+            if air_date:
+                ep_data = show_data.get(('date', air_date))
+                if ep_data:
+                    title = ep_data.get('name', '')
+                    s = ep_data.get('seasonNumber', 1)
+                    e = ep_data.get('number', 0)
+                    name = template.format(
+                        show=show_name,
+                        season=str(s).zfill(2),
+                        episode=str(e).zfill(2),
+                        title=title,
+                        year=ep_data.get('year', air_date[:4]),
+                    )
+                else:
+                    # No episode data found — use date as title
+                    name = f"{show_name} - {air_date}"
+                ext = item['ext']
+                sub_tags = ''
+                if ext in SUBTITLE_EXTENSIONS:
+                    sub_tags = _detect_sub_tags(item['path'])
+                return _sanitize_filename(name) + sub_tags + ext
+
             # ── TV series mode — need season/episode ──
             s = item.get('season')
             e = item.get('episode')
@@ -629,6 +658,8 @@ def open_tv_renamer(app):
             # Truncate at episode markers (including multi-episode S01E01E02)
             name = re.sub(r'\s*[Ss]\d{1,2}\s*[Ee]\d.*', '', name)
             name = re.sub(r'\s*\d{1,2}[xX]\d.*', '', name)
+            # Truncate at date-based episode markers (2026 04 22)
+            name = re.sub(r'\s*(?:19|20)\d{2}\s+(?:0[1-9]|1[0-2])\s+(?:0[1-9]|[12]\d|3[01]).*', '', name)
             # Truncate at quality/resolution tags
             name = re.sub(r'\s*(?:720|1080|2160|480)[pPiI].*', '', name)
             # Truncate at common release tags
@@ -954,6 +985,10 @@ def open_tv_renamer(app):
                 if s is not None and e is not None:
                     show_eps[(s, e)] = ep
                     seasons.add(s)
+                # Also index by air date for date-based episodes
+                aired = ep.get('aired') or ep.get('air_date') or ''
+                if aired and len(aired) >= 10:
+                    show_eps[('date', aired[:10])] = ep
 
             _all_shows[show_name] = show_eps
             real_seasons = {s for s in seasons if s > 0} or seasons
@@ -1122,7 +1157,8 @@ def open_tv_renamer(app):
                 is_movie = (isinstance(_all_shows.get(matched), dict)
                             and _all_shows.get(matched, {}).get('_is_movie'))
                 has_ep = (s is not None and e is not None)
-                if matched and (is_movie or has_ep):
+                has_date = item.get('air_date') is not None
+                if matched and (is_movie or has_ep or has_date):
                     try:
                         new_name = _build_new_name(item, template, matched) or ''
                     except (KeyError, ValueError):
@@ -1236,23 +1272,33 @@ def open_tv_renamer(app):
             for p in paths:
                 if os.path.isdir(p):
                     for root_dir, _dirs, files in os.walk(p):
-                        _dirs.sort()
+                        _dirs[:] = sorted(d for d in _dirs if not d.startswith('.'))
                         for f in sorted(files):
+                            if f.startswith('.'):
+                                continue
                             fp = os.path.join(root_dir, f)
                             ext = os.path.splitext(f)[1].lower()
                             if ext in _RENAME_EXTENSIONS:
                                 s, e = _parse_episode_info(f)
-                                _file_items.append({
-                                    'path': fp, 'season': s,
-                                    'episode': e, 'ext': ext})
+                                item = {'path': fp, 'season': s,
+                                        'episode': e, 'ext': ext}
+                                if s == 'date':
+                                    item['air_date'] = e
+                                    item['season'] = None
+                                    item['episode'] = None
+                                _file_items.append(item)
                                 added += 1
                 elif os.path.isfile(p):
                     ext = os.path.splitext(p)[1].lower()
                     if ext in _RENAME_EXTENSIONS:
                         s, e = _parse_episode_info(p)
-                        _file_items.append({
-                            'path': p, 'season': s,
-                            'episode': e, 'ext': ext})
+                        item = {'path': p, 'season': s,
+                                'episode': e, 'ext': ext}
+                        if s == 'date':
+                            item['air_date'] = e
+                            item['season'] = None
+                            item['episode'] = None
+                        _file_items.append(item)
                         added += 1
             _v = sum(1 for i in _file_items if i['ext'] in VIDEO_EXTENSIONS)
             _s = sum(1 for i in _file_items if i['ext'] in SUBTITLE_EXTENSIONS)

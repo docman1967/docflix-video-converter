@@ -1117,7 +1117,7 @@ def filter_remove_hi(cues):
         re.compile(r'\(.*?\)', re.DOTALL),          # (laughing) — including multi-line
     ]
     # Speaker label pattern (same as filter_remove_speaker_labels)
-    speaker_pattern = re.compile(r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}:\s*\n?', re.MULTILINE)
+    speaker_pattern = re.compile(r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}[A-Za-z]:\s*\n?', re.MULTILINE)
 
     # ALL CAPS HI descriptor labels — these describe sounds/actions, not speakers.
     # Only the label up to and including the colon is removed; text after is kept.
@@ -1161,7 +1161,7 @@ def filter_remove_hi(cues):
         # Clean up orphaned colons left after HI removal
         # "Speaker (description): text" → "Speaker : text" after (description) removed
         # Remove "word(s) :" speaker label remnants where parens were stripped
-        text = re.sub(r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}\s+:\s*', r'\1', text, flags=re.MULTILINE)
+        text = re.sub(r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}[A-Za-z]\s+:\s*', r'\1', text, flags=re.MULTILINE)
         # Colon at start of line: "(gasps): text" → ": text" → "text"
         text = re.sub(r'^\s*:\s*', '', text, flags=re.MULTILINE)
         text = re.sub(r'\n\s*:\s*', '\n', text)
@@ -1691,7 +1691,7 @@ def filter_remove_speaker_labels(cues):
     """
     # Match: optional dash/space, then letters (with spaces/numbers for "Man 1")
     # up to 30 chars, ending with colon+space — but first char must be a letter
-    pattern = re.compile(r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}:\s*\n?', re.MULTILINE)
+    pattern = re.compile(r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}[A-Za-z]:\s*\n?', re.MULTILINE)
     result = []
     for cue in cues:
         text = cue['text']
@@ -3508,10 +3508,12 @@ class VideoConverter:
                     lang = es.get('language', 'und')
                     if lang and lang != 'und':
                         c.extend([f'-metadata:s:s:{out_sub_idx}', f'language={lang}'])
-                    # Disposition flags (default / forced)
+                    # Disposition flags (default / forced / hearing_impaired)
                     disp_parts = []
                     if es.get('default'):
                         disp_parts.append('default')
+                    if es.get('sdh'):
+                        disp_parts.append('hearing_impaired')
                     if es.get('forced'):
                         disp_parts.append('forced')
                     if disp_parts:
@@ -3525,6 +3527,8 @@ class VideoConverter:
                                 lang_name = ln
                                 break
                         title_parts.append(lang_name)
+                    if es.get('sdh'):
+                        title_parts.append('SDH')
                     if es.get('forced'):
                         title_parts.append('Forced')
                     if title_parts:
@@ -4796,7 +4800,7 @@ class VideoConverterApp:
 
             # Filename column stretches; others are fixed width on the right
             inner.columnconfigure(0, weight=1)
-            for c in range(1, 7):
+            for c in range(1, 8):
                 inner.columnconfigure(c, weight=0)
 
             if not subs:
@@ -4804,7 +4808,7 @@ class VideoConverterApp:
                           "Use  ➕ Add Subtitle File  below,\n"
                           "or drag .srt / .ass / .vtt files onto the file queue.",
                           foreground='gray', justify='center').grid(row=0, column=0,
-                          columnspan=6, padx=40, pady=30)
+                          columnspan=8, padx=40, pady=30)
                 return
 
             # ── Column headers ──
@@ -4814,13 +4818,14 @@ class VideoConverterApp:
             ttk.Label(inner, text="Language",   font=hdr_font, anchor='w').grid(row=0, column=1, sticky='e', **pad)
             ttk.Label(inner, text="Mode",       font=hdr_font, anchor='w').grid(row=0, column=2, sticky='e', **pad)
             ttk.Label(inner, text="Default",    font=hdr_font, anchor='center').grid(row=0, column=3, sticky='e', **pad)
-            ttk.Label(inner, text="Forced",     font=hdr_font, anchor='center').grid(row=0, column=4, sticky='e', **pad)
-            ttk.Label(inner, text="",           font=hdr_font).grid(row=0, column=5, **pad)
+            ttk.Label(inner, text="SDH",        font=hdr_font, anchor='center').grid(row=0, column=4, sticky='e', **pad)
+            ttk.Label(inner, text="Forced",     font=hdr_font, anchor='center').grid(row=0, column=5, sticky='e', **pad)
             ttk.Label(inner, text="",           font=hdr_font).grid(row=0, column=6, **pad)
+            ttk.Label(inner, text="",           font=hdr_font).grid(row=0, column=7, **pad)
 
             # Separator under headers
             ttk.Separator(inner, orient='horizontal').grid(
-                row=1, column=0, columnspan=7, sticky='ew', pady=(0, 4))
+                row=1, column=0, columnspan=8, sticky='ew', pady=(0, 4))
 
             # ── Subtitle rows ──
             for i, sub in enumerate(subs):
@@ -4865,9 +4870,16 @@ class VideoConverterApp:
                     subs[idx]['default'] = var.get()
                 def_var.trace_add('write', lambda *a, idx=i, var=def_var: _on_default(idx, var))
 
+                # SDH checkbox
+                sdh_var = tk.BooleanVar(value=sub.get('sdh', False))
+                ttk.Checkbutton(inner, variable=sdh_var).grid(row=r, column=4, sticky='e', **rpad)
+                def _on_sdh(idx=i, var=sdh_var):
+                    subs[idx]['sdh'] = var.get()
+                sdh_var.trace_add('write', lambda *a, idx=i, var=sdh_var: _on_sdh(idx, var))
+
                 # Forced checkbox
                 forced_var = tk.BooleanVar(value=sub.get('forced', False))
-                ttk.Checkbutton(inner, variable=forced_var).grid(row=r, column=4, sticky='e', **rpad)
+                ttk.Checkbutton(inner, variable=forced_var).grid(row=r, column=5, sticky='e', **rpad)
                 def _on_forced(idx=i, var=forced_var):
                     subs[idx]['forced'] = var.get()
                 forced_var.trace_add('write', lambda *a, idx=i, var=forced_var: _on_forced(idx, var))
@@ -4882,11 +4894,11 @@ class VideoConverterApp:
                                    self.show_subtitle_editor(file_info['path'], None, file_info,
                                                              external_sub_path=s['path']),
                                    dlg.grab_set() if dlg.winfo_exists() else None
-                               )).grid(row=r, column=5, sticky='e', **rpad)
+                               )).grid(row=r, column=6, sticky='e', **rpad)
 
                 # Remove button
                 ttk.Button(inner, text="✖", width=3,
-                           command=lambda idx=i: _remove_sub(idx)).grid(row=r, column=6, sticky='e', **rpad)
+                           command=lambda idx=i: _remove_sub(idx)).grid(row=r, column=7, sticky='e', **rpad)
 
             _update_warning()
 
@@ -4964,6 +4976,7 @@ class VideoConverterApp:
                     'mode': 'embed',
                     'format': SUBTITLE_EXT_TO_CODEC.get(ext, 'srt'),
                     'default': is_plain and not existing_has_default,
+                    'sdh': is_sdh,
                     'forced': is_forced,
                 }
                 subs.append(sub_info)
@@ -5599,7 +5612,6 @@ class VideoConverterApp:
         editor = tk.Toplevel(self.root)
         editor.title("Subtitle Editor")
         editor.geometry("950x650")
-        editor.transient(self.root)
         editor.minsize(700, 500)
         editor.resizable(True, True)
         self._center_on_main(editor)
@@ -5750,6 +5762,8 @@ class VideoConverterApp:
             content_frame.pack(fill='both', expand=True)
             _set_menus_state('normal')
             refresh_tree(cues)
+            # Scroll to top for newly loaded file
+            tree.yview_moveto(0)
             return True
 
         def load_video_subtitle(video_path):
@@ -7482,7 +7496,7 @@ class VideoConverterApp:
                         return candidate
                 for ext in VIDEO_EXTENSIONS:
                     for fp in Path(sub_dir).glob(f'*{ext}'):
-                        if fp.is_file():
+                        if fp.is_file() and not fp.name.startswith('.'):
                             return str(fp)
             return vpath
 
@@ -8553,7 +8567,6 @@ class VideoConverterApp:
         win = tk.Toplevel(self.root)
         win.title("🔧 Media Processor")
         win.geometry("880x780")
-        win.transient(self.root)
         win.minsize(750, 600)
         self._center_on_main(win)
 
@@ -8625,7 +8638,7 @@ class VideoConverterApp:
             count = 0
             for ext in VIDEO_EXTENSIONS:
                 for fp in Path(folder).glob(f'*{ext}'):
-                    if fp.is_file():
+                    if fp.is_file() and not fp.name.startswith('.'):
                         _add_one_file(str(fp))
                         count += 1
             _rebuild_tree()
@@ -9593,7 +9606,7 @@ class VideoConverterApp:
                     elif os.path.isdir(p):
                         for ext in VIDEO_EXTENSIONS:
                             for fp in Path(p).glob(f'*{ext}'):
-                                if fp.is_file():
+                                if fp.is_file() and not fp.name.startswith('.'):
                                     _add_one_file(str(fp))
                                     added += 1
                 if added:
@@ -9627,7 +9640,6 @@ class VideoConverterApp:
         win = tk.Toplevel(self.root)
         win.title("📺 TV Show Renamer")
         win.geometry("960x650")
-        win.transient(self.root)
         win.minsize(800, 550)
         win.resizable(True, True)
         self._center_on_main(win)
@@ -9862,6 +9874,7 @@ class VideoConverterApp:
                         'seasonNumber': ep.get('season_number', sn),
                         'number': ep.get('episode_number'),
                         'name': ep.get('name', ''),
+                        'aired': ep.get('air_date', ''),
                         'year': (ep.get('air_date', '')[:4]
                                  if ep.get('air_date') else ''),
                     })
@@ -9899,8 +9912,9 @@ class VideoConverterApp:
         # ── Episode number parser ──
         def _parse_episode_info(filename):
             """Extract season and episode numbers from a filename.
-            Returns (season, episode) for single-episode files, or
-            (season, [ep1, ep2, ...]) for multi-episode files."""
+            Returns (season, episode) for single-episode files,
+            (season, [ep1, ep2, ...]) for multi-episode files,
+            or ('date', 'YYYY-MM-DD') for date-based episodes."""
             name = os.path.basename(filename)
             # S01E01E02, S01E01-E03, S01E01E02E03 (multi-episode)
             m = re.search(r'[Ss](\d{1,2})\s*[Ee](\d{1,3})(?:\s*-?\s*[Ee](\d{1,3}))+', name)
@@ -9926,6 +9940,10 @@ class VideoConverterApp:
             m = re.search(r'[Ss]eason\s*(\d+).*?[Ee]pisode\s*(\d+)', name)
             if m:
                 return int(m.group(1)), int(m.group(2))
+            # Date-based: 2026.04.22, 2026-04-22, 2026 04 22
+            m = re.search(r'((?:19|20)\d{2})[.\-\s](0[1-9]|1[0-2])[.\-\s](0[1-9]|[12]\d|3[01])', name)
+            if m:
+                return 'date', f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
             # E01 or Ep01 (season assumed from folder or default 1)
             m = re.search(r'[Ee](?:p|pisode)?\s*(\d{1,3})', name)
             if m:
@@ -9934,8 +9952,8 @@ class VideoConverterApp:
 
         def _sanitize_filename(name):
             """Remove characters not allowed in filenames."""
-            # Replace : with - (common in episode titles), strip others
-            name = name.replace(':', ' -').replace('/', '-').replace('\\', '-')
+            # Replace : with space (common in episode titles), strip others
+            name = name.replace(':', ' ').replace('/', '-').replace('\\', '-')
             name = re.sub(r'[<>"|?*]', '', name)
             # Collapse multiple spaces
             name = re.sub(r'\s+', ' ', name).strip()
@@ -10111,6 +10129,30 @@ class VideoConverterApp:
                     sub_tags = _detect_sub_tags(item['path'])
                 return _sanitize_filename(name) + sub_tags + ext
 
+            # ── Date-based episode mode ──
+            air_date = item.get('air_date')
+            if air_date:
+                ep_data = show_data.get(('date', air_date))
+                if ep_data:
+                    title = ep_data.get('name', '')
+                    s = ep_data.get('seasonNumber', 1)
+                    e = ep_data.get('number', 0)
+                    name = template.format(
+                        show=show_name,
+                        season=str(s).zfill(2),
+                        episode=str(e).zfill(2),
+                        title=title,
+                        year=ep_data.get('year', air_date[:4]),
+                    )
+                else:
+                    # No episode data found — use date as title
+                    name = f"{show_name} - {air_date}"
+                ext = item['ext']
+                sub_tags = ''
+                if ext in SUBTITLE_EXTENSIONS:
+                    sub_tags = _detect_sub_tags(item['path'])
+                return _sanitize_filename(name) + sub_tags + ext
+
             # ── TV series mode — need season/episode ──
             s = item.get('season')
             e = item.get('episode')
@@ -10217,6 +10259,8 @@ class VideoConverterApp:
             # Truncate at episode markers (including multi-episode S01E01E02)
             name = re.sub(r'\s*[Ss]\d{1,2}\s*[Ee]\d.*', '', name)
             name = re.sub(r'\s*\d{1,2}[xX]\d.*', '', name)
+            # Truncate at date-based episode markers (2026 04 22)
+            name = re.sub(r'\s*(?:19|20)\d{2}\s+(?:0[1-9]|1[0-2])\s+(?:0[1-9]|[12]\d|3[01]).*', '', name)
             # Truncate at quality/resolution tags
             name = re.sub(r'\s*(?:720|1080|2160|480)[pPiI].*', '', name)
             # Truncate at common release tags
@@ -10542,6 +10586,10 @@ class VideoConverterApp:
                 if s is not None and e is not None:
                     show_eps[(s, e)] = ep
                     seasons.add(s)
+                # Also index by air date for date-based episodes
+                aired = ep.get('aired') or ep.get('air_date') or ''
+                if aired and len(aired) >= 10:
+                    show_eps[('date', aired[:10])] = ep
 
             _all_shows[show_name] = show_eps
             real_seasons = {s for s in seasons if s > 0} or seasons
@@ -10710,7 +10758,8 @@ class VideoConverterApp:
                 is_movie = (isinstance(_all_shows.get(matched), dict)
                             and _all_shows.get(matched, {}).get('_is_movie'))
                 has_ep = (s is not None and e is not None)
-                if matched and (is_movie or has_ep):
+                has_date = item.get('air_date') is not None
+                if matched and (is_movie or has_ep or has_date):
                     try:
                         new_name = _build_new_name(item, template, matched) or ''
                     except (KeyError, ValueError):
@@ -10830,17 +10879,25 @@ class VideoConverterApp:
                             ext = os.path.splitext(f)[1].lower()
                             if ext in _RENAME_EXTENSIONS:
                                 s, e = _parse_episode_info(f)
-                                _file_items.append({
-                                    'path': fp, 'season': s,
-                                    'episode': e, 'ext': ext})
+                                item = {'path': fp, 'season': s,
+                                        'episode': e, 'ext': ext}
+                                if s == 'date':
+                                    item['air_date'] = e
+                                    item['season'] = None
+                                    item['episode'] = None
+                                _file_items.append(item)
                                 added += 1
                 elif os.path.isfile(p):
                     ext = os.path.splitext(p)[1].lower()
                     if ext in _RENAME_EXTENSIONS:
                         s, e = _parse_episode_info(p)
-                        _file_items.append({
-                            'path': p, 'season': s,
-                            'episode': e, 'ext': ext})
+                        item = {'path': p, 'season': s,
+                                'episode': e, 'ext': ext}
+                        if s == 'date':
+                            item['air_date'] = e
+                            item['season'] = None
+                            item['episode'] = None
+                        _file_items.append(item)
                         added += 1
             _v = sum(1 for i in _file_items if i['ext'] in VIDEO_EXTENSIONS)
             _s = sum(1 for i in _file_items if i['ext'] in SUBTITLE_EXTENSIONS)
@@ -14649,6 +14706,8 @@ class VideoConverterApp:
             path = Path(path_str.strip())
             if path.is_dir():
                 for filepath in sorted(path.rglob('*')):
+                    if any(part.startswith('.') for part in filepath.relative_to(path).parts):
+                        continue
                     if filepath.is_file():
                         if filepath.suffix.lower() in VIDEO_EXTENSIONS:
                             video_paths.append(filepath)
@@ -14806,6 +14865,7 @@ class VideoConverterApp:
             'mode': 'embed',        # 'embed' or 'burn_in'
             'format': SUBTITLE_EXT_TO_CODEC.get(ext, 'srt'),
             'default': is_plain and not existing_has_default,
+            'sdh': is_sdh,
             'forced': is_forced,
         }
 
@@ -14884,9 +14944,9 @@ class VideoConverterApp:
         dlg = tk.Toplevel(self.root)
         dlg.title("Default Settings")
         dlg.geometry("640x320")
-        dlg.transient(self.root)
         dlg.grab_set()
-        dlg.resizable(False, False)
+        dlg.resizable(True, True)
+        dlg.minsize(640, 320)
         self._center_on_main(dlg)
 
         # Load existing prefs for pre-fill
@@ -15637,6 +15697,8 @@ class VideoConverterApp:
         try:
             found = []
             for filepath in sorted(Path(self.working_dir).rglob('*')):
+                if any(part.startswith('.') for part in filepath.relative_to(self.working_dir).parts):
+                    continue
                 if filepath.is_file():
                     ext = filepath.suffix.lower()
                     if ext in VIDEO_EXTENSIONS:
@@ -15713,6 +15775,8 @@ class VideoConverterApp:
         try:
             sub_files = []
             for filepath in sorted(Path(self.working_dir).rglob('*')):
+                if any(part.startswith('.') for part in filepath.relative_to(self.working_dir).parts):
+                    continue
                 if filepath.is_file() and filepath.suffix.lower() in SUBTITLE_EXTENSIONS:
                     sub_files.append(filepath)
         except Exception:
@@ -17169,6 +17233,14 @@ def main():
 
     # Hide window until fully built and positioned — prevents flicker/wrong-monitor flash
     root.withdraw()
+
+    # Hide dotfiles in Tk file dialogs by default
+    try:
+        root.tk.call('catch', 'tk_getOpenFile foo bar')
+        root.tk.call('set', '::tk::dialog::file::showHiddenVar', '0')
+        root.tk.call('set', '::tk::dialog::file::showHiddenBtn', '1')
+    except Exception:
+        pass
 
     # Set theme
     try:

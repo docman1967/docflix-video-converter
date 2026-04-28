@@ -214,7 +214,7 @@ def filter_remove_hi(cues):
         re.compile(r'\(.*?\)', re.DOTALL),
     ]
     speaker_pattern = re.compile(
-        r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}:\s*\n?', re.MULTILINE)
+        r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}[A-Za-z]:\s*\n?', re.MULTILINE)
     caps_hi_label = re.compile(
         r'^(-?\s*)(?:[A-Z]{4,}|[A-Z][A-Z\-]*-[A-Z\-]*)'
         r'(?:\s+(?:[A-Z]{4,}|[A-Z][A-Z\-]*-[A-Z\-]*))*:\s*',
@@ -242,7 +242,7 @@ def filter_remove_hi(cues):
         lines = [line for line in lines if not caps_hi_checker(line)]
         text = '\n'.join(lines)
         text = re.sub(
-            r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}\s+:\s*', r'\1',
+            r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}[A-Za-z]\s+:\s*', r'\1',
             text, flags=re.MULTILINE)
         text = re.sub(r'^\s*:\s*', '', text, flags=re.MULTILINE)
         text = re.sub(r'\n\s*:\s*', '\n', text)
@@ -604,7 +604,7 @@ def filter_remove_speaker_labels(cues):
     Examples kept: '2:30', 'Wait: what?'
     """
     pattern = re.compile(
-        r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}:\s*\n?',
+        r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}[A-Za-z]:\s*\n?',
         re.MULTILINE)
 
     result = []

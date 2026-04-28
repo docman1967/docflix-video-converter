@@ -57,8 +57,6 @@ def open_standalone_subtitle_editor(app):
         editor = tk.Toplevel(app.root)
         editor.title("Subtitle Editor")
         editor.geometry("950x650")
-        if not getattr(app, '_standalone_mode', False):
-            editor.transient(app.root)
         editor.minsize(700, 500)
         editor.resizable(True, True)
         app._center_on_main(editor)
@@ -209,6 +207,8 @@ def open_standalone_subtitle_editor(app):
             content_frame.pack(fill='both', expand=True)
             _set_menus_state('normal')
             refresh_tree(cues)
+            # Scroll to top for newly loaded file
+            tree.yview_moveto(0)
             return True
 
         def load_video_subtitle(video_path):
@@ -1997,7 +1997,7 @@ def open_standalone_subtitle_editor(app):
                         return candidate
                 for ext in VIDEO_EXTENSIONS:
                     for fp in Path(sub_dir).glob(f'*{ext}'):
-                        if fp.is_file():
+                        if fp.is_file() and not fp.name.startswith('.'):
                             return str(fp)
             return vpath
 
