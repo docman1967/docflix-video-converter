@@ -2,10 +2,10 @@
 Docflix Video Converter — Package Entry Point
 
 Allows running the app via:
-    python -m video_converter           # Full app
-    python -m video_converter --subs    # Subtitle Editor only (future)
-    python -m video_converter --rename  # TV Show Renamer only (future)
-    python -m video_converter --media   # Media Processor only (future)
+    python -m modules           # Full app
+    python -m modules --subs    # Subtitle Editor only (future)
+    python -m modules --rename  # TV Show Renamer only (future)
+    python -m modules --media   # Media Processor only (future)
 """
 
 import sys

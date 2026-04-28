@@ -144,8 +144,8 @@ for f in "${APP_FILES[@]}"; do
         missing=1
     fi
 done
-if [[ ! -d "$SCRIPT_DIR/video_converter" ]] || [[ ! -f "$SCRIPT_DIR/video_converter/__init__.py" ]]; then
-    error "Missing video_converter/ package directory"
+if [[ ! -d "$SCRIPT_DIR/modules" ]] || [[ ! -f "$SCRIPT_DIR/modules/__init__.py" ]]; then
+    error "Missing modules/ package directory"
     missing=1
 fi
 if [[ $missing -eq 1 ]]; then
@@ -261,15 +261,15 @@ for f in "${APP_FILES[@]}"; do
     success "Copied $f"
 done
 
-# Copy the video_converter package directory
-if [[ -d "$SCRIPT_DIR/video_converter" ]]; then
+# Copy the modules package directory
+if [[ -d "$SCRIPT_DIR/modules" ]]; then
     # Remove old package copy first (clean update)
-    rm -rf "$INSTALL_DIR/video_converter"
-    cp -r "$SCRIPT_DIR/video_converter" "$INSTALL_DIR/video_converter"
+    rm -rf "$INSTALL_DIR/modules"
+    cp -r "$SCRIPT_DIR/modules" "$INSTALL_DIR/modules"
     # Remove __pycache__ from installed copy
-    find "$INSTALL_DIR/video_converter" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-    PKG_COUNT=$(find "$INSTALL_DIR/video_converter" -name '*.py' | wc -l)
-    success "Copied video_converter/ package ($PKG_COUNT modules)"
+    find "$INSTALL_DIR/modules" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+    PKG_COUNT=$(find "$INSTALL_DIR/modules" -name '*.py' | wc -l)
+    success "Copied modules/ package ($PKG_COUNT modules)"
 fi
 
 # Ensure scripts are executable
@@ -354,7 +354,7 @@ for entry in "${TOOL_CMDS[@]}"; do
     cat > "$cmd_path" <<EOF
 #!/usr/bin/env bash
 cd "$INSTALL_DIR"
-exec python3 -c "from video_converter.$module_name import main; main()" "\$@"
+exec python3 -c "from modules.$module_name import main; main()" "\$@"
 EOF
     chmod +x "$cmd_path"
     success "Tool command created: $cmd_path"
