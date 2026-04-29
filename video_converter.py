@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "2.0.6"
+APP_VERSION = "2.0.7"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -15700,19 +15700,21 @@ class VideoConverterApp:
         self._center_on_main(dlg)
 
     def show_user_manual(self):
-        """Open the user manual in the default web browser."""
-        import webbrowser
-        # Look for the manual in several locations
-        candidates = [
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'docs', 'user_manual.html'),
-            os.path.expanduser('~/.local/share/docflix/docs/user_manual.html'),
-        ]
-        for path in candidates:
-            if os.path.isfile(path):
-                webbrowser.open(f'file://{path}')
-                return
-        messagebox.showinfo("User Manual", "User manual not found.\n\n"
-                            "Expected at: docs/user_manual.html")
+        """Open the built-in user manual viewer."""
+        try:
+            from modules.manual_viewer import show_manual
+            show_manual(self)
+        except ImportError:
+            import importlib.util
+            _mv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     'modules', 'manual_viewer.py')
+            if os.path.exists(_mv_path):
+                spec = importlib.util.spec_from_file_location('manual_viewer', _mv_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                mod.show_manual(self)
+            else:
+                messagebox.showinfo("User Manual", "Manual viewer not found.")
 
     def show_about(self):
         """Show About dialog."""

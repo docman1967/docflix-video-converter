@@ -23,6 +23,7 @@ Package structure:
     preferences.py    — Preferences management (future)
     media_info.py     — Enhanced media details dialog
     chapters.py       — Chapter generation, parsing, FFMETADATA writing
+    manual_viewer.py  — Built-in user manual viewer
 """
 
 from .constants import APP_NAME, APP_VERSION
