@@ -15891,6 +15891,10 @@ class VideoConverterApp:
         if initialdir:
             initialdir = str(initialdir)
         if shutil.which('zenity'):
+            env = os.environ.copy()
+            env['GTK_USE_PORTAL'] = '0'
+            env['GDK_BACKEND'] = 'x11'
+            env['NO_AT_BRIDGE'] = '1'
             try:
                 cmd = [
                     'zenity', '--file-selection', '--directory',
@@ -15899,7 +15903,8 @@ class VideoConverterApp:
                 if initialdir:
                     cmd += ['--filename', initialdir + '/']
                 result = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=120
+                    cmd, capture_output=True, text=True, timeout=120,
+                    env=env
                 )
                 if result.returncode == 0 and result.stdout.strip():
                     return result.stdout.strip()

@@ -229,6 +229,28 @@ def create_tooltip(widget, text):
     widget.bind('<Leave>', _hide, add='+')
 
 
+def _run_zenity(cmd, timeout=120):
+    """Run a zenity command with optimized GTK startup.
+
+    Sets environment variables to reduce GTK initialization overhead:
+    - GTK_USE_PORTAL=0: bypass xdg-desktop-portal (slow D-Bus roundtrip)
+    - GDK_BACKEND=x11: skip Wayland detection on X11 systems
+    - NO_AT_BRIDGE=1: skip accessibility bridge (AT-SPI) startup
+
+    Returns (returncode, stdout) tuple.
+    """
+    env = os.environ.copy()
+    env['GTK_USE_PORTAL'] = '0'
+    env['GDK_BACKEND'] = 'x11'
+    env['NO_AT_BRIDGE'] = '1'
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=timeout, env=env)
+        return result.returncode, result.stdout
+    except Exception:
+        return 1, ''
+
+
 def ask_directory(initialdir=None, title="Select Folder", parent=None):
     """Open a folder-selection dialog.
 
@@ -238,20 +260,16 @@ def ask_directory(initialdir=None, title="Select Folder", parent=None):
     if initialdir:
         initialdir = str(initialdir)
     if shutil.which('zenity'):
-        try:
-            cmd = [
-                'zenity', '--file-selection', '--directory',
-                '--title', title,
-            ]
-            if initialdir:
-                cmd += ['--filename', initialdir + '/']
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120)
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
-            return ''
-        except Exception:
-            pass
+        cmd = [
+            'zenity', '--file-selection', '--directory',
+            '--title', title,
+        ]
+        if initialdir:
+            cmd += ['--filename', initialdir + '/']
+        rc, stdout = _run_zenity(cmd)
+        if rc == 0 and stdout.strip():
+            return stdout.strip()
+        return ''
     kwargs = {'initialdir': initialdir, 'title': title}
     if parent:
         kwargs['parent'] = parent
@@ -270,28 +288,23 @@ def ask_open_files(initialdir=None, title="Select Files", parent=None,
     if initialdir:
         initialdir = str(initialdir)
     if shutil.which('zenity'):
-        try:
-            cmd = [
-                'zenity', '--file-selection', '--multiple',
-                '--separator', '\n',
-                '--title', title,
-            ]
-            if initialdir:
-                cmd += ['--filename', initialdir + '/']
-            # Add file filter if provided
-            if filetypes:
-                for label, pattern in filetypes:
-                    if pattern and pattern != '*.*':
-                        cmd += ['--file-filter',
-                                f'{label} | {pattern.replace(" ", " ")}']
-                cmd += ['--file-filter', 'All files | *']
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120)
-            if result.returncode == 0 and result.stdout.strip():
-                return [p for p in result.stdout.strip().split('\n') if p]
-            return []
-        except Exception:
-            pass
+        cmd = [
+            'zenity', '--file-selection', '--multiple',
+            '--separator', '\n',
+            '--title', title,
+        ]
+        if initialdir:
+            cmd += ['--filename', initialdir + '/']
+        if filetypes:
+            for label, pattern in filetypes:
+                if pattern and pattern != '*.*':
+                    cmd += ['--file-filter',
+                            f'{label} | {pattern.replace(" ", " ")}']
+            cmd += ['--file-filter', 'All files | *']
+        rc, stdout = _run_zenity(cmd)
+        if rc == 0 and stdout.strip():
+            return [p for p in stdout.strip().split('\n') if p]
+        return []
     # Fallback to tkinter
     kwargs = {'initialdir': initialdir, 'title': title}
     if parent:
@@ -312,26 +325,22 @@ def ask_open_file(initialdir=None, title="Select File", parent=None,
     if initialdir:
         initialdir = str(initialdir)
     if shutil.which('zenity'):
-        try:
-            cmd = [
-                'zenity', '--file-selection',
-                '--title', title,
-            ]
-            if initialdir:
-                cmd += ['--filename', initialdir + '/']
-            if filetypes:
-                for label, pattern in filetypes:
-                    if pattern and pattern != '*.*':
-                        cmd += ['--file-filter',
-                                f'{label} | {pattern.replace(" ", " ")}']
-                cmd += ['--file-filter', 'All files | *']
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120)
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
-            return ''
-        except Exception:
-            pass
+        cmd = [
+            'zenity', '--file-selection',
+            '--title', title,
+        ]
+        if initialdir:
+            cmd += ['--filename', initialdir + '/']
+        if filetypes:
+            for label, pattern in filetypes:
+                if pattern and pattern != '*.*':
+                    cmd += ['--file-filter',
+                            f'{label} | {pattern.replace(" ", " ")}']
+            cmd += ['--file-filter', 'All files | *']
+        rc, stdout = _run_zenity(cmd)
+        if rc == 0 and stdout.strip():
+            return stdout.strip()
+        return ''
     kwargs = {'initialdir': initialdir, 'title': title}
     if parent:
         kwargs['parent'] = parent
@@ -351,34 +360,30 @@ def ask_save_file(initialdir=None, initialfile=None, title="Save As",
     if initialdir:
         initialdir = str(initialdir)
     if shutil.which('zenity'):
-        try:
-            cmd = [
-                'zenity', '--file-selection', '--save',
-                '--confirm-overwrite',
-                '--title', title,
-            ]
-            if initialdir and initialfile:
-                cmd += ['--filename', os.path.join(initialdir, initialfile)]
-            elif initialdir:
-                cmd += ['--filename', initialdir + '/']
-            elif initialfile:
-                cmd += ['--filename', initialfile]
-            if filetypes:
-                for label, pattern in filetypes:
-                    if pattern and pattern != '*.*':
-                        cmd += ['--file-filter',
-                                f'{label} | {pattern.replace(" ", " ")}']
-                cmd += ['--file-filter', 'All files | *']
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120)
-            if result.returncode == 0 and result.stdout.strip():
-                path = result.stdout.strip()
-                if defaultextension and not os.path.splitext(path)[1]:
-                    path += defaultextension
-                return path
-            return ''
-        except Exception:
-            pass
+        cmd = [
+            'zenity', '--file-selection', '--save',
+            '--confirm-overwrite',
+            '--title', title,
+        ]
+        if initialdir and initialfile:
+            cmd += ['--filename', os.path.join(initialdir, initialfile)]
+        elif initialdir:
+            cmd += ['--filename', initialdir + '/']
+        elif initialfile:
+            cmd += ['--filename', initialfile]
+        if filetypes:
+            for label, pattern in filetypes:
+                if pattern and pattern != '*.*':
+                    cmd += ['--file-filter',
+                            f'{label} | {pattern.replace(" ", " ")}']
+            cmd += ['--file-filter', 'All files | *']
+        rc, stdout = _run_zenity(cmd)
+        if rc == 0 and stdout.strip():
+            path = stdout.strip()
+            if defaultextension and not os.path.splitext(path)[1]:
+                path += defaultextension
+            return path
+        return ''
     kwargs = {'initialdir': initialdir, 'title': title}
     if parent:
         kwargs['parent'] = parent
