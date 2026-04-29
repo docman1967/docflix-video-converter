@@ -576,8 +576,9 @@ def show_manual(app):
                        spacing1=1, spacing3=1)
     text.tag_configure('sep', foreground=border)
 
-    # ── Section anchor indices for navigation ──
-    section_indices = {}  # title -> text index string (e.g. "42.0")
+    # ── Section navigation tags ──
+    # Each section's first character gets a unique tag so we can navigate to it
+    section_tags = {}  # title -> tag name
 
     def _render_all():
         """Render all sections into the text widget."""
@@ -588,10 +589,13 @@ def show_manual(app):
         text.insert('end', 'Docflix Video Converter\n', 'h2')
         text.insert('end', 'User Manual \u2014 Version 2.0.7\n\n', 'p')
 
-        for section_title, lines in MANUAL_SECTIONS:
-            # Record the index where this section starts
-            section_indices[section_title] = text.index('end-1c')
+        for sect_idx, (section_title, lines) in enumerate(MANUAL_SECTIONS):
+            # Create a unique tag for this section's anchor
+            anchor_tag = f'_nav_{sect_idx}'
+            text.tag_configure(anchor_tag)
+            section_tags[section_title] = anchor_tag
 
+            first_line = True
             for tag, content in lines:
                 if tag == 'bullet':
                     text.insert('end', f'  \u2022 {content}\n', 'bullet')
@@ -614,7 +618,12 @@ def show_manual(app):
                 elif tag == 'code':
                     text.insert('end', f'  {content}\n', 'code')
                 elif content:
-                    text.insert('end', content + '\n', tag)
+                    if first_line:
+                        # Tag the first line with both the display tag and the nav anchor
+                        text.insert('end', content + '\n', (tag, anchor_tag))
+                        first_line = False
+                    else:
+                        text.insert('end', content + '\n', tag)
                 else:
                     text.insert('end', '\n', 'p')
 
@@ -629,14 +638,18 @@ def show_manual(app):
         if not sel:
             return
         title = MANUAL_SECTIONS[sel[0]][0]
-        idx = section_indices.get(title)
-        if idx:
-            # Use the raw Tk yview command with a text index —
-            # this scrolls the given index to the top of the window
-            text.tk.call(text._w, 'yview', idx)
+        anchor_tag = section_tags.get(title)
+        if anchor_tag:
+            # Get the range of the anchor tag — first char is the section start
+            ranges = text.tag_ranges(anchor_tag)
+            if ranges:
+                target = str(ranges[0])
+                # Scroll to bottom first, then to target — forces target to top
+                text.yview_moveto(1.0)
+                text.update_idletasks()
+                text.see(target)
 
     sidebar_list.bind('<<ListboxSelect>>', _on_sidebar_select)
-    # Also bind single-click directly in case <<ListboxSelect>> is unreliable
     sidebar_list.bind('<ButtonRelease-1>', _on_sidebar_select)
 
     # Render content
