@@ -8792,6 +8792,11 @@ class VideoConverterApp:
         except Exception:
             _cpu_count = 4
         opt_max_jobs       = tk.IntVar(value=_mp.get('max_jobs', min(_cpu_count, 8)))
+        opt_edition_tag    = tk.StringVar(value=_mp.get('edition_tag', ''))
+        opt_edition_fn     = tk.BooleanVar(value=_mp.get('edition_in_filename', False))
+        _edition_custom_sv = tk.StringVar(value='')
+        opt_add_chapters   = tk.BooleanVar(value=_mp.get('add_chapters', False))
+        opt_ch_interval    = tk.IntVar(value=_mp.get('chapter_interval', 5))
 
         # ── Layout ──
         main_frame = ttk.Frame(win, padding=10)
@@ -9287,6 +9292,58 @@ class VideoConverterApp:
         _toggle_meta_fields()
         _toggle_audio_controls()
 
+        # Row 3b: Edition tagging
+        ops_row3b = ttk.Frame(ops_frame)
+        ops_row3b.pack(fill='x', pady=2)
+
+        ttk.Label(ops_row3b, text="Edition:").pack(side='left', padx=(0, 2))
+        mp_edition_combo = ttk.Combobox(ops_row3b, textvariable=opt_edition_tag,
+                                         values=EDITION_PRESETS, width=22, state='readonly')
+        mp_edition_combo.pack(side='left', padx=(0, 4))
+
+        mp_edition_custom = ttk.Entry(ops_row3b, textvariable=_edition_custom_sv, width=22)
+
+        if opt_edition_tag.get() and opt_edition_tag.get() not in EDITION_PRESETS:
+            _edition_custom_sv.set(opt_edition_tag.get())
+            mp_edition_combo.set('Custom...')
+            mp_edition_custom.pack(side='left', padx=(0, 4))
+
+        def _on_mp_edition_select(event=None):
+            sel = mp_edition_combo.get()
+            if sel == 'Custom...':
+                mp_edition_custom.pack(side='left', padx=(0, 4))
+                mp_edition_custom.focus()
+            else:
+                mp_edition_custom.pack_forget()
+                opt_edition_tag.set(sel)
+        mp_edition_combo.bind('<<ComboboxSelected>>', _on_mp_edition_select)
+
+        def _on_mp_edition_custom(*args):
+            if mp_edition_combo.get() == 'Custom...':
+                opt_edition_tag.set(_edition_custom_sv.get())
+        _edition_custom_sv.trace_add('write', _on_mp_edition_custom)
+
+        ttk.Checkbutton(ops_row3b, text="Add to filename (Plex)",
+                        variable=opt_edition_fn).pack(side='left', padx=(8, 0))
+
+        # Row 3c: Chapter insertion
+        ops_row3c = ttk.Frame(ops_frame)
+        ops_row3c.pack(fill='x', pady=2)
+
+        def _toggle_ch_spin():
+            mp_ch_spin.configure(state='normal' if opt_add_chapters.get() else 'disabled')
+            if opt_add_chapters.get():
+                opt_strip_chapters.set(False)
+
+        ttk.Checkbutton(ops_row3c, text="Add chapters every",
+                        variable=opt_add_chapters,
+                        command=_toggle_ch_spin).pack(side='left', padx=(0, 2))
+        mp_ch_spin = tk.Spinbox(ops_row3c, textvariable=opt_ch_interval,
+                                from_=1, to=60, width=3, state='disabled')
+        mp_ch_spin.pack(side='left', padx=(0, 2))
+        ttk.Label(ops_row3c, text="minutes").pack(side='left')
+        _toggle_ch_spin()
+
         # Row 4: Output + parallel + container
         ops_row4 = ttk.Frame(ops_frame)
         ops_row4.pack(fill='x', pady=2)
@@ -9444,10 +9501,22 @@ class VideoConverterApp:
             # Determine output container
             out_ext = _ov(f, 'container', opt_container)
 
+            # Edition filename tag for Plex
+            edition_fn_part = ''
+            edition = _ov(f, 'edition_tag', opt_edition_tag)
+            if isinstance(edition, tk.StringVar):
+                edition = edition.get()
+            edition_in_fn = _ov(f, 'edition_in_filename', opt_edition_fn)
+            if isinstance(edition_in_fn, tk.BooleanVar):
+                edition_in_fn = edition_in_fn.get()
+            if edition and edition_in_fn:
+                edition_fn_part = ' {edition-' + edition + '}'
+
             # Determine output path
             if opt_output_mode.get() == 'folder' and opt_output_folder.get():
                 out_dir = opt_output_folder.get()
-                out_name = os.path.join(out_dir, os.path.basename(base) + out_ext)
+                out_name = os.path.join(out_dir,
+                                         os.path.basename(base) + edition_fn_part + out_ext)
             else:
                 # In-place: write to temp, replace on success
                 out_name = f"{base}_mp_tmp{out_ext}"
@@ -9461,6 +9530,35 @@ class VideoConverterApp:
                 for stype, spath in f['ext_subs']:
                     cmd.extend(['-i', spath])
                     sub_inputs.append((stype, spath))
+
+            # Chapter injection
+            ch_meta_path = None
+            ch_input_idx = None
+            do_add_ch = _ov(f, 'add_chapters', opt_add_chapters)
+            if isinstance(do_add_ch, tk.BooleanVar):
+                do_add_ch = do_add_ch.get()
+            if do_add_ch and f.get('duration_secs'):
+                ch_intv = _ov(f, 'chapter_interval', opt_ch_interval)
+                if isinstance(ch_intv, tk.IntVar):
+                    ch_intv = ch_intv.get()
+                try:
+                    from modules.chapters import generate_auto_chapters, chapters_to_ffmetadata
+                except ImportError:
+                    import importlib.util as _ilu
+                    _ch_p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          'modules', 'chapters.py')
+                    _sp = _ilu.spec_from_file_location('chapters', _ch_p)
+                    _md = _ilu.module_from_spec(_sp)
+                    _sp.loader.exec_module(_md)
+                    generate_auto_chapters = _md.generate_auto_chapters
+                    chapters_to_ffmetadata = _md.chapters_to_ffmetadata
+                chs = generate_auto_chapters(f['duration_secs'], ch_intv)
+                if chs:
+                    ch_meta_path = chapters_to_ffmetadata(chs)
+                    if ch_meta_path:
+                        ch_input_idx = 1 + len(sub_inputs)
+                        cmd.extend(['-i', ch_meta_path])
+                        f['_ch_meta_path'] = ch_meta_path
 
             # ── Mapping ──
             cmd.extend(['-map', '0:v:0?', '-map', '0:a?'])
@@ -9548,7 +9646,9 @@ class VideoConverterApp:
                     cmd.extend([f'-disposition:s:{si}', 'forced'])
 
             # ── Chapters ──
-            if _ov(f, 'strip_chapters', opt_strip_chapters):
+            if ch_meta_path:
+                cmd.extend(['-map_chapters', str(ch_input_idx)])
+            elif _ov(f, 'strip_chapters', opt_strip_chapters):
                 cmd.extend(['-map_chapters', '-1'])
 
             # ── Tags ──
@@ -9565,6 +9665,10 @@ class VideoConverterApp:
                 if (not do_strip_subs and f.get('sub_count', 0) > 0) or sub_inputs:
                     if not sub_inputs:
                         cmd.extend([f'-metadata:s:s:0', f'language={s_lang}'])
+
+            # ── Edition tag ──
+            if edition:
+                cmd.extend(['-metadata', f'title={edition}'])
 
             cmd.append(out_name)
             return cmd, out_name
@@ -9641,6 +9745,14 @@ class VideoConverterApp:
                 _log(f"  ❌ Error: {e}", 'ERROR')
                 win.after(0, lambda idx=i: _update_tree_status(idx, '❌ Error'))
                 return ('failed', i)
+            finally:
+                # Clean up chapter metadata temp file
+                ch_tmp = f.pop('_ch_meta_path', None)
+                if ch_tmp:
+                    try:
+                        os.remove(ch_tmp)
+                    except OSError:
+                        pass
 
         # ── Processing thread (orchestrator) ──
         def _process_files():
@@ -9820,6 +9932,10 @@ class VideoConverterApp:
                 'container':      opt_container.get(),
                 'parallel':       opt_parallel.get(),
                 'max_jobs':       opt_max_jobs.get(),
+                'edition_tag':    opt_edition_tag.get(),
+                'edition_in_filename': opt_edition_fn.get(),
+                'add_chapters':   opt_add_chapters.get(),
+                'chapter_interval': opt_ch_interval.get(),
             }
             self._media_proc_prefs = mp_prefs
             try:
