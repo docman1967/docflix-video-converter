@@ -639,15 +639,24 @@ def show_manual(app):
             return
         title = MANUAL_SECTIONS[sel[0]][0]
         anchor_tag = section_tags.get(title)
-        if anchor_tag:
-            # Get the range of the anchor tag — first char is the section start
-            ranges = text.tag_ranges(anchor_tag)
-            if ranges:
-                target = str(ranges[0])
-                # Scroll to bottom first, then to target — forces target to top
-                text.yview_moveto(1.0)
-                text.update_idletasks()
-                text.see(target)
+        if not anchor_tag:
+            return
+        ranges = text.tag_ranges(anchor_tag)
+        if not ranges:
+            return
+        target = str(ranges[0])
+        try:
+            # Use pixel-accurate count for proper fraction with variable line heights
+            px_to_target = text.count('1.0', target, 'ypixels')
+            px_total = text.count('1.0', 'end-1c', 'ypixels')
+            if px_to_target and px_total and px_total[0] > 0:
+                fraction = max(0.0, min(1.0, px_to_target[0] / px_total[0]))
+                text.yview_moveto(fraction)
+                return
+        except (tk.TclError, TypeError, ZeroDivisionError):
+            pass
+        # Fallback: basic see()
+        text.see(target)
 
     sidebar_list.bind('<<ListboxSelect>>', _on_sidebar_select)
     sidebar_list.bind('<ButtonRelease-1>', _on_sidebar_select)
