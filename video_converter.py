@@ -4240,7 +4240,7 @@ class VideoConverterApp:
             ("Video files", " ".join(f"*{e}" for e in sorted(VIDEO_EXTENSIONS))),
             ("All files", "*.*")
         ]
-        paths = filedialog.askopenfilenames(
+        paths = self._ask_open_files(
             title="Select Video File(s)",
             filetypes=filetypes,
             initialdir=self.working_dir
@@ -5080,7 +5080,7 @@ class VideoConverterApp:
         def _add_sub():
             filetypes = [("Subtitle files", " ".join(f"*{ext}" for ext in SUBTITLE_EXTENSIONS)),
                          ("All files", "*.*")]
-            paths = filedialog.askopenfilenames(
+            paths = self._ask_open_files(
                 title="Add External Subtitle File(s)",
                 filetypes=filetypes,
                 initialdir=str(Path(file_info['path']).parent))
@@ -6160,7 +6160,7 @@ class VideoConverterApp:
             editor.after(50, _check_extract)
 
         def do_open_file():
-            path = filedialog.askopenfilename(
+            path = self._ask_open_file(
                 parent=editor,
                 title="Open Subtitle or Video File",
                 filetypes=[
@@ -6348,7 +6348,7 @@ class VideoConverterApp:
             out_dir = str(Path(ref_path).parent) if ref_path else ''
             default_name = (f"{Path(ref_path).stem}.srt"
                             if ref_path else "subtitle.srt")
-            out_path = filedialog.asksaveasfilename(
+            out_path = self._ask_save_file(
                 parent=editor,
                 initialdir=out_dir,
                 initialfile=default_name,
@@ -6378,7 +6378,7 @@ class VideoConverterApp:
             out_dir = str(Path(ref_path).parent) if ref_path else ''
             default_name = (f"{Path(ref_path).stem}.srt"
                             if ref_path else "subtitle.srt")
-            out_path = filedialog.asksaveasfilename(
+            out_path = self._ask_save_file(
                 parent=editor,
                 initialdir=out_dir,
                 initialfile=default_name,
@@ -7288,29 +7288,12 @@ class VideoConverterApp:
             def _qs_browse():
                 init_dir = os.path.dirname(_qs_vpath.get()) if _qs_vpath.get() \
                     else (os.path.dirname(current_path[0]) if current_path[0] else '')
-                p = None
-                if shutil.which('zenity'):
-                    try:
-                        cmd = ['zenity', '--file-selection',
-                               '--title', 'Select Video File',
-                               '--file-filter',
-                               'Video files|*.mkv *.mp4 *.avi *.mov *.ts *.m2ts *.mts *.webm *.wmv *.flv',
-                               '--file-filter', 'All files|*']
-                        if init_dir:
-                            cmd += ['--filename', init_dir + '/']
-                        r = subprocess.run(cmd, capture_output=True,
-                                           text=True, timeout=120)
-                        if r.returncode == 0 and r.stdout.strip():
-                            p = r.stdout.strip()
-                    except Exception:
-                        pass
-                if not p:
-                    p = filedialog.askopenfilename(
-                        parent=qd, title="Select Video File",
-                        initialdir=init_dir or None,
-                        filetypes=[("Video files",
-                                    "*.mkv *.mp4 *.avi *.mov *.ts *.m2ts"),
-                                   ("All files", "*.*")])
+                p = self._ask_open_file(
+                    parent=qd, title="Select Video File",
+                    initialdir=init_dir or None,
+                    filetypes=[("Video files",
+                                "*.mkv *.mp4 *.avi *.mov *.ts *.m2ts"),
+                               ("All files", "*.*")])
                 if p:
                     _qs_vpath.set(p)
                     # Auto-load the video after browse selection
@@ -7746,29 +7729,12 @@ class VideoConverterApp:
                     init_dir = os.path.dirname(vpath_var.get())
                 elif current_path[0]:
                     init_dir = os.path.dirname(current_path[0])
-                # Try zenity first (better sizing), fall back to tkinter
-                p = None
-                if shutil.which('zenity'):
-                    try:
-                        cmd = ['zenity', '--file-selection',
-                               '--title', 'Select Video File',
-                               '--file-filter', 'Video files|*.mkv *.mp4 *.avi *.mov *.ts *.m2ts *.mts *.webm *.wmv *.flv',
-                               '--file-filter', 'All files|*']
-                        if init_dir:
-                            cmd += ['--filename', init_dir + '/']
-                        result = subprocess.run(cmd, capture_output=True,
-                                                text=True, timeout=120)
-                        if result.returncode == 0 and result.stdout.strip():
-                            p = result.stdout.strip()
-                    except Exception:
-                        pass
-                if not p:
-                    p = filedialog.askopenfilename(
-                        parent=sd,
-                        title="Select Video File",
-                        initialdir=init_dir or None,
-                        filetypes=[("Video files", "*.mkv *.mp4 *.avi *.mov *.ts *.m2ts"),
-                                   ("All files", "*.*")])
+                p = self._ask_open_file(
+                    parent=sd,
+                    title="Select Video File",
+                    initialdir=init_dir or None,
+                    filetypes=[("Video files", "*.mkv *.mp4 *.avi *.mov *.ts *.m2ts"),
+                               ("All files", "*.*")])
                 if p:
                     vpath_var.set(p)
             ttk.Button(f, text="Browse...", command=_browse_vid).grid(row=0, column=2, **_sp)
@@ -8816,7 +8782,7 @@ class VideoConverterApp:
         toolbar.grid(row=0, column=0, sticky='ew', pady=(0, 6))
 
         def _add_files():
-            paths = filedialog.askopenfilenames(
+            paths = self._ask_open_files(
                 title="Select Video Files",
                 filetypes=[("Video files", "*.mkv *.mp4 *.avi *.mov *.wmv *.flv *.webm *.ts *.m2ts *.mts"),
                            ("All files", "*.*")])
@@ -9155,7 +9121,7 @@ class VideoConverterApp:
                     sub_list.insert('end', f"[{stype}] {os.path.basename(spath)}")
 
             def _add_sub():
-                paths = filedialog.askopenfilenames(
+                paths = self._ask_open_files(
                     title="Select Subtitle Files",
                     filetypes=[("Subtitle files", "*.srt *.ass *.ssa *.vtt *.sub"),
                                ("All files", "*.*")])
@@ -11494,7 +11460,7 @@ class VideoConverterApp:
         _create_tooltip(clear_btn, "Remove all files from the list")
 
         def _browse_files():
-            paths = filedialog.askopenfilenames(
+            paths = self._ask_open_files(
                 parent=win, title="Select Video Files",
                 filetypes=[("Video files", "*.mkv *.mp4 *.avi *.mov *.ts *.m2ts"),
                            ("All files", "*.*")])
@@ -11502,7 +11468,7 @@ class VideoConverterApp:
                 _add_paths(list(paths))
 
         def _browse_folder():
-            path = filedialog.askdirectory(parent=win, title="Select Folder")
+            path = self._ask_directory(title="Select Folder")
             if path:
                 _add_paths([path])
 
@@ -11807,7 +11773,7 @@ class VideoConverterApp:
                 self.add_log(f"Batch filter: added {added} subtitle file(s)", 'INFO')
 
         def add_files():
-            paths = filedialog.askopenfilenames(
+            paths = self._ask_open_files(
                 parent=win,
                 title="Select Subtitle Files",
                 filetypes=[
@@ -13652,29 +13618,12 @@ class VideoConverterApp:
             def _qs_browse():
                 init_dir = os.path.dirname(_qs_vpath.get()) if _qs_vpath.get() \
                     else (os.path.dirname(current_path[0]) if current_path[0] else '')
-                p = None
-                if shutil.which('zenity'):
-                    try:
-                        cmd = ['zenity', '--file-selection',
-                               '--title', 'Select Video File',
-                               '--file-filter',
-                               'Video files|*.mkv *.mp4 *.avi *.mov *.ts *.m2ts *.mts *.webm *.wmv *.flv',
-                               '--file-filter', 'All files|*']
-                        if init_dir:
-                            cmd += ['--filename', init_dir + '/']
-                        r = subprocess.run(cmd, capture_output=True,
-                                           text=True, timeout=120)
-                        if r.returncode == 0 and r.stdout.strip():
-                            p = r.stdout.strip()
-                    except Exception:
-                        pass
-                if not p:
-                    p = filedialog.askopenfilename(
-                        parent=qd, title="Select Video File",
-                        initialdir=init_dir or None,
-                        filetypes=[("Video files",
-                                    "*.mkv *.mp4 *.avi *.mov *.ts *.m2ts"),
-                                   ("All files", "*.*")])
+                p = self._ask_open_file(
+                    parent=qd, title="Select Video File",
+                    initialdir=init_dir or None,
+                    filetypes=[("Video files",
+                                "*.mkv *.mp4 *.avi *.mov *.ts *.m2ts"),
+                               ("All files", "*.*")])
                 if p:
                     _qs_vpath.set(p)
                     # Auto-load the video after browse selection
@@ -14087,29 +14036,12 @@ class VideoConverterApp:
                     init_dir = os.path.dirname(vpath_var.get())
                 elif current_path[0]:
                     init_dir = os.path.dirname(current_path[0])
-                # Try zenity first (better sizing), fall back to tkinter
-                p = None
-                if shutil.which('zenity'):
-                    try:
-                        cmd = ['zenity', '--file-selection',
-                               '--title', 'Select Video File',
-                               '--file-filter', 'Video files|*.mkv *.mp4 *.avi *.mov *.ts *.m2ts *.mts *.webm *.wmv *.flv',
-                               '--file-filter', 'All files|*']
-                        if init_dir:
-                            cmd += ['--filename', init_dir + '/']
-                        result = subprocess.run(cmd, capture_output=True,
-                                                text=True, timeout=120)
-                        if result.returncode == 0 and result.stdout.strip():
-                            p = result.stdout.strip()
-                    except Exception:
-                        pass
-                if not p:
-                    p = filedialog.askopenfilename(
-                        parent=sd,
-                        title="Select Video File",
-                        initialdir=init_dir or None,
-                        filetypes=[("Video files", "*.mkv *.mp4 *.avi *.mov *.ts *.m2ts"),
-                                   ("All files", "*.*")])
+                p = self._ask_open_file(
+                    parent=sd,
+                    title="Select Video File",
+                    initialdir=init_dir or None,
+                    filetypes=[("Video files", "*.mkv *.mp4 *.avi *.mov *.ts *.m2ts"),
+                               ("All files", "*.*")])
                 if p:
                     vpath_var.set(p)
             ttk.Button(f, text="Browse...", command=_browse_vid).grid(row=0, column=2, **_sp)
@@ -15000,7 +14932,7 @@ class VideoConverterApp:
                 return
             out_dir = self.output_dir or Path(filepath).parent
             default_name = f"{Path(filepath).stem}.edited.srt"
-            out_path = filedialog.asksaveasfilename(
+            out_path = self._ask_save_file(
                 parent=editor,
                 initialdir=str(out_dir),
                 initialfile=default_name,
@@ -15407,8 +15339,8 @@ class VideoConverterApp:
         custom_entry.grid(row=0, column=1, sticky='ew')
         ttk.Button(custom_frame, text="Browse…",
                    command=lambda: v_custom.set(
-                       filedialog.askopenfilename(title="Select Video Player Executable",
-                                                  initialdir='/usr/bin')
+                       self._ask_open_file(title="Select Video Player Executable",
+                                           initialdir='/usr/bin')
                        or v_custom.get()
                    )).grid(row=0, column=2, padx=(4, 0))
 
@@ -15925,6 +15857,30 @@ class VideoConverterApp:
         # Redraw tree
         for item, file_info in zip(self.file_tree.get_children(), self.files):
             self._refresh_tree_row(item, file_info)
+
+    def _ask_open_files(self, **kwargs):
+        """Open a multi-file picker via zenity helpers, tk fallback."""
+        try:
+            from modules.utils import ask_open_files
+            return ask_open_files(**kwargs)
+        except ImportError:
+            return list(filedialog.askopenfilenames(**kwargs) or [])
+
+    def _ask_open_file(self, **kwargs):
+        """Open a single-file picker via zenity helpers, tk fallback."""
+        try:
+            from modules.utils import ask_open_file
+            return ask_open_file(**kwargs)
+        except ImportError:
+            return filedialog.askopenfilename(**kwargs) or ''
+
+    def _ask_save_file(self, **kwargs):
+        """Open a save-file dialog via zenity helpers, tk fallback."""
+        try:
+            from modules.utils import ask_save_file
+            return ask_save_file(**kwargs)
+        except ImportError:
+            return filedialog.asksaveasfilename(**kwargs) or ''
 
     def _ask_directory(self, initialdir=None, title="Select Folder"):
         """Open a folder-selection dialog.

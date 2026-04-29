@@ -302,6 +302,96 @@ def ask_open_files(initialdir=None, title="Select Files", parent=None,
     return list(result) if result else []
 
 
+def ask_open_file(initialdir=None, title="Select File", parent=None,
+                   filetypes=None):
+    """Open a file-selection dialog (single file).
+
+    Tries zenity first, falls back to tkinter.
+    Returns a file path string, or '' if cancelled.
+    """
+    if initialdir:
+        initialdir = str(initialdir)
+    if shutil.which('zenity'):
+        try:
+            cmd = [
+                'zenity', '--file-selection',
+                '--title', title,
+            ]
+            if initialdir:
+                cmd += ['--filename', initialdir + '/']
+            if filetypes:
+                for label, pattern in filetypes:
+                    if pattern and pattern != '*.*':
+                        cmd += ['--file-filter',
+                                f'{label} | {pattern.replace(" ", " ")}']
+                cmd += ['--file-filter', 'All files | *']
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+            return ''
+        except Exception:
+            pass
+    kwargs = {'initialdir': initialdir, 'title': title}
+    if parent:
+        kwargs['parent'] = parent
+    if filetypes:
+        kwargs['filetypes'] = filetypes
+    result = filedialog.askopenfilename(**kwargs)
+    return result or ''
+
+
+def ask_save_file(initialdir=None, initialfile=None, title="Save As",
+                   parent=None, filetypes=None, defaultextension=None):
+    """Open a save-file dialog.
+
+    Tries zenity first, falls back to tkinter.
+    Returns a file path string, or '' if cancelled.
+    """
+    if initialdir:
+        initialdir = str(initialdir)
+    if shutil.which('zenity'):
+        try:
+            cmd = [
+                'zenity', '--file-selection', '--save',
+                '--confirm-overwrite',
+                '--title', title,
+            ]
+            if initialdir and initialfile:
+                cmd += ['--filename', os.path.join(initialdir, initialfile)]
+            elif initialdir:
+                cmd += ['--filename', initialdir + '/']
+            elif initialfile:
+                cmd += ['--filename', initialfile]
+            if filetypes:
+                for label, pattern in filetypes:
+                    if pattern and pattern != '*.*':
+                        cmd += ['--file-filter',
+                                f'{label} | {pattern.replace(" ", " ")}']
+                cmd += ['--file-filter', 'All files | *']
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode == 0 and result.stdout.strip():
+                path = result.stdout.strip()
+                if defaultextension and not os.path.splitext(path)[1]:
+                    path += defaultextension
+                return path
+            return ''
+        except Exception:
+            pass
+    kwargs = {'initialdir': initialdir, 'title': title}
+    if parent:
+        kwargs['parent'] = parent
+    if filetypes:
+        kwargs['filetypes'] = filetypes
+    if initialfile:
+        kwargs['initialfile'] = initialfile
+    if defaultextension:
+        kwargs['defaultextension'] = defaultextension
+    result = filedialog.asksaveasfilename(**kwargs)
+    return result or ''
+
+
 def configure_dpi_scaling(root):
     """Configure Tk scaling for high-DPI displays.
 
