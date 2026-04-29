@@ -16204,139 +16204,16 @@ class VideoConverterApp:
             self.add_log(f"Could not match {len(unmatched)} subtitle(s): {names}{extra}", 'WARNING')
 
     def change_folder(self):
-        """Open custom single-click folder browser dialog"""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Select Video Folder")
-        dialog.geometry("550x450")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        self._center_on_main(dialog)
-
-        selected_path = tk.StringVar(value=str(self.working_dir))
-
-        # Current path display
-        path_frame = ttk.Frame(dialog, padding=(8, 8, 8, 0))
-        path_frame.pack(fill='x')
-        ttk.Label(path_frame, text="Current:").pack(side='left')
-        path_label = ttk.Label(path_frame, textvariable=selected_path,
-                               foreground='blue', anchor='w')
-        path_label.pack(side='left', fill='x', expand=True, padx=(5, 0))
-
-        # Treeview for folder browsing
-        tree_frame = ttk.Frame(dialog, padding=8)
-        tree_frame.pack(fill='both', expand=True)
-
-        tree = ttk.Treeview(tree_frame, selectmode='browse', show='tree')
-        vsb = ttk.Scrollbar(tree_frame, orient='vertical', command=tree.yview)
-        tree.configure(yscrollcommand=vsb.set)
-        tree.pack(side='left', fill='both', expand=True)
-        vsb.pack(side='right', fill='y')
-
-        def populate_tree(parent_id, path):
-            """Add immediate subdirectories under parent_id."""
-            try:
-                entries = sorted(
-                    [e for e in Path(path).iterdir() if e.is_dir() and not e.name.startswith('.')],
-                    key=lambda e: e.name.lower()
-                )
-            except PermissionError:
-                return
-            for entry in entries:
-                node = tree.insert(parent_id, 'end', text=entry.name,
-                                   values=[str(entry)], open=False)
-                # Insert a dummy child so the expand arrow appears
-                tree.insert(node, 'end', text='__dummy__')
-
-        def on_open(event):
-            """Expand a node and populate its children on first open."""
-            node = tree.focus()
-            children = tree.get_children(node)
-            if len(children) == 1 and tree.item(children[0], 'text') == '__dummy__':
-                tree.delete(children[0])
-                path = tree.item(node, 'values')[0]
-                populate_tree(node, path)
-
-        def on_select(event):
-            """Update the path label on single click."""
-            node = tree.focus()
-            if node:
-                path = tree.item(node, 'values')[0]
-                selected_path.set(path)
-
-        tree.bind('<<TreeviewOpen>>', on_open)
-        tree.bind('<<TreeviewSelect>>', on_select)
-
-        # Seed the tree with filesystem roots and expand to working_dir
-        # Add home directory and / as top-level roots
-        home = str(Path.home())
-        roots = [('/ (root)', '/'), (f'~ (home: {Path.home().name})', home)]
-        for label, rpath in roots:
-            node = tree.insert('', 'end', text=label, values=[rpath], open=False)
-            populate_tree(node, rpath)
-
-        # Auto-expand and select current working_dir
-        def expand_to(target):
-            target = Path(target).resolve()
-            parts = target.parts  # e.g. ('/', 'home', 'user', 'videos')
-            # Walk tree nodes to find and expand the path
-            def find_and_expand(parent_id, remaining):
-                if not remaining:
-                    return
-                for child in tree.get_children(parent_id):
-                    child_path = tree.item(child, 'values')
-                    if not child_path:
-                        continue
-                    child_path = Path(child_path[0]).resolve()
-                    try:
-                        rel = child_path.relative_to(target.parents[len(remaining)-1] if len(remaining) > 1 else target.parent)
-                        # simpler: just check if target starts with child_path
-                    except Exception:
-                        pass
-                    if str(target).startswith(str(child_path)):
-                        # expand this node
-                        children = tree.get_children(child)
-                        if len(children) == 1 and tree.item(children[0], 'text') == '__dummy__':
-                            tree.delete(children[0])
-                            populate_tree(child, str(child_path))
-                        tree.item(child, open=True)
-                        if child_path == target:
-                            tree.selection_set(child)
-                            tree.focus(child)
-                            tree.see(child)
-                            selected_path.set(str(target))
-                            return
-                        find_and_expand(child, remaining[1:])
-                        return
-            find_and_expand('', list(parts))
-
-        dialog.after(100, lambda: expand_to(str(self.working_dir)))
-
-        # Buttons
-        btn_frame = ttk.Frame(dialog, padding=(8, 4, 8, 8))
-        btn_frame.pack(fill='x')
-
-        result = {'folder': None}
-
-        def on_ok():
-            result['folder'] = selected_path.get()
-            dialog.destroy()
-
-        def on_cancel():
-            dialog.destroy()
-
-        ttk.Button(btn_frame, text="Select Folder", command=on_ok).pack(side='right', padx=(4, 0))
-        ttk.Button(btn_frame, text="Cancel", command=on_cancel).pack(side='right')
-
-        # Also allow double-click to confirm
-        tree.bind('<Double-1>', lambda e: on_ok())
-
-        dialog.wait_window()
-
-        if result['folder']:
-            self.working_dir = Path(result['folder'])
-            self._add_recent_folder(result['folder'])
+        """Open folder browser dialog to select a video source directory."""
+        folder = self._ask_directory(
+            initialdir=self.working_dir,
+            title="Select Video Folder"
+        )
+        if folder:
+            self.working_dir = Path(folder)
+            self._add_recent_folder(folder)
             self.refresh_files()
-            self.add_log(f"Changed directory to: {result['folder']}", 'INFO')
+            self.add_log(f"Changed directory to: {folder}", 'INFO')
     
     # ── Recent Folders ───────────────────────────────────────────────────────
 
