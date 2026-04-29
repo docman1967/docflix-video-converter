@@ -9691,11 +9691,34 @@ class VideoConverterApp:
                     is_inplace = opt_output_mode.get() == 'inplace' or not opt_output_folder.get()
                     if is_inplace:
                         original = f['path']
-                        try:
-                            os.replace(out_path, original)
-                        except OSError as e:
-                            _log(f"  Warning: could not replace original: {e}", 'WARNING')
-                        final_path = original
+                        if edition_fn_part:
+                            # Rename to include edition tag in filename
+                            orig_base, orig_ext = os.path.splitext(original)
+                            new_name = orig_base + edition_fn_part + (out_ext if out_ext else orig_ext)
+                            try:
+                                os.replace(out_path, new_name)
+                                final_path = new_name
+                                # Remove the original if it's a different name
+                                if os.path.normpath(new_name) != os.path.normpath(original):
+                                    try:
+                                        os.remove(original)
+                                    except OSError:
+                                        pass
+                                _log(f"  Renamed to: {os.path.basename(new_name)}", 'INFO')
+                            except OSError as e:
+                                _log(f"  Warning: could not rename: {e}", 'WARNING')
+                                # Fall back to replacing original
+                                try:
+                                    os.replace(out_path, original)
+                                except OSError:
+                                    pass
+                                final_path = original
+                        else:
+                            try:
+                                os.replace(out_path, original)
+                            except OSError as e:
+                                _log(f"  Warning: could not replace original: {e}", 'WARNING')
+                            final_path = original
                     else:
                         final_path = out_path
 
