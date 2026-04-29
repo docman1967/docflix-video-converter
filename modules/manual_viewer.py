@@ -125,8 +125,8 @@ MANUAL_SECTIONS = [
         ("p", ""),
         ("h4", "Queue Indicators"),
         ("table_header", "Icon|Meaning"),
-        ("table_row", "\u2699\ufe0f|Per-file settings override applied"),
-        ("table_row", "\ud83d\udcce|External subtitles attached"),
+        ("table_row", "[gear]|Per-file settings override applied"),
+        ("table_row", "Clip|External subtitles attached"),
         ("table_row", "CC|Closed captions detected (MPEG-TS)"),
         ("p", ""),
         ("h3", "Starting a Conversion"),
@@ -327,7 +327,7 @@ MANUAL_SECTIONS = [
         ("bullet", "Strip chapters, strip tags, set track metadata"),
         ("bullet", "Edition tag and Plex filename option"),
         ("p", ""),
-        ("p", "Files with overrides show a \u2699\ufe0f icon. Double-click to edit."),
+        ("p", "Files with overrides show a [gear] icon. Double-click to edit."),
     ]),
 
     ("CLI Usage", [
@@ -594,30 +594,34 @@ def show_manual(app):
             section_lines[section_title] = int(text.index('end-1c').split('.')[0])
 
             for tag, content in lines:
-                if tag == 'bullet':
-                    text.insert('end', f'  \u2022 {content}\n', 'bullet')
-                elif tag == 'tip':
-                    text.insert('end', f'  Tip: {content}\n', 'tip')
-                elif tag == 'warning':
-                    text.insert('end', f'  Warning: {content}\n', 'warning')
-                elif tag == 'note':
-                    text.insert('end', f'  Note: {content}\n', 'note')
-                elif tag == 'table_header':
-                    cols = content.split('|')
-                    row = '  ' + '  '.join(f'{c:<24}' for c in cols)
-                    text.insert('end', row + '\n', 'table_header')
-                elif tag == 'table_row':
-                    cols = content.split('|')
-                    row = '  ' + '  '.join(f'{c:<24}' for c in cols)
-                    text.insert('end', row + '\n', 'table_row')
-                elif tag == 'sep':
-                    text.insert('end', '\u2500' * 60 + '\n', 'sep')
-                elif tag == 'code':
-                    text.insert('end', f'  {content}\n', 'code')
-                elif content:
-                    text.insert('end', content + '\n', tag)
-                else:
-                    text.insert('end', '\n', 'p')
+                try:
+                    if tag == 'bullet':
+                        text.insert('end', f'  \u2022 {content}\n', 'bullet')
+                    elif tag == 'tip':
+                        text.insert('end', f'  Tip: {content}\n', 'tip')
+                    elif tag == 'warning':
+                        text.insert('end', f'  Warning: {content}\n', 'warning')
+                    elif tag == 'note':
+                        text.insert('end', f'  Note: {content}\n', 'note')
+                    elif tag == 'table_header':
+                        cols = content.split('|')
+                        row = '  ' + '  '.join(f'{c:<24}' for c in cols)
+                        text.insert('end', row + '\n', 'table_header')
+                    elif tag == 'table_row':
+                        cols = content.split('|')
+                        row = '  ' + '  '.join(f'{c:<24}' for c in cols)
+                        text.insert('end', row + '\n', 'table_row')
+                    elif tag == 'sep':
+                        text.insert('end', '\u2500' * 60 + '\n', 'sep')
+                    elif tag == 'code':
+                        text.insert('end', f'  {content}\n', 'code')
+                    elif content:
+                        text.insert('end', content + '\n', tag)
+                    else:
+                        text.insert('end', '\n', 'p')
+                except tk.TclError:
+                    # Skip lines with characters Tk can't render
+                    text.insert('end', content + '\n', 'p')
 
             text.insert('end', '\n')
 
