@@ -166,7 +166,7 @@ def open_video_scaler(app):
     main_frame.pack(fill='both', expand=True)
     main_frame.columnconfigure(0, weight=1)
     main_frame.rowconfigure(1, weight=1)   # file list
-    main_frame.rowconfigure(3, weight=1)   # log
+    main_frame.rowconfigure(4, weight=1)   # log
 
     # ── Toolbar ──
     toolbar = ttk.Frame(main_frame)
@@ -335,9 +335,22 @@ def open_video_scaler(app):
     # Initialize presets
     _on_encoder_change()
 
+    # ── Progress bar + status ──
+    progress_frame = ttk.Frame(main_frame)
+    progress_frame.grid(row=3, column=0, sticky='ew', pady=(0, 4))
+    progress_frame.columnconfigure(0, weight=1)
+
+    progress_var = tk.DoubleVar(value=0.0)
+    progress_bar = ttk.Progressbar(progress_frame, variable=progress_var,
+                                    maximum=100, mode='determinate')
+    progress_bar.grid(row=0, column=0, sticky='ew', padx=(0, 8))
+
+    progress_label = ttk.Label(progress_frame, text="", width=40, anchor='e')
+    progress_label.grid(row=0, column=1, sticky='e')
+
     # ── Log panel ──
     log_frame = ttk.Frame(main_frame)
-    log_frame.grid(row=3, column=0, sticky='nsew', pady=(0, 4))
+    log_frame.grid(row=4, column=0, sticky='nsew', pady=(0, 4))
     log_frame.columnconfigure(0, weight=1)
     log_frame.rowconfigure(0, weight=1)
 
@@ -356,7 +369,7 @@ def open_video_scaler(app):
 
     # ── Close button ──
     close_frame = ttk.Frame(main_frame)
-    close_frame.grid(row=4, column=0, sticky='e', pady=(0, 0))
+    close_frame.grid(row=5, column=0, sticky='e', pady=(0, 0))
 
     def _close():
         win.destroy()
@@ -484,6 +497,32 @@ def open_video_scaler(app):
         if index < len(files):
             files[index]['status'] = status
 
+    def _update_progress(pct, eta_str=''):
+        """Update progress bar and label from any thread."""
+        def _do():
+            progress_var.set(min(100.0, pct))
+            progress_label.configure(text=eta_str)
+        win.after(0, _do)
+
+    def _reset_progress():
+        """Reset progress bar and label."""
+        def _do():
+            progress_var.set(0.0)
+            progress_label.configure(text='')
+        win.after(0, _do)
+
+    def _parse_ffmpeg_time(time_str):
+        """Parse ffmpeg time string (HH:MM:SS.xx) to seconds."""
+        try:
+            parts = time_str.strip().split(':')
+            if len(parts) == 3:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+            elif len(parts) == 2:
+                return int(parts[0]) * 60 + float(parts[1])
+            return float(parts[0])
+        except (ValueError, IndexError):
+            return 0.0
+
     # ═══════════════════════════════════════════════════════════════
     # Processing
     # ═══════════════════════════════════════════════════════════════
@@ -598,6 +637,7 @@ def open_video_scaler(app):
 
         win.after(0, lambda: _update_status(i, 'Processing...'))
         _log(f"  Scaling: {f['name']} -> {_target_str(f)}", 'INFO')
+        _update_progress(0.0, f"File {i + 1}/{len(files)}: {f['name']}")
 
         try:
             cmd, out_path = _build_cmd(f)
@@ -607,17 +647,53 @@ def open_video_scaler(app):
 
             _log(f"  {' '.join(cmd)}", 'INFO')
 
+            import time as _time
+            file_start_time = _time.monotonic()
+            duration = f.get('duration') or 0
+
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1)
 
+            import re as _re
             for line in proc.stdout:
                 line = line.strip()
-                if line and ('frame=' in line or 'speed=' in line):
-                    # Could parse progress here
-                    pass
+                if not line:
+                    continue
+                # Parse ffmpeg progress: "frame= 1234 fps= 45 ... time=00:05:23.45 ... speed=2.1x"
+                time_match = _re.search(r'time=(\d+:\d+:\d+\.\d+)', line)
+                speed_match = _re.search(r'speed=\s*([\d.]+)x', line)
+
+                if time_match and duration > 0:
+                    current_time = _parse_ffmpeg_time(time_match.group(1))
+                    pct = min(99.9, (current_time / duration) * 100)
+                    remaining = duration - current_time
+
+                    # Calculate ETA from speed
+                    eta_str = ''
+                    if speed_match:
+                        speed = float(speed_match.group(1))
+                        if speed > 0:
+                            eta_secs = remaining / speed
+                            if eta_secs >= 3600:
+                                eta_str = f"{int(eta_secs // 3600)}h {int((eta_secs % 3600) // 60)}m left"
+                            elif eta_secs >= 60:
+                                eta_str = f"{int(eta_secs // 60)}m {int(eta_secs % 60)}s left"
+                            else:
+                                eta_str = f"{int(eta_secs)}s left"
+
+                    status_text = f"{pct:.0f}%"
+                    if eta_str:
+                        status_text += f" ({eta_str})"
+                    label_text = f"File {i + 1}/{len(files)}: {pct:.0f}%"
+                    if eta_str:
+                        label_text += f" \u2014 {eta_str}"
+
+                    _update_progress(pct, label_text)
+                    win.after(0, lambda s=status_text: _update_status(i, s))
 
             proc.wait()
+            elapsed = _time.monotonic() - file_start_time
 
             if proc.returncode == 0 and os.path.isfile(out_path):
                 size = os.path.getsize(out_path)
@@ -626,8 +702,16 @@ def open_video_scaler(app):
                         sz = f"{size / 1_073_741_824:.1f} GB"
                     else:
                         sz = f"{size / 1_048_576:.0f} MB"
+                    # Format elapsed time
+                    if elapsed >= 3600:
+                        elapsed_str = f"{int(elapsed // 3600)}h {int((elapsed % 3600) // 60)}m {int(elapsed % 60)}s"
+                    elif elapsed >= 60:
+                        elapsed_str = f"{int(elapsed // 60)}m {int(elapsed % 60)}s"
+                    else:
+                        elapsed_str = f"{int(elapsed)}s"
+                    _update_progress(100.0, f"File {i + 1}/{len(files)}: Done in {elapsed_str}")
                     win.after(0, lambda: _update_status(i, f'Done ({sz})'))
-                    _log(f"  Done: {os.path.basename(out_path)} ({sz})", 'SUCCESS')
+                    _log(f"  Done: {os.path.basename(out_path)} ({sz}, {elapsed_str})", 'SUCCESS')
 
                     # In-place: replace original
                     if opt_output_mode.get() == 'inplace':
@@ -695,6 +779,8 @@ def open_video_scaler(app):
 
             _log(f"Complete: {done} done, {failed} failed, "
                  f"{total - done - failed} skipped", 'INFO')
+            _update_progress(100.0 if done > 0 else 0.0,
+                            f"Done: {done}/{total} files")
             processing[0] = False
             win.after(0, lambda: process_btn.configure(state='normal'))
             win.after(0, lambda: stop_btn.configure(state='disabled'))
