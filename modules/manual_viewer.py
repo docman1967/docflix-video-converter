@@ -633,9 +633,13 @@ def show_manual(app):
         title = MANUAL_SECTIONS[sel[0]][0]
         mark = section_marks.get(title)
         if mark:
-            text.configure(state='normal')
-            text.see(mark)
-            text.configure(state='disabled')
+            # Get the mark's position as a line.char index and scroll
+            # that line to the top of the visible area
+            idx = text.index(mark)
+            line = int(idx.split('.')[0])
+            total = int(text.index('end-1c').split('.')[0])
+            if total > 0:
+                text.yview_moveto(max(0, (line - 1) / total))
 
     sidebar_list.bind('<<ListboxSelect>>', _on_sidebar_select)
 
