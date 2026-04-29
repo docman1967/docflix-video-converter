@@ -231,10 +231,15 @@ install_pip_pkg() {
         success "$pkg already installed"
     else
         info "Installing $pkg..."
-        if pip3 install --user "$pkg" --quiet; then
+        # Try normal --user install first; if blocked by PEP 668
+        # (externally-managed-environment), retry with --break-system-packages
+        if pip3 install --user "$pkg" --quiet 2>/dev/null; then
+            success "$pkg installed"
+        elif pip3 install --user --break-system-packages "$pkg" --quiet 2>/dev/null; then
             success "$pkg installed"
         else
             warn "Failed to install $pkg — some features may not work"
+            warn "  You can install manually: pip3 install --user --break-system-packages $pkg"
         fi
     fi
 }

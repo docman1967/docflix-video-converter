@@ -360,6 +360,23 @@ def open_tv_renamer(app):
             name = name.rstrip('. ')
             return name
 
+        def _sanitize_path(name):
+            """Sanitize a filename that may contain path separators (/).
+            Each path component is sanitized individually, preserving the
+            folder structure defined in the template."""
+            if '/' not in name:
+                return _sanitize_filename(name)
+            parts = name.split('/')
+            sanitized = []
+            for part in parts:
+                part = part.replace(':', ' ').replace('\\', '-')
+                part = re.sub(r'[<>"|?*]', '', part)
+                part = re.sub(r'\s+', ' ', part).strip()
+                part = part.rstrip('. ')
+                if part:  # skip empty components
+                    sanitized.append(part)
+            return os.path.join(*sanitized) if sanitized else ''
+
         def _match_file_to_show(item):
             """Match a file to one of the loaded shows by filename."""
             if not _all_shows:
@@ -512,10 +529,17 @@ def open_tv_renamer(app):
             return '.' + '.'.join(tags)
 
         def _build_new_name(item, template, show_name):
-            """Build a new filename from template and episode data."""
+            """Build a new filename (or relative path) from template and
+            episode data.  When the template contains '/' separators the
+            result is a relative path whose parent directories will be
+            created at rename time."""
             if not show_name:
                 return None
             show_data = _all_shows.get(show_name, {})
+
+            # Choose sanitizer: path-aware when template contains '/'
+            sanitize = (_sanitize_path if '/' in template
+                        else _sanitize_filename)
 
             # ── Movie mode — no season/episode needed ──
             if isinstance(show_data, dict) and show_data.get('_is_movie'):
@@ -526,7 +550,7 @@ def open_tv_renamer(app):
                 sub_tags = ''
                 if ext in SUBTITLE_EXTENSIONS:
                     sub_tags = _detect_sub_tags(item['path'])
-                return _sanitize_filename(name) + sub_tags + ext
+                return sanitize(name) + sub_tags + ext
 
             # ── Date-based episode mode ──
             air_date = item.get('air_date')
@@ -550,7 +574,7 @@ def open_tv_renamer(app):
                 sub_tags = ''
                 if ext in SUBTITLE_EXTENSIONS:
                     sub_tags = _detect_sub_tags(item['path'])
-                return _sanitize_filename(name) + sub_tags + ext
+                return sanitize(name) + sub_tags + ext
 
             # ── TV series mode — need season/episode ──
             s = item.get('season')
@@ -602,7 +626,7 @@ def open_tv_renamer(app):
             sub_tags = ''
             if ext in SUBTITLE_EXTENSIONS:
                 sub_tags = _detect_sub_tags(item['path'])
-            return _sanitize_filename(name) + sub_tags + ext
+            return sanitize(name) + sub_tags + ext
 
         # ── Logging ──
         def _log(msg, level='INFO'):
@@ -1366,6 +1390,7 @@ def open_tv_renamer(app):
             skipped = 0
             errors = 0
             batch_history = []  # [(old_path, new_path), ...]
+            created_dirs = []   # track dirs created for undo cleanup
             for item in _file_items:
                 try:
                     matched = item.get('matched_show')
@@ -1384,6 +1409,11 @@ def open_tv_renamer(app):
                         _log(f"Skipped (exists): {new_name}", 'WARNING')
                         skipped += 1
                         continue
+                    # Create parent directories if the template has folders
+                    new_dir = os.path.dirname(new_path)
+                    if new_dir and not os.path.exists(new_dir):
+                        os.makedirs(new_dir, exist_ok=True)
+                        created_dirs.append(new_dir)
                     os.rename(old_path, new_path)
                     batch_history.append((old_path, new_path))
                     item['path'] = new_path
@@ -1391,9 +1421,12 @@ def open_tv_renamer(app):
                 except Exception as e:
                     _log(f"Error renaming: {e}", 'ERROR')
                     errors += 1
-            # Save undo history
+            # Save undo history (include created dirs for cleanup)
             if batch_history:
-                _rename_history.append(batch_history)
+                _rename_history.append({
+                    'renames': batch_history,
+                    'created_dirs': created_dirs,
+                })
             parts = [f"Renamed {renamed} files"]
             if skipped:
                 parts.append(f"{skipped} skipped (no match)")
@@ -1412,7 +1445,14 @@ def open_tv_renamer(app):
             if not _rename_history:
                 _log("Nothing to undo", 'WARNING')
                 return
-            batch = _rename_history.pop()
+            entry = _rename_history.pop()
+            # Support both old format (list) and new format (dict)
+            if isinstance(entry, dict):
+                batch = entry['renames']
+                created_dirs = entry.get('created_dirs', [])
+            else:
+                batch = entry
+                created_dirs = []
             undone = 0
             errors = 0
             # Reverse in reverse order for safety
@@ -1432,6 +1472,21 @@ def open_tv_renamer(app):
                 except Exception as e:
                     _log(f"Undo error: {e}", 'ERROR')
                     errors += 1
+            # Clean up empty directories created during rename (deepest first)
+            for d in sorted(created_dirs, key=len, reverse=True):
+                try:
+                    if os.path.isdir(d) and not os.listdir(d):
+                        os.rmdir(d)
+                        # Also try to remove parent dirs if empty
+                        parent = os.path.dirname(d)
+                        while parent and parent != os.path.dirname(parent):
+                            if os.path.isdir(parent) and not os.listdir(parent):
+                                os.rmdir(parent)
+                                parent = os.path.dirname(parent)
+                            else:
+                                break
+                except OSError:
+                    pass  # directory not empty or already removed
             msg = f"Undone {undone} rename(s)"
             if errors:
                 msg += f" ({errors} errors)"
@@ -1622,8 +1677,8 @@ def open_tv_renamer(app):
         def _open_template_settings():
             dlg = tk.Toplevel(win)
             dlg.title("Filename Template")
-            dlg.geometry("520x420")
-            dlg.minsize(450, 380)
+            dlg.geometry("560x560")
+            dlg.minsize(480, 500)
             dlg.resizable(True, True)
             dlg.transient(win)
             dlg.grab_set()
@@ -1653,20 +1708,23 @@ def open_tv_renamer(app):
                 "{season}     — Season number (zero-padded)\n"
                 "{episode}    — Episode number (zero-padded)\n"
                 "{title}      — Episode title\n"
-                "{year}       — Air year"
+                "{year}       — Air year\n"
+                "\n"
+                "Use / to create folders automatically:\n"
+                "  {show}/Season {season}/{show} S{season}E{episode} {title}"
             )
             ttk.Label(f, text=vars_text, font=('Courier', 10),
                       justify='left').grid(
                           row=3, column=0, columnspan=2, sticky='w',
                           padx=(15, 0))
 
-            # Preset templates
-            ttk.Label(f, text="Presets:",
+            # Preset templates — flat
+            ttk.Label(f, text="Flat presets:",
                       font=('Helvetica', 9, 'bold')).grid(
                           row=4, column=0, columnspan=2, sticky='w',
                           pady=(12, 4))
 
-            presets = [
+            flat_presets = [
                 ('{show} S{season}E{episode} {title}',
                  'Show S01E01 Title'),
                 ('{show} - S{season}E{episode} - {title}',
@@ -1676,15 +1734,40 @@ def open_tv_renamer(app):
                 ('{show} - {season}x{episode} - {title}',
                  'Show - 01x01 - Title'),
             ]
-            for i, (tmpl, desc) in enumerate(presets):
+            row = 5
+            for tmpl, desc in flat_presets:
                 def _set(t=tmpl):
                     template_var.set(t)
-                ttk.Button(f, text=desc, command=_set, width=30).grid(
-                    row=5 + i, column=0, columnspan=2, sticky='w',
+                ttk.Button(f, text=desc, command=_set, width=40).grid(
+                    row=row, column=0, columnspan=2, sticky='w',
                     padx=(10, 0), pady=1)
+                row += 1
+
+            # Preset templates — with folders
+            ttk.Label(f, text="Folder presets:",
+                      font=('Helvetica', 9, 'bold')).grid(
+                          row=row, column=0, columnspan=2, sticky='w',
+                          pady=(12, 4))
+            row += 1
+
+            folder_presets = [
+                ('{show}/Season {season}/{show} S{season}E{episode} {title}',
+                 'Show/Season 01/Show S01E01 Title'),
+                ('{show}/Season {season}/{show} - S{season}E{episode} - {title}',
+                 'Show/Season 01/Show - S01E01 - Title'),
+                ('{show}/S{season}/{show} S{season}E{episode} {title}',
+                 'Show/S01/Show S01E01 Title'),
+            ]
+            for tmpl, desc in folder_presets:
+                def _set(t=tmpl):
+                    template_var.set(t)
+                ttk.Button(f, text=desc, command=_set, width=40).grid(
+                    row=row, column=0, columnspan=2, sticky='w',
+                    padx=(10, 0), pady=1)
+                row += 1
 
             ttk.Button(f, text="Close", command=dlg.destroy,
-                       width=8).grid(row=5 + len(presets), column=1,
+                       width=8).grid(row=row, column=1,
                                      sticky='e', pady=(12, 0))
 
             dlg.wait_window()
