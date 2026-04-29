@@ -576,9 +576,9 @@ def show_manual(app):
                        spacing1=1, spacing3=1)
     text.tag_configure('sep', foreground=border)
 
-    # ── Section navigation tags ──
-    # Each section's first character gets a unique tag so we can navigate to it
-    section_tags = {}  # title -> tag name
+    # ── Section line numbers for navigation ──
+    section_lines = {}  # title -> line number (int)
+    total_lines = [0]   # mutable container for total line count
 
     def _render_all():
         """Render all sections into the text widget."""
@@ -590,12 +590,9 @@ def show_manual(app):
         text.insert('end', 'User Manual \u2014 Version 2.0.7\n\n', 'p')
 
         for sect_idx, (section_title, lines) in enumerate(MANUAL_SECTIONS):
-            # Create a unique tag for this section's anchor
-            anchor_tag = f'_nav_{sect_idx}'
-            text.tag_configure(anchor_tag)
-            section_tags[section_title] = anchor_tag
+            # Store the line number where this section starts
+            section_lines[section_title] = int(text.index('end-1c').split('.')[0])
 
-            first_line = True
             for tag, content in lines:
                 if tag == 'bullet':
                     text.insert('end', f'  \u2022 {content}\n', 'bullet')
@@ -618,18 +615,14 @@ def show_manual(app):
                 elif tag == 'code':
                     text.insert('end', f'  {content}\n', 'code')
                 elif content:
-                    if first_line:
-                        # Tag the first line with both the display tag and the nav anchor
-                        text.insert('end', content + '\n', (tag, anchor_tag))
-                        first_line = False
-                    else:
-                        text.insert('end', content + '\n', tag)
+                    text.insert('end', content + '\n', tag)
                 else:
                     text.insert('end', '\n', 'p')
 
             text.insert('end', '\n')
 
         text.insert('end', '\n\u00a9 2026 Tony Davis \u2014 MIT License\n', 'p')
+        total_lines[0] = int(text.index('end-1c').split('.')[0])
         text.configure(state='disabled')
 
     def _on_sidebar_select(event=None):
@@ -638,30 +631,24 @@ def show_manual(app):
         if not sel:
             return
         title = MANUAL_SECTIONS[sel[0]][0]
-        anchor_tag = section_tags.get(title)
-        if not anchor_tag:
+        line = section_lines.get(title)
+        if line is None or total_lines[0] <= 0:
             return
-        ranges = text.tag_ranges(anchor_tag)
-        if not ranges:
-            return
-        target = str(ranges[0])
 
-        # Temporarily enable the widget — some Tk versions block
-        # scroll operations on disabled Text widgets
         text.configure(state='normal')
+        # Method 1: Direct Tk yview with index — scrolls index to top
         try:
-            # Pixel-accurate scroll using text.count ypixels
-            px_to_target = text.count('1.0', target, 'ypixels')
-            px_total = text.count('1.0', 'end-1c', 'ypixels')
-            if px_to_target and px_total and px_total[0] > 0:
-                fraction = max(0.0, min(1.0, px_to_target[0] / px_total[0]))
+            text.tk.call(text._w, 'yview', f'{line}.0')
+        except tk.TclError:
+            # Method 2: Fraction-based scroll
+            try:
+                fraction = max(0.0, (line - 1) / total_lines[0])
                 text.yview_moveto(fraction)
-            else:
-                text.see(target)
-        except (tk.TclError, TypeError, ZeroDivisionError):
-            text.see(target)
-        finally:
-            text.configure(state='disabled')
+            except Exception:
+                # Method 3: Last resort
+                text.see(f'{line}.0')
+        text.update_idletasks()
+        text.configure(state='disabled')
 
     sidebar_list.bind('<<ListboxSelect>>', _on_sidebar_select)
     sidebar_list.bind('<ButtonRelease-1>', _on_sidebar_select)
