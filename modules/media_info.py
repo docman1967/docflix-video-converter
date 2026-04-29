@@ -177,6 +177,12 @@ def _build_general_section(filepath, fmt):
     lines = []
     lines.append(f'  File Name:      {os.path.basename(filepath)}')
     lines.append(f'  Directory:      {os.path.dirname(filepath)}')
+
+    # Edition / container title
+    title = fmt.get('tags', {}).get('title', '')
+    if title:
+        lines.append(f'  Title/Edition:  {title}')
+
     lines.append(f'  Format:         {fmt.get("format_long_name", fmt.get("format_name", "?"))}')
 
     profile = fmt.get('profile')

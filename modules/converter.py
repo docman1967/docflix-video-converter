@@ -562,6 +562,14 @@ class VideoConverter:
                               '-metadata:s:s:0', f'title={sub_lang.upper() if len(sub_lang) <= 3 else sub_lang}'])
                     self.log(f"Setting track metadata: video={video_lang}, audio={audio_lang}, sub={sub_lang}", 'INFO')
 
+                # Edition tag — write to container title
+                # Placed after set_track_metadata so it overrides the title= clear
+                # Works independently — doesn't require set_track_metadata to be on
+                edition = settings.get('edition_tag', '')
+                if edition:
+                    c.extend(['-metadata', f'title={edition}'])
+                    self.log(f"Setting edition tag: {edition}", 'INFO')
+
             # ── Log what we're about to do ──
             self.log(f"Video codec: {video_enc_name}", 'INFO')
             self.log(f"Mode: {mode}" + (" (two-pass)" if use_two_pass else " (GPU multipass)" if use_gpu_multipass else ""), 'INFO')

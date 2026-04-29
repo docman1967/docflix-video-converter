@@ -17,7 +17,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-from .constants import VIDEO_EXTENSIONS
+from .constants import VIDEO_EXTENSIONS, EDITION_PRESETS
 from .utils import get_audio_info, get_subtitle_streams, ask_directory
 
 try:
@@ -82,6 +82,9 @@ def open_media_processor(app):
         except Exception:
             _cpu_count = 4
         opt_max_jobs       = tk.IntVar(value=_mp.get('max_jobs', min(_cpu_count, 8)))
+        opt_edition_tag    = tk.StringVar(value=_mp.get('edition_tag', ''))
+        opt_edition_fn     = tk.BooleanVar(value=_mp.get('edition_in_filename', False))
+        _edition_custom_sv = tk.StringVar(value='')
 
         # ── Layout ──
         main_frame = ttk.Frame(win, padding=10)
@@ -579,6 +582,41 @@ def open_media_processor(app):
         _toggle_meta_fields()
         _toggle_audio_controls()
 
+        # Row 3b: Edition tagging
+        ops_row3b = ttk.Frame(ops_frame)
+        ops_row3b.pack(fill='x', pady=2)
+
+        ttk.Label(ops_row3b, text="Edition:").pack(side='left', padx=(0, 2))
+        mp_edition_combo = ttk.Combobox(ops_row3b, textvariable=opt_edition_tag,
+                                         values=EDITION_PRESETS, width=22, state='readonly')
+        mp_edition_combo.pack(side='left', padx=(0, 4))
+
+        mp_edition_custom = ttk.Entry(ops_row3b, textvariable=_edition_custom_sv, width=22)
+
+        # If loaded value is a custom edition (not in presets), show custom entry
+        if opt_edition_tag.get() and opt_edition_tag.get() not in EDITION_PRESETS:
+            _edition_custom_sv.set(opt_edition_tag.get())
+            mp_edition_combo.set('Custom...')
+            mp_edition_custom.pack(side='left', padx=(0, 4))
+
+        def _on_mp_edition_select(event=None):
+            sel = mp_edition_combo.get()
+            if sel == 'Custom...':
+                mp_edition_custom.pack(side='left', padx=(0, 4))
+                mp_edition_custom.focus()
+            else:
+                mp_edition_custom.pack_forget()
+                opt_edition_tag.set(sel)
+        mp_edition_combo.bind('<<ComboboxSelected>>', _on_mp_edition_select)
+
+        def _on_mp_edition_custom(*args):
+            if mp_edition_combo.get() == 'Custom...':
+                opt_edition_tag.set(_edition_custom_sv.get())
+        _edition_custom_sv.trace_add('write', _on_mp_edition_custom)
+
+        ttk.Checkbutton(ops_row3b, text="Add to filename (Plex)",
+                        variable=opt_edition_fn).pack(side='left', padx=(8, 0))
+
         # Row 4: Output + parallel + container
         ops_row4 = ttk.Frame(ops_frame)
         ops_row4.pack(fill='x', pady=2)
@@ -736,10 +774,22 @@ def open_media_processor(app):
             # Determine output container
             out_ext = _ov(f, 'container', opt_container)
 
+            # Edition filename tag for Plex
+            edition_fn_part = ''
+            edition = _ov(f, 'edition_tag', opt_edition_tag)
+            if isinstance(edition, tk.StringVar):
+                edition = edition.get()
+            edition_in_fn = _ov(f, 'edition_in_filename', opt_edition_fn)
+            if isinstance(edition_in_fn, tk.BooleanVar):
+                edition_in_fn = edition_in_fn.get()
+            if edition and edition_in_fn:
+                edition_fn_part = ' {edition-' + edition + '}'
+
             # Determine output path
             if opt_output_mode.get() == 'folder' and opt_output_folder.get():
                 out_dir = opt_output_folder.get()
-                out_name = os.path.join(out_dir, os.path.basename(base) + out_ext)
+                out_name = os.path.join(out_dir,
+                                         os.path.basename(base) + edition_fn_part + out_ext)
             else:
                 # In-place: write to temp, replace on success
                 out_name = f"{base}_mp_tmp{out_ext}"
@@ -857,6 +907,13 @@ def open_media_processor(app):
                 if (not do_strip_subs and f.get('sub_count', 0) > 0) or sub_inputs:
                     if not sub_inputs:
                         cmd.extend([f'-metadata:s:s:0', f'language={s_lang}'])
+
+            # ── Edition tag ──
+            edition = _ov(f, 'edition_tag', opt_edition_tag)
+            if isinstance(edition, tk.StringVar):
+                edition = edition.get()
+            if edition:
+                cmd.extend(['-metadata', f'title={edition}'])
 
             cmd.append(out_name)
             return cmd, out_name
@@ -1112,6 +1169,8 @@ def open_media_processor(app):
                 'container':      opt_container.get(),
                 'parallel':       opt_parallel.get(),
                 'max_jobs':       opt_max_jobs.get(),
+                'edition_tag':    opt_edition_tag.get(),
+                'edition_in_filename': opt_edition_fn.get(),
             }
             app._media_proc_prefs = mp_prefs
             # Write to shared preferences file

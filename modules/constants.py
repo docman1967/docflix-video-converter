@@ -6,7 +6,7 @@ All shared constants, codec maps, extension sets, and GPU backend definitions.
 
 # ── App identity ──
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "2.0.3"
+APP_VERSION = "2.0.4"
 
 # ── Defaults ──
 DEFAULT_BITRATE = "2M"
@@ -18,6 +18,23 @@ MAX_CHARS_PER_LINE = 42
 # ── Preferences path ──
 PREFS_DIR = "~/.local/share/docflix"
 PREFS_FILENAME = "preferences.json"
+
+# ── Edition presets for container title tagging ──
+EDITION_PRESETS = [
+    '',                     # (no edition)
+    'Theatrical',
+    "Director's Cut",
+    'Extended',
+    'Extended Director\'s Cut',
+    'Unrated',
+    'Special Edition',
+    'IMAX',
+    'Criterion',
+    'Remastered',
+    'Anniversary Edition',
+    'Ultimate Edition',
+    'Custom...',
+]
 
 # ── Bitmap subtitle codecs (cannot convert to text without OCR) ──
 BITMAP_SUB_CODECS = frozenset({

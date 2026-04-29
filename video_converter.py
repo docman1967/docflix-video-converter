@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "2.0.3"
+APP_VERSION = "2.0.4"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -57,6 +57,23 @@ DEFAULT_GPU_PRESET = "p4"
 
 # Bitmap subtitle codecs that cannot be converted to text formats without OCR
 BITMAP_SUB_CODECS = frozenset({'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle', 'dvb_teletext', 'xsub'})
+
+# ── Edition presets for container title tagging ──
+EDITION_PRESETS = [
+    '',                     # (no edition)
+    'Theatrical',
+    "Director's Cut",
+    'Extended',
+    'Extended Director\'s Cut',
+    'Unrated',
+    'Special Edition',
+    'IMAX',
+    'Criterion',
+    'Remastered',
+    'Anniversary Edition',
+    'Ultimate Edition',
+    'Custom...',
+]
 
 # ── GPU Backend Definitions ──
 # Each backend defines its hwaccel flags, per-codec encoders, presets, quality
@@ -3670,6 +3687,14 @@ class VideoConverter:
                               '-metadata:s:s:0', f'title={sub_lang.upper() if len(sub_lang) <= 3 else sub_lang}'])
                     self.log(f"Setting track metadata: video={video_lang}, audio={audio_lang}, sub={sub_lang}", 'INFO')
 
+                # Edition tag — write to container title
+                # Placed after set_track_metadata so it overrides the title= clear
+                # Works independently — doesn't require set_track_metadata to be on
+                edition = settings.get('edition_tag', '')
+                if edition:
+                    c.extend(['-metadata', f'title={edition}'])
+                    self.log(f"Setting edition tag: {edition}", 'INFO')
+
             # ── Log what we're about to do ──
             self.log(f"Video codec: {video_enc_name}", 'INFO')
             self.log(f"Mode: {mode}" + (" (two-pass)" if use_two_pass else " (GPU multipass)" if use_gpu_multipass else ""), 'INFO')
@@ -3985,6 +4010,9 @@ class VideoConverterApp:
         self.meta_video_lang = tk.StringVar(value='und')
         self.meta_audio_lang = tk.StringVar(value='eng')
         self.meta_sub_lang = tk.StringVar(value='eng')
+        # Edition tagging
+        self.edition_tag = tk.StringVar(value='')
+        self.edition_in_filename = tk.BooleanVar(value=False)
 
         # Check system capabilities
         self.has_ffmpeg, self.ffmpeg_version = check_ffmpeg()
@@ -4536,6 +4564,49 @@ class VideoConverterApp:
         # Initial state
         self._on_metadata_toggle()
 
+        # ── Row 9: Edition tagging ──
+        self.edition_frame = ttk.Frame(settings_frame)
+        self.edition_frame.grid(row=9, column=0, columnspan=2, sticky='w', pady=(0, 6))
+
+        ttk.Label(self.edition_frame, text="Edition:").pack(side='left', padx=(5, 2))
+        self.edition_combo = ttk.Combobox(
+            self.edition_frame, textvariable=self.edition_tag,
+            values=EDITION_PRESETS, width=22, state='readonly')
+        self.edition_combo.pack(side='left', padx=(0, 4))
+        self.edition_combo.set('')
+
+        self.edition_custom_entry = ttk.Entry(self.edition_frame,
+                                               textvariable=self._edition_custom_var(),
+                                               width=22)
+        # Hidden by default — shown when "Custom..." is selected
+        self._edition_custom_sv = tk.StringVar(value='')
+
+        def _on_edition_select(event=None):
+            sel = self.edition_combo.get()
+            if sel == 'Custom...':
+                self.edition_custom_entry.pack(side='left', padx=(0, 4))
+                self.edition_custom_entry.focus()
+            else:
+                self.edition_custom_entry.pack_forget()
+                self.edition_tag.set(sel)
+
+        self.edition_combo.bind('<<ComboboxSelected>>', _on_edition_select)
+
+        # Trace the custom entry to update edition_tag
+        def _on_custom_change(*args):
+            if self.edition_combo.get() == 'Custom...':
+                self.edition_tag.set(self._edition_custom_sv.get())
+        self._edition_custom_sv.trace_add('write', _on_custom_change)
+
+        ttk.Checkbutton(self.edition_frame, text="Add to filename (Plex)",
+                        variable=self.edition_in_filename).pack(side='left', padx=(8, 0))
+
+
+    def _edition_custom_var(self):
+        """Return the StringVar for the custom edition entry."""
+        if not hasattr(self, '_edition_custom_sv'):
+            self._edition_custom_sv = tk.StringVar(value='')
+        return self._edition_custom_sv
 
     def setup_file_list(self, parent):
         """Setup file list section"""
@@ -5192,6 +5263,45 @@ class VideoConverterApp:
         ovr_ms.pack(side='left', padx=(2, 0))
         _toggle_ovr_meta()
 
+        # ── Edition tagging ──
+        v_edition = tk.StringVar(value=ov('edition_tag', self.edition_tag.get()))
+        v_edition_fn = tk.BooleanVar(value=ov('edition_in_filename', self.edition_in_filename.get()))
+
+        edition_frame = ttk.Frame(f)
+        edition_frame.grid(row=row, column=0, columnspan=2, sticky='w', **pad); row += 1
+
+        ttk.Label(edition_frame, text="Edition:").pack(side='left', padx=(4, 2))
+        ovr_edition_combo = ttk.Combobox(edition_frame, textvariable=v_edition,
+                                          values=EDITION_PRESETS, width=22, state='readonly')
+        ovr_edition_combo.pack(side='left', padx=(0, 4))
+
+        _ovr_edition_custom_sv = tk.StringVar(value=v_edition.get() if v_edition.get() not in EDITION_PRESETS else '')
+        ovr_edition_custom = ttk.Entry(edition_frame, textvariable=_ovr_edition_custom_sv, width=22)
+
+        # If loaded value is a custom edition (not in presets), show custom entry
+        if v_edition.get() and v_edition.get() not in EDITION_PRESETS:
+            _ovr_edition_custom_sv.set(v_edition.get())
+            ovr_edition_combo.set('Custom...')
+            ovr_edition_custom.pack(side='left', padx=(0, 4))
+
+        def _on_ovr_edition_select(event=None):
+            sel = ovr_edition_combo.get()
+            if sel == 'Custom...':
+                ovr_edition_custom.pack(side='left', padx=(0, 4))
+                ovr_edition_custom.focus()
+            else:
+                ovr_edition_custom.pack_forget()
+                v_edition.set(sel)
+        ovr_edition_combo.bind('<<ComboboxSelected>>', _on_ovr_edition_select)
+
+        def _on_ovr_custom_change(*args):
+            if ovr_edition_combo.get() == 'Custom...':
+                v_edition.set(_ovr_edition_custom_sv.get())
+        _ovr_edition_custom_sv.trace_add('write', _on_ovr_custom_change)
+
+        ttk.Checkbutton(edition_frame, text="Add to filename (Plex)",
+                        variable=v_edition_fn).pack(side='left', padx=(8, 0))
+
         # ── Dynamic update helpers ──
         def _update_presets():
             info = VIDEO_CODEC_MAP.get(v_video_codec.get(), VIDEO_CODEC_MAP['H.265 / HEVC'])
@@ -5268,6 +5378,8 @@ class VideoConverterApp:
                 'meta_video_lang':     v_meta_video_lang.get(),
                 'meta_audio_lang':     v_meta_audio_lang.get(),
                 'meta_sub_lang':       v_meta_sub_lang.get(),
+                'edition_tag':         v_edition.get(),
+                'edition_in_filename': v_edition_fn.get(),
             }
             file_info['overrides'] = overrides
             self._refresh_tree_row(item, file_info)
@@ -15213,6 +15325,8 @@ class VideoConverterApp:
             'meta_video_lang':       self.meta_video_lang.get(),
             'meta_audio_lang':       self.meta_audio_lang.get(),
             'meta_sub_lang':         self.meta_sub_lang.get(),
+            'edition_tag':           self.edition_tag.get(),
+            'edition_in_filename':   self.edition_in_filename.get(),
             'custom_ad_patterns':    self.custom_ad_patterns,
             'custom_cap_words':      self.custom_cap_words,
             'custom_replacements':   self.custom_replacements,
@@ -15267,6 +15381,8 @@ class VideoConverterApp:
             self.meta_video_lang.set(prefs.get('meta_video_lang', self.meta_video_lang.get()))
             self.meta_audio_lang.set(prefs.get('meta_audio_lang', self.meta_audio_lang.get()))
             self.meta_sub_lang.set(prefs.get('meta_sub_lang', self.meta_sub_lang.get()))
+            self.edition_tag.set(prefs.get('edition_tag', ''))
+            self.edition_in_filename.set(prefs.get('edition_in_filename', False))
             self.verify_output.set(prefs.get('verify_output',   self.verify_output.get()))
             self.notify_sound.set(prefs.get('notify_sound',     self.notify_sound.get()))
             self.notify_sound_file.set(prefs.get('notify_sound_file', self.notify_sound_file.get()))
@@ -15325,6 +15441,8 @@ class VideoConverterApp:
         self.meta_video_lang.set('und')
         self.meta_audio_lang.set('eng')
         self.meta_sub_lang.set('eng')
+        self.edition_tag.set('')
+        self.edition_in_filename.set(False)
         self._on_metadata_toggle()
         # Refresh UI state
         self.on_encoder_change(silent=True)
@@ -16955,6 +17073,8 @@ class VideoConverterApp:
             'meta_video_lang':     self.meta_video_lang.get(),
             'meta_audio_lang':     self.meta_audio_lang.get(),
             'meta_sub_lang':       self.meta_sub_lang.get(),
+            'edition_tag':         self.edition_tag.get(),
+            'edition_in_filename': self.edition_in_filename.get(),
         }
 
         renamed_candidates = []  # (output_path, original_input_path) for files whose originals were deleted
@@ -17007,6 +17127,8 @@ class VideoConverterApp:
                 'meta_video_lang':     ov.get('meta_video_lang',     settings['meta_video_lang']),
                 'meta_audio_lang':     ov.get('meta_audio_lang',     settings['meta_audio_lang']),
                 'meta_sub_lang':       ov.get('meta_sub_lang',       settings['meta_sub_lang']),
+                'edition_tag':         ov.get('edition_tag',         settings['edition_tag']),
+                'edition_in_filename': ov.get('edition_in_filename', settings['edition_in_filename']),
             }
 
             transcode_mode = file_settings['transcode_mode']
@@ -17051,7 +17173,12 @@ class VideoConverterApp:
                 output_ext = container
 
             out_dir = self.output_dir if self.output_dir else Path(input_path).parent
-            output_path = str(out_dir / f"{base_name}{suffix}{output_ext}")
+            # Edition tag in filename for Plex: {edition-Director's Cut}
+            edition_part = ''
+            edition = file_settings.get('edition_tag', '')
+            if edition and file_settings.get('edition_in_filename', False):
+                edition_part = ' {edition-' + edition + '}'
+            output_path = str(out_dir / f"{base_name}{edition_part}{suffix}{output_ext}")
 
             # Check if output exists
             if skip_existing and os.path.exists(output_path):
@@ -17103,7 +17230,7 @@ class VideoConverterApp:
                     new_suffix = f"-CRF{file_settings['crf']}-{cpu_short}_{cpu_preset}"
                 else:
                     new_suffix = f"-{file_settings['bitrate']}-{cpu_short}_{cpu_preset}"
-                output_path = str(out_dir / f"{base_name}{new_suffix}{output_ext}")
+                output_path = str(out_dir / f"{base_name}{edition_part}{new_suffix}{output_ext}")
                 self.current_output_path = output_path
                 success = self.converter.convert_file(input_path, output_path, cpu_settings)
                 if success:
