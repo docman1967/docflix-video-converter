@@ -258,6 +258,50 @@ def ask_directory(initialdir=None, title="Select Folder", parent=None):
     return filedialog.askdirectory(**kwargs)
 
 
+def ask_open_files(initialdir=None, title="Select Files", parent=None,
+                    filetypes=None):
+    """Open a file-selection dialog (multi-select).
+
+    Tries zenity first (GTK dialog with proper theming and font scaling),
+    then falls back to tkinter's askopenfilenames.
+
+    Returns a list of file paths, or an empty list if cancelled.
+    """
+    if initialdir:
+        initialdir = str(initialdir)
+    if shutil.which('zenity'):
+        try:
+            cmd = [
+                'zenity', '--file-selection', '--multiple',
+                '--separator', '\n',
+                '--title', title,
+            ]
+            if initialdir:
+                cmd += ['--filename', initialdir + '/']
+            # Add file filter if provided
+            if filetypes:
+                for label, pattern in filetypes:
+                    if pattern and pattern != '*.*':
+                        cmd += ['--file-filter',
+                                f'{label} | {pattern.replace(" ", " ")}']
+                cmd += ['--file-filter', 'All files | *']
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode == 0 and result.stdout.strip():
+                return [p for p in result.stdout.strip().split('\n') if p]
+            return []
+        except Exception:
+            pass
+    # Fallback to tkinter
+    kwargs = {'initialdir': initialdir, 'title': title}
+    if parent:
+        kwargs['parent'] = parent
+    if filetypes:
+        kwargs['filetypes'] = filetypes
+    result = filedialog.askopenfilenames(**kwargs)
+    return list(result) if result else []
+
+
 def configure_dpi_scaling(root):
     """Configure Tk scaling for high-DPI displays.
 
@@ -319,6 +363,25 @@ def configure_dpi_scaling(root):
             root.tk.call('tk', 'scaling', factor)
     except Exception:
         pass  # never break app startup over scaling
+
+    # Set readable font sizes for all Tk named fonts — affects ALL dialogs
+    # including file pickers, message boxes, etc.
+    try:
+        import tkinter.font as tkfont
+        # Increase the size of all standard Tk fonts
+        for font_name in ('TkDefaultFont', 'TkTextFont', 'TkMenuFont',
+                          'TkHeadingFont', 'TkCaptionFont', 'TkSmallCaptionFont',
+                          'TkIconFont', 'TkTooltipFont', 'TkFixedFont'):
+            try:
+                f = tkfont.nametofont(font_name)
+                current_size = f.actual()['size']
+                # Only increase if currently small (< 10pt)
+                if abs(current_size) < 10:
+                    f.configure(size=11)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def center_window_on_screen(win):

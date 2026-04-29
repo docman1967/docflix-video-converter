@@ -17715,6 +17715,23 @@ def _configure_dpi_scaling(root):
     except Exception:
         pass  # never break app startup over scaling
 
+    # Set readable font sizes for all Tk named fonts — affects ALL dialogs
+    # including file pickers, message boxes, etc.
+    try:
+        import tkinter.font as tkfont
+        for font_name in ('TkDefaultFont', 'TkTextFont', 'TkMenuFont',
+                          'TkHeadingFont', 'TkCaptionFont', 'TkSmallCaptionFont',
+                          'TkIconFont', 'TkTooltipFont', 'TkFixedFont'):
+            try:
+                f = tkfont.nametofont(font_name)
+                current_size = f.actual()['size']
+                if abs(current_size) < 10:
+                    f.configure(size=11)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 
 def main():
     """Main entry point"""
