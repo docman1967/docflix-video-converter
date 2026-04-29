@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — TV Show Renamer
+Docflix Video Converter — File Renamer
 
 Batch rename TV show and movie files using episode data
 from TVDB or TMDB. Can run as standalone tool or as part
@@ -36,7 +36,7 @@ def open_tv_renamer(app):
         TMDB_IMG_BASE = 'https://image.tmdb.org/t/p'
 
         win = tk.Toplevel(app.root)
-        win.title("📺 TV Show Renamer")
+        win.title("📺 File Renamer")
         win.geometry("960x650")
         win.minsize(800, 550)
         win.resizable(True, True)
@@ -541,6 +541,12 @@ def open_tv_renamer(app):
             sanitize = (_sanitize_path if '/' in template
                         else _sanitize_filename)
 
+            # Build provider ID variables for template
+            sid = show_data.get('_series_id', '') if isinstance(show_data, dict) else ''
+            prov = show_data.get('_provider', '') if isinstance(show_data, dict) else ''
+            tvdb_id = f'tvdb-{sid}' if prov == 'tvdb' and sid else ''
+            tmdb_id = f'tmdb-{sid}' if prov == 'tmdb' and sid else ''
+
             # ── Movie mode — no season/episode needed ──
             if isinstance(show_data, dict) and show_data.get('_is_movie'):
                 year = show_data.get('_year', '')
@@ -566,6 +572,8 @@ def open_tv_renamer(app):
                         episode=str(e).zfill(2),
                         title=title,
                         year=ep_data.get('year', air_date[:4]),
+                        tvdb=tvdb_id,
+                        tmdb=tmdb_id,
                     )
                 else:
                     # No episode data found — use date as title
@@ -608,6 +616,8 @@ def open_tv_renamer(app):
                     episode=ep_tag,
                     title=title,
                     year=year,
+                    tvdb=tvdb_id,
+                    tmdb=tmdb_id,
                 )
             else:
                 # Single episode
@@ -620,6 +630,8 @@ def open_tv_renamer(app):
                     episode=str(ep_num).zfill(2),
                     title=title,
                     year=ep_data.get('year', '') if ep_data else '',
+                    tvdb=tvdb_id,
+                    tmdb=tmdb_id,
                 )
             ext = item['ext']
             # For subtitle files, preserve language/forced/SDH tags
@@ -985,6 +997,8 @@ def open_tv_renamer(app):
             series_id = _provider_get_series_id(best)
             media_type = best.get('_media_type', best.get('type', 'series'))
 
+            prov = best.get('_provider', provider_var.get().lower())
+
             if media_type == 'movie':
                 # Movies have no episodes — store a single entry
                 year = best.get('year', '')
@@ -992,6 +1006,8 @@ def open_tv_renamer(app):
                     '_is_movie': True,
                     '_year': year,
                     '_name': show_name,
+                    '_series_id': str(series_id),
+                    '_provider': prov,
                 }
                 _log(f"  Loaded movie \"{show_name}\" ({year})")
                 return show_name
@@ -1014,6 +1030,8 @@ def open_tv_renamer(app):
                 if aired and len(aired) >= 10:
                     show_eps[('date', aired[:10])] = ep
 
+            show_eps['_series_id'] = str(series_id)
+            show_eps['_provider'] = prov
             _all_shows[show_name] = show_eps
             real_seasons = {s for s in seasons if s > 0} or seasons
             _log(f"  Loaded \"{show_name}\" — {len(eps)} eps, "
@@ -1417,6 +1435,7 @@ def open_tv_renamer(app):
                     os.rename(old_path, new_path)
                     batch_history.append((old_path, new_path))
                     item['path'] = new_path
+                    item['_renamed'] = True
                     renamed += 1
                 except Exception as e:
                     _log(f"Error renaming: {e}", 'ERROR')
@@ -1427,6 +1446,8 @@ def open_tv_renamer(app):
                     'renames': batch_history,
                     'created_dirs': created_dirs,
                 })
+            # Remove successfully renamed files from the list
+            _file_items[:] = [i for i in _file_items if not i.get('_renamed')]
             parts = [f"Renamed {renamed} files"]
             if skipped:
                 parts.append(f"{skipped} skipped (no match)")
@@ -1677,8 +1698,8 @@ def open_tv_renamer(app):
         def _open_template_settings():
             dlg = tk.Toplevel(win)
             dlg.title("Filename Template")
-            dlg.geometry("560x560")
-            dlg.minsize(480, 500)
+            dlg.geometry("620x850")
+            dlg.minsize(580, 800)
             dlg.resizable(True, True)
             dlg.transient(win)
             dlg.grab_set()
@@ -1698,9 +1719,69 @@ def open_tv_renamer(app):
             t_entry.grid(row=1, column=1, sticky='ew')
             f.columnconfigure(1, weight=1)
 
+            # ── Custom templates (right below Template entry) ──
+            _custom_templates = list(getattr(app, '_custom_rename_templates', []))
+
+            ttk.Label(f, text="Saved:").grid(
+                row=2, column=0, sticky='nw', padx=(0, 8), pady=(6, 0))
+
+            custom_frame = ttk.Frame(f)
+            custom_frame.grid(row=2, column=1, sticky='ew', pady=(6, 0))
+
+            custom_listbox = tk.Listbox(custom_frame, height=3,
+                                         font=('Courier', 9))
+            custom_listbox.pack(side='left', fill='both', expand=True)
+            custom_scroll = ttk.Scrollbar(custom_frame, orient='vertical',
+                                           command=custom_listbox.yview)
+            custom_scroll.pack(side='right', fill='y')
+            custom_listbox.configure(yscrollcommand=custom_scroll.set)
+
+            def _refresh_custom_list():
+                custom_listbox.delete(0, 'end')
+                for t in _custom_templates:
+                    custom_listbox.insert('end', t)
+
+            _refresh_custom_list()
+
+            def _use_custom(event=None):
+                sel = custom_listbox.curselection()
+                if sel:
+                    template_var.set(_custom_templates[sel[0]])
+
+            custom_listbox.bind('<Double-1>', _use_custom)
+
+            custom_btn_frame = ttk.Frame(f)
+            custom_btn_frame.grid(row=3, column=1, sticky='w',
+                                   pady=(2, 0))
+
+            def _save_custom():
+                tmpl = template_var.get().strip()
+                if not tmpl:
+                    return
+                if tmpl not in _custom_templates:
+                    _custom_templates.append(tmpl)
+                    app._custom_rename_templates = _custom_templates
+                    app.save_preferences()
+                    _refresh_custom_list()
+
+            def _delete_custom():
+                sel = custom_listbox.curselection()
+                if sel:
+                    _custom_templates.pop(sel[0])
+                    app._custom_rename_templates = _custom_templates
+                    app.save_preferences()
+                    _refresh_custom_list()
+
+            ttk.Button(custom_btn_frame, text="Use", width=6,
+                       command=_use_custom).pack(side='left', padx=2)
+            ttk.Button(custom_btn_frame, text="Save Current", width=12,
+                       command=_save_custom).pack(side='left', padx=2)
+            ttk.Button(custom_btn_frame, text="Delete", width=8,
+                       command=_delete_custom).pack(side='left', padx=2)
+
             ttk.Label(f, text="Available variables:",
                       font=('Helvetica', 10, 'bold')).grid(
-                          row=2, column=0, columnspan=2, sticky='w',
+                          row=4, column=0, columnspan=2, sticky='w',
                           pady=(16, 6))
 
             vars_text = (
@@ -1709,19 +1790,39 @@ def open_tv_renamer(app):
                 "{episode}    — Episode number (zero-padded)\n"
                 "{title}      — Episode title\n"
                 "{year}       — Air year\n"
+                "{tvdb}       — TVDB ID (e.g. tvdb-475560)\n"
+                "{tmdb}       — TMDB ID (e.g. tmdb-12345)\n"
                 "\n"
                 "Use / to create folders automatically:\n"
                 "  {show}/Season {season}/{show} S{season}E{episode} {title}"
             )
-            ttk.Label(f, text=vars_text, font=('Courier', 10),
-                      justify='left').grid(
-                          row=3, column=0, columnspan=2, sticky='w',
+            vars_box = tk.Text(f, font=('Courier', 10), height=11, width=65,
+                               wrap='none', relief='flat',
+                               bg=f.winfo_toplevel().cget('bg'),
+                               cursor='arrow')
+            vars_box.insert('1.0', vars_text)
+            vars_box.configure(state='disabled')
+            vars_box.grid(row=5, column=0, columnspan=2, sticky='w',
                           padx=(15, 0))
+            # Enable select + copy on the read-only text widget
+            def _vars_copy(event=None):
+                try:
+                    sel = vars_box.get('sel.first', 'sel.last')
+                    vars_box.clipboard_clear()
+                    vars_box.clipboard_append(sel)
+                except tk.TclError:
+                    pass
+            vars_ctx = tk.Menu(vars_box, tearoff=0)
+            vars_ctx.add_command(label="Copy", command=_vars_copy)
+            vars_box.bind('<Button-1>', lambda e: vars_box.focus_set())
+            vars_box.bind('<ButtonPress-3>',
+                          lambda e: vars_ctx.tk_popup(e.x_root, e.y_root))
+            vars_box.bind('<Control-c>', _vars_copy)
 
             # Preset templates — flat
             ttk.Label(f, text="Flat presets:",
                       font=('Helvetica', 9, 'bold')).grid(
-                          row=4, column=0, columnspan=2, sticky='w',
+                          row=6, column=0, columnspan=2, sticky='w',
                           pady=(12, 4))
 
             flat_presets = [
@@ -1734,7 +1835,7 @@ def open_tv_renamer(app):
                 ('{show} - {season}x{episode} - {title}',
                  'Show - 01x01 - Title'),
             ]
-            row = 5
+            row = 7
             for tmpl, desc in flat_presets:
                 def _set(t=tmpl):
                     template_var.set(t)
@@ -1757,6 +1858,10 @@ def open_tv_renamer(app):
                  'Show/Season 01/Show - S01E01 - Title'),
                 ('{show}/S{season}/{show} S{season}E{episode} {title}',
                  'Show/S01/Show S01E01 Title'),
+                ('{show} {{{tvdb}}}/Season {season}/{show} S{season}E{episode} {title}',
+                 'Show {tvdb-475560}/Season 01/Show S01E01 Title'),
+                ('{show} {{{tmdb}}}/Season {season}/{show} S{season}E{episode} {title}',
+                 'Show {tmdb-12345}/Season 01/Show S01E01 Title'),
             ]
             for tmpl, desc in folder_presets:
                 def _set(t=tmpl):
@@ -1851,8 +1956,8 @@ def open_tv_renamer(app):
         menubar.add_cascade(label="Help", menu=help_menu)
 
         def _show_about():
-            messagebox.showinfo("About TV Show Renamer",
-                f"TV Show Renamer\n"
+            messagebox.showinfo("About File Renamer",
+                f"File Renamer\n"
                 f"Part of {APP_NAME} v{APP_VERSION}\n\n"
                 f"Rename video and subtitle files using\n"
                 f"episode data from TVDB or TMDB.\n\n"
@@ -1885,17 +1990,17 @@ def open_tv_renamer(app):
             tree.get_children()))
         win.bind('<Delete>', lambda e: _remove_selected_files())
 
-        _log(f"TV Show Renamer ready — provider: {provider_var.get()}")
+        _log(f"File Renamer ready — provider: {provider_var.get()}")
         _log("Drag and drop video files or folders to begin")
 
 
 
 def main():
-    """Launch TV Show Renamer as a standalone application."""
+    """Launch File Renamer as a standalone application."""
     from .standalone import create_standalone_root
 
     root, app = create_standalone_root(
-        title="\U0001f4fa TV Show Renamer",
+        title="\U0001f4fa File Renamer",
         geometry="960x650",
         minsize=(800, 550),
     )

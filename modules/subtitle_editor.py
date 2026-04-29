@@ -43,6 +43,7 @@ from .subtitle_filters import (
     BUILTIN_AD_PATTERNS,
 )
 from .smart_sync import smart_sync
+from .waveform_timeline import WaveformTimeline
 
 try:
     from tkinterdnd2 import DND_FILES
@@ -414,6 +415,8 @@ def open_standalone_subtitle_editor(app):
                         f"Opened video subtitle: stream #{stream_index} ({lang}) "
                         f"from {os.path.basename(video_path)} "
                         f"({len(cues)} entries)", 'INFO')
+                    # Auto-load waveform timeline
+                    editor.after(200, lambda: _load_waveform_for_video(video_path))
                 else:
                     os.unlink(tmp_srt.name)
 
@@ -1980,6 +1983,39 @@ def open_standalone_subtitle_editor(app):
         quick_sync_menu.add_command(label="Set First Cue Time...",
                                     command=_quick_sync_first_cue)
 
+        # ── View menu ──
+        view_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="View", menu=view_menu)
+
+        def _toggle_timeline_menu():
+            _toggle_timeline()
+
+        def _load_waveform_menu():
+            """Load waveform from the associated video file."""
+            vpath = _find_video_for_subtitle()
+            if vpath:
+                _load_waveform_for_video(vpath)
+            else:
+                # Ask user to pick a video file
+                vpath = filedialog.askopenfilename(
+                    parent=editor,
+                    title="Select Video File for Waveform",
+                    filetypes=[
+                        ("Video files", " ".join(f"*{e}" for e in VIDEO_EXTENSIONS)),
+                        ("All files", "*.*"),
+                    ],
+                )
+                if vpath:
+                    _load_waveform_for_video(vpath)
+
+        view_menu.add_command(label="Load Waveform...",
+                              command=_load_waveform_menu)
+        view_menu.add_command(label="Show/Hide Timeline",
+                              command=_toggle_timeline_menu,
+                              accelerator="Ctrl+T")
+        editor.bind('<Control-t>', lambda e: _toggle_timeline_menu())
+        editor.bind('<Control-T>', lambda e: _toggle_timeline_menu())
+
         def _find_video_for_subtitle():
             """Try to find the video file for the current subtitle."""
             vpath = None
@@ -2732,9 +2768,29 @@ def open_standalone_subtitle_editor(app):
 
         ttk.Separator(content_frame, orient='horizontal').pack(fill='x')
 
+        # ── PanedWindow: (Video + Treeview) / Waveform Timeline ──
+        paned = tk.PanedWindow(content_frame, orient='vertical',
+                               sashwidth=6, sashrelief='raised')
+        paned.pack(fill='both', expand=True, padx=10, pady=(4, 0))
+
+        # ── Top section: horizontal split (Video | Treeview) ──
+        top_paned = tk.PanedWindow(paned, orient='horizontal',
+                                    sashwidth=6, sashrelief='raised')
+
+        # ── Video panel ──
+        video_panel = ttk.Frame(top_paned, relief='sunken', borderwidth=1)
+        video_embed_frame = tk.Frame(video_panel, bg='black',
+                                      width=320, height=240)
+        video_embed_frame.pack(fill='both', expand=True)
+        video_embed_frame.pack_propagate(False)
+        _video_placeholder = ttk.Label(video_embed_frame,
+                                        text="No video loaded\n\nUse View → Load Waveform\nto load a video file",
+                                        anchor='center', justify='center')
+        _video_placeholder.place(relx=0.5, rely=0.5, anchor='center')
+        video_visible = [False]
+
         # ── Treeview ──
-        tree_frame = ttk.Frame(content_frame)
-        tree_frame.pack(fill='both', expand=True, padx=10, pady=(4, 0))
+        tree_frame = ttk.Frame(top_paned)
 
         tree_scroll_y = ttk.Scrollbar(tree_frame, orient='vertical')
         tree_scroll_y.pack(side='right', fill='y')
@@ -2965,6 +3021,97 @@ def open_standalone_subtitle_editor(app):
 
         tree.bind('<Button-3>', show_context_menu)
 
+        # ── Waveform Timeline ──
+        timeline_frame = ttk.Frame(paned)
+        timeline_visible = [False]
+
+        def _on_timeline_cue_modified(cue_idx, new_start_ms, new_end_ms):
+            """Called when a cue is dragged on the timeline."""
+            if cue_idx < len(cues):
+                cues[cue_idx]['start'] = ms_to_srt_ts(int(new_start_ms))
+                cues[cue_idx]['end'] = ms_to_srt_ts(int(new_end_ms))
+                refresh_tree(cues)
+
+        def _on_timeline_selection(cue_idx):
+            """Called when a cue is clicked on the timeline."""
+            iid = str(cue_idx)
+            if tree.exists(iid):
+                tree.selection_set(iid)
+                tree.see(iid)
+                tree.focus(iid)
+
+        timeline = WaveformTimeline(
+            timeline_frame,
+            cues_fn=lambda: cues,
+            on_cue_modified=_on_timeline_cue_modified,
+            on_selection_changed=_on_timeline_selection,
+            push_undo=push_undo,
+            log_fn=app.add_log,
+            video_frame=video_embed_frame,
+        )
+        timeline.pack(fill='both', expand=True)
+
+        # Tree → Timeline selection sync
+        def _on_tree_select(event):
+            sel = tree.selection()
+            if sel:
+                try:
+                    idx = int(sel[0])
+                    timeline.select_cue(idx)
+                    # Don't scroll during drag — it shifts coordinates
+                    if not timeline._drag:
+                        timeline.scroll_to_cue(idx)
+                except (ValueError, IndexError):
+                    pass
+
+        tree.bind('<<TreeviewSelect>>', _on_tree_select)
+
+        # Build paned layout: top_paned (video | tree) in vertical paned with timeline
+        top_paned.add(tree_frame, stretch='always')
+        paned.add(top_paned, stretch='always')
+
+        def _show_video():
+            if not video_visible[0]:
+                top_paned.add(video_panel, before=tree_frame, stretch='never',
+                              width=360)
+                video_visible[0] = True
+
+        def _hide_video():
+            if video_visible[0]:
+                top_paned.forget(video_panel)
+                video_visible[0] = False
+
+        def _show_timeline():
+            if not timeline_visible[0]:
+                paned.add(timeline_frame, stretch='always')
+                # Set initial sash position: 65% top, 35% timeline
+                paned.update_idletasks()
+                total_h = paned.winfo_height()
+                if total_h > 100:
+                    paned.sash_place(0, 0, int(total_h * 0.65))
+                timeline_visible[0] = True
+
+        def _hide_timeline():
+            if timeline_visible[0]:
+                paned.forget(timeline_frame)
+                timeline_visible[0] = False
+
+        def _toggle_timeline():
+            if timeline_visible[0]:
+                _hide_timeline()
+            else:
+                _show_timeline()
+
+        def _load_waveform_for_video(video_path):
+            """Load waveform from video, show the timeline and video panel."""
+            if not video_path or not os.path.isfile(video_path):
+                return
+            _show_video()
+            _video_placeholder.place_forget()
+            _show_timeline()
+            if not timeline.is_loaded:
+                timeline.load_audio(video_path)
+
         # ── Status bar ──
         status_frame = ttk.Frame(content_frame, padding=(10, 6, 10, 6))
         status_frame.pack(fill='x')
@@ -3022,13 +3169,17 @@ def open_standalone_subtitle_editor(app):
             if long_count:
                 stats_parts.append(f"{long_count} long lines")
             stats_label.configure(text=" │ ".join(stats_parts))
+            # Refresh waveform timeline cue blocks and live subtitles
+            if timeline.is_loaded:
+                timeline.refresh()
+                timeline.reload_subtitles()
 
         # Delete key shortcut
         editor.bind('<Delete>', lambda e: None if isinstance(e.widget, tk.Text) else delete_selected())
 
         # ── Disable menus until a file is loaded ──
         def _set_menus_state(state):
-            for menu_label in ('Tools', 'Edit', 'Timing'):
+            for menu_label in ('Tools', 'Edit', 'Timing', 'View'):
                 try:
                     idx = menubar.index(menu_label)
                     menubar.entryconfigure(idx, state=state)
@@ -3044,7 +3195,29 @@ def open_standalone_subtitle_editor(app):
         _set_menus_state('disabled')
 
         # ── Cleanup temp files on editor close ──
+        def _has_unsaved_changes():
+            """Check if cues have been modified since last load/save."""
+            if len(cues) != len(original_cues):
+                return True
+            for c, o in zip(cues, original_cues):
+                if (c.get('start') != o.get('start') or
+                        c.get('end') != o.get('end') or
+                        c.get('text') != o.get('text')):
+                    return True
+            return False
+
         def on_editor_close():
+            if cues and _has_unsaved_changes():
+                result = messagebox.askyesnocancel(
+                    "Unsaved Changes",
+                    "You have unsaved changes.\n\n"
+                    "Would you like to save before closing?",
+                    parent=editor)
+                if result is None:
+                    return  # Cancel — don't close
+                if result:
+                    do_save_file()  # Save first
+            timeline.cleanup()
             if video_source[0] and video_source[0].get('temp_srt'):
                 try:
                     os.unlink(video_source[0]['temp_srt'])
@@ -3274,6 +3447,13 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
             if long_count:
                 stats_parts.append(f"{long_count} long lines")
             stats_label.configure(text=" │ ".join(stats_parts))
+            # Refresh waveform timeline cue blocks and live subtitles (if loaded)
+            try:
+                if timeline_int.is_loaded:
+                    timeline_int.refresh()
+                    timeline_int.reload_subtitles()
+            except NameError:
+                pass  # timeline_int not yet defined during initial setup
 
         def apply_filter(filter_func, name):
             nonlocal cues
@@ -4643,6 +4823,15 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
         quick_sync_menu.add_command(label="Set First Cue Time...",
                                     command=_quick_sync_first_cue)
 
+        # ── View menu ──
+        view_menu_int = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="View", menu=view_menu_int)
+        view_menu_int.add_command(label="Show/Hide Timeline",
+                                  command=_toggle_timeline_int,
+                                  accelerator="Ctrl+T")
+        editor.bind('<Control-t>', lambda e: _toggle_timeline_int())
+        editor.bind('<Control-T>', lambda e: _toggle_timeline_int())
+
         def _show_smart_sync():
             """Auto-sync subtitles using Whisper speech recognition."""
             import threading
@@ -5196,10 +5385,24 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
         ttk.Separator(editor, orient='horizontal').pack(fill='x')
 
         # ══════════════════════════════════════════════════════════════════════
-        # Treeview with subtitle entries
+        # PanedWindow: (Video + Treeview) / Waveform Timeline
         # ══════════════════════════════════════════════════════════════════════
-        tree_frame = ttk.Frame(editor)
-        tree_frame.pack(fill='both', expand=True, padx=10, pady=(4, 0))
+        paned = tk.PanedWindow(editor, orient='vertical',
+                               sashwidth=6, sashrelief='raised')
+        paned.pack(fill='both', expand=True, padx=10, pady=(4, 0))
+
+        top_paned = tk.PanedWindow(paned, orient='horizontal',
+                                    sashwidth=6, sashrelief='raised')
+
+        # ── Video panel ──
+        video_panel_int = ttk.Frame(top_paned, relief='sunken', borderwidth=1)
+        video_embed_frame_int = tk.Frame(video_panel_int, bg='black',
+                                          width=320, height=240)
+        video_embed_frame_int.pack(fill='both', expand=True)
+        video_embed_frame_int.pack_propagate(False)
+        video_visible_int = [False]
+
+        tree_frame = ttk.Frame(top_paned)
 
         tree_scroll_y = ttk.Scrollbar(tree_frame, orient='vertical')
         tree_scroll_y.pack(side='right', fill='y')
@@ -5454,6 +5657,86 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
 
         tree.bind('<Button-3>', show_context_menu)
 
+        # ── Waveform Timeline ──
+        timeline_frame_int = ttk.Frame(paned)
+        timeline_visible_int = [False]
+
+        def _on_timeline_cue_modified_int(cue_idx, new_start_ms, new_end_ms):
+            if cue_idx < len(cues):
+                cues[cue_idx]['start'] = ms_to_srt_ts(int(new_start_ms))
+                cues[cue_idx]['end'] = ms_to_srt_ts(int(new_end_ms))
+                refresh_tree(cues)
+
+        def _on_timeline_selection_int(cue_idx):
+            iid = str(cue_idx)
+            if tree.exists(iid):
+                tree.selection_set(iid)
+                tree.see(iid)
+                tree.focus(iid)
+
+        timeline_int = WaveformTimeline(
+            timeline_frame_int,
+            cues_fn=lambda: cues,
+            on_cue_modified=_on_timeline_cue_modified_int,
+            on_selection_changed=_on_timeline_selection_int,
+            push_undo=push_undo,
+            log_fn=app.add_log,
+            video_frame=video_embed_frame_int,
+        )
+        timeline_int.pack(fill='both', expand=True)
+
+        def _on_tree_select_int(event):
+            sel = tree.selection()
+            if sel:
+                try:
+                    idx = int(sel[0])
+                    timeline_int.select_cue(idx)
+                    if not timeline_int._drag:
+                        timeline_int.scroll_to_cue(idx)
+                except (ValueError, IndexError):
+                    pass
+
+        tree.bind('<<TreeviewSelect>>', _on_tree_select_int)
+
+        # Build paned layout
+        top_paned.add(tree_frame, stretch='always')
+        paned.add(top_paned, stretch='always')
+
+        def _show_video_int():
+            if not video_visible_int[0]:
+                top_paned.add(video_panel_int, before=tree_frame,
+                              stretch='never', width=360)
+                video_visible_int[0] = True
+
+        def _show_timeline_int():
+            if not timeline_visible_int[0]:
+                paned.add(timeline_frame_int, stretch='always')
+                paned.update_idletasks()
+                total_h = paned.winfo_height()
+                if total_h > 100:
+                    paned.sash_place(0, 0, int(total_h * 0.65))
+                timeline_visible_int[0] = True
+
+        def _hide_timeline_int():
+            if timeline_visible_int[0]:
+                paned.forget(timeline_frame_int)
+                timeline_visible_int[0] = False
+
+        def _toggle_timeline_int():
+            if timeline_visible_int[0]:
+                _hide_timeline_int()
+            else:
+                _show_timeline_int()
+
+        # Auto-load waveform from the video file (always available in internal editor)
+        def _auto_load_waveform():
+            _show_video_int()
+            _show_timeline_int()
+            if not timeline_int.is_loaded:
+                timeline_int.load_audio(filepath)
+
+        editor.after(200, _auto_load_waveform)
+
         # ══════════════════════════════════════════════════════════════════════
         # Status bar + action buttons
         # ══════════════════════════════════════════════════════════════════════
@@ -5642,6 +5925,33 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
 
         # Delete key shortcut
         editor.bind('<Delete>', lambda e: None if isinstance(e.widget, tk.Text) else delete_selected())
+
+        # Clean up timeline on close
+        def _has_unsaved_changes_int():
+            if len(cues) != len(original_cues):
+                return True
+            for c, o in zip(cues, original_cues):
+                if (c.get('start') != o.get('start') or
+                        c.get('end') != o.get('end') or
+                        c.get('text') != o.get('text')):
+                    return True
+            return False
+
+        def _on_internal_editor_close():
+            if cues and _has_unsaved_changes_int():
+                result = messagebox.askyesnocancel(
+                    "Unsaved Changes",
+                    "You have unsaved changes.\n\n"
+                    "Would you like to save before closing?",
+                    parent=editor)
+                if result is None:
+                    return  # Cancel — don't close
+                if result:
+                    do_save()  # Save first
+            timeline_int.cleanup()
+            editor.destroy()
+
+        editor.protocol('WM_DELETE_WINDOW', _on_internal_editor_close)
 
         if not getattr(app, '_standalone_mode', False):
             editor.wait_window()

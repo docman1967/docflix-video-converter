@@ -49,6 +49,8 @@ class StandaloneContext:
         self._tv_rename_template = prefs.get(
             'tv_rename_template',
             '{show} S{season}E{episode} {title}')
+        self._custom_rename_templates = prefs.get(
+            'custom_rename_templates', [])
 
         # Subtitle editor
         self.custom_cap_words = prefs.get('custom_cap_words', [])
@@ -77,6 +79,8 @@ class StandaloneContext:
         prefs['tv_rename_template'] = getattr(
             self, '_tv_rename_template',
             '{show} S{season}E{episode} {title}')
+        prefs['custom_rename_templates'] = getattr(
+            self, '_custom_rename_templates', [])
         prefs['custom_cap_words'] = getattr(self, 'custom_cap_words', [])
         prefs['custom_spell_words'] = getattr(
             self, 'custom_spell_words', [])

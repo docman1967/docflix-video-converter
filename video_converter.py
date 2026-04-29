@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.2.0"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -4200,7 +4200,7 @@ class VideoConverterApp:
         tools_menu.add_command(label="🔧 Media Processor...",
                                accelerator="Ctrl+M",
                                command=self.open_media_processor)
-        tools_menu.add_command(label="📺 TV Show Renamer...",
+        tools_menu.add_command(label="📺 File Renamer...",
                                command=self.open_tv_renamer)
         tools_menu.add_command(label="📐 Video Scaler...",
                                accelerator="Ctrl+Shift+R",
@@ -5802,7 +5802,24 @@ class VideoConverterApp:
         dlg.wait_window()
 
     def open_standalone_subtitle_editor(self):
-        """Open the subtitle editor as a standalone app window with its own File menu."""
+        """Open the subtitle editor as a standalone window."""
+        try:
+            from modules.subtitle_editor import open_standalone_subtitle_editor
+            open_standalone_subtitle_editor(self)
+        except ImportError:
+            import importlib.util
+            _se_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     'modules', 'subtitle_editor.py')
+            if os.path.exists(_se_path):
+                spec = importlib.util.spec_from_file_location('subtitle_editor', _se_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                mod.open_standalone_subtitle_editor(self)
+            else:
+                messagebox.showerror("Subtitle Editor", "modules/subtitle_editor.py not found.")
+
+    def _open_standalone_subtitle_editor_UNUSED(self):
+        """DEPRECATED — inline copy kept for reference only. Use module import above."""
         import tempfile
 
         editor = tk.Toplevel(self.root)
@@ -8720,7 +8737,24 @@ class VideoConverterApp:
     # ── Media Processor ──────────────────────────────────────────────────────
 
     def open_media_processor(self):
-        """Open the standalone Media Processor window for remux-only post-processing."""
+        """Open the Media Processor window."""
+        try:
+            from modules.media_processor import open_media_processor
+            open_media_processor(self)
+        except ImportError:
+            import importlib.util
+            _mp_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     'modules', 'media_processor.py')
+            if os.path.exists(_mp_path):
+                spec = importlib.util.spec_from_file_location('media_processor', _mp_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                mod.open_media_processor(self)
+            else:
+                messagebox.showerror("Media Processor", "modules/media_processor.py not found.")
+
+    def _open_media_processor_UNUSED(self):
+        """DEPRECATED — inline copy kept for reference only. Use module import above."""
         import time as _time
         import tempfile
         import threading
@@ -10018,7 +10052,7 @@ class VideoConverterApp:
         _log("Tip: drag and drop video files onto this window", 'INFO')
         _log(f"Subtitle matching: *.{opt_sub_lang.get()}.srt / *.{opt_sub_lang.get()}.forced.srt", 'INFO')
 
-    # ── TV Show Renamer ────────────────────────────────────────────────────
+    # ── File Renamer ────────────────────────────────────────────────────
     def open_video_scaler(self):
         """Open the Video Scaler tool."""
         try:
@@ -10037,7 +10071,24 @@ class VideoConverterApp:
                 messagebox.showerror("Video Scaler", "modules/video_scaler.py not found.")
 
     def open_tv_renamer(self):
-        """Open the TV Show Renamer tool with TVDB integration."""
+        """Open the File Renamer tool."""
+        try:
+            from modules.tv_renamer import open_tv_renamer
+            open_tv_renamer(self)
+        except ImportError:
+            import importlib.util
+            _tr_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     'modules', 'tv_renamer.py')
+            if os.path.exists(_tr_path):
+                spec = importlib.util.spec_from_file_location('tv_renamer', _tr_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                mod.open_tv_renamer(self)
+            else:
+                messagebox.showerror("TV Renamer", "modules/tv_renamer.py not found.")
+
+    def _open_tv_renamer_UNUSED(self):
+        """DEPRECATED — inline copy kept for reference only. Use module import above."""
         import urllib.request
         import urllib.parse
         import json as _json
@@ -10047,7 +10098,7 @@ class VideoConverterApp:
         TMDB_IMG_BASE = 'https://image.tmdb.org/t/p'
 
         win = tk.Toplevel(self.root)
-        win.title("📺 TV Show Renamer")
+        win.title("📺 File Renamer")
         win.geometry("960x650")
         win.minsize(800, 550)
         win.resizable(True, True)
@@ -11425,6 +11476,7 @@ class VideoConverterApp:
                     os.rename(old_path, new_path)
                     batch_history.append((old_path, new_path))
                     item['path'] = new_path
+                    item['_renamed'] = True
                     renamed += 1
                 except Exception as e:
                     _log(f"Error renaming: {e}", 'ERROR')
@@ -11435,6 +11487,8 @@ class VideoConverterApp:
                     'renames': batch_history,
                     'created_dirs': created_dirs,
                 })
+            # Remove successfully renamed files from the list
+            _file_items[:] = [i for i in _file_items if not i.get('_renamed')]
             parts = [f"Renamed {renamed} files"]
             if skipped:
                 parts.append(f"{skipped} skipped (no match)")
@@ -11855,8 +11909,8 @@ class VideoConverterApp:
         menubar.add_cascade(label="Help", menu=help_menu)
 
         def _show_about():
-            messagebox.showinfo("About TV Show Renamer",
-                f"TV Show Renamer\n"
+            messagebox.showinfo("About File Renamer",
+                f"File Renamer\n"
                 f"Part of {APP_NAME} v{APP_VERSION}\n\n"
                 f"Rename video and subtitle files using\n"
                 f"episode data from TVDB or TMDB.\n\n"
@@ -11881,7 +11935,7 @@ class VideoConverterApp:
             tree.get_children()))
         win.bind('<Delete>', lambda e: _remove_selected_files())
 
-        _log(f"TV Show Renamer ready — provider: {provider_var.get()}")
+        _log(f"File Renamer ready — provider: {provider_var.get()}")
         _log("Drag and drop video files or folders to begin")
 
     def open_batch_filter(self):
@@ -12633,7 +12687,27 @@ class VideoConverterApp:
 
     def show_subtitle_editor(self, filepath, stream_index, file_info,
                                 external_sub_path=None):
-        """Show subtitle text editor for a subtitle stream or external file.
+        """Show subtitle text editor for a subtitle stream or external file."""
+        try:
+            from modules.subtitle_editor import show_subtitle_editor
+            show_subtitle_editor(self, filepath, stream_index, file_info,
+                                  external_sub_path=external_sub_path)
+        except ImportError:
+            import importlib.util
+            _se_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     'modules', 'subtitle_editor.py')
+            if os.path.exists(_se_path):
+                spec = importlib.util.spec_from_file_location('subtitle_editor', _se_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                mod.show_subtitle_editor(self, filepath, stream_index, file_info,
+                                          external_sub_path=external_sub_path)
+            else:
+                messagebox.showerror("Subtitle Editor", "modules/subtitle_editor.py not found.")
+
+    def _show_subtitle_editor_UNUSED(self, filepath, stream_index, file_info,
+                                external_sub_path=None):
+        """DEPRECATED — inline copy kept for reference only. Use module import above.
 
         For internal streams: extracts from filepath using stream_index.
         For external files: pass external_sub_path (stream_index is ignored).
@@ -15635,6 +15709,7 @@ class VideoConverterApp:
             'tmdb_api_key':          getattr(self, '_tmdb_api_key', ''),
             'tv_rename_provider':    getattr(self, '_tv_rename_provider', 'TVDB'),
             'tv_rename_template':    getattr(self, '_tv_rename_template', '{show} S{season}E{episode} {title}'),
+            'custom_rename_templates': getattr(self, '_custom_rename_templates', []),
         }
         try:
             self._prefs_path().parent.mkdir(parents=True, exist_ok=True)
@@ -15699,6 +15774,8 @@ class VideoConverterApp:
             self._tv_rename_provider = prefs.get('tv_rename_provider', 'TVDB')
             self._tv_rename_template = prefs.get('tv_rename_template',
                                                   '{show} S{season}E{episode} {title}')
+            self._custom_rename_templates = prefs.get(
+                'custom_rename_templates', [])
             # Media Processor
             self._media_proc_prefs = prefs.get('media_processor', {})
             self._scaler_prefs = prefs.get('video_scaler', {})
