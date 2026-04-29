@@ -8747,8 +8747,8 @@ class VideoConverterApp:
 
         win = tk.Toplevel(self.root)
         win.title("🔧 Media Processor")
-        win.geometry("920x1080")
-        win.minsize(750, 850)
+        win.geometry("920x880")
+        win.minsize(750, 650)
         self._center_on_main(win)
 
         # ── State ──
@@ -9294,16 +9294,16 @@ class VideoConverterApp:
         _toggle_meta_fields()
         _toggle_audio_controls()
 
-        # Row 3b: Edition tagging
+        # Row 3b: Edition tagging + Chapter insertion (combined row)
         ops_row3b = ttk.Frame(ops_frame)
         ops_row3b.pack(fill='x', pady=2)
 
         ttk.Label(ops_row3b, text="Edition:").pack(side='left', padx=(0, 2))
         mp_edition_combo = ttk.Combobox(ops_row3b, textvariable=opt_edition_tag,
-                                         values=EDITION_PRESETS, width=22, state='readonly')
+                                         values=EDITION_PRESETS, width=18, state='readonly')
         mp_edition_combo.pack(side='left', padx=(0, 4))
 
-        mp_edition_custom = ttk.Entry(ops_row3b, textvariable=_edition_custom_sv, width=22)
+        mp_edition_custom = ttk.Entry(ops_row3b, textvariable=_edition_custom_sv, width=18)
 
         if opt_edition_tag.get() and opt_edition_tag.get() not in EDITION_PRESETS:
             _edition_custom_sv.set(opt_edition_tag.get())
@@ -9325,25 +9325,24 @@ class VideoConverterApp:
                 opt_edition_tag.set(_edition_custom_sv.get())
         _edition_custom_sv.trace_add('write', _on_mp_edition_custom)
 
-        ttk.Checkbutton(ops_row3b, text="Add to filename (Plex)",
-                        variable=opt_edition_fn).pack(side='left', padx=(8, 0))
+        ttk.Checkbutton(ops_row3b, text="Plex",
+                        variable=opt_edition_fn).pack(side='left', padx=(4, 0))
 
-        # Row 3c: Chapter insertion
-        ops_row3c = ttk.Frame(ops_frame)
-        ops_row3c.pack(fill='x', pady=2)
+        # Separator
+        ttk.Separator(ops_row3b, orient='vertical').pack(side='left', fill='y', padx=8)
 
         def _toggle_ch_spin():
             mp_ch_spin.configure(state='normal' if opt_add_chapters.get() else 'disabled')
             if opt_add_chapters.get():
                 opt_strip_chapters.set(False)
 
-        ttk.Checkbutton(ops_row3c, text="Add chapters every",
+        ttk.Checkbutton(ops_row3b, text="Chapters every",
                         variable=opt_add_chapters,
                         command=_toggle_ch_spin).pack(side='left', padx=(0, 2))
-        mp_ch_spin = tk.Spinbox(ops_row3c, textvariable=opt_ch_interval,
+        mp_ch_spin = tk.Spinbox(ops_row3b, textvariable=opt_ch_interval,
                                 from_=1, to=60, width=3, state='disabled')
         mp_ch_spin.pack(side='left', padx=(0, 2))
-        ttk.Label(ops_row3c, text="minutes").pack(side='left')
+        ttk.Label(ops_row3b, text="min").pack(side='left')
         _toggle_ch_spin()
 
         # Row 4: Output + parallel + container
