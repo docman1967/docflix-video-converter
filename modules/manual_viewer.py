@@ -507,13 +507,16 @@ def show_manual(app):
     warn_bg = '#2e2a1a'
     note_bg = '#1a1a2e'
 
-    # ── Main paned window ──
-    paned = tk.PanedWindow(win, orient='horizontal', bg=bg,
-                           sashwidth=4, sashrelief='flat')
-    paned.pack(fill='both', expand=True)
+    # ── Main layout (grid-based, no PanedWindow) ──
+    main_frame = tk.Frame(win, bg=bg)
+    main_frame.pack(fill='both', expand=True)
+    main_frame.columnconfigure(1, weight=1)
+    main_frame.rowconfigure(0, weight=1)
 
     # ── Sidebar ──
-    sidebar_frame = tk.Frame(paned, bg=bg2, width=220)
+    sidebar_frame = tk.Frame(main_frame, bg=bg2, width=220)
+    sidebar_frame.grid(row=0, column=0, sticky='ns')
+    sidebar_frame.grid_propagate(False)
 
     sidebar_label = tk.Label(sidebar_frame, text="Contents", font=('Helvetica', 12, 'bold'),
                              bg=bg2, fg=accent, anchor='w', padx=12, pady=8)
@@ -528,10 +531,9 @@ def show_manual(app):
     for title, _ in MANUAL_SECTIONS:
         sidebar_list.insert('end', f'  {title}')
 
-    paned.add(sidebar_frame, minsize=180, width=220)
-
     # ── Content area ──
-    content_frame = tk.Frame(paned, bg=bg)
+    content_frame = tk.Frame(main_frame, bg=bg)
+    content_frame.grid(row=0, column=1, sticky='nsew')
 
     text = tk.Text(content_frame, wrap='word', bg=bg, fg=fg,
                    font=('Helvetica', 11), padx=20, pady=16,
@@ -542,8 +544,6 @@ def show_manual(app):
     text.configure(yscrollcommand=scrollbar.set)
     scrollbar.pack(side='right', fill='y')
     text.pack(fill='both', expand=True)
-
-    paned.add(content_frame, minsize=400)
 
     # ── Text tags ──
     text.tag_configure('h2', font=('Helvetica', 18, 'bold'), foreground=accent,
