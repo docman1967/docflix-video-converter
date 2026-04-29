@@ -9345,7 +9345,7 @@ class VideoConverterApp:
         ttk.Label(ops_row3b, text="min").pack(side='left')
         _toggle_ch_spin()
 
-        # Row 4: Output + parallel + container
+        # Row 4: Output
         ops_row4 = ttk.Frame(ops_frame)
         ops_row4.pack(fill='x', pady=2)
 
@@ -9359,16 +9359,20 @@ class VideoConverterApp:
         mp_out_btn = ttk.Button(ops_row4, text="Browse…", state='disabled',
             command=lambda: opt_output_folder.set(
                 self._ask_directory(title="Select Output Folder") or opt_output_folder.get()))
-        mp_out_btn.pack(side='left', padx=(0, 12))
+        mp_out_btn.pack(side='left')
 
-        ttk.Label(ops_row4, text="Container:").pack(side='left', padx=(0, 2))
-        ttk.Combobox(ops_row4, textvariable=opt_container,
+        # Row 5: Container + parallel
+        ops_row5 = ttk.Frame(ops_frame)
+        ops_row5.pack(fill='x', pady=2)
+
+        ttk.Label(ops_row5, text="Container:").pack(side='left', padx=(0, 2))
+        ttk.Combobox(ops_row5, textvariable=opt_container,
                      values=('.mkv', '.mp4'), width=5, state='readonly').pack(side='left', padx=(0, 12))
 
-        ttk.Checkbutton(ops_row4, text="Parallel",
+        ttk.Checkbutton(ops_row5, text="Parallel",
                        variable=opt_parallel).pack(side='left', padx=(0, 2))
-        ttk.Label(ops_row4, text="Jobs:").pack(side='left', padx=(0, 2))
-        ttk.Spinbox(ops_row4, textvariable=opt_max_jobs, from_=1, to=32,
+        ttk.Label(ops_row5, text="Jobs:").pack(side='left', padx=(0, 2))
+        ttk.Spinbox(ops_row5, textvariable=opt_max_jobs, from_=1, to=32,
                     width=3).pack(side='left')
 
         def _toggle_output_folder():
