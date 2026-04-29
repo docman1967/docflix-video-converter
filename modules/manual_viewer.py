@@ -576,8 +576,8 @@ def show_manual(app):
                        spacing1=1, spacing3=1)
     text.tag_configure('sep', foreground=border)
 
-    # ── Section markers for navigation ──
-    section_marks = {}
+    # ── Section anchor indices for navigation ──
+    section_indices = {}  # title -> text index string (e.g. "42.0")
 
     def _render_all():
         """Render all sections into the text widget."""
@@ -586,13 +586,11 @@ def show_manual(app):
 
         # Title
         text.insert('end', 'Docflix Video Converter\n', 'h2')
-        text.insert('end', 'User Manual \u2014 Version 2.0.6\n\n', 'p')
+        text.insert('end', 'User Manual \u2014 Version 2.0.7\n\n', 'p')
 
         for section_title, lines in MANUAL_SECTIONS:
-            mark = f'section_{section_title}'
-            text.mark_set(mark, 'end-1c')
-            text.mark_gravity(mark, 'left')
-            section_marks[section_title] = mark
+            # Record the index where this section starts
+            section_indices[section_title] = text.index('end-1c')
 
             for tag, content in lines:
                 if tag == 'bullet':
@@ -631,15 +629,13 @@ def show_manual(app):
         if not sel:
             return
         title = MANUAL_SECTIONS[sel[0]][0]
-        mark = section_marks.get(title)
-        if mark:
-            # Get the mark's position as a line.char index and scroll
-            # that line to the top of the visible area
-            idx = text.index(mark)
-            line = int(idx.split('.')[0])
-            total = int(text.index('end-1c').split('.')[0])
-            if total > 0:
-                text.yview_moveto(max(0, (line - 1) / total))
+        idx = section_indices.get(title)
+        if idx:
+            # Scroll far past the target, then back to it —
+            # this forces text.see() to place it at the top
+            text.see('end')
+            text.update_idletasks()
+            text.see(idx)
 
     sidebar_list.bind('<<ListboxSelect>>', _on_sidebar_select)
 
