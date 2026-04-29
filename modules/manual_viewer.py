@@ -631,13 +631,13 @@ def show_manual(app):
         title = MANUAL_SECTIONS[sel[0]][0]
         idx = section_indices.get(title)
         if idx:
-            # Scroll far past the target, then back to it —
-            # this forces text.see() to place it at the top
-            text.see('end')
-            text.update_idletasks()
-            text.see(idx)
+            # Use the raw Tk yview command with a text index —
+            # this scrolls the given index to the top of the window
+            text.tk.call(text._w, 'yview', idx)
 
     sidebar_list.bind('<<ListboxSelect>>', _on_sidebar_select)
+    # Also bind single-click directly in case <<ListboxSelect>> is unreliable
+    sidebar_list.bind('<ButtonRelease-1>', _on_sidebar_select)
 
     # Render content
     _render_all()
