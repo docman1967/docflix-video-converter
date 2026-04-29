@@ -52,7 +52,15 @@ RESOLUTION_MAP = {
 # ═══════════════════════════════════════════════════════════════════
 
 def _probe_video_info(filepath):
-    """Probe a video file and return (width, height, duration_secs, codec_name) or Nones."""
+    """Probe a video file and return (width, height, duration_secs, codec_name) or Nones.
+
+    Uses a 1-frame decode to get the actual content dimensions (which may
+    differ from container dimensions for letterboxed/cropped content).
+    Falls back to ffprobe stream metadata if decode probe fails.
+    """
+    width, height, duration, codec = None, None, None, None
+
+    # Get duration and codec from ffprobe (fast metadata read)
     try:
         cmd = [
             'ffprobe', '-v', 'quiet', '-print_format', 'json',
@@ -60,21 +68,53 @@ def _probe_video_info(filepath):
             filepath
         ]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        if r.returncode != 0:
-            return None, None, None, None
-        data = json.loads(r.stdout)
-        streams = data.get('streams', [])
-        fmt = data.get('format', {})
-        if not streams:
-            return None, None, None, None
-        s = streams[0]
-        w = s.get('width')
-        h = s.get('height')
-        codec = s.get('codec_name', '?')
-        dur = fmt.get('duration')
-        return w, h, float(dur) if dur else None, codec
+        if r.returncode == 0:
+            data = json.loads(r.stdout)
+            streams = data.get('streams', [])
+            fmt = data.get('format', {})
+            if streams:
+                s = streams[0]
+                width = s.get('width')
+                height = s.get('height')
+                codec = s.get('codec_name', '?')
+            dur = fmt.get('duration')
+            duration = float(dur) if dur else None
     except Exception:
-        return None, None, None, None
+        pass
+
+    # Decode 1 frame from mid-file to get actual content dimensions.
+    # Some files have variable resolution (e.g. 1080p intro, 960p main content)
+    # or H.264 SPS crop metadata. Seeking to 30% ensures we sample the main content.
+    try:
+        import tempfile
+        seek_pos = int(duration * 0.3) if duration and duration > 60 else 10
+        _tmpf = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+        _tmpf.close()
+        cmd = [
+            'ffmpeg', '-y', '-ss', str(seek_pos),
+            '-i', filepath, '-vframes', '1',
+            '-update', '1', _tmpf.name
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if r.returncode == 0 and os.path.isfile(_tmpf.name):
+            # Read actual PNG dimensions
+            with open(_tmpf.name, 'rb') as pf:
+                header = pf.read(32)
+                if len(header) >= 24 and header[:8] == b'\x89PNG\r\n\x1a\n':
+                    import struct
+                    pw = struct.unpack('>I', header[16:20])[0]
+                    ph = struct.unpack('>I', header[20:24])[0]
+                    if pw > 0 and ph > 0:
+                        width = pw
+                        height = ph
+        try:
+            os.remove(_tmpf.name)
+        except OSError:
+            pass
+    except Exception:
+        pass  # fall back to ffprobe dimensions
+
+    return width, height, duration, codec
 
 
 def _detect_gpu_backends_quick():
@@ -98,44 +138,42 @@ def _detect_gpu_backends_quick():
 # Scale filter builder
 # ═══════════════════════════════════════════════════════════════════
 
-def _build_scale_filter(target_h, backend_id=None):
+def _build_scale_filter(target_w, target_h, backend_id=None):
     """Build the -vf scale filter string.
 
-    Uses -2 for width to auto-calculate preserving aspect ratio (always even).
+    Uses explicit target_w and target_h (pre-calculated from the actual
+    decoded content dimensions to preserve aspect ratio correctly).
+    Both must be even numbers.
+
     Returns the filter string or None if target_h is not set.
-
-    For NVENC: uses CPU scale filter because the NVENC backend does not use
-    -hwaccel_output_format cuda (to avoid filter reinitialization errors),
-    so decoded frames are in system memory and scale_cuda won't work.
-
-    For QSV/VAAPI: uses GPU scale filter because those backends set
-    -hwaccel_output_format which keeps frames on the GPU.
     """
     if target_h is None or target_h <= 0:
         return None
 
-    # Use scale with force_original_aspect_ratio to handle letterboxed
-    # or anamorphic content correctly. The -2 ensures width is even.
-    # force_original_aspect_ratio=decrease ensures the output fits within
-    # the target dimensions without stretching.
+    # Ensure even dimensions (required by most codecs)
+    if target_w and target_w % 2 != 0:
+        target_w += 1
+    if target_h % 2 != 0:
+        target_h += 1
+
     if backend_id and backend_id in GPU_BACKENDS:
         backend = GPU_BACKENDS[backend_id]
         hwaccel_flags = backend.get('hwaccel', [])
         has_hw_output_fmt = '-hwaccel_output_format' in hwaccel_flags
 
         if has_hw_output_fmt:
-            # GPU scale filter (QSV, VAAPI)
+            # GPU scale filter (QSV, VAAPI — frames on GPU)
             scale_name = backend['scale_filter'].split('=')[0]
             fmt = backend['scale_filter'].split('=', 1)[1] if '=' in backend['scale_filter'] else ''
             if fmt:
-                return f"{scale_name}=w=-2:h={target_h}:{fmt}"
+                return f"{scale_name}=w={target_w}:h={target_h}:{fmt}"
             else:
-                return f"{scale_name}=w=-2:h={target_h}"
+                return f"{scale_name}=w={target_w}:h={target_h}"
         else:
             # CPU scale filter (NVENC — frames in system memory)
-            return f"scale=-2:{target_h}:force_original_aspect_ratio=decrease"
+            return f"scale={target_w}:{target_h}"
     else:
-        return f"scale=-2:{target_h}:force_original_aspect_ratio=decrease"
+        return f"scale={target_w}:{target_h}"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -496,12 +534,11 @@ def open_video_scaler(app):
         target = _get_target(f)
         if target is None:
             return 'Original'
-        tw, th = target
+        _, th = target
         src_w, src_h = f.get('width'), f.get('height')
         # Calculate actual output width preserving aspect ratio
         if src_w and src_h and src_h > 0:
             actual_w = int(round(src_w * th / src_h))
-            # Ensure even
             if actual_w % 2 != 0:
                 actual_w += 1
             return f"{actual_w}x{th}"
@@ -621,19 +658,32 @@ def open_video_scaler(app):
         else:
             out_path = str(Path(input_path).parent / f"{base}-{res_tag}{ext}")
 
+        # Calculate exact target dimensions from actual content aspect ratio
+        # (probed via 1-frame decode which respects H.264 SPS crop metadata)
+        src_w = f.get('width') or 1920
+        src_h = f.get('height') or 1080
+        if src_h > 0:
+            target_w = int(round(src_w * target_h / src_h))
+            # Ensure even
+            if target_w % 2 != 0:
+                target_w += 1
+        else:
+            target_w = int(round(target_h * 16 / 9))
+
         # Build command
         cmd = ['ffmpeg', '-y']
 
-        # Note: hwaccel decode is NOT used when scaling because CUDA
-        # decode delivers padded frames (e.g. 1920x1080 with letterbox)
-        # while CPU decode delivers active picture frames (e.g. 1920x960).
-        # The scale filter needs the active picture to calculate correct
-        # dimensions. GPU is still used for encoding (hevc_nvenc etc).
+        # HW accel for GPU decode
+        if bid != 'cpu' and bid in GPU_BACKENDS:
+            backend_info = GPU_BACKENDS[bid]
+            cmd.extend(backend_info['hwaccel'])
 
         cmd.extend(['-i', input_path])
 
-        # Scale filter
-        scale_vf = _build_scale_filter(target_h, bid if bid != 'cpu' else None)
+        # Scale filter — uses explicit dimensions calculated from actual
+        # decoded content size, so it works correctly with CUDA hwaccel
+        # (which may deliver padded frames for cropped H.264 content)
+        scale_vf = _build_scale_filter(target_w, target_h, bid if bid != 'cpu' else None)
         if scale_vf:
             cmd.extend(['-vf', scale_vf])
 
