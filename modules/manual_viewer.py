@@ -627,7 +627,17 @@ def show_manual(app):
 
         text.insert('end', '\n\u00a9 2026 Tony Davis \u2014 MIT License\n', 'p')
         total_lines[0] = int(text.index('end-1c').split('.')[0])
-        text.configure(state='disabled')
+
+        # Keep the widget editable (so selection + copy works) but
+        # block all keyboard input except copy and select-all
+        def _block_edit(event):
+            # Allow Ctrl+C (copy) and Ctrl+A (select all)
+            if event.state & 0x4 and event.keysym in ('c', 'C', 'a', 'A'):
+                return
+            return 'break'
+        text.bind('<Key>', _block_edit)
+        # Ensure the text cursor isn't visible
+        text.configure(insertwidth=0)
 
     def _on_sidebar_select(event=None):
         """Navigate to the selected section."""
@@ -639,20 +649,15 @@ def show_manual(app):
         if line is None or total_lines[0] <= 0:
             return
 
-        text.configure(state='normal')
-        # Method 1: Direct Tk yview with index — scrolls index to top
+        # Scroll target line to top of view
         try:
             text.tk.call(text._w, 'yview', f'{line}.0')
         except tk.TclError:
-            # Method 2: Fraction-based scroll
             try:
                 fraction = max(0.0, (line - 1) / total_lines[0])
                 text.yview_moveto(fraction)
             except Exception:
-                # Method 3: Last resort
                 text.see(f'{line}.0')
-        text.update_idletasks()
-        text.configure(state='disabled')
 
     sidebar_list.bind('<<ListboxSelect>>', _on_sidebar_select)
     sidebar_list.bind('<ButtonRelease-1>', _on_sidebar_select)
