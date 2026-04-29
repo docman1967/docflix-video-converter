@@ -537,8 +537,12 @@ def show_manual(app):
 
     text = tk.Text(content_frame, wrap='word', bg=bg, fg=fg,
                    font=('Helvetica', 11), padx=20, pady=16,
-                   insertbackground=fg, selectbackground='#264f78',
-                   selectforeground='#ffffff', borderwidth=0,
+                   insertbackground=fg,
+                   selectbackground='#3a6ea5',
+                   selectforeground='#ffffff',
+                   inactiveselectbackground='#3a6ea5',
+                   exportselection=False,
+                   borderwidth=0,
                    highlightthickness=0, spacing1=1, spacing3=1)
     scrollbar = ttk.Scrollbar(content_frame, orient='vertical', command=text.yview)
     text.configure(yscrollcommand=scrollbar.set)
