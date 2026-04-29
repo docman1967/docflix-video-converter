@@ -36,8 +36,8 @@ def open_media_processor(app):
 
         win = tk.Toplevel(app.root)
         win.title("🔧 Media Processor")
-        win.geometry("920x900")
-        win.minsize(750, 700)
+        win.geometry("920x960")
+        win.minsize(750, 750)
         app._center_on_main(win)
 
         # ── State ──
@@ -1268,8 +1268,8 @@ def main():
 
     root, app = create_standalone_root(
         title="Media Processor",
-        geometry="920x900",
-        minsize=(750, 700),
+        geometry="920x960",
+        minsize=(750, 750),
     )
 
     app._standalone_mode = True
