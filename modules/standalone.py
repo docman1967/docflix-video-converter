@@ -59,6 +59,9 @@ class StandaloneContext:
         # Media processor
         self._media_proc_prefs = prefs.get('media_processor', {})
 
+        # Video scaler
+        self._scaler_prefs = prefs.get('video_scaler', {})
+
         # Store full prefs for pass-through
         self._prefs = prefs
 

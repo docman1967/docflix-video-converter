@@ -159,18 +159,21 @@ def open_video_scaler(app):
     processing = [False]
     stop_flag = [False]
 
+    # ── Load saved preferences ──
+    _sp = getattr(app, '_scaler_prefs', {})
+
     # ── Options ──
-    opt_resolution   = tk.StringVar(value='1080p')
-    opt_custom_w     = tk.StringVar(value='1280')
-    opt_custom_h     = tk.StringVar(value='720')
-    opt_encoder      = tk.StringVar(value='cpu')
-    opt_codec        = tk.StringVar(value='H.265 / HEVC')
-    opt_preset       = tk.StringVar(value='medium')
-    opt_crf          = tk.StringVar(value='23')
-    opt_audio        = tk.StringVar(value='copy')
-    opt_container    = tk.StringVar(value='.mkv')
-    opt_output_mode  = tk.StringVar(value='folder')
-    opt_output_folder = tk.StringVar(value='')
+    opt_resolution   = tk.StringVar(value=_sp.get('resolution', '1080p'))
+    opt_custom_w     = tk.StringVar(value=_sp.get('custom_w', '1280'))
+    opt_custom_h     = tk.StringVar(value=_sp.get('custom_h', '720'))
+    opt_encoder      = tk.StringVar(value=_sp.get('encoder', 'cpu'))
+    opt_codec        = tk.StringVar(value=_sp.get('codec', 'H.265 / HEVC'))
+    opt_preset       = tk.StringVar(value=_sp.get('preset', 'medium'))
+    opt_crf          = tk.StringVar(value=_sp.get('crf', '23'))
+    opt_audio        = tk.StringVar(value=_sp.get('audio', 'copy'))
+    opt_container    = tk.StringVar(value=_sp.get('container', '.mkv'))
+    opt_output_mode  = tk.StringVar(value=_sp.get('output_mode', 'folder'))
+    opt_output_folder = tk.StringVar(value=_sp.get('output_folder', ''))
 
     # Detect GPU backends
     gpu_backends = _detect_gpu_backends_quick()
@@ -390,7 +393,41 @@ def open_video_scaler(app):
     close_frame = ttk.Frame(main_frame)
     close_frame.grid(row=5, column=0, sticky='e', pady=(0, 0))
 
+    def _save_scaler_prefs():
+        """Save Video Scaler settings to preferences."""
+        sp = {
+            'resolution':    opt_resolution.get(),
+            'custom_w':      opt_custom_w.get(),
+            'custom_h':      opt_custom_h.get(),
+            'encoder':       opt_encoder.get(),
+            'codec':         opt_codec.get(),
+            'preset':        opt_preset.get(),
+            'crf':           opt_crf.get(),
+            'audio':         opt_audio.get(),
+            'container':     opt_container.get(),
+            'output_mode':   opt_output_mode.get(),
+            'output_folder': opt_output_folder.get(),
+        }
+        app._scaler_prefs = sp
+        try:
+            prefs_path = getattr(app, '_prefs_path', None)
+            if prefs_path:
+                if isinstance(prefs_path, str):
+                    p = Path(prefs_path)
+                else:
+                    p = prefs_path() if callable(prefs_path) else Path(str(prefs_path))
+                if p.exists():
+                    prefs = json.loads(p.read_text())
+                else:
+                    prefs = {}
+                prefs['video_scaler'] = sp
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(json.dumps(prefs, indent=2))
+        except Exception:
+            pass
+
     def _close():
+        _save_scaler_prefs()
         win.destroy()
         if getattr(app, '_standalone_mode', False):
             app.root.destroy()

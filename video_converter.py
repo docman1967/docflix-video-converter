@@ -15608,6 +15608,7 @@ class VideoConverterApp:
                                                   '{show} S{season}E{episode} {title}')
             # Media Processor
             self._media_proc_prefs = prefs.get('media_processor', {})
+            self._scaler_prefs = prefs.get('video_scaler', {})
             self._rebuild_recent_menu()
             self.default_player.set(prefs.get('default_player', 'auto'))
             dvf = prefs.get('default_video_folder', '')
