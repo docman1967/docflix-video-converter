@@ -9227,51 +9227,42 @@ class VideoConverterApp:
         tree.bind('<Double-1>', _on_double_click)
 
         # ── Operations panel ──
-        ops_frame = ttk.LabelFrame(main_frame, text="Operations", padding=8)
+        ops_frame = ttk.Frame(main_frame, padding=(0, 4))
         ops_frame.grid(row=2, column=0, sticky='ew', pady=(0, 6))
 
-        # Row 1: Audio + strip options
-        ops_row1 = ttk.Frame(ops_frame)
-        ops_row1.pack(fill='x', pady=2)
+        # ── Audio group ──
+        audio_grp = ttk.LabelFrame(ops_frame, text="Audio", padding=4)
+        audio_grp.pack(fill='x', pady=(0, 4))
+        audio_row = ttk.Frame(audio_grp)
+        audio_row.pack(fill='x')
 
         def _toggle_audio_controls():
             st = 'readonly' if opt_convert_audio.get() else 'disabled'
             mp_ac_combo.configure(state=st)
             mp_br_combo.configure(state=st)
 
-        ttk.Checkbutton(ops_row1, text="Convert audio:",
+        ttk.Checkbutton(audio_row, text="Convert:",
                        variable=opt_convert_audio, command=_toggle_audio_controls).pack(side='left', padx=(0, 4))
-        mp_ac_combo = ttk.Combobox(ops_row1, textvariable=opt_audio_codec,
+        mp_ac_combo = ttk.Combobox(audio_row, textvariable=opt_audio_codec,
                                    width=18, state='readonly')
         mp_ac_combo['values'] = list(mp_audio_codec_map.keys())
-        mp_ac_combo.pack(side='left', padx=(0, 8))
-        ttk.Label(ops_row1, text="Bitrate:").pack(side='left', padx=(0, 2))
-        mp_br_combo = ttk.Combobox(ops_row1, textvariable=opt_audio_bitrate,
+        mp_ac_combo.pack(side='left', padx=(0, 6))
+        ttk.Label(audio_row, text="Bitrate:").pack(side='left', padx=(0, 2))
+        mp_br_combo = ttk.Combobox(audio_row, textvariable=opt_audio_bitrate,
                                    values=('128k', '192k', '256k', '320k', '384k', '448k', '512k', '640k'),
                                    width=6, state='readonly')
-        mp_br_combo.pack(side='left', padx=(0, 16))
+        mp_br_combo.pack(side='left')
 
-        ttk.Checkbutton(ops_row1, text="Strip chapters",
-                       variable=opt_strip_chapters).pack(side='left', padx=4)
-        ttk.Checkbutton(ops_row1, text="Strip tags",
-                       variable=opt_strip_tags).pack(side='left', padx=4)
+        # ── Metadata group ──
+        meta_grp = ttk.LabelFrame(ops_frame, text="Metadata", padding=4)
+        meta_grp.pack(fill='x', pady=(0, 4))
 
-        # Row 2: Strip subs + mux subs + sub language
-        ops_row2 = ttk.Frame(ops_frame)
-        ops_row2.pack(fill='x', pady=2)
-
-        ttk.Checkbutton(ops_row2, text="Strip existing subtitles",
-                       variable=opt_strip_subs).pack(side='left', padx=(0, 4))
-        ttk.Checkbutton(ops_row2, text="Mux external subtitles",
-                       variable=opt_mux_subs).pack(side='left', padx=(16, 4))
-        ttk.Label(ops_row2, text="Lang:").pack(side='left', padx=(8, 2))
-        sub_lang_entry = ttk.Entry(ops_row2, textvariable=opt_sub_lang, width=4)
-        sub_lang_entry.pack(side='left', padx=(0, 4))
-        ttk.Button(ops_row2, text="🔄 Rescan", command=_rescan_subs, width=8).pack(side='left', padx=4)
-
-        # Row 3: Track metadata
-        ops_row3 = ttk.Frame(ops_frame)
-        ops_row3.pack(fill='x', pady=2)
+        meta_row1 = ttk.Frame(meta_grp)
+        meta_row1.pack(fill='x', pady=1)
+        ttk.Checkbutton(meta_row1, text="Strip chapters",
+                       variable=opt_strip_chapters).pack(side='left', padx=(0, 8))
+        ttk.Checkbutton(meta_row1, text="Strip tags",
+                       variable=opt_strip_tags).pack(side='left', padx=(0, 8))
 
         def _toggle_meta_fields():
             st = 'normal' if opt_set_metadata.get() else 'disabled'
@@ -9279,31 +9270,26 @@ class VideoConverterApp:
             mp_ma.configure(state=st)
             mp_ms.configure(state=st)
 
-        ttk.Checkbutton(ops_row3, text="Set track metadata:",
-                       variable=opt_set_metadata, command=_toggle_meta_fields).pack(side='left', padx=(0, 4))
-        ttk.Label(ops_row3, text="V:").pack(side='left')
-        mp_mv = ttk.Entry(ops_row3, textvariable=opt_meta_video, width=4)
-        mp_mv.pack(side='left', padx=(2, 6))
-        ttk.Label(ops_row3, text="A:").pack(side='left')
-        mp_ma = ttk.Entry(ops_row3, textvariable=opt_meta_audio, width=4)
-        mp_ma.pack(side='left', padx=(2, 6))
-        ttk.Label(ops_row3, text="S:").pack(side='left')
-        mp_ms = ttk.Entry(ops_row3, textvariable=opt_meta_sub, width=4)
+        ttk.Checkbutton(meta_row1, text="Track metadata:",
+                       variable=opt_set_metadata, command=_toggle_meta_fields).pack(side='left', padx=(0, 2))
+        ttk.Label(meta_row1, text="V:").pack(side='left')
+        mp_mv = ttk.Entry(meta_row1, textvariable=opt_meta_video, width=4)
+        mp_mv.pack(side='left', padx=(2, 4))
+        ttk.Label(meta_row1, text="A:").pack(side='left')
+        mp_ma = ttk.Entry(meta_row1, textvariable=opt_meta_audio, width=4)
+        mp_ma.pack(side='left', padx=(2, 4))
+        ttk.Label(meta_row1, text="S:").pack(side='left')
+        mp_ms = ttk.Entry(meta_row1, textvariable=opt_meta_sub, width=4)
         mp_ms.pack(side='left', padx=(2, 0))
 
-        _toggle_meta_fields()
-        _toggle_audio_controls()
-
-        # Row 3b: Edition tagging + Chapter insertion (combined row)
-        ops_row3b = ttk.Frame(ops_frame)
-        ops_row3b.pack(fill='x', pady=2)
-
-        ttk.Label(ops_row3b, text="Edition:").pack(side='left', padx=(0, 2))
-        mp_edition_combo = ttk.Combobox(ops_row3b, textvariable=opt_edition_tag,
+        meta_row2 = ttk.Frame(meta_grp)
+        meta_row2.pack(fill='x', pady=1)
+        ttk.Label(meta_row2, text="Edition:").pack(side='left', padx=(0, 2))
+        mp_edition_combo = ttk.Combobox(meta_row2, textvariable=opt_edition_tag,
                                          values=EDITION_PRESETS, width=18, state='readonly')
         mp_edition_combo.pack(side='left', padx=(0, 4))
 
-        mp_edition_custom = ttk.Entry(ops_row3b, textvariable=_edition_custom_sv, width=18)
+        mp_edition_custom = ttk.Entry(meta_row2, textvariable=_edition_custom_sv, width=18)
 
         if opt_edition_tag.get() and opt_edition_tag.get() not in EDITION_PRESETS:
             _edition_custom_sv.set(opt_edition_tag.get())
@@ -9325,54 +9311,69 @@ class VideoConverterApp:
                 opt_edition_tag.set(_edition_custom_sv.get())
         _edition_custom_sv.trace_add('write', _on_mp_edition_custom)
 
-        ttk.Checkbutton(ops_row3b, text="Plex",
+        ttk.Checkbutton(meta_row2, text="Plex",
                         variable=opt_edition_fn).pack(side='left', padx=(4, 0))
 
-        # Separator
-        ttk.Separator(ops_row3b, orient='vertical').pack(side='left', fill='y', padx=8)
+        ttk.Separator(meta_row2, orient='vertical').pack(side='left', fill='y', padx=8)
 
         def _toggle_ch_spin():
             mp_ch_spin.configure(state='normal' if opt_add_chapters.get() else 'disabled')
             if opt_add_chapters.get():
                 opt_strip_chapters.set(False)
 
-        ttk.Checkbutton(ops_row3b, text="Chapters every",
+        ttk.Checkbutton(meta_row2, text="Chapters every",
                         variable=opt_add_chapters,
                         command=_toggle_ch_spin).pack(side='left', padx=(0, 2))
-        mp_ch_spin = tk.Spinbox(ops_row3b, textvariable=opt_ch_interval,
+        mp_ch_spin = tk.Spinbox(meta_row2, textvariable=opt_ch_interval,
                                 from_=1, to=60, width=3, state='disabled')
         mp_ch_spin.pack(side='left', padx=(0, 2))
-        ttk.Label(ops_row3b, text="min").pack(side='left')
+        ttk.Label(meta_row2, text="min").pack(side='left')
         _toggle_ch_spin()
 
-        # Row 4: Output
-        ops_row4 = ttk.Frame(ops_frame)
-        ops_row4.pack(fill='x', pady=2)
+        _toggle_meta_fields()
+        _toggle_audio_controls()
 
-        ttk.Label(ops_row4, text="Output:").pack(side='left', padx=(0, 4))
-        ttk.Radiobutton(ops_row4, text="Replace in-place", variable=opt_output_mode,
-                        value='inplace', command=lambda: _toggle_output_folder()).pack(side='left', padx=(0, 4))
-        ttk.Radiobutton(ops_row4, text="Save to folder:", variable=opt_output_mode,
+        # ── Subtitles group ──
+        sub_grp = ttk.LabelFrame(ops_frame, text="Subtitles", padding=4)
+        sub_grp.pack(fill='x', pady=(0, 4))
+        sub_row = ttk.Frame(sub_grp)
+        sub_row.pack(fill='x')
+
+        ttk.Checkbutton(sub_row, text="Strip existing",
+                       variable=opt_strip_subs).pack(side='left', padx=(0, 8))
+        ttk.Checkbutton(sub_row, text="Mux external",
+                       variable=opt_mux_subs).pack(side='left', padx=(0, 6))
+        ttk.Label(sub_row, text="Lang:").pack(side='left', padx=(0, 2))
+        sub_lang_entry = ttk.Entry(sub_row, textvariable=opt_sub_lang, width=4)
+        sub_lang_entry.pack(side='left', padx=(0, 4))
+        ttk.Button(sub_row, text="Rescan", command=_rescan_subs, width=7).pack(side='left')
+
+        # ── Output group ──
+        out_grp = ttk.LabelFrame(ops_frame, text="Output", padding=4)
+        out_grp.pack(fill='x', pady=(0, 0))
+
+        out_row1 = ttk.Frame(out_grp)
+        out_row1.pack(fill='x', pady=1)
+        ttk.Radiobutton(out_row1, text="Replace in-place", variable=opt_output_mode,
+                        value='inplace', command=lambda: _toggle_output_folder()).pack(side='left', padx=(0, 6))
+        ttk.Radiobutton(out_row1, text="Save to folder:", variable=opt_output_mode,
                         value='folder', command=lambda: _toggle_output_folder()).pack(side='left', padx=(0, 4))
-        mp_out_entry = ttk.Entry(ops_row4, textvariable=opt_output_folder, width=24, state='disabled')
+        mp_out_entry = ttk.Entry(out_row1, textvariable=opt_output_folder, width=20, state='disabled')
         mp_out_entry.pack(side='left', padx=(0, 4))
-        mp_out_btn = ttk.Button(ops_row4, text="Browse…", state='disabled',
+        mp_out_btn = ttk.Button(out_row1, text="Browse…", state='disabled',
             command=lambda: opt_output_folder.set(
                 self._ask_directory(title="Select Output Folder") or opt_output_folder.get()))
         mp_out_btn.pack(side='left')
 
-        # Row 5: Container + parallel
-        ops_row5 = ttk.Frame(ops_frame)
-        ops_row5.pack(fill='x', pady=2)
-
-        ttk.Label(ops_row5, text="Container:").pack(side='left', padx=(0, 2))
-        ttk.Combobox(ops_row5, textvariable=opt_container,
+        out_row2 = ttk.Frame(out_grp)
+        out_row2.pack(fill='x', pady=1)
+        ttk.Label(out_row2, text="Container:").pack(side='left', padx=(0, 2))
+        ttk.Combobox(out_row2, textvariable=opt_container,
                      values=('.mkv', '.mp4'), width=5, state='readonly').pack(side='left', padx=(0, 12))
-
-        ttk.Checkbutton(ops_row5, text="Parallel",
+        ttk.Checkbutton(out_row2, text="Parallel",
                        variable=opt_parallel).pack(side='left', padx=(0, 2))
-        ttk.Label(ops_row5, text="Jobs:").pack(side='left', padx=(0, 2))
-        ttk.Spinbox(ops_row5, textvariable=opt_max_jobs, from_=1, to=32,
+        ttk.Label(out_row2, text="Jobs:").pack(side='left', padx=(0, 2))
+        ttk.Spinbox(out_row2, textvariable=opt_max_jobs, from_=1, to=32,
                     width=3).pack(side='left')
 
         def _toggle_output_folder():
