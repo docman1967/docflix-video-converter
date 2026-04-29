@@ -17262,11 +17262,13 @@ class VideoConverterApp:
 
             out_dir = self.output_dir if self.output_dir else Path(input_path).parent
             # Edition tag in filename for Plex: {edition-Director's Cut}
-            edition_part = ''
+            # When Plex edition is active, use clean filename without encoding suffix
             edition = file_settings.get('edition_tag', '')
             if edition and file_settings.get('edition_in_filename', False):
                 edition_part = ' {edition-' + edition + '}'
-            output_path = str(out_dir / f"{base_name}{edition_part}{suffix}{output_ext}")
+                output_path = str(out_dir / f"{base_name}{edition_part}{output_ext}")
+            else:
+                output_path = str(out_dir / f"{base_name}{suffix}{output_ext}")
 
             # Check if output exists
             if skip_existing and os.path.exists(output_path):
@@ -17318,7 +17320,10 @@ class VideoConverterApp:
                     new_suffix = f"-CRF{file_settings['crf']}-{cpu_short}_{cpu_preset}"
                 else:
                     new_suffix = f"-{file_settings['bitrate']}-{cpu_short}_{cpu_preset}"
-                output_path = str(out_dir / f"{base_name}{edition_part}{new_suffix}{output_ext}")
+                if edition and file_settings.get('edition_in_filename', False):
+                    output_path = str(out_dir / f"{base_name} {{edition-{edition}}}{output_ext}")
+                else:
+                    output_path = str(out_dir / f"{base_name}{new_suffix}{output_ext}")
                 self.current_output_path = output_path
                 success = self.converter.convert_file(input_path, output_path, cpu_settings)
                 if success:
