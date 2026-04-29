@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "2.0.8"
+APP_VERSION = "2.0.9"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -4202,6 +4202,9 @@ class VideoConverterApp:
                                command=self.open_media_processor)
         tools_menu.add_command(label="📺 TV Show Renamer...",
                                command=self.open_tv_renamer)
+        tools_menu.add_command(label="📐 Video Scaler...",
+                               accelerator="Ctrl+Shift+R",
+                               command=self.open_video_scaler)
         # Help menu
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
@@ -4229,6 +4232,7 @@ class VideoConverterApp:
         self.root.bind('<Control-t>', lambda e: self.test_encode())
         self.root.bind('<Control-F>', lambda e: self.open_output_folder())
         self.root.bind('<Control-m>', lambda e: self.open_media_processor())
+        self.root.bind('<Control-R>', lambda e: self.open_video_scaler())
 
     def open_files(self):
         """Open a file picker and add selected video files to the queue."""
@@ -9969,6 +9973,23 @@ class VideoConverterApp:
         _log(f"Subtitle matching: *.{opt_sub_lang.get()}.srt / *.{opt_sub_lang.get()}.forced.srt", 'INFO')
 
     # ── TV Show Renamer ────────────────────────────────────────────────────
+    def open_video_scaler(self):
+        """Open the Video Scaler tool."""
+        try:
+            from modules.video_scaler import open_video_scaler
+            open_video_scaler(self)
+        except ImportError:
+            import importlib.util
+            _vs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     'modules', 'video_scaler.py')
+            if os.path.exists(_vs_path):
+                spec = importlib.util.spec_from_file_location('video_scaler', _vs_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                mod.open_video_scaler(self)
+            else:
+                messagebox.showerror("Video Scaler", "modules/video_scaler.py not found.")
+
     def open_tv_renamer(self):
         """Open the TV Show Renamer tool with TVDB integration."""
         import urllib.request

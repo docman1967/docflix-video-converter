@@ -24,6 +24,7 @@ Package structure:
     media_info.py     — Enhanced media details dialog
     chapters.py       — Chapter generation, parsing, FFMETADATA writing
     manual_viewer.py  — Built-in user manual viewer
+    video_scaler.py   — Video Scaler tool
 """
 
 from .constants import APP_NAME, APP_VERSION

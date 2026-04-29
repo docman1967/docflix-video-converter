@@ -41,6 +41,7 @@ TOOL_CMDS=(
     "docflix-subs:subtitle_editor"
     "docflix-rename:tv_renamer"
     "docflix-media:media_processor"
+    "docflix-scale:video_scaler"
 )
 
 #───────────────────────────────────────────────────────────────────────────────
@@ -381,6 +382,7 @@ echo "  Standalone tools:"
 echo "    • docflix-subs     Subtitle Editor"
 echo "    • docflix-rename   TV Show Renamer"
 echo "    • docflix-media    Media Processor"
+echo "    • docflix-scale    Video Scaler"
 echo ""
 echo "  To uninstall:"
 echo "    $SCRIPT_DIR/install.sh --uninstall"
