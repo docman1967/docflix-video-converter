@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "2.0.5"
+APP_VERSION = "2.0.6"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -4206,6 +4206,8 @@ class VideoConverterApp:
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
 
+        help_menu.add_command(label="User Manual",
+                              command=self.show_user_manual)
         help_menu.add_command(label="Keyboard Shortcuts",
                               accelerator="F1",
                               command=self.show_keyboard_shortcuts)
@@ -15696,6 +15698,21 @@ class VideoConverterApp:
         dlg.update_idletasks()
         dlg.geometry(f"{dlg.winfo_reqwidth() + 20}x{dlg.winfo_reqheight() + 10}")
         self._center_on_main(dlg)
+
+    def show_user_manual(self):
+        """Open the user manual in the default web browser."""
+        import webbrowser
+        # Look for the manual in several locations
+        candidates = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'docs', 'user_manual.html'),
+            os.path.expanduser('~/.local/share/docflix/docs/user_manual.html'),
+        ]
+        for path in candidates:
+            if os.path.isfile(path):
+                webbrowser.open(f'file://{path}')
+                return
+        messagebox.showinfo("User Manual", "User manual not found.\n\n"
+                            "Expected at: docs/user_manual.html")
 
     def show_about(self):
         """Show About dialog."""

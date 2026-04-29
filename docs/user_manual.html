@@ -1,0 +1,882 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Docflix Video Converter &mdash; User Manual</title>
+<style>
+  :root {
+    --bg: #1a1a2e;
+    --bg2: #16213e;
+    --bg3: #0f3460;
+    --accent: #e94560;
+    --accent2: #533483;
+    --text: #e0e0e0;
+    --text2: #a0a0b0;
+    --code-bg: #0d1117;
+    --border: #2a2a4a;
+    --link: #64b5f6;
+    --success: #66bb6a;
+    --warning: #ffa726;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    font-size: 15px;
+  }
+  /* ── Sidebar navigation ── */
+  .sidebar {
+    position: fixed;
+    top: 0; left: 0;
+    width: 280px;
+    height: 100vh;
+    background: var(--bg2);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 20px 0;
+    z-index: 100;
+  }
+  .sidebar h2 {
+    color: var(--accent);
+    font-size: 16px;
+    padding: 0 20px 12px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 8px;
+  }
+  .sidebar a {
+    display: block;
+    color: var(--text2);
+    text-decoration: none;
+    padding: 5px 20px;
+    font-size: 13px;
+    transition: all 0.2s;
+  }
+  .sidebar a:hover { color: var(--accent); background: rgba(233,69,96,0.08); }
+  .sidebar a.section {
+    font-weight: 600;
+    color: var(--text);
+    font-size: 14px;
+    margin-top: 10px;
+  }
+  .sidebar a.sub { padding-left: 36px; font-size: 12.5px; }
+
+  /* ── Main content ── */
+  .content {
+    margin-left: 280px;
+    max-width: 900px;
+    padding: 40px 50px 80px;
+  }
+  h1 {
+    color: var(--accent);
+    font-size: 32px;
+    margin-bottom: 8px;
+    border-bottom: 2px solid var(--accent);
+    padding-bottom: 12px;
+  }
+  .subtitle { color: var(--text2); font-size: 16px; margin-bottom: 30px; }
+  h2 {
+    color: var(--accent);
+    font-size: 24px;
+    margin: 40px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  h3 {
+    color: #bb86fc;
+    font-size: 18px;
+    margin: 28px 0 10px;
+  }
+  h4 {
+    color: var(--text);
+    font-size: 15px;
+    margin: 20px 0 8px;
+    font-weight: 600;
+  }
+  p { margin: 8px 0 12px; }
+  ul, ol { margin: 8px 0 16px 24px; }
+  li { margin: 4px 0; }
+  a { color: var(--link); }
+
+  code {
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 13px;
+  }
+  pre {
+    background: var(--code-bg);
+    padding: 14px 18px;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 12px 0 16px;
+    border: 1px solid var(--border);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+
+  table {
+    border-collapse: collapse;
+    margin: 12px 0 20px;
+    width: 100%;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    text-align: left;
+    font-size: 14px;
+  }
+  th { background: var(--bg3); color: var(--text); font-weight: 600; }
+  tr:nth-child(even) { background: rgba(255,255,255,0.02); }
+
+  .tip, .warning, .note {
+    padding: 14px 18px;
+    border-radius: 6px;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+  .tip { background: rgba(102,187,106,0.1); border-left: 4px solid var(--success); }
+  .warning { background: rgba(255,167,38,0.1); border-left: 4px solid var(--warning); }
+  .note { background: rgba(100,181,246,0.1); border-left: 4px solid var(--link); }
+  .tip::before { content: "Tip: "; font-weight: 700; color: var(--success); }
+  .warning::before { content: "Warning: "; font-weight: 700; color: var(--warning); }
+  .note::before { content: "Note: "; font-weight: 700; color: var(--link); }
+
+  .kbd {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 7px;
+    font-family: monospace;
+    font-size: 12px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+  }
+  .version { color: var(--text2); font-size: 12px; text-align: center; margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--border); }
+
+  @media (max-width: 900px) {
+    .sidebar { display: none; }
+    .content { margin-left: 0; padding: 20px; }
+  }
+  @media print {
+    .sidebar { display: none; }
+    .content { margin-left: 0; max-width: 100%; }
+    body { background: #fff; color: #222; font-size: 11pt; }
+    h1, h2, h3 { color: #333; }
+    pre { border: 1px solid #ccc; }
+    th { background: #eee; }
+    a { color: #333; text-decoration: underline; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ════════════════════════════════════════════════════════════ -->
+<!-- SIDEBAR NAVIGATION                                          -->
+<!-- ════════════════════════════════════════════════════════════ -->
+<nav class="sidebar">
+  <h2>Docflix User Manual</h2>
+
+  <a class="section" href="#getting-started">1. Getting Started</a>
+  <a class="sub" href="#requirements">Requirements</a>
+  <a class="sub" href="#installation">Installation</a>
+  <a class="sub" href="#launching">Launching the App</a>
+
+  <a class="section" href="#quick-start">2. Quick Start</a>
+
+  <a class="section" href="#main-window">3. Main Window</a>
+  <a class="sub" href="#menu-bar">Menu Bar</a>
+  <a class="sub" href="#encoder-selection">Encoder Selection</a>
+  <a class="sub" href="#settings-panel">Settings Panel</a>
+  <a class="sub" href="#file-queue">File Queue</a>
+  <a class="sub" href="#conversion">Starting a Conversion</a>
+
+  <a class="section" href="#video-settings">4. Video Settings</a>
+  <a class="sub" href="#codecs">Video Codecs</a>
+  <a class="sub" href="#quality-modes">Quality Modes</a>
+  <a class="sub" href="#presets">Presets</a>
+  <a class="sub" href="#two-pass">Two-Pass Encoding</a>
+  <a class="sub" href="#hw-decode">Hardware Decode</a>
+  <a class="sub" href="#containers">Container Formats</a>
+
+  <a class="section" href="#audio-settings">5. Audio Settings</a>
+
+  <a class="section" href="#metadata">6. Metadata &amp; Tagging</a>
+  <a class="sub" href="#strip-options">Strip Chapters / Tags</a>
+  <a class="sub" href="#track-metadata">Track Metadata</a>
+  <a class="sub" href="#edition-tagging">Edition Tagging</a>
+  <a class="sub" href="#add-chapters">Add Chapters</a>
+
+  <a class="section" href="#subtitles">7. Subtitles</a>
+  <a class="sub" href="#internal-subs">Internal Subtitles</a>
+  <a class="sub" href="#external-subs">External Subtitles</a>
+  <a class="sub" href="#subtitle-editor">Subtitle Editor</a>
+  <a class="sub" href="#smart-sync">Smart Sync</a>
+  <a class="sub" href="#bitmap-ocr">Bitmap OCR</a>
+  <a class="sub" href="#spell-check">Spell Checker</a>
+  <a class="sub" href="#batch-filter">Batch Filter</a>
+
+  <a class="section" href="#tools">8. Tools</a>
+  <a class="sub" href="#media-processor">Media Processor</a>
+  <a class="sub" href="#tv-renamer">TV Show Renamer</a>
+  <a class="sub" href="#enhanced-media-details">Enhanced Media Details</a>
+  <a class="sub" href="#test-encode">Test Encode</a>
+
+  <a class="section" href="#per-file-overrides">9. Per-File Overrides</a>
+
+  <a class="section" href="#cli">10. CLI Usage</a>
+
+  <a class="section" href="#keyboard-shortcuts">11. Keyboard Shortcuts</a>
+
+  <a class="section" href="#preferences">12. Preferences</a>
+
+  <a class="section" href="#troubleshooting">13. Troubleshooting</a>
+
+  <a class="section" href="#encoding-reference">14. Encoding Reference</a>
+</nav>
+
+<!-- ════════════════════════════════════════════════════════════ -->
+<!-- MAIN CONTENT                                                -->
+<!-- ════════════════════════════════════════════════════════════ -->
+<div class="content">
+
+<h1>Docflix Video Converter</h1>
+<p class="subtitle">User Manual &mdash; Version 2.0.5</p>
+
+<p>Docflix Video Converter is a batch video converter that encodes files to H.265/HEVC (and other codecs) using <code>ffmpeg</code>, with support for CPU and multi-GPU encoding (NVIDIA NVENC, Intel QSV, AMD VAAPI). It includes a full-featured desktop GUI, a subtitle editor with OCR and Whisper-based auto-sync, a TV show renamer, a media processor, and a headless CLI tool.</p>
+
+<!-- ──────────────────────────────────────────────────────────── -->
+<h2 id="getting-started">1. Getting Started</h2>
+
+<h3 id="requirements">System Requirements</h3>
+
+<table>
+  <tr><th>Dependency</th><th>Required For</th><th>Install Command</th></tr>
+  <tr><td><code>ffmpeg</code></td><td>All features</td><td><code>sudo apt install ffmpeg</code></td></tr>
+  <tr><td><code>python3</code></td><td>Desktop GUI</td><td><code>sudo apt install python3</code></td></tr>
+  <tr><td><code>python3-tk</code></td><td>Desktop GUI</td><td><code>sudo apt install python3-tk</code></td></tr>
+  <tr><td><code>tkinterdnd2</code></td><td>Drag &amp; drop</td><td><code>pip install tkinterdnd2</code></td></tr>
+  <tr><td><code>Pillow</code></td><td>App logo</td><td><code>pip install Pillow</code></td></tr>
+</table>
+
+<h4>Optional Dependencies</h4>
+<table>
+  <tr><th>Dependency</th><th>Feature</th><th>Install Command</th></tr>
+  <tr><td><code>zenity</code></td><td>Native folder dialogs</td><td><code>sudo apt install zenity</code></td></tr>
+  <tr><td><code>ccextractor</code></td><td>Closed caption extraction from .ts</td><td><code>sudo apt install ccextractor</code></td></tr>
+  <tr><td><code>tesseract-ocr</code></td><td>Bitmap subtitle OCR</td><td><code>sudo apt install tesseract-ocr tesseract-ocr-eng</code></td></tr>
+  <tr><td><code>pytesseract</code></td><td>Python Tesseract bindings</td><td><code>pip install pytesseract</code></td></tr>
+  <tr><td><code>pyspellchecker</code></td><td>Subtitle spell checker</td><td><code>pip install pyspellchecker</code></td></tr>
+  <tr><td><code>faster-whisper</code></td><td>Smart Sync &mdash; Standard engine</td><td><code>pip install faster-whisper</code></td></tr>
+  <tr><td><code>whisperx</code></td><td>Smart Sync &mdash; Precise engine</td><td><code>pip install whisperx 'transformers&lt;4.45'</code></td></tr>
+  <tr><td><code>langdetect</code></td><td>Subtitle language detection</td><td><code>pip install langdetect</code></td></tr>
+  <tr><td><code>mpv</code></td><td>Quick Sync video playback</td><td><code>sudo apt install mpv</code></td></tr>
+</table>
+
+<h3 id="installation">Installation</h3>
+
+<pre><code>git clone https://github.com/docman1967/docflix-video-converter.git
+cd docflix-video-converter
+./install.sh</code></pre>
+
+<p>The installer will:</p>
+<ul>
+  <li>Check and report missing system dependencies</li>
+  <li>Install Python packages (<code>tkinterdnd2</code>, <code>Pillow</code>) for your user</li>
+  <li>Copy app files to <code>~/.local/share/docflix/</code></li>
+  <li>Create a <code>.desktop</code> entry (appears in your system app menu)</li>
+  <li>Create a <code>docflix</code> terminal command in <code>~/.local/bin/</code></li>
+  <li>Create standalone tool commands: <code>docflix-subs</code>, <code>docflix-rename</code>, <code>docflix-media</code></li>
+</ul>
+
+<p>No <code>sudo</code> required. To uninstall: <code>./install.sh --uninstall</code></p>
+
+<h3 id="launching">Launching the App</h3>
+
+<table>
+  <tr><th>Method</th><th>Command</th></tr>
+  <tr><td>App menu</td><td>Search "Docflix Video Converter"</td></tr>
+  <tr><td>Terminal</td><td><code>docflix</code></td></tr>
+  <tr><td>Open a file</td><td><code>docflix /path/to/video.mkv</code></td></tr>
+  <tr><td>From source</td><td><code>python3 video_converter.py</code></td></tr>
+  <tr><td>Background with logging</td><td><code>./run_converter.sh</code></td></tr>
+</table>
+
+<h4>Standalone Tools</h4>
+<table>
+  <tr><th>Command</th><th>Tool</th></tr>
+  <tr><td><code>docflix-subs</code></td><td>Subtitle Editor</td></tr>
+  <tr><td><code>docflix-rename</code></td><td>TV Show Renamer</td></tr>
+  <tr><td><code>docflix-media</code></td><td>Media Processor</td></tr>
+</table>
+
+<!-- ──────────────────────────────────────────────────────────── -->
+<h2 id="quick-start">2. Quick Start</h2>
+
+<ol>
+  <li><strong>Launch</strong> the app via the system menu, terminal (<code>docflix</code>), or by running <code>python3 video_converter.py</code></li>
+  <li><strong>Add files</strong> &mdash; drag and drop video files onto the window, or use <span class="kbd">Ctrl+O</span> to open files / <span class="kbd">Ctrl+Shift+O</span> to open a folder</li>
+  <li><strong>Choose settings</strong> &mdash; select your encoder (CPU or GPU), video codec, quality mode, and container format in the settings panel</li>
+  <li><strong>Click "Start Conversion"</strong> &mdash; the app will convert all queued files with your chosen settings</li>
+  <li><strong>Monitor progress</strong> &mdash; a progress bar and log show real-time encoding status with batch ETA</li>
+</ol>
+
+<div class="tip">For a quick test before committing to a full conversion, select a file and press <span class="kbd">Ctrl+T</span> to encode just the first 30 seconds with your current settings.</div>
+
+<!-- ──────────────────────────────────────────────────────────── -->
+<h2 id="main-window">3. Main Window</h2>
+
+<h3 id="menu-bar">Menu Bar</h3>
+
+<table>
+  <tr><th>Menu</th><th>Key Items</th></tr>
+  <tr><td><strong>File</strong></td><td>Open File(s), Open Folder, Exit</td></tr>
+  <tr><td><strong>Settings</strong></td><td>Default Settings, Reset to Defaults</td></tr>
+  <tr><td><strong>View</strong></td><td>Show/Hide Log, Show/Hide Settings</td></tr>
+  <tr><td><strong>Tools</strong></td><td>Play Source/Output, Media Details, Enhanced Media Details, Test Encode, Open Output Folder, Media Processor, Subtitle Editor, TV Show Renamer</td></tr>
+  <tr><td><strong>Help</strong></td><td>User Manual, Keyboard Shortcuts, About</td></tr>
+</table>
+
+<h3 id="encoder-selection">Encoder Selection</h3>
+
+<p>The encoder dropdown (top-right of the title bar) shows all detected encoding backends:</p>
+
+<table>
+  <tr><th>Encoder</th><th>Hardware</th><th>Speed</th><th>Quality</th></tr>
+  <tr><td><strong>CPU</strong></td><td>Any CPU</td><td>Slowest</td><td>Best at equivalent settings</td></tr>
+  <tr><td><strong>NVIDIA (NVENC)</strong></td><td>NVIDIA GPU</td><td>Very fast</td><td>Excellent</td></tr>
+  <tr><td><strong>Intel (QSV)</strong></td><td>Intel GPU/iGPU</td><td>Fast</td><td>Good</td></tr>
+  <tr><td><strong>AMD / VAAPI</strong></td><td>AMD GPU</td><td>Fast</td><td>Good</td></tr>
+</table>
+
+<div class="note">The app automatically detects available GPU backends at startup using a test encode. Only backends that actually work on your system are shown in the dropdown.</div>
+
+<h3 id="settings-panel">Settings Panel</h3>
+
+<p>The collapsible settings panel (<span class="kbd">Ctrl+Shift+S</span> to toggle) contains all encoding controls:</p>
+
+<ul>
+  <li><strong>Video Codec</strong> &mdash; H.265/HEVC, H.264/AVC, AV1, VP9, MPEG-4, ProRes, or Copy (no re-encode)</li>
+  <li><strong>Container</strong> &mdash; .mkv, .mp4, .ts, or match source</li>
+  <li><strong>Transcode Mode</strong> &mdash; Video Only, Audio Only, or Both</li>
+  <li><strong>Quality Mode</strong> &mdash; Bitrate (fixed size) or CRF (constant quality)</li>
+  <li><strong>Bitrate slider</strong> &mdash; 1M to 16M with quick-set buttons</li>
+  <li><strong>CRF value</strong> &mdash; lower = better quality, higher = smaller file</li>
+  <li><strong>Preset</strong> &mdash; speed/quality trade-off (ultrafast to veryslow for CPU; p1-p7 for NVENC)</li>
+  <li><strong>Audio</strong> &mdash; codec and bitrate dropdowns</li>
+  <li><strong>Options</strong> &mdash; Skip existing, Delete originals, HW Decode, Two-pass, Verify output</li>
+  <li><strong>Metadata</strong> &mdash; Strip chapters, Strip tags, Set track metadata with language codes</li>
+  <li><strong>Edition</strong> &mdash; Tag videos with version info (Theatrical, Director's Cut, etc.)</li>
+  <li><strong>Chapters</strong> &mdash; Auto-generate chapter markers at a specified interval</li>
+</ul>
+
+<h3 id="file-queue">File Queue</h3>
+
+<p>The file queue shows all files to be converted. You can:</p>
+
+<ul>
+  <li><strong>Add files</strong> &mdash; drag and drop, <span class="kbd">Ctrl+O</span> (files), <span class="kbd">Ctrl+Shift+O</span> (folder)</li>
+  <li><strong>Remove files</strong> &mdash; select and press <span class="kbd">Delete</span>, or right-click &rarr; Remove</li>
+  <li><strong>Double-click</strong> &mdash; opens the Internal Subtitles dialog</li>
+  <li><strong>Right-click</strong> &mdash; context menu with play, override settings, subtitle management, Enhanced Media Details, and remove options</li>
+</ul>
+
+<h4>Queue Indicators</h4>
+<table>
+  <tr><th>Icon</th><th>Meaning</th></tr>
+  <tr><td>&#9881;&#65039;</td><td>Per-file settings override applied</td></tr>
+  <tr><td>&#128206;</td><td>External subtitles attached</td></tr>
+  <tr><td>CC</td><td>Closed captions detected (MPEG-TS)</td></tr>
+</table>
+
+<h3 id="conversion">Starting a Conversion</h3>
+
+<ol>
+  <li>Add files to the queue</li>
+  <li>Adjust settings as needed (or use per-file overrides for individual files)</li>
+  <li>Click <strong>Start Conversion</strong></li>
+  <li>Use <strong>Pause</strong> / <strong>Stop</strong> to control the process</li>
+  <li>When complete, a sound notification plays (configurable in Default Settings)</li>
+  <li>Click <strong>Clear Finished</strong> to remove completed files, leaving failed files for retry</li>
+</ol>
+
+<div class="tip">The <strong>Batch ETA</strong> in the status bar shows estimated time remaining for all files, based on rolling average encoding speed.</div>
+
+<!-- ──────────────────────────────────────────────────────────── -->
+<h2 id="video-settings">4. Video Settings</h2>
+
+<h3 id="codecs">Video Codecs</h3>
+
+<table>
+  <tr><th>Codec</th><th>CPU Encoder</th><th>Best For</th></tr>
+  <tr><td><strong>H.265 / HEVC</strong></td><td>libx265</td><td>General use &mdash; best compression, wide compatibility</td></tr>
+  <tr><td><strong>H.264 / AVC</strong></td><td>libx264</td><td>Maximum compatibility with older devices</td></tr>
+  <tr><td><strong>AV1</strong></td><td>libsvtav1</td><td>Next-gen codec &mdash; best compression, slower encoding</td></tr>
+  <tr><td><strong>VP9</strong></td><td>libvpx-vp9</td><td>WebM container, web streaming</td></tr>
+  <tr><td><strong>MPEG-4</strong></td><td>mpeg4</td><td>Legacy compatibility</td></tr>
+  <tr><td><strong>ProRes</strong></td><td>prores_ks</td><td>Professional editing, Apple ecosystem</td></tr>
+  <tr><td><strong>Copy</strong></td><td>copy</td><td>No re-encoding &mdash; just remux to a different container</td></tr>
+</table>
+
+<h3 id="quality-modes">Quality Modes</h3>
+
+<h4>Bitrate Mode (Fixed Size)</h4>
+<p>Sets a target bitrate. The output file size is predictable. Use the slider (1M&ndash;16M) or type a value. Quick buttons: 1M, 2M, 3M, 4M, 8M, 16M.</p>
+
+<h4>CRF Mode (Constant Quality)</h4>
+<p>CRF (Constant Rate Factor) maintains consistent visual quality throughout the file. The file size varies based on content complexity.</p>
+
+<table>
+  <tr><th>CRF Value</th><th>Quality</th><th>File Size</th></tr>
+  <tr><td>18</td><td>Visually lossless</td><td>Large</td></tr>
+  <tr><td>23</td><td>Good quality (default)</td><td>Medium</td></tr>
+  <tr><td>28</td><td>Acceptable quality</td><td>Small</td></tr>
+  <tr><td>35+</td><td>Noticeable quality loss</td><td>Very small</td></tr>
+</table>
+
+<div class="tip">For GPU encoders, the quality flag varies: NVENC uses <code>-cq</code>, QSV uses <code>-global_quality</code>, VAAPI uses <code>-qp</code>. The app handles this automatically.</div>
+
+<h3 id="presets">Presets</h3>
+
+<h4>CPU Presets (libx265 / libx264)</h4>
+<p><code>ultrafast</code> &rarr; <code>superfast</code> &rarr; <code>veryfast</code> &rarr; <code>faster</code> &rarr; <code>fast</code> &rarr; <code>medium</code> &rarr; <code>slow</code> &rarr; <code>slower</code> &rarr; <code>veryslow</code></p>
+<p>Slower presets produce smaller files at the same quality, but take much longer to encode.</p>
+
+<h4>NVIDIA NVENC Presets</h4>
+<p><code>p1</code> (fastest) &rarr; <code>p4</code> (default) &rarr; <code>p7</code> (best quality)</p>
+
+<h4>Intel QSV Presets</h4>
+<p><code>veryfast</code> &rarr; <code>medium</code> (default) &rarr; <code>veryslow</code></p>
+
+<h3 id="two-pass">Two-Pass Encoding</h3>
+
+<p>Two-pass encoding analyzes the video in a first pass and optimizes bit allocation in the second pass. This produces better quality at a given bitrate, especially for complex scenes. Available for CPU encoding; GPU encoders use multipass where supported.</p>
+
+<div class="note">Two-pass roughly doubles encoding time. It's most beneficial in bitrate mode; CRF mode already adapts per-frame.</div>
+
+<h3 id="hw-decode">Hardware Decode</h3>
+
+<p>When a GPU encoder is selected, the <strong>HW Decode</strong> checkbox enables hardware-accelerated decoding. This speeds up encoding by offloading both decoding and encoding to the GPU.</p>
+
+<div class="warning">HW Decode is automatically disabled when burn-in subtitles are used, as subtitle rendering requires CPU-side video filtering. It may also cause issues with some source files (variable resolution, unusual codecs). Uncheck it if you encounter errors.</div>
+
+<h3 id="containers">Container Formats</h3>
+
+<table>
+  <tr><th>Container</th><th>Subtitle Support</th><th>Notes</th></tr>
+  <tr><td><strong>.mkv</strong> (Matroska)</td><td>All formats</td><td>Most flexible, recommended for archiving</td></tr>
+  <tr><td><strong>.mp4</strong></td><td>mov_text only</td><td>Best compatibility with devices and players</td></tr>
+  <tr><td><strong>.ts</strong> (MPEG-TS)</td><td>DVB only</td><td>Transport stream, TV recording format</td></tr>
+</table>
+
+<!-- ──────────────────────────────────────────────────────────── -->
+<h2 id="audio-settings">5. Audio Settings</h2>
+
+<p>Audio settings are available when Transcode Mode is set to "Audio Only" or "Both".</p>
+
+<table>
+  <tr><th>Setting</th><th>Options</th><th>Default</th></tr>
+  <tr><td><strong>Audio Codec</strong></td><td>AAC, AC3 (Dolby Digital), EAC3 (Dolby Digital+), MP3, Opus, FLAC, Copy</td><td>AAC</td></tr>
+  <tr><td><strong>Audio Bitrate</strong></td><td>32k &ndash; 640k</td><td>128k</td></tr>
+</table>
+
+<div class="tip">Use "Copy" to keep the original audio stream without re-encoding. This is the fastest option and preserves the original quality.</div>
+
+<!-- ──────────────────────────────────────────────────────────── -->
+<h2 id="metadata">6. Metadata &amp; Tagging</h2>
+
+<h3 id="strip-options">Strip Chapters / Strip Tags</h3>
+
+<ul>
+  <li><strong>Strip chapters</strong> &mdash; removes all chapter markers from the output (<code>-map_chapters -1</code>)</li>
+  <li><strong>Strip tags</strong> &mdash; removes all global metadata/tags from the output (<code>-map_metadata -1</code>)</li>
+</ul>
+
+<h3 id="track-metadata">Set Track Metadata</h3>
+
+<p>When enabled, sets language codes on video, audio, and subtitle tracks and clears track names and the container title. Default language codes:</p>
+
+<table>
+  <tr><th>Track</th><th>Default</th><th>Purpose</th></tr>
+  <tr><td>Video (V:)</td><td><code>und</code></td><td>Undetermined</td></tr>
+  <tr><td>Audio (A:)</td><td><code>eng</code></td><td>English</td></tr>
+  <tr><td>Subtitle (S:)</td><td><code>eng</code></td><td>English</td></tr>
+</table>
+
+<h3 id="edition-tagging">Edition Tagging</h3>
+
+<p>Tag videos with version/edition information. The edition is written to the container <code>title</code> metadata field, which is displayed by most media players and servers (VLC, Plex, Kodi, Jellyfin).</p>
+
+<h4>Presets</h4>
+<p>Theatrical, Director's Cut, Extended, Extended Director's Cut, Unrated, Special Edition, IMAX, Criterion, Remastered, Anniversary Edition, Ultimate Edition, or <strong>Custom...</strong> (free text entry).</p>
+
+<h4>Plex Filename Tag</h4>
+<p>When <strong>"Add to filename (Plex)"</strong> is checked, the output filename includes a <code>{edition-Director's Cut}</code> tag that Plex recognizes for grouping different editions of the same movie.</p>
+
+<p>Example: <code>Superman {edition-Director's Cut}-2M-H265_ultrafast.mkv</code></p>
+
+<div class="note">The edition tag works independently of "Set track metadata". If both are active, the edition overrides the title-clearing behavior.</div>
+
+<h3 id="add-chapters">Add Chapters</h3>
+
+<p>Auto-generate evenly-spaced chapter markers at a configurable interval (1&ndash;60 minutes, default 5). Chapters are injected via a temporary FFMETADATA1 file.</p>
+
+<p><strong>"Add chapters"</strong> and <strong>"Strip chapters"</strong> are mutually exclusive &mdash; checking one automatically unchecks the other.</p>
+
+<div class="tip">Chapters make it easy to jump through a long video. Most players (VLC, mpv, Plex, Kodi) display chapter markers in the seek bar.</div>
+
+<!-- ──────────────────────────────────────────────────────────── -->
+<h2 id="subtitles">7. Subtitles</h2>
+
+<h3 id="internal-subs">Internal Subtitles</h3>
+
+<p>Double-click a file in the queue (or right-click &rarr; Internal Subtitles) to manage subtitle tracks already embedded in the source file. For each track you can:</p>
+
+<ul>
+  <li>Keep or drop the track</li>
+  <li>Convert to a different format (SRT, ASS, WebVTT, TTML)</li>
+  <li>Extract to a standalone file</li>
+  <li>Edit in the built-in subtitle editor</li>
+</ul>
+
+<p>Bitmap subtitles (PGS, VobSub) can be converted to text via OCR when set to a text format.</p>
+
+<h3 id="external-subs">External Subtitles</h3>
+
+<p>Attach external subtitle files to videos:</p>
+
+<ul>
+  <li><strong>Drag and drop</strong> <code>.srt</code>, <code>.ass</code>, <code>.ssa</code>, <code>.vtt</code>, <code>.sub</code>, <code>.idx</code>, <code>.sup</code> files onto the queue</li>
+  <li><strong>Auto-matching</strong> &mdash; subtitles are matched to videos by filename stem</li>
+  <li><strong>Auto-detection</strong> &mdash; language, forced flag, SDH flag detected from filename (e.g., <code>movie.eng.forced.srt</code>)</li>
+</ul>
+
+<h4>Embed vs Burn-In</h4>
+<table>
+  <tr><th>Mode</th><th>Description</th><th>Can be toggled?</th></tr>
+  <tr><td><strong>Embed</strong></td><td>Muxed as a selectable subtitle stream</td><td>Yes (player controls)</td></tr>
+  <tr><td><strong>Burn-in</strong></td><td>Rendered permanently onto the video</td><td>No (permanent)</td></tr>
+</table>
+
+<h3 id="subtitle-editor">Subtitle Editor</h3>
+
+<p>A full-featured subtitle editor accessible from Tools &rarr; Subtitle Editor (standalone) or by editing an internal/external subtitle track. Features:</p>
+
+<ul>
+  <li><strong>Inline editing</strong> &mdash; double-click any cell to edit text directly</li>
+  <li><strong>Filters</strong> &mdash; Remove HI, Remove Tags, Remove Ads/Credits, Remove Stray Notes, Remove Leading Dashes, Remove ALL CAPS HI, Remove Off-Screen Quotes, Remove Duplicates, Merge Short Cues, Reduce to 2 Lines, Fix ALL CAPS</li>
+  <li><strong>Search &amp; Replace</strong> &mdash; with Find, Replace, Replace All, and wrap-around</li>
+  <li><strong>Search/Replace List</strong> &mdash; persistent find/replace pairs for common corrections</li>
+  <li><strong>Timing tools</strong> &mdash; offset (shift &plusmn;ms) and stretch (scale by factor)</li>
+  <li><strong>Split / Join / Insert</strong> cues via right-click context menu</li>
+  <li><strong>Undo/Redo</strong> (<span class="kbd">Ctrl+Z</span> / <span class="kbd">Ctrl+Y</span>)</li>
+  <li><strong>Video preview</strong> at cue timestamp via ffplay</li>
+  <li><strong>Color-coded rows</strong> &mdash; yellow=modified, blue=HI, pink=tags, orange=long lines, green=search match</li>
+  <li><strong>Save to Video</strong> &mdash; re-mux edited subtitle directly back into the video (no re-encoding)</li>
+</ul>
+
+<h4>Video Subtitle Editing</h4>
+<p>Drag a video file onto the standalone editor to extract an internal subtitle stream, edit it, and re-mux it back into the video. The stream picker dialog lets you choose which track to edit.</p>
+
+<h3 id="smart-sync">Smart Sync (Whisper-based Auto-Sync)</h3>
+
+<p>Automatically sync subtitles to video audio using speech recognition. Access via Timing &rarr; Smart Sync in the subtitle editor.</p>
+
+<h4>Engines</h4>
+<table>
+  <tr><th>Engine</th><th>Accuracy</th><th>Speed</th><th>Size</th></tr>
+  <tr><td><strong>Standard</strong> (faster-whisper)</td><td>~400ms</td><td>Fast (CPU)</td><td>~200MB</td></tr>
+  <tr><td><strong>Precise</strong> (WhisperX)</td><td>~50ms</td><td>Faster with GPU</td><td>~2GB</td></tr>
+</table>
+
+<h4>Scan Modes</h4>
+<ul>
+  <li><strong>Quick Scan</strong> &mdash; samples segments across the video for fast offset detection</li>
+  <li><strong>Full Scan</strong> &mdash; transcribes entire audio for maximum anchor points</li>
+  <li><strong>Direct Align</strong> (WhisperX only) &mdash; skips transcription, aligns subtitle text directly against audio</li>
+</ul>
+
+<h4>Apply Methods</h4>
+<ul>
+  <li><strong>Apply Sync</strong> &mdash; applies a single global offset (median of matched pairs)</li>
+  <li><strong>Re-time All</strong> &mdash; per-cue adjustment using piecewise linear interpolation from anchor points</li>
+</ul>
+
+<h3 id="bitmap-ocr">Bitmap Subtitle OCR</h3>
+
+<p>Convert PGS (Blu-ray) and VobSub (DVD) bitmap subtitles to text SRT format using Tesseract OCR. Activated when a bitmap track is set to a text format in the Internal Subtitles dialog.</p>
+
+<ul>
+  <li><strong>Single-pass rendering</strong> &mdash; overlays subtitle stream on a black canvas (~2 min for 1-hour episode)</li>
+  <li><strong>Parallel OCR</strong> &mdash; uses multiple CPU cores simultaneously</li>
+  <li><strong>Smart cropping</strong> &mdash; crops to subtitle text region before OCR (~13x fewer pixels)</li>
+  <li><strong>Live monitor window</strong> &mdash; real-time progress, image preview, scrolling cue list</li>
+  <li><strong>Post-processing</strong> &mdash; comprehensive fixes for common OCR mistakes (<code>|</code> &rarr; <code>I</code>, music note detection, etc.)</li>
+</ul>
+
+<h3 id="spell-check">Spell Checker</h3>
+
+<p>Interactive spell check (<span class="kbd">F7</span> or Tools &rarr; Spell Check) that scans cues one at a time with Replace, Replace All, Skip, Ignore, Add to Dict, and Add as Name buttons. Custom dictionary persisted to preferences.</p>
+
+<h3 id="batch-filter">Batch Filter</h3>
+
+<p>Process multiple subtitle files at once (Tools &rarr; Batch Filter). Drag and drop files, select filters via checkboxes, and run. Includes batch Search &amp; Replace with persistent find/replace pairs.</p>
+
+<!-- ──────────────────────────────────────────────────────────── -->
+<h2 id="tools">8. Tools</h2>
+
+<h3 id="media-processor">Media Processor</h3>
+
+<p>A standalone remux-only post-processing tool (Tools &rarr; Media Processor, <span class="kbd">Ctrl+M</span>). Processes already-encoded files without re-encoding (<code>-c:v copy</code>).</p>
+
+<h4>Operations</h4>
+<ul>
+  <li><strong>Convert audio</strong> &mdash; change audio codec (AAC, AC3, EAC3, MP3, Opus, FLAC, Copy) + bitrate</li>
+  <li><strong>Strip chapters / tags / existing subtitles</strong></li>
+  <li><strong>Mux external subtitles</strong> &mdash; auto-detects <code>*.eng.srt</code> and <code>*.eng.forced.srt</code> alongside videos</li>
+  <li><strong>Set track metadata</strong> &mdash; language codes, clear titles</li>
+  <li><strong>Edition tagging</strong> &mdash; same presets as the main converter</li>
+  <li><strong>Add chapters</strong> &mdash; auto-generate at configurable intervals</li>
+  <li><strong>Parallel processing</strong> &mdash; concurrent ffmpeg execution across multiple CPU cores</li>
+  <li><strong>Output options</strong> &mdash; replace in-place or save to a separate folder</li>
+  <li><strong>Per-file overrides</strong> &mdash; right-click any file for individual settings</li>
+</ul>
+
+<div class="tip">All operations are combined into a single ffmpeg command per file, making it very efficient.</div>
+
+<h3 id="tv-renamer">TV Show Renamer</h3>
+
+<p>Batch rename TV show and movie files using TVDB or TMDB metadata (Tools &rarr; TV Show Renamer).</p>
+
+<ul>
+  <li><strong>Auto-detection</strong> &mdash; detects show/movie names from filenames and auto-searches the selected provider</li>
+  <li><strong>Disambiguation</strong> &mdash; when multiple matches are found, shows a card-based picker with poster thumbnails and synopsis</li>
+  <li><strong>Movie support</strong> &mdash; movies renamed to <code>Name (Year).ext</code></li>
+  <li><strong>Multi-episode</strong> &mdash; handles <code>S01E01E02</code> and <code>S01E01-E03</code> patterns</li>
+  <li><strong>Date-based episodes</strong> &mdash; detects <code>2026.04.22</code> patterns for daily shows</li>
+  <li><strong>Subtitle preservation</strong> &mdash; preserves language/forced/SDH tags from original filenames</li>
+  <li><strong>Undo</strong> &mdash; revert the last rename batch (<span class="kbd">Ctrl+Z</span>)</li>
+  <li><strong>Configurable template</strong> &mdash; Settings &rarr; Filename Template with presets</li>
+</ul>
+
+<h3 id="enhanced-media-details">Enhanced Media Details</h3>
+
+<p>Comprehensive file analysis (right-click &rarr; Enhanced Media Details, or <span class="kbd">Ctrl+Shift+I</span>). Displays detailed information in a tabbed dialog:</p>
+
+<table>
+  <tr><th>Tab</th><th>Information Shown</th></tr>
+  <tr><td><strong>General</strong></td><td>Format, duration, size, bitrate, stream count, title/edition</td></tr>
+  <tr><td><strong>Video</strong></td><td>Codec/profile/level, resolution/SAR/DAR, frame rate, scan type, bit depth, color space, HDR format (HDR10/HLG/Dolby Vision), mastering display, content light level</td></tr>
+  <tr><td><strong>Audio</strong></td><td>Codec/profile, sample rate, channels, layout, bitrate, language, disposition</td></tr>
+  <tr><td><strong>Subtitles</strong></td><td>Codec, event count, resolution (bitmap), disposition flags</td></tr>
+  <tr><td><strong>Chapters</strong></td><td>Full chapter listing with timestamps and titles</td></tr>
+  <tr><td><strong>Attachments</strong></td><td>Fonts, images, MIME types</td></tr>
+  <tr><td><strong>Metadata</strong></td><td>All container tags (title, encoder, date, show info, etc.)</td></tr>
+  <tr><td><strong>Full Report</strong></td><td>All sections combined</td></tr>
+</table>
+
+<p>Includes <strong>Copy to Clipboard</strong> (current tab) and <strong>Copy Full Report</strong> buttons.</p>
+
+<h3 id="test-encode">Test Encode</h3>
+
+<p>Encode the first 30 seconds of the selected file with your current settings (<span class="kbd">Ctrl+T</span>). Useful for previewing quality and checking settings before committing to a full conversion.</p>
+
+<!-- ──────────────────────────────────────────────────────────── -->
+<h2 id="per-file-overrides">9. Per-File Overrides</h2>
+
+<p>Right-click a file &rarr; Override Settings to set different encoding parameters for individual files. Overrides include:</p>
+
+<ul>
+  <li>Encoder, video codec, quality mode, bitrate/CRF, preset</li>
+  <li>Audio codec and bitrate</li>
+  <li>Skip existing, delete originals, HW decode</li>
+  <li>Strip chapters, strip tags, set track metadata with language codes</li>
+  <li>Edition tag and Plex filename option</li>
+</ul>
+
+<p>Files with overrides show a &#9881;&#65039; icon in the queue. Double-click to edit the override.</p>
+
+<!-- ──────────────────────────────────────────────────────────── -->
+<h2 id="cli">10. CLI Usage</h2>
+
+<p>The <code>convert_videos.sh</code> script provides headless batch conversion from the command line. Run it from the directory containing your video files:</p>
+
+<pre><code># CPU encoding, default settings
+./convert_videos.sh
+
+# NVIDIA GPU encoding
+./convert_videos.sh --gpu
+
+# Intel QSV encoding
+./convert_videos.sh --qsv
+
+# AMD VAAPI encoding
+./convert_videos.sh --vaapi
+
+# CRF quality mode
+./convert_videos.sh --crf 22
+
+# GPU, high quality preset, overwrite existing
+./convert_videos.sh --gpu --gpu-preset p5 --overwrite</code></pre>
+
+<h4>CLI Options</h4>
+<table>
+  <tr><th>Flag</th><th>Description</th><th>Default</th></tr>
+  <tr><td><code>-b, --bitrate</code></td><td>Video bitrate</td><td><code>2M</code></td></tr>
+  <tr><td><code>-q, --crf</code></td><td>CRF quality value (disables bitrate)</td><td>disabled</td></tr>
+  <tr><td><code>-p, --preset</code></td><td>CPU encoding preset</td><td><code>ultrafast</code></td></tr>
+  <tr><td><code>-g, --gpu</code></td><td>Use NVIDIA GPU (hevc_nvenc)</td><td>off</td></tr>
+  <tr><td><code>--qsv</code></td><td>Use Intel Quick Sync Video</td><td>off</td></tr>
+  <tr><td><code>--vaapi</code></td><td>Use VAAPI encoding</td><td>off</td></tr>
+  <tr><td><code>-P, --gpu-preset</code></td><td>GPU preset</td><td>varies</td></tr>
+  <tr><td><code>-s, --suffix</code></td><td>Output filename suffix</td><td><code>-2mbps-UF_265</code></td></tr>
+  <tr><td><code>-o, --overwrite</code></td><td>Overwrite existing output files</td><td>skip</td></tr>
+  <tr><td><code>-c, --cleanup</code></td><td>Delete originals after success</td><td>off</td></tr>
+  <tr><td><code>-n, --no-log</code></td><td>Disable log file</td><td>off</td></tr>
+</table>
+
+<!-- ──────────────────────────────────────────────────────────── -->
+<h2 id="keyboard-shortcuts">11. Keyboard Shortcuts</h2>
+
+<table>
+  <tr><th>Shortcut</th><th>Action</th></tr>
+  <tr><td><span class="kbd">Ctrl+O</span></td><td>Open File(s)</td></tr>
+  <tr><td><span class="kbd">Ctrl+Shift+O</span></td><td>Open Folder</td></tr>
+  <tr><td><span class="kbd">Ctrl+P</span></td><td>Play Source File</td></tr>
+  <tr><td><span class="kbd">Ctrl+Shift+P</span></td><td>Play Output File</td></tr>
+  <tr><td><span class="kbd">Ctrl+I</span></td><td>Media Details</td></tr>
+  <tr><td><span class="kbd">Ctrl+Shift+I</span></td><td>Enhanced Media Details</td></tr>
+  <tr><td><span class="kbd">Ctrl+T</span></td><td>Test Encode (30s)</td></tr>
+  <tr><td><span class="kbd">Ctrl+M</span></td><td>Media Processor</td></tr>
+  <tr><td><span class="kbd">Ctrl+Shift+F</span></td><td>Open Output Folder</td></tr>
+  <tr><td><span class="kbd">Ctrl+L</span></td><td>Show/Hide Log</td></tr>
+  <tr><td><span class="kbd">Ctrl+Shift+S</span></td><td>Show/Hide Settings Panel</td></tr>
+  <tr><td><span class="kbd">F1</span></td><td>Keyboard Shortcuts</td></tr>
+  <tr><td><span class="kbd">Ctrl+Q</span></td><td>Exit</td></tr>
+  <tr><td><span class="kbd">Delete</span></td><td>Remove selected file from queue</td></tr>
+</table>
+
+<h4>Subtitle Editor Shortcuts</h4>
+<table>
+  <tr><th>Shortcut</th><th>Action</th></tr>
+  <tr><td><span class="kbd">Ctrl+Z</span></td><td>Undo</td></tr>
+  <tr><td><span class="kbd">Ctrl+Y</span></td><td>Redo</td></tr>
+  <tr><td><span class="kbd">Ctrl+F</span></td><td>Find</td></tr>
+  <tr><td><span class="kbd">Ctrl+H</span></td><td>Find &amp; Replace</td></tr>
+  <tr><td><span class="kbd">F7</span></td><td>Spell Check</td></tr>
+  <tr><td><span class="kbd">Ctrl+S</span></td><td>Save</td></tr>
+  <tr><td><span class="kbd">Ctrl+Enter</span></td><td>Save inline edit</td></tr>
+  <tr><td><span class="kbd">Escape</span></td><td>Cancel inline edit</td></tr>
+</table>
+
+<!-- ──────────────────────────────────────────────────────────── -->
+<h2 id="preferences">12. Preferences</h2>
+
+<p>Preferences are auto-saved to <code>~/.local/share/docflix/preferences.json</code> when the Default Settings dialog is closed. No manual save is required.</p>
+
+<h4>What is saved</h4>
+<ul>
+  <li>Encoder, video codec, container, quality mode, CRF, presets</li>
+  <li>Audio codec and bitrate</li>
+  <li>All checkboxes (skip existing, delete originals, HW decode, two-pass, verify output, sound notification)</li>
+  <li>Metadata options (strip chapters/tags, track metadata, language codes)</li>
+  <li>Edition tag and Plex filename option</li>
+  <li>Chapter insertion settings</li>
+  <li>Media player preference</li>
+  <li>Recent folders, custom ad patterns, character names, spell check dictionary</li>
+  <li>TV Show Renamer API keys, provider, and template</li>
+  <li>Media Processor settings (all options)</li>
+</ul>
+
+<h4>What is NOT saved</h4>
+<ul>
+  <li><strong>Video bitrate</strong> &mdash; intentionally resets to 2M on every launch to prevent silent mismatches</li>
+  <li><strong>Transcode mode</strong> &mdash; always starts in Video Only mode</li>
+</ul>
+
+<p>To reset all settings: Settings &rarr; Reset to Defaults, or delete the <code>preferences.json</code> file.</p>
+
+<!-- ──────────────────────────────────────────────────────────── -->
+<h2 id="troubleshooting">13. Troubleshooting</h2>
+
+<h3>Common Issues</h3>
+
+<h4>GPU encoding fails</h4>
+<p>If a GPU encoder fails during conversion, the app automatically retries with CPU encoding. If you consistently get GPU failures:</p>
+<ul>
+  <li>Try unchecking <strong>HW Decode</strong> &mdash; some sources are incompatible with hardware decoding</li>
+  <li>Ensure your GPU drivers are up to date</li>
+  <li>Check that ffmpeg was compiled with your GPU's encoder support</li>
+</ul>
+
+<h4>Small or empty output files</h4>
+<ul>
+  <li>Check the log for error messages</li>
+  <li>Try a different encoder (switch from GPU to CPU)</li>
+  <li>Try a different container format</li>
+  <li>Ensure the source file is not corrupted</li>
+</ul>
+
+<h4>Subtitles not appearing in output</h4>
+<ul>
+  <li><strong>MPEG-TS output</strong> &mdash; text subtitles are not supported in .ts containers; only DVB subtitles work</li>
+  <li><strong>MP4 output</strong> &mdash; only <code>mov_text</code> format is supported; other formats are auto-converted</li>
+  <li>Check that "Strip existing subtitle tracks" is not enabled</li>
+</ul>
+
+<h4>App appears tiny on high-DPI monitor</h4>
+<p>The app includes automatic DPI scaling detection. If it's still too small:</p>
+<ul>
+  <li>Set the <code>GDK_SCALE=2</code> environment variable before launching</li>
+  <li>Or set <code>Xft.dpi: 192</code> in your X resources (<code>~/.Xresources</code>)</li>
+</ul>
+
+<h4>Drag and drop not working</h4>
+<p>Drag and drop requires <code>tkinterdnd2</code>. Install it with: <code>pip install tkinterdnd2</code></p>
+
+<h4>Zenity folder dialogs not appearing</h4>
+<p>Install zenity: <code>sudo apt install zenity</code>. The app falls back to Tkinter's built-in dialog if zenity is not available.</p>
+
+<!-- ──────────────────────────────────────────────────────────── -->
+<h2 id="encoding-reference">14. Encoding Reference</h2>
+
+<h3>CPU (libx265)</h3>
+<table>
+  <tr><th>Mode</th><th>Flag</th><th>Recommended Range</th></tr>
+  <tr><td>Bitrate</td><td><code>-b:v</code></td><td>1M &ndash; 8M+</td></tr>
+  <tr><td>CRF</td><td><code>-crf</code></td><td>18&ndash;28 (lower = better)</td></tr>
+</table>
+
+<h3>NVIDIA GPU (hevc_nvenc)</h3>
+<table>
+  <tr><th>Mode</th><th>Flag</th><th>Recommended Range</th></tr>
+  <tr><td>Bitrate</td><td><code>-b:v</code></td><td>1M &ndash; 8M+</td></tr>
+  <tr><td>CQ</td><td><code>-cq</code></td><td>15&ndash;25 (lower = better)</td></tr>
+</table>
+
+<h3>Intel GPU (hevc_qsv)</h3>
+<table>
+  <tr><th>Mode</th><th>Flag</th><th>Recommended Range</th></tr>
+  <tr><td>Bitrate</td><td><code>-b:v</code></td><td>1M &ndash; 8M+</td></tr>
+  <tr><td>Quality</td><td><code>-global_quality</code></td><td>15&ndash;25 (lower = better)</td></tr>
+</table>
+
+<h3>AMD GPU (hevc_vaapi)</h3>
+<table>
+  <tr><th>Mode</th><th>Flag</th><th>Recommended Range</th></tr>
+  <tr><td>Bitrate</td><td><code>-b:v</code></td><td>1M &ndash; 8M+</td></tr>
+  <tr><td>Quality</td><td><code>-qp</code></td><td>15&ndash;25 (lower = better)</td></tr>
+</table>
+
+<div class="note">GPU encoding is significantly faster but may produce slightly larger files at equivalent quality settings. The quality difference is minimal with modern GPU encoders.</div>
+
+<!-- ──────────────────────────────────────────────────────────── -->
+
+<p class="version">Docflix Video Converter v2.0.5 &mdash; &copy; 2026 Tony Davis &mdash; MIT License</p>
+
+</div>
+</body>
+</html>

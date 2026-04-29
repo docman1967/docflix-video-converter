@@ -272,6 +272,13 @@ if [[ -d "$SCRIPT_DIR/modules" ]]; then
     success "Copied modules/ package ($PKG_COUNT modules)"
 fi
 
+# ── Copy docs/ directory (user manual) ──
+if [[ -d "$SCRIPT_DIR/docs" ]]; then
+    rm -rf "$INSTALL_DIR/docs"
+    cp -r "$SCRIPT_DIR/docs" "$INSTALL_DIR/docs"
+    success "Copied docs/ directory"
+fi
+
 # Ensure scripts are executable
 chmod +x "$INSTALL_DIR/run_converter.sh"
 chmod +x "$INSTALL_DIR/video_converter.py"
