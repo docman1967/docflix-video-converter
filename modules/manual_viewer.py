@@ -638,10 +638,10 @@ def show_manual(app):
         total_lines[0] = int(text.index('end-1c').split('.')[0])
 
         # Keep the widget editable (so selection + copy works) but
-        # block all keyboard input except copy, select-all, and navigation
+        # block all keyboard input except copy and navigation
         def _block_edit(event):
-            # Allow Ctrl+C (copy), Ctrl+A (select all)
-            if event.state & 0x4 and event.keysym in ('c', 'C', 'a', 'A'):
+            # Allow Ctrl+C (copy)
+            if event.state & 0x4 and event.keysym in ('c', 'C'):
                 return
             # Allow navigation keys
             if event.keysym in ('Up', 'Down', 'Left', 'Right', 'Home', 'End',
@@ -662,8 +662,6 @@ def show_manual(app):
             menu = tk.Menu(text, tearoff=0)
             menu.add_command(label="Copy", accelerator="Ctrl+C",
                              command=lambda: text.event_generate('<<Copy>>'))
-            menu.add_command(label="Select All", accelerator="Ctrl+A",
-                             command=lambda: text.tag_add('sel', '1.0', 'end'))
             menu.tk_popup(event.x_root, event.y_root)
         text.bind('<Button-3>', _show_copy_menu)
 
