@@ -8747,8 +8747,8 @@ class VideoConverterApp:
 
         win = tk.Toplevel(self.root)
         win.title("🔧 Media Processor")
-        win.geometry("880x780")
-        win.minsize(750, 600)
+        win.geometry("920x900")
+        win.minsize(750, 700)
         self._center_on_main(win)
 
         # ── State ──
