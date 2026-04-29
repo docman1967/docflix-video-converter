@@ -645,18 +645,23 @@ def show_manual(app):
         if not ranges:
             return
         target = str(ranges[0])
+
+        # Temporarily enable the widget — some Tk versions block
+        # scroll operations on disabled Text widgets
+        text.configure(state='normal')
         try:
-            # Use pixel-accurate count for proper fraction with variable line heights
+            # Pixel-accurate scroll using text.count ypixels
             px_to_target = text.count('1.0', target, 'ypixels')
             px_total = text.count('1.0', 'end-1c', 'ypixels')
             if px_to_target and px_total and px_total[0] > 0:
                 fraction = max(0.0, min(1.0, px_to_target[0] / px_total[0]))
                 text.yview_moveto(fraction)
-                return
+            else:
+                text.see(target)
         except (tk.TclError, TypeError, ZeroDivisionError):
-            pass
-        # Fallback: basic see()
-        text.see(target)
+            text.see(target)
+        finally:
+            text.configure(state='disabled')
 
     sidebar_list.bind('<<ListboxSelect>>', _on_sidebar_select)
     sidebar_list.bind('<ButtonRelease-1>', _on_sidebar_select)
