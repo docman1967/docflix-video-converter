@@ -808,7 +808,7 @@ def open_media_processor(app):
             if isinstance(edition_in_fn, tk.BooleanVar):
                 edition_in_fn = edition_in_fn.get()
             if edition and edition_in_fn:
-                edition_fn_part = ' {' + edition + '}'
+                edition_fn_part = ' {edition-' + edition + '}'
 
             # Determine output path
             if opt_output_mode.get() == 'folder' and opt_output_folder.get():
@@ -1010,7 +1010,7 @@ def open_media_processor(app):
                     _ed_fn = _ov(f, 'edition_in_filename', opt_edition_fn)
                     if isinstance(_ed_fn, tk.BooleanVar):
                         _ed_fn = _ed_fn.get()
-                    _edition_fn_part = (' {' + _ed + '}') if (_ed and _ed_fn) else ''
+                    _edition_fn_part = (' {edition-' + _ed + '}') if (_ed and _ed_fn) else ''
 
                     if is_inplace:
                         original = f['path']
