@@ -98,13 +98,13 @@ def _detect_gpu_backends_quick():
 # Scale filter builder
 # ═══════════════════════════════════════════════════════════════════
 
-def _build_scale_filter(target_w, target_h, backend_id=None):
+def _build_scale_filter(target_h, backend_id=None):
     """Build the -vf scale filter string.
 
-    Uses -2 for auto-dimension (preserves aspect ratio, ensures even).
-    Returns the filter string or None.
+    Uses -2 for width to auto-calculate preserving aspect ratio (always even).
+    Returns the filter string or None if target_h is not set.
     """
-    if target_w is None or target_h is None:
+    if target_h is None or target_h <= 0:
         return None
 
     if backend_id and backend_id in GPU_BACKENDS:
@@ -576,7 +576,7 @@ def open_video_scaler(app):
         cmd.extend(['-i', input_path])
 
         # Scale filter
-        scale_vf = _build_scale_filter(None, target_h, bid if bid != 'cpu' else None)
+        scale_vf = _build_scale_filter(target_h, bid if bid != 'cpu' else None)
         if scale_vf:
             cmd.extend(['-vf', scale_vf])
 
@@ -648,49 +648,64 @@ def open_video_scaler(app):
             _log(f"  {' '.join(cmd)}", 'INFO')
 
             import time as _time
+            import re as _re
             file_start_time = _time.monotonic()
             duration = f.get('duration') or 0
+            last_update = [0.0]  # throttle UI updates
 
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1)
 
-            import re as _re
-            for line in proc.stdout:
-                line = line.strip()
-                if not line:
-                    continue
-                # Parse ffmpeg progress: "frame= 1234 fps= 45 ... time=00:05:23.45 ... speed=2.1x"
-                time_match = _re.search(r'time=(\d+:\d+:\d+\.\d+)', line)
-                speed_match = _re.search(r'speed=\s*([\d.]+)x', line)
+            # ffmpeg outputs progress with \r (carriage return), not \n
+            # Read character by character and split on \r or \n
+            line_buf = []
+            while True:
+                ch = proc.stdout.read(1)
+                if not ch:
+                    break
+                if ch in ('\r', '\n'):
+                    line = ''.join(line_buf).strip()
+                    line_buf = []
+                    if not line:
+                        continue
 
-                if time_match and duration > 0:
-                    current_time = _parse_ffmpeg_time(time_match.group(1))
-                    pct = min(99.9, (current_time / duration) * 100)
-                    remaining = duration - current_time
+                    time_match = _re.search(r'time=(\d+:\d+:\d+\.\d+)', line)
+                    speed_match = _re.search(r'speed=\s*([\d.]+)x', line)
 
-                    # Calculate ETA from speed
-                    eta_str = ''
-                    if speed_match:
-                        speed = float(speed_match.group(1))
-                        if speed > 0:
-                            eta_secs = remaining / speed
-                            if eta_secs >= 3600:
-                                eta_str = f"{int(eta_secs // 3600)}h {int((eta_secs % 3600) // 60)}m left"
-                            elif eta_secs >= 60:
-                                eta_str = f"{int(eta_secs // 60)}m {int(eta_secs % 60)}s left"
-                            else:
-                                eta_str = f"{int(eta_secs)}s left"
+                    if time_match and duration > 0:
+                        now = _time.monotonic()
+                        if now - last_update[0] < 0.3:
+                            continue  # throttle to ~3 updates/sec
+                        last_update[0] = now
 
-                    status_text = f"{pct:.0f}%"
-                    if eta_str:
-                        status_text += f" ({eta_str})"
-                    label_text = f"File {i + 1}/{len(files)}: {pct:.0f}%"
-                    if eta_str:
-                        label_text += f" \u2014 {eta_str}"
+                        current_time = _parse_ffmpeg_time(time_match.group(1))
+                        pct = min(99.9, (current_time / duration) * 100)
+                        remaining = duration - current_time
 
-                    _update_progress(pct, label_text)
-                    win.after(0, lambda s=status_text: _update_status(i, s))
+                        eta_str = ''
+                        if speed_match:
+                            speed = float(speed_match.group(1))
+                            if speed > 0:
+                                eta_secs = remaining / speed
+                                if eta_secs >= 3600:
+                                    eta_str = f"{int(eta_secs // 3600)}h {int((eta_secs % 3600) // 60)}m left"
+                                elif eta_secs >= 60:
+                                    eta_str = f"{int(eta_secs // 60)}m {int(eta_secs % 60)}s left"
+                                else:
+                                    eta_str = f"{int(eta_secs)}s left"
+
+                        status_text = f"{pct:.0f}%"
+                        if eta_str:
+                            status_text += f" ({eta_str})"
+                        label_text = f"File {i + 1}/{len(files)}: {pct:.0f}%"
+                        if eta_str:
+                            label_text += f" \u2014 {eta_str}"
+
+                        _update_progress(pct, label_text)
+                        win.after(0, lambda s=status_text: _update_status(i, s))
+                else:
+                    line_buf.append(ch)
 
             proc.wait()
             elapsed = _time.monotonic() - file_start_time
