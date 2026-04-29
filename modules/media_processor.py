@@ -1003,12 +1003,21 @@ def open_media_processor(app):
                 if proc.returncode == 0:
                     # In-place mode: replace original
                     is_inplace = opt_output_mode.get() == 'inplace' or not opt_output_folder.get()
+                    # Compute edition filename part for rename
+                    _ed = _ov(f, 'edition_tag', opt_edition_tag)
+                    if isinstance(_ed, tk.StringVar):
+                        _ed = _ed.get()
+                    _ed_fn = _ov(f, 'edition_in_filename', opt_edition_fn)
+                    if isinstance(_ed_fn, tk.BooleanVar):
+                        _ed_fn = _ed_fn.get()
+                    _edition_fn_part = (' {edition-' + _ed + '}') if (_ed and _ed_fn) else ''
+
                     if is_inplace:
                         original = f['path']
-                        if edition_fn_part:
+                        if _edition_fn_part:
                             # Rename to include edition tag in filename
                             orig_base, orig_ext = os.path.splitext(original)
-                            new_name = orig_base + edition_fn_part + (out_ext if out_ext else orig_ext)
+                            new_name = orig_base + _edition_fn_part + (out_ext if out_ext else orig_ext)
                             try:
                                 os.replace(out_path, new_name)
                                 final_path = new_name
