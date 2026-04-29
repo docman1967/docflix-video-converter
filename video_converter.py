@@ -8726,6 +8726,8 @@ class VideoConverterApp:
         mp_processing = [False]
         mp_stop = [False]
         mp_lock = threading.Lock()  # protects mp_files during parallel access
+        mp_batch_total = [0]
+        mp_batch_done = [0]
 
         # ── Options ──
         # Map display names → ffmpeg codec names (subset for remux use)
@@ -9673,16 +9675,47 @@ class VideoConverterApp:
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, bufsize=1)
 
+                import re as _re
+                import time as _time
                 last_lines = []
-                for line in proc.stdout:
-                    if mp_stop[0]:
-                        proc.terminate()
-                        return ('stopped', i)
-                    line = line.strip()
-                    if line:
+                last_update = [0.0]
+                duration = f.get('duration_secs') or 0
+                line_buf = []
+
+                while True:
+                    ch = proc.stdout.read(1)
+                    if not ch:
+                        break
+                    if ch in ('\r', '\n'):
+                        line = ''.join(line_buf).strip()
+                        line_buf = []
+                        if not line:
+                            continue
+                        if mp_stop[0]:
+                            proc.terminate()
+                            return ('stopped', i)
                         last_lines.append(line)
                         if len(last_lines) > 5:
                             last_lines.pop(0)
+
+                        # Parse progress
+                        if duration > 0:
+                            time_match = _re.search(r'time=(\d+:\d+:\d+\.\d+)', line)
+                            if time_match:
+                                now = _time.monotonic()
+                                if now - last_update[0] >= 0.3:
+                                    last_update[0] = now
+                                    parts = time_match.group(1).split(':')
+                                    cur = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                                    file_pct = min(99.9, (cur / duration) * 100)
+                                    # Combine file progress with batch progress
+                                    batch_pct = ((mp_batch_done[0] + file_pct / 100) / max(1, mp_batch_total[0])) * 100
+                                    win.after(0, lambda p=batch_pct: mp_progress_var.set(p))
+                                    win.after(0, lambda p=file_pct: mp_progress_label.configure(
+                                        text=f"File {mp_batch_done[0] + 1}/{mp_batch_total[0]}: {p:.0f}%"))
+                                    win.after(0, lambda p=file_pct: _update_tree_status(i, f'{p:.0f}%'))
+                    else:
+                        line_buf.append(ch)
 
                 proc.wait()
 
@@ -9768,6 +9801,8 @@ class VideoConverterApp:
             mp_processing[0] = True
             mp_stop[0] = False
             total = len(mp_files)
+            mp_batch_total[0] = total
+            mp_batch_done[0] = 0
             completed = [0]
             failed = [0]
             processed_count = [0]
@@ -9785,6 +9820,7 @@ class VideoConverterApp:
                 status, _ = result
                 with mp_lock:
                     processed_count[0] += 1
+                    mp_batch_done[0] = processed_count[0]
                     if status == 'done':
                         completed[0] += 1
                     elif status == 'failed':
