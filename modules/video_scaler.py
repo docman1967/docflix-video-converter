@@ -103,18 +103,35 @@ def _build_scale_filter(target_h, backend_id=None):
 
     Uses -2 for width to auto-calculate preserving aspect ratio (always even).
     Returns the filter string or None if target_h is not set.
+
+    For NVENC: uses CPU scale filter because the NVENC backend does not use
+    -hwaccel_output_format cuda (to avoid filter reinitialization errors),
+    so decoded frames are in system memory and scale_cuda won't work.
+
+    For QSV/VAAPI: uses GPU scale filter because those backends set
+    -hwaccel_output_format which keeps frames on the GPU.
     """
     if target_h is None or target_h <= 0:
         return None
 
     if backend_id and backend_id in GPU_BACKENDS:
         backend = GPU_BACKENDS[backend_id]
-        scale_name = backend['scale_filter'].split('=')[0]
-        fmt = backend['scale_filter'].split('=', 1)[1] if '=' in backend['scale_filter'] else ''
-        if fmt:
-            return f"{scale_name}=w=-2:h={target_h}:{fmt}"
+        # Check if the backend keeps frames on GPU (-hwaccel_output_format)
+        # NVENC does not (frames in system memory), QSV/VAAPI do
+        hwaccel_flags = backend.get('hwaccel', [])
+        has_hw_output_fmt = '-hwaccel_output_format' in hwaccel_flags
+
+        if has_hw_output_fmt:
+            # GPU scale filter (QSV, VAAPI)
+            scale_name = backend['scale_filter'].split('=')[0]
+            fmt = backend['scale_filter'].split('=', 1)[1] if '=' in backend['scale_filter'] else ''
+            if fmt:
+                return f"{scale_name}=w=-2:h={target_h}:{fmt}"
+            else:
+                return f"{scale_name}=w=-2:h={target_h}"
         else:
-            return f"{scale_name}=w=-2:h={target_h}"
+            # CPU scale filter (NVENC — frames in system memory)
+            return f"scale=-2:{target_h}"
     else:
         return f"scale=-2:{target_h}"
 
