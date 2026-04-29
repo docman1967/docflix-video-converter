@@ -9231,7 +9231,7 @@ class VideoConverterApp:
         ops_frame.grid(row=2, column=0, sticky='ew', pady=(0, 6))
 
         # ── Audio group ──
-        audio_grp = ttk.LabelFrame(ops_frame, text="Audio", padding=4)
+        audio_grp = ttk.Frame(ops_frame, padding=4)
         audio_grp.pack(fill='x', pady=(0, 4))
         audio_row = ttk.Frame(audio_grp)
         audio_row.pack(fill='x')
@@ -9254,7 +9254,7 @@ class VideoConverterApp:
         mp_br_combo.pack(side='left')
 
         # ── Metadata group ──
-        meta_grp = ttk.LabelFrame(ops_frame, text="Metadata", padding=4)
+        meta_grp = ttk.Frame(ops_frame, padding=4)
         meta_grp.pack(fill='x', pady=(0, 4))
 
         meta_row1 = ttk.Frame(meta_grp)
@@ -9334,7 +9334,7 @@ class VideoConverterApp:
         _toggle_audio_controls()
 
         # ── Subtitles group ──
-        sub_grp = ttk.LabelFrame(ops_frame, text="Subtitles", padding=4)
+        sub_grp = ttk.Frame(ops_frame, padding=4)
         sub_grp.pack(fill='x', pady=(0, 4))
         sub_row = ttk.Frame(sub_grp)
         sub_row.pack(fill='x')
@@ -9349,7 +9349,7 @@ class VideoConverterApp:
         ttk.Button(sub_row, text="Rescan", command=_rescan_subs, width=7).pack(side='left')
 
         # ── Output group ──
-        out_grp = ttk.LabelFrame(ops_frame, text="Output", padding=4)
+        out_grp = ttk.Frame(ops_frame, padding=4)
         out_grp.pack(fill='x', pady=(0, 0))
 
         out_row1 = ttk.Frame(out_grp)
