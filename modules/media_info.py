@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — Enhanced Media Info
+Docflix Video Converter — Enhanced Media Details
 
 Comprehensive media file analysis tool using ffprobe.
 Displays container, video, audio, subtitle, chapter, and
@@ -706,14 +706,14 @@ def show_enhanced_media_info(app, filepath):
     # Probe in foreground (fast — typically <1s)
     data = probe_file(filepath)
     if not data['format']:
-        messagebox.showerror('Media Info', f'ffprobe failed to read:\n{filepath}')
+        messagebox.showerror('Media Details', f'ffprobe failed to read:\n{filepath}')
         return
 
     sections = build_full_report(filepath, data)
 
     # ── Window ──
     dlg = tk.Toplevel(app.root)
-    dlg.title(f'Enhanced Media Info — {os.path.basename(filepath)}')
+    dlg.title(f'Enhanced Media Details — {os.path.basename(filepath)}')
     dlg.geometry('780x620')
     dlg.minsize(600, 400)
     dlg.resizable(True, True)

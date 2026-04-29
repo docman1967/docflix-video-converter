@@ -27,7 +27,7 @@ A batch video converter that encodes files to **H.265/HEVC** (and other codecs) 
 - 🎞️ **Internal subtitle management** — per-stream format control, codec conversion
 - ✏️ **Subtitle editor** — full-featured editor with filters (Remove HI, Fix ALL CAPS, Remove Ads, etc.), search & replace, timing tools, batch processing, video preview
 - 🧹 **Metadata cleanup** — strip chapters, strip tags, set track metadata (language codes for video/audio/subtitle tracks, clear container title)
-- 📊 **Media info** panel — codec, resolution, duration, streams
+- 📊 **Media details** panel — codec, resolution, duration, streams
 - 🔬 **Test encode** — 30-second preview clip before full conversion
 - 📐 **Estimated output size** before conversion starts
 - ⏱️ **Batch ETA** — real-time estimated time remaining for the entire batch
@@ -262,7 +262,7 @@ docflix-video-converter/
 | `Ctrl+Shift+O` | Open Folder |
 | `Ctrl+P` | Play Source File |
 | `Ctrl+Shift+P` | Play Output File |
-| `Ctrl+I` | Media Info |
+| `Ctrl+I` | Media Details |
 | `Ctrl+T` | Test Encode (30s) |
 | `Ctrl+M` | Media Processor |
 | `Ctrl+Shift+F` | Open Output Folder |

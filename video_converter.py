@@ -4178,10 +4178,10 @@ class VideoConverterApp:
                                accelerator="Ctrl+Shift+P",
                                command=self.play_output_file)
         tools_menu.add_separator()
-        tools_menu.add_command(label="Media Info...",
+        tools_menu.add_command(label="Media Details...",
                                accelerator="Ctrl+I",
                                command=self.show_media_info)
-        tools_menu.add_command(label="Enhanced Media Info...",
+        tools_menu.add_command(label="Enhanced Media Details...",
                                accelerator="Ctrl+Shift+I",
                                command=self.show_enhanced_media_info)
         tools_menu.add_command(label="Test Encode (30s)...",
@@ -4747,7 +4747,7 @@ class VideoConverterApp:
         self.tree_context_menu = tk.Menu(self.root, tearoff=0)
         self.tree_context_menu.add_command(label="▶ Play Source File",  command=self.play_source_file)
         self.tree_context_menu.add_command(label="▶ Play Output File",  command=self.play_output_file)
-        self.tree_context_menu.add_command(label="ℹ️ Enhanced Media Info...", command=self.show_enhanced_media_info)
+        self.tree_context_menu.add_command(label="ℹ️ Enhanced Media Details...", command=self.show_enhanced_media_info)
         self.tree_context_menu.add_separator()
         self.tree_context_menu.add_command(label="⚙️ Override Settings...", command=self.show_override_dialog)
         self.tree_context_menu.add_command(label="✖ Clear Override", command=self.clear_override)
@@ -15545,7 +15545,7 @@ class VideoConverterApp:
             ("Tools", [
                 ("Ctrl+P",         "Play Source File"),
                 ("Ctrl+Shift+P",   "Play Output File"),
-                ("Ctrl+I",         "Media Info"),
+                ("Ctrl+I",         "Media Details"),
                 ("Ctrl+T",         "Test Encode (30s)"),
                 ("Ctrl+Shift+F",   "Open Output Folder"),
                 ("Ctrl+M",         "Media Processor"),
@@ -16227,7 +16227,7 @@ class VideoConverterApp:
         """Run ffprobe on the selected file and show a formatted info dialog."""
         item, index = self._get_selected_file_index()
         if index is None:
-            messagebox.showinfo("Media Info", "Please select a file from the list first.")
+            messagebox.showinfo("Media Details", "Please select a file from the list first.")
             return
         filepath = self.files[index]['path']
 
@@ -16240,16 +16240,16 @@ class VideoConverterApp:
                 capture_output=True, text=True, timeout=15
             )
             if result.returncode != 0:
-                messagebox.showerror("Media Info Error", result.stderr[:300])
+                messagebox.showerror("Media Details Error", result.stderr[:300])
                 return
             import json as _json
             data = _json.loads(result.stdout)
         except Exception as e:
-            messagebox.showerror("Media Info Error", str(e))
+            messagebox.showerror("Media Details Error", str(e))
             return
 
         dlg = tk.Toplevel(self.root)
-        dlg.title(f"Media Info — {os.path.basename(filepath)}")
+        dlg.title(f"Media Details — {os.path.basename(filepath)}")
         dlg.geometry("620x520")
         dlg.transient(self.root)
         dlg.resizable(True, True)
@@ -16327,7 +16327,7 @@ class VideoConverterApp:
         """Show the enhanced media info dialog for the selected file."""
         item, index = self._get_selected_file_index()
         if index is None:
-            messagebox.showinfo("Enhanced Media Info",
+            messagebox.showinfo("Enhanced Media Details",
                                 "Please select a file from the list first.")
             return
         filepath = self.files[index]['path']
@@ -16345,7 +16345,7 @@ class VideoConverterApp:
                 spec.loader.exec_module(mod)
                 mod.show_enhanced_media_info(self, filepath)
             else:
-                messagebox.showerror("Enhanced Media Info",
+                messagebox.showerror("Enhanced Media Details",
                                      "modules/media_info.py not found.")
 
     def test_encode(self):
