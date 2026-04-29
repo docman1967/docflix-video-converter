@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "2.0.2"
+APP_VERSION = "2.0.3"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -4119,6 +4119,9 @@ class VideoConverterApp:
         tools_menu.add_command(label="Media Info...",
                                accelerator="Ctrl+I",
                                command=self.show_media_info)
+        tools_menu.add_command(label="Enhanced Media Info...",
+                               accelerator="Ctrl+Shift+I",
+                               command=self.show_enhanced_media_info)
         tools_menu.add_command(label="Test Encode (30s)...",
                                accelerator="Ctrl+T",
                                command=self.test_encode)
@@ -4158,6 +4161,7 @@ class VideoConverterApp:
         self.root.bind('<Control-p>', lambda e: self.play_source_file())
         self.root.bind('<Control-P>', lambda e: self.play_output_file())
         self.root.bind('<Control-i>', lambda e: self.show_media_info())
+        self.root.bind('<Control-I>', lambda e: self.show_enhanced_media_info())
         self.root.bind('<Control-t>', lambda e: self.test_encode())
         self.root.bind('<Control-F>', lambda e: self.open_output_folder())
         self.root.bind('<Control-m>', lambda e: self.open_media_processor())
@@ -4610,6 +4614,7 @@ class VideoConverterApp:
         self.tree_context_menu = tk.Menu(self.root, tearoff=0)
         self.tree_context_menu.add_command(label="▶ Play Source File",  command=self.play_source_file)
         self.tree_context_menu.add_command(label="▶ Play Output File",  command=self.play_output_file)
+        self.tree_context_menu.add_command(label="ℹ️ Enhanced Media Info...", command=self.show_enhanced_media_info)
         self.tree_context_menu.add_separator()
         self.tree_context_menu.add_command(label="⚙️ Override Settings...", command=self.show_override_dialog)
         self.tree_context_menu.add_command(label="✖ Clear Override", command=self.clear_override)
@@ -16131,6 +16136,31 @@ class VideoConverterApp:
         text.configure(state='disabled')
 
         ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=(0, 8))
+
+    def show_enhanced_media_info(self):
+        """Show the enhanced media info dialog for the selected file."""
+        item, index = self._get_selected_file_index()
+        if index is None:
+            messagebox.showinfo("Enhanced Media Info",
+                                "Please select a file from the list first.")
+            return
+        filepath = self.files[index]['path']
+        try:
+            from modules.media_info import show_enhanced_media_info as _show
+            _show(self, filepath)
+        except ImportError:
+            # Fallback: try loading from the same directory as this script
+            import importlib.util
+            _mi_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     'modules', 'media_info.py')
+            if os.path.exists(_mi_path):
+                spec = importlib.util.spec_from_file_location('media_info', _mi_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                mod.show_enhanced_media_info(self, filepath)
+            else:
+                messagebox.showerror("Enhanced Media Info",
+                                     "modules/media_info.py not found.")
 
     def test_encode(self):
         """Encode the first 30 seconds of the selected file with current settings."""

@@ -21,6 +21,7 @@ Package structure:
     subtitle_ocr.py   — Bitmap subtitle OCR (future)
     batch_filter.py   — Batch filter window (future)
     preferences.py    — Preferences management (future)
+    media_info.py     — Enhanced media info dialog
 """
 
 from .constants import APP_NAME, APP_VERSION
