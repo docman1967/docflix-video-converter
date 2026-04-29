@@ -661,8 +661,20 @@ cd docflix-video-converter
   <li><strong>Date-based episodes</strong> &mdash; detects <code>2026.04.22</code> patterns for daily shows</li>
   <li><strong>Subtitle preservation</strong> &mdash; preserves language/forced/SDH tags from original filenames</li>
   <li><strong>Undo</strong> &mdash; revert the last rename batch (<span class="kbd">Ctrl+Z</span>)</li>
-  <li><strong>Configurable template</strong> &mdash; Settings &rarr; Filename Template with presets</li>
+  <li><strong>Configurable template</strong> &mdash; Settings &rarr; Filename Template with flat and folder presets</li>
 </ul>
+
+<h4>Folder Templates</h4>
+<p>Use <code>/</code> in the filename template to automatically create folder hierarchies during rename. For example:</p>
+
+<table>
+  <tr><th>Template</th><th>Result</th></tr>
+  <tr><td><code>{show} S{season}E{episode} {title}</code></td><td><code>Breaking Bad S01E01 Pilot.mkv</code></td></tr>
+  <tr><td><code>{show}/Season {season}/{show} S{season}E{episode} {title}</code></td><td><code>Breaking Bad/Season 01/Breaking Bad S01E01 Pilot.mkv</code></td></tr>
+  <tr><td><code>{show}/S{season}/{show} S{season}E{episode} {title}</code></td><td><code>Breaking Bad/S01/Breaking Bad S01E01 Pilot.mkv</code></td></tr>
+</table>
+
+<p>Folders are created relative to the source file&rsquo;s location. Undo will move files back and clean up any empty folders that were created.</p>
 
 <h3 id="enhanced-media-details">Enhanced Media Details</h3>
 

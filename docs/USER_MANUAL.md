@@ -366,7 +366,19 @@ Batch rename TV/movie files using TVDB/TMDB (Tools > TV Show Renamer):
 - Date-based episodes for daily shows
 - Subtitle tag preservation
 - Undo rename (`Ctrl+Z`)
-- Configurable filename template
+- Configurable filename template with flat and folder presets
+
+#### Folder Templates
+
+Use `/` in the filename template to automatically create folder hierarchies during rename. For example:
+
+| Template | Result |
+|---|---|
+| `{show} S{season}E{episode} {title}` | `Breaking Bad S01E01 Pilot.mkv` |
+| `{show}/Season {season}/{show} S{season}E{episode} {title}` | `Breaking Bad/Season 01/Breaking Bad S01E01 Pilot.mkv` |
+| `{show}/S{season}/{show} S{season}E{episode} {title}` | `Breaking Bad/S01/Breaking Bad S01E01 Pilot.mkv` |
+
+Folders are created relative to the source file's location. Undo will move files back and clean up any empty folders that were created.
 
 ### Enhanced Media Details
 
