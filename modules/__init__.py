@@ -22,6 +22,7 @@ Package structure:
     batch_filter.py   — Batch filter window (future)
     preferences.py    — Preferences management (future)
     media_info.py     — Enhanced media info dialog
+    chapters.py       — Chapter generation, parsing, FFMETADATA writing
 """
 
 from .constants import APP_NAME, APP_VERSION

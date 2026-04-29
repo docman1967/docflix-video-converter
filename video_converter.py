@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "2.0.4"
+APP_VERSION = "2.0.5"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -3294,6 +3294,24 @@ class VideoConverter:
                     cc_passthrough_flags = flags
                     self.log(f"A53 CC passthrough enabled for {video_enc_name}", 'INFO')
 
+            # ── Chapter injection ──
+            chapters_metadata_path = None
+            chapters = settings.get('chapters', [])
+            if chapters and not settings.get('strip_chapters', False):
+                try:
+                    from modules.chapters import chapters_to_ffmetadata
+                except ImportError:
+                    import importlib.util
+                    _ch_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                             'modules', 'chapters.py')
+                    _spec = importlib.util.spec_from_file_location('chapters', _ch_path)
+                    _mod = importlib.util.module_from_spec(_spec)
+                    _spec.loader.exec_module(_mod)
+                    chapters_to_ffmetadata = _mod.chapters_to_ffmetadata
+                chapters_metadata_path = chapters_to_ffmetadata(chapters)
+                if chapters_metadata_path:
+                    self.log(f"Adding {len(chapters)} chapters to output", 'INFO')
+
             def _build_base_cmd():
                 """Build the common part of the ffmpeg command."""
                 c = ['ffmpeg', '-y']
@@ -3309,6 +3327,9 @@ class VideoConverter:
                 # Add extracted closed caption SRT as input
                 if cc_srt_path:
                     c.extend(['-i', cc_srt_path])
+                # Add chapter metadata file as input
+                if chapters_metadata_path:
+                    c.extend(['-i', chapters_metadata_path])
                 return c
 
             def _edited_sub_input_idx(stream_index):
@@ -3659,8 +3680,12 @@ class VideoConverter:
 
             def _add_metadata_args(c):
                 """Add metadata cleanup and track metadata flags."""
-                # Strip chapters
-                if settings.get('strip_chapters', False):
+                # Add chapters or strip chapters (mutually exclusive)
+                if chapters_metadata_path:
+                    # Map chapters from the metadata file input
+                    ch_idx = 1 + len(embed_subs) + len(_edited_sub_inputs) + (1 if cc_srt_path else 0)
+                    c.extend(['-map_chapters', str(ch_idx)])
+                elif settings.get('strip_chapters', False):
                     c.extend(['-map_chapters', '-1'])
                     self.log("Stripping chapters from output", 'INFO')
 
@@ -3799,6 +3824,12 @@ class VideoConverter:
             if cc_srt_path:
                 try:
                     os.remove(cc_srt_path)
+                except OSError:
+                    pass
+            # Clean up chapter metadata temp file
+            if chapters_metadata_path:
+                try:
+                    os.remove(chapters_metadata_path)
                 except OSError:
                     pass
 
@@ -4013,6 +4044,9 @@ class VideoConverterApp:
         # Edition tagging
         self.edition_tag = tk.StringVar(value='')
         self.edition_in_filename = tk.BooleanVar(value=False)
+        # Chapter insertion
+        self.add_chapters = tk.BooleanVar(value=False)
+        self.chapter_interval = tk.IntVar(value=5)  # minutes
 
         # Check system capabilities
         self.has_ffmpeg, self.ffmpeg_version = check_ffmpeg()
@@ -4600,6 +4634,34 @@ class VideoConverterApp:
 
         ttk.Checkbutton(self.edition_frame, text="Add to filename (Plex)",
                         variable=self.edition_in_filename).pack(side='left', padx=(8, 0))
+
+
+        # ── Row 10: Chapter insertion ──
+        self.chapter_frame = ttk.Frame(settings_frame)
+        self.chapter_frame.grid(row=10, column=0, columnspan=2, sticky='w', pady=(0, 6))
+
+        def _on_add_chapters_toggle():
+            """Mutual exclusion: add_chapters unchecks strip_chapters."""
+            if self.add_chapters.get():
+                self.strip_chapters.set(False)
+            st = 'normal' if self.add_chapters.get() else 'disabled'
+            self.chapter_interval_spin.configure(state=st)
+
+        ttk.Checkbutton(self.chapter_frame, text="Add chapters every",
+                        variable=self.add_chapters,
+                        command=_on_add_chapters_toggle).pack(side='left', padx=(5, 2))
+        self.chapter_interval_spin = tk.Spinbox(
+            self.chapter_frame, textvariable=self.chapter_interval,
+            from_=1, to=60, width=3, state='disabled')
+        self.chapter_interval_spin.pack(side='left', padx=(0, 2))
+        ttk.Label(self.chapter_frame, text="minutes").pack(side='left')
+
+        # Wire strip_chapters to uncheck add_chapters
+        def _on_strip_chapters_trace(*args):
+            if self.strip_chapters.get() and self.add_chapters.get():
+                self.add_chapters.set(False)
+                _on_add_chapters_toggle()
+        self.strip_chapters.trace_add('write', _on_strip_chapters_trace)
 
 
     def _edition_custom_var(self):
@@ -15327,6 +15389,8 @@ class VideoConverterApp:
             'meta_sub_lang':         self.meta_sub_lang.get(),
             'edition_tag':           self.edition_tag.get(),
             'edition_in_filename':   self.edition_in_filename.get(),
+            'add_chapters':          self.add_chapters.get(),
+            'chapter_interval':      self.chapter_interval.get(),
             'custom_ad_patterns':    self.custom_ad_patterns,
             'custom_cap_words':      self.custom_cap_words,
             'custom_replacements':   self.custom_replacements,
@@ -15383,6 +15447,8 @@ class VideoConverterApp:
             self.meta_sub_lang.set(prefs.get('meta_sub_lang', self.meta_sub_lang.get()))
             self.edition_tag.set(prefs.get('edition_tag', ''))
             self.edition_in_filename.set(prefs.get('edition_in_filename', False))
+            self.add_chapters.set(prefs.get('add_chapters', False))
+            self.chapter_interval.set(prefs.get('chapter_interval', 5))
             self.verify_output.set(prefs.get('verify_output',   self.verify_output.get()))
             self.notify_sound.set(prefs.get('notify_sound',     self.notify_sound.get()))
             self.notify_sound_file.set(prefs.get('notify_sound_file', self.notify_sound_file.get()))
@@ -15443,6 +15509,8 @@ class VideoConverterApp:
         self.meta_sub_lang.set('eng')
         self.edition_tag.set('')
         self.edition_in_filename.set(False)
+        self.add_chapters.set(False)
+        self.chapter_interval.set(5)
         self._on_metadata_toggle()
         # Refresh UI state
         self.on_encoder_change(silent=True)
@@ -17075,6 +17143,8 @@ class VideoConverterApp:
             'meta_sub_lang':       self.meta_sub_lang.get(),
             'edition_tag':         self.edition_tag.get(),
             'edition_in_filename': self.edition_in_filename.get(),
+            'add_chapters':        self.add_chapters.get(),
+            'chapter_interval':    self.chapter_interval.get(),
         }
 
         renamed_candidates = []  # (output_path, original_input_path) for files whose originals were deleted
@@ -17130,6 +17200,25 @@ class VideoConverterApp:
                 'edition_tag':         ov.get('edition_tag',         settings['edition_tag']),
                 'edition_in_filename': ov.get('edition_in_filename', settings['edition_in_filename']),
             }
+
+            # Generate chapters if requested (auto-generate from duration)
+            file_chapters = file_info.get('chapters', [])
+            if not file_chapters:
+                add_ch = ov.get('add_chapters', settings.get('add_chapters', False))
+                ch_interval = ov.get('chapter_interval', settings.get('chapter_interval', 5))
+                if add_ch and file_info.get('duration_secs'):
+                    try:
+                        from modules.chapters import generate_auto_chapters
+                    except ImportError:
+                        import importlib.util
+                        _ch_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                 'modules', 'chapters.py')
+                        _spec = importlib.util.spec_from_file_location('chapters', _ch_path)
+                        _mod = importlib.util.module_from_spec(_spec)
+                        _spec.loader.exec_module(_mod)
+                        generate_auto_chapters = _mod.generate_auto_chapters
+                    file_chapters = generate_auto_chapters(file_info['duration_secs'], ch_interval)
+            file_settings['chapters'] = file_chapters
 
             transcode_mode = file_settings['transcode_mode']
             encoder        = file_settings['encoder']

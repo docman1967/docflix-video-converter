@@ -18,6 +18,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from .constants import VIDEO_EXTENSIONS, EDITION_PRESETS
+from .chapters import generate_auto_chapters, chapters_to_ffmetadata
 from .utils import get_audio_info, get_subtitle_streams, ask_directory
 
 try:
@@ -85,6 +86,8 @@ def open_media_processor(app):
         opt_edition_tag    = tk.StringVar(value=_mp.get('edition_tag', ''))
         opt_edition_fn     = tk.BooleanVar(value=_mp.get('edition_in_filename', False))
         _edition_custom_sv = tk.StringVar(value='')
+        opt_add_chapters   = tk.BooleanVar(value=_mp.get('add_chapters', False))
+        opt_ch_interval    = tk.IntVar(value=_mp.get('chapter_interval', 5))
 
         # ── Layout ──
         main_frame = ttk.Frame(win, padding=10)
@@ -617,6 +620,24 @@ def open_media_processor(app):
         ttk.Checkbutton(ops_row3b, text="Add to filename (Plex)",
                         variable=opt_edition_fn).pack(side='left', padx=(8, 0))
 
+        # Row 3c: Chapter insertion
+        ops_row3c = ttk.Frame(ops_frame)
+        ops_row3c.pack(fill='x', pady=2)
+
+        def _toggle_ch_spin():
+            mp_ch_spin.configure(state='normal' if opt_add_chapters.get() else 'disabled')
+            if opt_add_chapters.get():
+                opt_strip_chapters.set(False)
+
+        ttk.Checkbutton(ops_row3c, text="Add chapters every",
+                        variable=opt_add_chapters,
+                        command=_toggle_ch_spin).pack(side='left', padx=(0, 2))
+        mp_ch_spin = tk.Spinbox(ops_row3c, textvariable=opt_ch_interval,
+                                from_=1, to=60, width=3, state='disabled')
+        mp_ch_spin.pack(side='left', padx=(0, 2))
+        ttk.Label(ops_row3c, text="minutes").pack(side='left')
+        _toggle_ch_spin()
+
         # Row 4: Output + parallel + container
         ops_row4 = ttk.Frame(ops_frame)
         ops_row4.pack(fill='x', pady=2)
@@ -804,6 +825,24 @@ def open_media_processor(app):
                     cmd.extend(['-i', spath])
                     sub_inputs.append((stype, spath))
 
+            # Chapter injection
+            ch_meta_path = None
+            ch_input_idx = None
+            do_add_ch = _ov(f, 'add_chapters', opt_add_chapters)
+            if isinstance(do_add_ch, tk.BooleanVar):
+                do_add_ch = do_add_ch.get()
+            if do_add_ch and f.get('duration_secs'):
+                ch_intv = _ov(f, 'chapter_interval', opt_ch_interval)
+                if isinstance(ch_intv, tk.IntVar):
+                    ch_intv = ch_intv.get()
+                chs = generate_auto_chapters(f['duration_secs'], ch_intv)
+                if chs:
+                    ch_meta_path = chapters_to_ffmetadata(chs)
+                    if ch_meta_path:
+                        ch_input_idx = 1 + len(sub_inputs)  # input 0=main, 1..N=subs
+                        cmd.extend(['-i', ch_meta_path])
+                        f['_ch_meta_path'] = ch_meta_path  # for cleanup
+
             # ── Mapping ──
             cmd.extend(['-map', '0:v:0?', '-map', '0:a?'])
 
@@ -890,7 +929,9 @@ def open_media_processor(app):
                     cmd.extend([f'-disposition:s:{si}', 'forced'])
 
             # ── Chapters ──
-            if _ov(f, 'strip_chapters', opt_strip_chapters):
+            if ch_meta_path:
+                cmd.extend(['-map_chapters', str(ch_input_idx)])
+            elif _ov(f, 'strip_chapters', opt_strip_chapters):
                 cmd.extend(['-map_chapters', '-1'])
 
             # ── Tags ──
@@ -990,6 +1031,14 @@ def open_media_processor(app):
                 _log(f"  ❌ Error: {e}", 'ERROR')
                 win.after(0, lambda idx=i: _update_tree_status(idx, '❌ Error'))
                 return ('failed', i)
+            finally:
+                # Clean up chapter metadata temp file
+                ch_tmp = f.pop('_ch_meta_path', None)
+                if ch_tmp:
+                    try:
+                        os.remove(ch_tmp)
+                    except OSError:
+                        pass
 
         # ── Processing thread (orchestrator) ──
         def _process_files():
@@ -1171,6 +1220,8 @@ def open_media_processor(app):
                 'max_jobs':       opt_max_jobs.get(),
                 'edition_tag':    opt_edition_tag.get(),
                 'edition_in_filename': opt_edition_fn.get(),
+                'add_chapters':   opt_add_chapters.get(),
+                'chapter_interval': opt_ch_interval.get(),
             }
             app._media_proc_prefs = mp_prefs
             # Write to shared preferences file

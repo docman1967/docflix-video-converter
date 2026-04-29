@@ -169,6 +169,15 @@ class VideoConverter:
                     cc_passthrough_flags = flags
                     self.log(f"A53 CC passthrough enabled for {video_enc_name}", 'INFO')
 
+            # ── Chapter injection ──
+            chapters_metadata_path = None
+            chapters = settings.get('chapters', [])
+            if chapters and not settings.get('strip_chapters', False):
+                from .chapters import chapters_to_ffmetadata
+                chapters_metadata_path = chapters_to_ffmetadata(chapters)
+                if chapters_metadata_path:
+                    self.log(f"Adding {len(chapters)} chapters to output", 'INFO')
+
             def _build_base_cmd():
                 """Build the common part of the ffmpeg command."""
                 c = ['ffmpeg', '-y']
@@ -184,6 +193,9 @@ class VideoConverter:
                 # Add extracted closed caption SRT as input
                 if cc_srt_path:
                     c.extend(['-i', cc_srt_path])
+                # Add chapter metadata file as input
+                if chapters_metadata_path:
+                    c.extend(['-i', chapters_metadata_path])
                 return c
 
             def _edited_sub_input_idx(stream_index):
@@ -534,8 +546,11 @@ class VideoConverter:
 
             def _add_metadata_args(c):
                 """Add metadata cleanup and track metadata flags."""
-                # Strip chapters
-                if settings.get('strip_chapters', False):
+                # Add chapters or strip chapters (mutually exclusive)
+                if chapters_metadata_path:
+                    ch_idx = 1 + len(embed_subs) + len(_edited_sub_inputs) + (1 if cc_srt_path else 0)
+                    c.extend(['-map_chapters', str(ch_idx)])
+                elif settings.get('strip_chapters', False):
                     c.extend(['-map_chapters', '-1'])
                     self.log("Stripping chapters from output", 'INFO')
 
@@ -674,6 +689,12 @@ class VideoConverter:
             if cc_srt_path:
                 try:
                     os.remove(cc_srt_path)
+                except OSError:
+                    pass
+            # Clean up chapter metadata temp file
+            if chapters_metadata_path:
+                try:
+                    os.remove(chapters_metadata_path)
                 except OSError:
                     pass
 
