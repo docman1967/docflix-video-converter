@@ -223,6 +223,7 @@
   <a class="sub" href="#media-processor">Media Processor</a>
   <a class="sub" href="#tv-renamer">TV Show Renamer</a>
   <a class="sub" href="#enhanced-media-details">Enhanced Media Details</a>
+  <a class="sub" href="#video-scaler">Video Scaler</a>
   <a class="sub" href="#test-encode">Test Encode</a>
 
   <a class="section" href="#per-file-overrides">9. Per-File Overrides</a>
@@ -311,6 +312,7 @@ cd docflix-video-converter
   <tr><td><code>docflix-subs</code></td><td>Subtitle Editor</td></tr>
   <tr><td><code>docflix-rename</code></td><td>TV Show Renamer</td></tr>
   <tr><td><code>docflix-media</code></td><td>Media Processor</td></tr>
+  <tr><td><code>docflix-scale</code></td><td>Video Scaler</td></tr>
 </table>
 
 <!-- ──────────────────────────────────────────────────────────── -->
@@ -680,6 +682,35 @@ cd docflix-video-converter
 
 <p>Includes <strong>Copy to Clipboard</strong> (current tab) and <strong>Copy Full Report</strong> buttons.</p>
 
+<h3 id="video-scaler">Video Scaler</h3>
+
+<p>Batch resize video files (Tools &rarr; Video Scaler, <span class="kbd">Ctrl+Shift+R</span>). Also available as <code>docflix-scale</code> standalone command.</p>
+
+<h4>Resolution Presets</h4>
+<table>
+  <tr><th>Preset</th><th>Dimensions</th></tr>
+  <tr><td>Original</td><td>No scaling (passthrough)</td></tr>
+  <tr><td>2160p (4K)</td><td>3840x2160</td></tr>
+  <tr><td>1440p (2K)</td><td>2560x1440</td></tr>
+  <tr><td>1080p</td><td>1920x1080</td></tr>
+  <tr><td>720p</td><td>1280x720</td></tr>
+  <tr><td>480p</td><td>854x480</td></tr>
+  <tr><td>Custom</td><td>User enters WxH</td></tr>
+</table>
+
+<h4>Features</h4>
+<ul>
+  <li><strong>GPU-accelerated scaling</strong> &mdash; NVENC, QSV, VAAPI; GPU handles encoding, scaling adapts per backend</li>
+  <li><strong>Aspect ratio preservation</strong> &mdash; width auto-calculated from actual decoded content dimensions</li>
+  <li><strong>Upscale warning</strong> &mdash; flags files where target resolution exceeds source</li>
+  <li><strong>Smart probing</strong> &mdash; extracts a frame at 30% of duration to detect actual content size (handles letterboxed and variable-resolution files)</li>
+  <li>Encoder selection with preset and CRF controls</li>
+  <li>Audio passthrough (copy) or re-encode</li>
+  <li>Real-time progress bar with ETA</li>
+  <li>Drag-and-drop file support</li>
+  <li>All settings saved to preferences between sessions</li>
+</ul>
+
 <h3 id="test-encode">Test Encode</h3>
 
 <p>Encode the first 30 seconds of the selected file with your current settings (<span class="kbd">Ctrl+T</span>). Useful for previewing quality and checking settings before committing to a full conversion.</p>
@@ -751,6 +782,7 @@ cd docflix-video-converter
   <tr><td><span class="kbd">Ctrl+Shift+I</span></td><td>Enhanced Media Details</td></tr>
   <tr><td><span class="kbd">Ctrl+T</span></td><td>Test Encode (30s)</td></tr>
   <tr><td><span class="kbd">Ctrl+M</span></td><td>Media Processor</td></tr>
+  <tr><td><span class="kbd">Ctrl+Shift+R</span></td><td>Video Scaler</td></tr>
   <tr><td><span class="kbd">Ctrl+Shift+F</span></td><td>Open Output Folder</td></tr>
   <tr><td><span class="kbd">Ctrl+L</span></td><td>Show/Hide Log</td></tr>
   <tr><td><span class="kbd">Ctrl+Shift+S</span></td><td>Show/Hide Settings Panel</td></tr>

@@ -84,6 +84,7 @@ No `sudo` required. To uninstall: `./install.sh --uninstall`
 | `docflix-subs` | Subtitle Editor |
 | `docflix-rename` | TV Show Renamer |
 | `docflix-media` | Media Processor |
+| `docflix-scale` | Video Scaler |
 
 ---
 
@@ -384,6 +385,22 @@ Comprehensive file analysis (right-click > Enhanced Media Details, `Ctrl+Shift+I
 
 Copy to Clipboard and Copy Full Report buttons included.
 
+### Video Scaler
+
+Batch resize video files (Tools > Video Scaler, `Ctrl+Shift+R`). Also available as `docflix-scale` standalone command.
+
+**Resolution Presets:** Original, 2160p (4K), 1440p (2K), 1080p, 720p, 480p, Custom WxH
+
+**Features:**
+- GPU-accelerated scaling (NVENC, QSV, VAAPI)
+- Aspect ratio preservation -- width auto-calculated from actual decoded content
+- Upscale warning -- flags files where target exceeds source
+- Smart probing -- extracts frame at 30% of duration for actual content size
+- Encoder selection with preset and CRF controls
+- Audio passthrough (copy) or re-encode
+- Real-time progress bar with ETA
+- Drag-and-drop, settings saved to preferences
+
 ### Test Encode
 
 `Ctrl+T` -- encode first 30 seconds with current settings for preview.
@@ -453,6 +470,7 @@ Files with overrides show a :gear: icon. Double-click to edit.
 | `Ctrl+Shift+I` | Enhanced Media Details |
 | `Ctrl+T` | Test Encode (30s) |
 | `Ctrl+M` | Media Processor |
+| `Ctrl+Shift+R` | Video Scaler |
 | `Ctrl+Shift+F` | Open Output Folder |
 | `Ctrl+L` | Show/Hide Log |
 | `Ctrl+Shift+S` | Show/Hide Settings Panel |
