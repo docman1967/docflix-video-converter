@@ -624,10 +624,11 @@ def open_video_scaler(app):
         # Build command
         cmd = ['ffmpeg', '-y']
 
-        # HW accel for GPU
-        if bid != 'cpu' and bid in GPU_BACKENDS:
-            backend = GPU_BACKENDS[bid]
-            cmd.extend(backend['hwaccel'])
+        # Note: hwaccel decode is NOT used when scaling because CUDA
+        # decode delivers padded frames (e.g. 1920x1080 with letterbox)
+        # while CPU decode delivers active picture frames (e.g. 1920x960).
+        # The scale filter needs the active picture to calculate correct
+        # dimensions. GPU is still used for encoding (hevc_nvenc etc).
 
         cmd.extend(['-i', input_path])
 
