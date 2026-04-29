@@ -9703,7 +9703,8 @@ class VideoConverterApp:
                         if _edition_fn_part:
                             # Rename to include edition tag in filename
                             orig_base, orig_ext = os.path.splitext(original)
-                            new_name = orig_base + _edition_fn_part + (out_ext if out_ext else orig_ext)
+                            _ext = opt_container.get() or orig_ext
+                            new_name = orig_base + _edition_fn_part + _ext
                             try:
                                 os.replace(out_path, new_name)
                                 final_path = new_name
