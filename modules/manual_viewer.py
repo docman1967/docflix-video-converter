@@ -580,6 +580,11 @@ def show_manual(app):
                        spacing1=1, spacing3=1)
     text.tag_configure('sep', foreground=border)
 
+    # Raise the 'sel' tag above all content tags so selection highlight
+    # is always visible regardless of foreground/background styling
+    text.tag_configure('sel', background='#3a6ea5', foreground='#ffffff')
+    text.tag_raise('sel')
+
     # ── Section line numbers for navigation ──
     section_lines = {}  # title -> line number (int)
     total_lines = [0]   # mutable container for total line count
