@@ -685,7 +685,10 @@ def open_video_scaler(app):
         # (which may deliver padded frames for cropped H.264 content)
         scale_vf = _build_scale_filter(target_w, target_h, bid if bid != 'cpu' else None)
         if scale_vf:
-            cmd.extend(['-vf', scale_vf])
+            # Append setsar=1:1 to force square pixels in the output.
+            # Without this, the encoder may inherit the source SAR and
+            # set a non-square SAR (e.g. 8:9) that squishes the image.
+            cmd.extend(['-vf', f'{scale_vf},setsar=1:1'])
 
         # Video encoder
         cmd.extend(['-c:v', video_enc])
