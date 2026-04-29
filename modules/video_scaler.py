@@ -114,10 +114,12 @@ def _build_scale_filter(target_h, backend_id=None):
     if target_h is None or target_h <= 0:
         return None
 
+    # Use scale with force_original_aspect_ratio to handle letterboxed
+    # or anamorphic content correctly. The -2 ensures width is even.
+    # force_original_aspect_ratio=decrease ensures the output fits within
+    # the target dimensions without stretching.
     if backend_id and backend_id in GPU_BACKENDS:
         backend = GPU_BACKENDS[backend_id]
-        # Check if the backend keeps frames on GPU (-hwaccel_output_format)
-        # NVENC does not (frames in system memory), QSV/VAAPI do
         hwaccel_flags = backend.get('hwaccel', [])
         has_hw_output_fmt = '-hwaccel_output_format' in hwaccel_flags
 
@@ -131,9 +133,9 @@ def _build_scale_filter(target_h, backend_id=None):
                 return f"{scale_name}=w=-2:h={target_h}"
         else:
             # CPU scale filter (NVENC — frames in system memory)
-            return f"scale=-2:{target_h}"
+            return f"scale=-2:{target_h}:force_original_aspect_ratio=decrease"
     else:
-        return f"scale=-2:{target_h}"
+        return f"scale=-2:{target_h}:force_original_aspect_ratio=decrease"
 
 
 # ═══════════════════════════════════════════════════════════════════
