@@ -53,6 +53,7 @@ def save_preferences(app):
         'tmdb_api_key':          getattr(self, '_tmdb_api_key', ''),
         'tv_rename_provider':    getattr(self, '_tv_rename_provider', 'TVDB'),
         'tv_rename_template':    getattr(self, '_tv_rename_template', '{show} S{season}E{episode} {title}'),
+        'media_processor':       getattr(app, '_media_proc_prefs', {}),
     }
     try:
         app._prefs_path().parent.mkdir(parents=True, exist_ok=True)
@@ -114,6 +115,8 @@ def load_preferences(app):
         app._tv_rename_provider = prefs.get('tv_rename_provider', 'TVDB')
         app._tv_rename_template = prefs.get('tv_rename_template',
                                               '{show} S{season}E{episode} {title}')
+        # Media Processor
+        app._media_proc_prefs = prefs.get('media_processor', {})
         app._rebuild_recent_menu()
         app.default_player.set(prefs.get('default_player', 'auto'))
         dvf = prefs.get('default_video_folder', '')

@@ -15,7 +15,8 @@ import tkinter as tk
 from tkinter import ttk
 
 from .constants import APP_NAME, APP_VERSION, PREFS_DIR, PREFS_FILENAME
-from .utils import center_window_on_screen, center_window_on_parent
+from .utils import (center_window_on_screen, center_window_on_parent,
+                     configure_dpi_scaling)
 
 
 class StandaloneContext:
@@ -122,6 +123,9 @@ def create_standalone_root(title, geometry="960x650", minsize=(800, 550)):
         root = TkinterDnD.Tk()
     except ImportError:
         root = tk.Tk()
+
+    # Apply high-DPI scaling before any widgets are created
+    configure_dpi_scaling(root)
 
     root.title(title)
     root.geometry(geometry)

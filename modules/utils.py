@@ -258,6 +258,69 @@ def ask_directory(initialdir=None, title="Select Folder", parent=None):
     return filedialog.askdirectory(**kwargs)
 
 
+def configure_dpi_scaling(root):
+    """Configure Tk scaling for high-DPI displays.
+
+    Tkinter on Linux defaults to 96 DPI and ignores the desktop
+    environment's scaling settings.  This function detects the real
+    DPI (via the X server, GDK, or environment variables) and tells
+    Tk to scale all widgets, fonts, and geometry accordingly.
+
+    Call once, immediately after creating the root Tk window and
+    before building any widgets.
+    """
+    try:
+        # Method 1: Xft.dpi from X resources (set by most DEs)
+        # e.g. "Xft.dpi:\t192" on a 2× scaled display
+        try:
+            xft_dpi = root.tk.call('winfo', 'fpixels', root, '1i')
+            # fpixels returns the current Tk DPI — if the system
+            # already set it correctly (e.g. Wayland with Tk 8.6.13+)
+            # we may already be fine.
+        except Exception:
+            xft_dpi = 96.0
+
+        # Try to read the real DPI from X resources
+        real_dpi = None
+        try:
+            xrdb = subprocess.check_output(
+                ['xrdb', '-query'], stderr=subprocess.DEVNULL, timeout=2
+            ).decode('utf-8', errors='replace')
+            for line in xrdb.splitlines():
+                if 'Xft.dpi' in line:
+                    real_dpi = float(line.split(':')[-1].strip())
+                    break
+        except Exception:
+            pass
+
+        # Method 2: GDK_SCALE environment variable (GNOME/GTK)
+        if real_dpi is None:
+            gdk_scale = os.environ.get('GDK_SCALE')
+            if gdk_scale:
+                try:
+                    real_dpi = 96.0 * float(gdk_scale)
+                except (ValueError, TypeError):
+                    pass
+
+        # Method 3: QT_SCALE_FACTOR (KDE/Qt)
+        if real_dpi is None:
+            qt_scale = os.environ.get('QT_SCALE_FACTOR')
+            if qt_scale:
+                try:
+                    real_dpi = 96.0 * float(qt_scale)
+                except (ValueError, TypeError):
+                    pass
+
+        if real_dpi and real_dpi > 96:
+            # Tk scaling factor: 1.0 = 72 DPI (Tk's internal unit)
+            # Default Tk scaling on 96 DPI display = 96/72 = 1.333...
+            # For a 192 DPI display we want 192/72 = 2.666...
+            factor = real_dpi / 72.0
+            root.tk.call('tk', 'scaling', factor)
+    except Exception:
+        pass  # never break app startup over scaling
+
+
 def center_window_on_screen(win):
     """Center a Toplevel or Tk window on the screen containing the
     mouse pointer."""

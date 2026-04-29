@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.2"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -8577,10 +8577,6 @@ class VideoConverterApp:
         mp_lock = threading.Lock()  # protects mp_files during parallel access
 
         # ── Options ──
-        opt_convert_audio  = tk.BooleanVar(value=True)
-        opt_audio_codec    = tk.StringVar(value='ac3 (Dolby Digital)')
-        opt_audio_bitrate  = tk.StringVar(value='384k')
-
         # Map display names → ffmpeg codec names (subset for remux use)
         mp_audio_codec_map = {
             'aac': 'aac',
@@ -8592,24 +8588,31 @@ class VideoConverterApp:
             'copy (no re-encode)': 'copy',
         }
         mp_audio_codec_reverse = {v: k for k, v in mp_audio_codec_map.items()}
-        opt_strip_chapters = tk.BooleanVar(value=True)
-        opt_strip_tags     = tk.BooleanVar(value=True)
-        opt_strip_subs     = tk.BooleanVar(value=True)
-        opt_set_metadata   = tk.BooleanVar(value=True)
-        opt_meta_video     = tk.StringVar(value='und')
-        opt_meta_audio     = tk.StringVar(value='eng')
-        opt_meta_sub       = tk.StringVar(value='eng')
-        opt_mux_subs       = tk.BooleanVar(value=True)
-        opt_sub_lang       = tk.StringVar(value='eng')
-        opt_output_mode    = tk.StringVar(value='inplace')  # 'inplace' or 'folder'
-        opt_output_folder  = tk.StringVar(value='')
-        opt_container      = tk.StringVar(value='.mkv')
-        opt_parallel       = tk.BooleanVar(value=True)
+
+        # Load saved Media Processor preferences (empty dict on fresh install)
+        _mp = getattr(self, '_media_proc_prefs', {})
+
+        opt_convert_audio  = tk.BooleanVar(value=_mp.get('convert_audio', False))
+        opt_audio_codec    = tk.StringVar(value=_mp.get('audio_codec', 'ac3 (Dolby Digital)'))
+        opt_audio_bitrate  = tk.StringVar(value=_mp.get('audio_bitrate', '384k'))
+        opt_strip_chapters = tk.BooleanVar(value=_mp.get('strip_chapters', False))
+        opt_strip_tags     = tk.BooleanVar(value=_mp.get('strip_tags', False))
+        opt_strip_subs     = tk.BooleanVar(value=_mp.get('strip_subs', False))
+        opt_set_metadata   = tk.BooleanVar(value=_mp.get('set_metadata', False))
+        opt_meta_video     = tk.StringVar(value=_mp.get('meta_video', 'und'))
+        opt_meta_audio     = tk.StringVar(value=_mp.get('meta_audio', 'eng'))
+        opt_meta_sub       = tk.StringVar(value=_mp.get('meta_sub', 'eng'))
+        opt_mux_subs       = tk.BooleanVar(value=_mp.get('mux_subs', False))
+        opt_sub_lang       = tk.StringVar(value=_mp.get('sub_lang', 'eng'))
+        opt_output_mode    = tk.StringVar(value=_mp.get('output_mode', 'inplace'))
+        opt_output_folder  = tk.StringVar(value=_mp.get('output_folder', ''))
+        opt_container      = tk.StringVar(value=_mp.get('container', '.mkv'))
+        opt_parallel       = tk.BooleanVar(value=_mp.get('parallel', False))
         try:
             _cpu_count = os.cpu_count() or 4
         except Exception:
             _cpu_count = 4
-        opt_max_jobs       = tk.IntVar(value=min(_cpu_count, 8))
+        opt_max_jobs       = tk.IntVar(value=_mp.get('max_jobs', min(_cpu_count, 8)))
 
         # ── Layout ──
         main_frame = ttk.Frame(win, padding=10)
@@ -9055,7 +9058,6 @@ class VideoConverterApp:
         mp_ac_combo = ttk.Combobox(ops_row1, textvariable=opt_audio_codec,
                                    width=18, state='readonly')
         mp_ac_combo['values'] = list(mp_audio_codec_map.keys())
-        mp_ac_combo.set('ac3 (Dolby Digital)')
         mp_ac_combo.pack(side='left', padx=(0, 8))
         ttk.Label(ops_row1, text="Bitrate:").pack(side='left', padx=(0, 2))
         mp_br_combo = ttk.Combobox(ops_row1, textvariable=opt_audio_bitrate,
@@ -9104,6 +9106,7 @@ class VideoConverterApp:
         mp_ms.pack(side='left', padx=(2, 0))
 
         _toggle_meta_fields()
+        _toggle_audio_controls()
 
         # Row 4: Output + parallel + container
         ops_row4 = ttk.Frame(ops_frame)
@@ -9617,10 +9620,48 @@ class VideoConverterApp:
         except Exception:
             pass  # tkinterdnd2 not available
 
-        # ── Close button ──
+        # ── Save / Close ──
+        def _save_mp_prefs():
+            """Save current Media Processor settings to preferences."""
+            mp_prefs = {
+                'convert_audio':  opt_convert_audio.get(),
+                'audio_codec':    opt_audio_codec.get(),
+                'audio_bitrate':  opt_audio_bitrate.get(),
+                'strip_chapters': opt_strip_chapters.get(),
+                'strip_tags':     opt_strip_tags.get(),
+                'strip_subs':     opt_strip_subs.get(),
+                'set_metadata':   opt_set_metadata.get(),
+                'meta_video':     opt_meta_video.get(),
+                'meta_audio':     opt_meta_audio.get(),
+                'meta_sub':       opt_meta_sub.get(),
+                'mux_subs':       opt_mux_subs.get(),
+                'sub_lang':       opt_sub_lang.get(),
+                'output_mode':    opt_output_mode.get(),
+                'output_folder':  opt_output_folder.get(),
+                'container':      opt_container.get(),
+                'parallel':       opt_parallel.get(),
+                'max_jobs':       opt_max_jobs.get(),
+            }
+            self._media_proc_prefs = mp_prefs
+            try:
+                p = self._prefs_path()
+                if p.exists():
+                    prefs = json.loads(p.read_text())
+                else:
+                    prefs = {}
+                prefs['media_processor'] = mp_prefs
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(json.dumps(prefs, indent=2))
+            except Exception:
+                pass  # best-effort save
+
         close_frame = ttk.Frame(main_frame)
         close_frame.grid(row=5, column=0, sticky='e', pady=(6, 0))
-        ttk.Button(close_frame, text="Close", command=win.destroy).pack(side='right')
+        def _close_window():
+            _save_mp_prefs()
+            win.destroy()
+        ttk.Button(close_frame, text="Close", command=_close_window).pack(side='right')
+        win.protocol('WM_DELETE_WINDOW', _close_window)
 
         _log("Media Processor ready — add files and click Process All", 'INFO')
         _log("Tip: drag and drop video files onto this window", 'INFO')
@@ -15235,6 +15276,8 @@ class VideoConverterApp:
             self._tv_rename_provider = prefs.get('tv_rename_provider', 'TVDB')
             self._tv_rename_template = prefs.get('tv_rename_template',
                                                   '{show} S{season}E{episode} {title}')
+            # Media Processor
+            self._media_proc_prefs = prefs.get('media_processor', {})
             self._rebuild_recent_menu()
             self.default_player.set(prefs.get('default_player', 'auto'))
             dvf = prefs.get('default_video_folder', '')
@@ -17213,6 +17256,59 @@ class VideoConverterApp:
 # Main Entry Point
 # ============================================================================
 
+def _configure_dpi_scaling(root):
+    """Configure Tk scaling for high-DPI displays.
+
+    Tkinter on Linux defaults to 96 DPI and ignores the desktop
+    environment's scaling settings.  This function detects the real
+    DPI (via the X server, GDK, or environment variables) and tells
+    Tk to scale all widgets, fonts, and geometry accordingly.
+
+    Call once, immediately after creating the root Tk window and
+    before building any widgets.
+    """
+    try:
+        # Method 1: Xft.dpi from X resources (set by most DEs)
+        real_dpi = None
+        try:
+            xrdb = subprocess.check_output(
+                ['xrdb', '-query'], stderr=subprocess.DEVNULL, timeout=2
+            ).decode('utf-8', errors='replace')
+            for line in xrdb.splitlines():
+                if 'Xft.dpi' in line:
+                    real_dpi = float(line.split(':')[-1].strip())
+                    break
+        except Exception:
+            pass
+
+        # Method 2: GDK_SCALE environment variable (GNOME/GTK)
+        if real_dpi is None:
+            gdk_scale = os.environ.get('GDK_SCALE')
+            if gdk_scale:
+                try:
+                    real_dpi = 96.0 * float(gdk_scale)
+                except (ValueError, TypeError):
+                    pass
+
+        # Method 3: QT_SCALE_FACTOR (KDE/Qt)
+        if real_dpi is None:
+            qt_scale = os.environ.get('QT_SCALE_FACTOR')
+            if qt_scale:
+                try:
+                    real_dpi = 96.0 * float(qt_scale)
+                except (ValueError, TypeError):
+                    pass
+
+        if real_dpi and real_dpi > 96:
+            # Tk scaling factor: 1.0 = 72 DPI (Tk's internal unit)
+            # Default Tk scaling on 96 DPI display = 96/72 = 1.333...
+            # For a 192 DPI display we want 192/72 = 2.666...
+            factor = real_dpi / 72.0
+            root.tk.call('tk', 'scaling', factor)
+    except Exception:
+        pass  # never break app startup over scaling
+
+
 def main():
     """Main entry point"""
     # ── Info flags (print and exit) ──
@@ -17230,6 +17326,9 @@ def main():
         print("*** GPU TEST MODE ENABLED — skipping GPU test encodes, detection only ***")
 
     root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
+
+    # Apply high-DPI scaling before any widgets are created
+    _configure_dpi_scaling(root)
 
     # Hide window until fully built and positioned — prevents flicker/wrong-monitor flash
     root.withdraw()

@@ -46,10 +46,6 @@ def open_media_processor(app):
         mp_lock = threading.Lock()  # protects mp_files during parallel access
 
         # ── Options ──
-        opt_convert_audio  = tk.BooleanVar(value=True)
-        opt_audio_codec    = tk.StringVar(value='ac3 (Dolby Digital)')
-        opt_audio_bitrate  = tk.StringVar(value='384k')
-
         # Map display names → ffmpeg codec names (subset for remux use)
         mp_audio_codec_map = {
             'aac': 'aac',
@@ -61,24 +57,31 @@ def open_media_processor(app):
             'copy (no re-encode)': 'copy',
         }
         mp_audio_codec_reverse = {v: k for k, v in mp_audio_codec_map.items()}
-        opt_strip_chapters = tk.BooleanVar(value=True)
-        opt_strip_tags     = tk.BooleanVar(value=True)
-        opt_strip_subs     = tk.BooleanVar(value=True)
-        opt_set_metadata   = tk.BooleanVar(value=True)
-        opt_meta_video     = tk.StringVar(value='und')
-        opt_meta_audio     = tk.StringVar(value='eng')
-        opt_meta_sub       = tk.StringVar(value='eng')
-        opt_mux_subs       = tk.BooleanVar(value=True)
-        opt_sub_lang       = tk.StringVar(value='eng')
-        opt_output_mode    = tk.StringVar(value='inplace')  # 'inplace' or 'folder'
-        opt_output_folder  = tk.StringVar(value='')
-        opt_container      = tk.StringVar(value='.mkv')
-        opt_parallel       = tk.BooleanVar(value=True)
+
+        # Load saved Media Processor preferences (empty dict on fresh install)
+        _mp = getattr(app, '_media_proc_prefs', {})
+
+        opt_convert_audio  = tk.BooleanVar(value=_mp.get('convert_audio', False))
+        opt_audio_codec    = tk.StringVar(value=_mp.get('audio_codec', 'ac3 (Dolby Digital)'))
+        opt_audio_bitrate  = tk.StringVar(value=_mp.get('audio_bitrate', '384k'))
+        opt_strip_chapters = tk.BooleanVar(value=_mp.get('strip_chapters', False))
+        opt_strip_tags     = tk.BooleanVar(value=_mp.get('strip_tags', False))
+        opt_strip_subs     = tk.BooleanVar(value=_mp.get('strip_subs', False))
+        opt_set_metadata   = tk.BooleanVar(value=_mp.get('set_metadata', False))
+        opt_meta_video     = tk.StringVar(value=_mp.get('meta_video', 'und'))
+        opt_meta_audio     = tk.StringVar(value=_mp.get('meta_audio', 'eng'))
+        opt_meta_sub       = tk.StringVar(value=_mp.get('meta_sub', 'eng'))
+        opt_mux_subs       = tk.BooleanVar(value=_mp.get('mux_subs', False))
+        opt_sub_lang       = tk.StringVar(value=_mp.get('sub_lang', 'eng'))
+        opt_output_mode    = tk.StringVar(value=_mp.get('output_mode', 'inplace'))
+        opt_output_folder  = tk.StringVar(value=_mp.get('output_folder', ''))
+        opt_container      = tk.StringVar(value=_mp.get('container', '.mkv'))
+        opt_parallel       = tk.BooleanVar(value=_mp.get('parallel', False))
         try:
             _cpu_count = os.cpu_count() or 4
         except Exception:
             _cpu_count = 4
-        opt_max_jobs       = tk.IntVar(value=min(_cpu_count, 8))
+        opt_max_jobs       = tk.IntVar(value=_mp.get('max_jobs', min(_cpu_count, 8)))
 
         # ── Layout ──
         main_frame = ttk.Frame(win, padding=10)
@@ -526,7 +529,6 @@ def open_media_processor(app):
         mp_ac_combo = ttk.Combobox(ops_row1, textvariable=opt_audio_codec,
                                    width=18, state='readonly')
         mp_ac_combo['values'] = list(mp_audio_codec_map.keys())
-        mp_ac_combo.set('ac3 (Dolby Digital)')
         mp_ac_combo.pack(side='left', padx=(0, 8))
         ttk.Label(ops_row1, text="Bitrate:").pack(side='left', padx=(0, 2))
         mp_br_combo = ttk.Combobox(ops_row1, textvariable=opt_audio_bitrate,
@@ -575,6 +577,7 @@ def open_media_processor(app):
         mp_ms.pack(side='left', padx=(2, 0))
 
         _toggle_meta_fields()
+        _toggle_audio_controls()
 
         # Row 4: Output + parallel + container
         ops_row4 = ttk.Frame(ops_frame)
@@ -1088,10 +1091,53 @@ def open_media_processor(app):
         except Exception:
             pass  # tkinterdnd2 not available
 
-        # ── Close button ──
+        # ── Save / Close ──
+        def _save_mp_prefs():
+            """Save current Media Processor settings to preferences."""
+            mp_prefs = {
+                'convert_audio':  opt_convert_audio.get(),
+                'audio_codec':    opt_audio_codec.get(),
+                'audio_bitrate':  opt_audio_bitrate.get(),
+                'strip_chapters': opt_strip_chapters.get(),
+                'strip_tags':     opt_strip_tags.get(),
+                'strip_subs':     opt_strip_subs.get(),
+                'set_metadata':   opt_set_metadata.get(),
+                'meta_video':     opt_meta_video.get(),
+                'meta_audio':     opt_meta_audio.get(),
+                'meta_sub':       opt_meta_sub.get(),
+                'mux_subs':       opt_mux_subs.get(),
+                'sub_lang':       opt_sub_lang.get(),
+                'output_mode':    opt_output_mode.get(),
+                'output_folder':  opt_output_folder.get(),
+                'container':      opt_container.get(),
+                'parallel':       opt_parallel.get(),
+                'max_jobs':       opt_max_jobs.get(),
+            }
+            app._media_proc_prefs = mp_prefs
+            # Write to shared preferences file
+            try:
+                prefs_path = getattr(app, '_prefs_path', None)
+                if prefs_path:
+                    # StandaloneContext uses a string path
+                    if isinstance(prefs_path, str):
+                        p = Path(prefs_path)
+                    else:
+                        # Main app uses a method
+                        p = prefs_path() if callable(prefs_path) else Path(str(prefs_path))
+                    if p.exists():
+                        prefs = json.loads(p.read_text())
+                    else:
+                        prefs = {}
+                    prefs['media_processor'] = mp_prefs
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_text(json.dumps(prefs, indent=2))
+            except Exception:
+                pass  # best-effort save
+
         close_frame = ttk.Frame(main_frame)
         close_frame.grid(row=5, column=0, sticky='e', pady=(6, 0))
         def _close_window():
+            _save_mp_prefs()
             win.destroy()
             if getattr(app, '_standalone_mode', False):
                 app.root.destroy()
