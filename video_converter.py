@@ -9486,7 +9486,7 @@ class VideoConverterApp:
             if isinstance(edition_in_fn, tk.BooleanVar):
                 edition_in_fn = edition_in_fn.get()
             if edition and edition_in_fn:
-                edition_fn_part = ' {edition-' + edition + '}'
+                edition_fn_part = ' {' + edition + '}'
 
             # Determine output path
             if opt_output_mode.get() == 'folder' and opt_output_folder.get():
@@ -9696,7 +9696,7 @@ class VideoConverterApp:
                     _ed_fn = _ov(f, 'edition_in_filename', opt_edition_fn)
                     if isinstance(_ed_fn, tk.BooleanVar):
                         _ed_fn = _ed_fn.get()
-                    _edition_fn_part = (' {edition-' + _ed + '}') if (_ed and _ed_fn) else ''
+                    _edition_fn_part = (' {' + _ed + '}') if (_ed and _ed_fn) else ''
 
                     if is_inplace:
                         original = f['path']
@@ -17298,7 +17298,7 @@ class VideoConverterApp:
             # When Plex edition is active, use clean filename without encoding suffix
             edition = file_settings.get('edition_tag', '')
             if edition and file_settings.get('edition_in_filename', False):
-                edition_part = ' {edition-' + edition + '}'
+                edition_part = ' {' + edition + '}'
                 output_path = str(out_dir / f"{base_name}{edition_part}{output_ext}")
             else:
                 output_path = str(out_dir / f"{base_name}{suffix}{output_ext}")
@@ -17354,7 +17354,7 @@ class VideoConverterApp:
                 else:
                     new_suffix = f"-{file_settings['bitrate']}-{cpu_short}_{cpu_preset}"
                 if edition and file_settings.get('edition_in_filename', False):
-                    output_path = str(out_dir / f"{base_name} {{edition-{edition}}}{output_ext}")
+                    output_path = str(out_dir / f"{base_name} {{{edition}}}{output_ext}")
                 else:
                     output_path = str(out_dir / f"{base_name}{new_suffix}{output_ext}")
                 self.current_output_path = output_path
