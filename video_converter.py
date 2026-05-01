@@ -3881,6 +3881,10 @@ class VideoConverter:
             for line in self.current_process.stdout:
                 if self.is_stopped:
                     self.current_process.terminate()
+                    try:
+                        self.current_process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        self.current_process.kill()
                     self.log("Conversion stopped by user", "WARNING")
                     return False
 
@@ -3971,10 +3975,15 @@ class VideoConverter:
         self.log("Conversion resumed", "INFO")
     
     def stop(self):
-        """Stop conversion"""
+        """Stop conversion — terminate then force-kill if needed."""
         self.is_stopped = True
         if self.current_process:
             self.current_process.terminate()
+            try:
+                self.current_process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.current_process.kill()
+                self.current_process.wait(timeout=5)
 
 # ============================================================================
 # Main Application Class
