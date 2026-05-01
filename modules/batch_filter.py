@@ -34,49 +34,217 @@ def open_batch_filter(app):
 
         win = tk.Toplevel(app.root)
         win.title("Batch Filter Subtitles")
-        win.geometry("620x860")
-        win.minsize(620, 750)
+        win.geometry("620x600")
+        win.minsize(620, 500)
         win.resizable(True, True)
         app._center_on_main(win)
 
         file_paths = []  # list of absolute paths
 
-        # Pack order matters: pack bottom sections first so they always
-        # have space, then let the file list expand into whatever remains.
+        if not hasattr(app, 'custom_cap_words'):
+            app.custom_cap_words = []
 
         # ══════════════════════════════════════════════════════════════════════
-        # Progress + Apply (pack FIRST from bottom so they're never clipped)
+        # Menu bar
         # ══════════════════════════════════════════════════════════════════════
-        action_frame = ttk.Frame(win, padding=(10, 4, 10, 10))
-        action_frame.pack(fill='x', side='bottom')
+        menubar = tk.Menu(win)
+        win.configure(menu=menubar)
 
-        progress_frame = ttk.Frame(win, padding=(10, 6, 10, 6))
-        progress_frame.pack(fill='x', side='bottom')
+        # ── Settings menu ──
+        settings_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Settings", menu=settings_menu)
+        settings_menu.add_command(label="Search && Replace Pairs...",
+                                  command=lambda: _open_sr_dialog())
+        settings_menu.add_command(label="Custom Names (Fix ALL CAPS)...",
+                                  command=lambda: _open_names_dialog())
+
+        # ── Search & Replace dialog ──────────────────────────────────────────
+        def _open_sr_dialog():
+            """Open a dialog to manage persistent search & replace pairs."""
+            sd = tk.Toplevel(win)
+            sd.title("Search & Replace Pairs")
+            sd.geometry("520x420")
+            sd.minsize(420, 320)
+            sd.resizable(True, True)
+            app._center_on_main(sd)
+            sd.transient(win)
+            sd.grab_set()
+
+            ttk.Label(sd, text="Find/replace pairs are applied to every file\n"
+                      "when \"Apply search && replace\" is checked.",
+                      justify='center', padding=(10, 8)).pack()
+
+            # Input row
+            sr_input = ttk.Frame(sd, padding=(10, 0, 10, 0))
+            sr_input.pack(fill='x')
+
+            ttk.Label(sr_input, text="Find:").pack(side='left')
+            sr_find_var = tk.StringVar()
+            sr_find_entry = ttk.Entry(sr_input, textvariable=sr_find_var, width=18)
+            sr_find_entry.pack(side='left', padx=(2, 6))
+
+            ttk.Label(sr_input, text="Replace:").pack(side='left')
+            sr_repl_var = tk.StringVar()
+            sr_repl_entry = ttk.Entry(sr_input, textvariable=sr_repl_var, width=18)
+            sr_repl_entry.pack(side='left', padx=(2, 6))
+
+            sr_case_var = tk.BooleanVar(value=False)
+
+            def sr_add_pair():
+                find = sr_find_var.get()
+                if not find:
+                    return
+                repl = sr_repl_var.get()
+                pair = [find, repl, sr_case_var.get()]
+                if pair not in app.custom_replacements:
+                    app.custom_replacements.append(pair)
+                    case_str = " [Aa]" if not pair[2] else ""
+                    sr_listbox.insert('end', f'"{find}" → "{repl}"{case_str}')
+                    app.save_preferences()
+                    _update_sr_label()
+                sr_find_var.set('')
+                sr_repl_var.set('')
+
+            ttk.Button(sr_input, text="Add", command=sr_add_pair).pack(side='left', padx=2)
+
+            # Right-click copy/paste on find/replace entries
+            for entry in (sr_find_entry, sr_repl_entry):
+                _m = tk.Menu(entry, tearoff=0)
+                _m.add_command(label="Cut", command=lambda e=entry: e.event_generate('<<Cut>>'))
+                _m.add_command(label="Copy", command=lambda e=entry: e.event_generate('<<Copy>>'))
+                _m.add_command(label="Paste", command=lambda e=entry: e.event_generate('<<Paste>>'))
+                _m.add_separator()
+                _m.add_command(label="Select All",
+                    command=lambda e=entry: (e.select_range(0, 'end'), e.icursor('end')))
+                entry.bind('<Button-3>', lambda ev, m=_m: m.tk_popup(ev.x_root, ev.y_root))
+
+            # Options row
+            sr_opts = ttk.Frame(sd, padding=(10, 4, 10, 4))
+            sr_opts.pack(fill='x')
+            ttk.Checkbutton(sr_opts, text="Case sensitive",
+                            variable=sr_case_var).pack(side='left')
+
+            # Replacement list
+            sr_list_frame = ttk.Frame(sd, padding=(10, 0, 10, 0))
+            sr_list_frame.pack(fill='both', expand=True)
+
+            sr_scroll = ttk.Scrollbar(sr_list_frame, orient='vertical')
+            sr_scroll.pack(side='right', fill='y')
+
+            sr_listbox = tk.Listbox(sr_list_frame, height=8, font=('Courier', 9),
+                                    yscrollcommand=sr_scroll.set)
+            sr_listbox.pack(fill='both', expand=True)
+            sr_scroll.config(command=sr_listbox.yview)
+
+            # Populate from saved replacements
+            for pair in app.custom_replacements:
+                find, repl = pair[0], pair[1]
+                case_sensitive = pair[2] if len(pair) > 2 else False
+                case_str = "" if case_sensitive else " [Aa]"
+                sr_listbox.insert('end', f'"{find}" → "{repl}"{case_str}')
+
+            def sr_remove_selected():
+                sel = sorted(sr_listbox.curselection(), reverse=True)
+                for idx in sel:
+                    sr_listbox.delete(idx)
+                    del app.custom_replacements[idx]
+                if sel:
+                    app.save_preferences()
+                    _update_sr_label()
+
+            def sr_clear_all():
+                sr_listbox.delete(0, 'end')
+                app.custom_replacements.clear()
+                app.save_preferences()
+                _update_sr_label()
+
+            sr_btn_frame = ttk.Frame(sd, padding=(10, 4, 10, 10))
+            sr_btn_frame.pack(fill='x')
+            ttk.Button(sr_btn_frame, text="Remove Selected",
+                       command=sr_remove_selected).pack(side='left', padx=(0, 4))
+            ttk.Button(sr_btn_frame, text="Clear All",
+                       command=sr_clear_all).pack(side='left')
+            ttk.Label(sr_btn_frame, text="Saved across sessions",
+                      font=('Helvetica', 8), foreground='gray').pack(side='right')
+
+            sr_find_entry.bind('<Return>', lambda e: sr_add_pair())
+            sr_find_entry.focus_set()
+
+            ttk.Button(sr_btn_frame, text="Close",
+                       command=sd.destroy).pack(side='right')
+
+        # ── Custom Names dialog ──────────────────────────────────────────────
+        def _open_names_dialog():
+            """Open the custom names editor from the batch filter window."""
+            nd = tk.Toplevel(win)
+            nd.title("Custom Names — Fix ALL CAPS")
+            nd.geometry("400x350")
+            app._center_on_main(nd)
+            nd.resizable(True, True)
+            nd.attributes('-topmost', True)
+
+            ttk.Label(nd, text="Add character names to preserve their\n"
+                      "capitalisation when Fix ALL CAPS is applied.",
+                      justify='center', padding=(10, 10)).pack()
+
+            lf = ttk.LabelFrame(nd, text="Custom Names (saved across sessions)",
+                                padding=8)
+            lf.pack(fill='both', expand=True, padx=10, pady=5)
+
+            word_list = tk.Listbox(lf, height=8, font=('Courier', 10))
+            word_list.pack(fill='both', expand=True)
+            for w in app.custom_cap_words:
+                word_list.insert('end', w)
+
+            add_frame = ttk.Frame(lf)
+            add_frame.pack(fill='x', pady=(4, 0))
+            new_word_var = tk.StringVar()
+            word_entry = ttk.Entry(add_frame, textvariable=new_word_var)
+            word_entry.pack(side='left', fill='x', expand=True, padx=(0, 4))
+            word_entry.focus_set()
+            # Right-click context menu for copy/paste
+            _wm = tk.Menu(word_entry, tearoff=0)
+            _wm.add_command(label="Cut", command=lambda: word_entry.event_generate('<<Cut>>'))
+            _wm.add_command(label="Copy", command=lambda: word_entry.event_generate('<<Copy>>'))
+            _wm.add_command(label="Paste", command=lambda: word_entry.event_generate('<<Paste>>'))
+            _wm.add_separator()
+            _wm.add_command(label="Select All",
+                command=lambda: (word_entry.select_range(0, 'end'), word_entry.icursor('end')))
+            word_entry.bind('<Button-3>', lambda e, m=_wm: m.tk_popup(e.x_root, e.y_root))
+
+            def add_word():
+                word = new_word_var.get().strip()
+                if not word:
+                    return
+                if word.lower() not in [w.lower() for w in app.custom_cap_words]:
+                    app.custom_cap_words.append(word)
+                    word_list.insert('end', word)
+                    app.save_preferences()
+                new_word_var.set('')
+
+            def remove_word():
+                sel = word_list.curselection()
+                if sel:
+                    app.custom_cap_words.pop(sel[0])
+                    word_list.delete(sel[0])
+                    app.save_preferences()
+
+            ttk.Button(add_frame, text="Add", command=add_word).pack(side='right')
+            word_entry.bind('<Return>', lambda e: add_word())
+
+            ttk.Label(lf, text="Names are saved automatically and persist between sessions.",
+                      font=('Helvetica', 8), foreground='gray').pack(anchor='w')
+
+            btn_frame = ttk.Frame(nd, padding=(10, 8, 10, 10))
+            btn_frame.pack(fill='x')
+            ttk.Button(btn_frame, text="Remove Selected", command=remove_word).pack(side='left')
+            ttk.Button(btn_frame, text="Close", command=nd.destroy).pack(side='right')
 
         # ══════════════════════════════════════════════════════════════════════
-        # Output section (pack from bottom)
-        # ══════════════════════════════════════════════════════════════════════
-        output_frame = ttk.LabelFrame(win, text="Output", padding=8)
-        output_frame.pack(fill='x', side='bottom', padx=10, pady=5)
-
-        # ══════════════════════════════════════════════════════════════════════
-        # Search & Replace section (pack from bottom)
-        # ══════════════════════════════════════════════════════════════════════
-        sr_frame = ttk.LabelFrame(win, text="Search && Replace (applied to all files)",
-                                  padding=8)
-        sr_frame.pack(fill='x', side='bottom', padx=10, pady=5)
-
-        # ══════════════════════════════════════════════════════════════════════
-        # Filters section (pack from bottom)
-        # ══════════════════════════════════════════════════════════════════════
-        filters_frame = ttk.LabelFrame(win, text="Filters to Apply", padding=8)
-        filters_frame.pack(fill='x', side='bottom', padx=10, pady=5)
-
-        # ══════════════════════════════════════════════════════════════════════
-        # Files section (pack LAST — expands into remaining space)
+        # Files section
         # ══════════════════════════════════════════════════════════════════════
         files_frame = ttk.LabelFrame(win, text="Subtitle Files", padding=8)
-        files_frame.pack(fill='both', expand=True, padx=10, pady=(10, 5))
+        files_frame.pack(fill='both', expand=True, padx=10, pady=(6, 5))
 
         list_frame = ttk.Frame(files_frame)
         list_frame.pack(fill='both', expand=True)
@@ -84,7 +252,7 @@ def open_batch_filter(app):
         list_scroll = ttk.Scrollbar(list_frame, orient='vertical')
         list_scroll.pack(side='right', fill='y')
 
-        file_listbox = tk.Listbox(list_frame, height=10, font=('Courier', 9),
+        file_listbox = tk.Listbox(list_frame, height=8, font=('Courier', 9),
                                   selectmode='extended',
                                   yscrollcommand=list_scroll.set)
         file_listbox.pack(fill='both', expand=True)
@@ -174,9 +342,11 @@ def open_batch_filter(app):
             win.drop_target_register(DND_FILES)
             win.dnd_bind('<<Drop>>', on_batch_drop)
 
-        # ── Populate: Filters ─────────────────────────────────────────────────
-        if not hasattr(app, 'custom_cap_words'):
-            app.custom_cap_words = []
+        # ══════════════════════════════════════════════════════════════════════
+        # Filters section
+        # ══════════════════════════════════════════════════════════════════════
+        filters_frame = ttk.LabelFrame(win, text="Filters to Apply", padding=8)
+        filters_frame.pack(fill='x', padx=10, pady=5)
 
         # Define filters: (key, label, filter_function)
         filter_defs = [
@@ -214,75 +384,27 @@ def open_batch_filter(app):
                 caps_row.pack(fill='x', anchor='w')
                 ttk.Checkbutton(caps_row, text=label, variable=var).pack(side='left')
                 ttk.Button(caps_row, text="Names...",
-                           command=lambda: show_batch_names_dialog()).pack(side='left', padx=(4, 0))
+                           command=lambda: _open_names_dialog()).pack(side='left', padx=(4, 0))
             else:
                 ttk.Checkbutton(col, text=label, variable=var).pack(anchor='w')
 
-        def show_batch_names_dialog():
-            """Open the custom names editor from the batch filter window."""
-            nd = tk.Toplevel(win)
-            nd.title("Custom Names — Fix ALL CAPS")
-            nd.geometry("400x350")
-            app._center_on_main(nd)
-            nd.resizable(True, True)
-            nd.attributes('-topmost', True)
+        # Search & replace checkbox (pairs managed via Settings menu)
+        opt_apply_sr = tk.BooleanVar(value=False)
 
-            ttk.Label(nd, text="Add character names to preserve their\n"
-                      "capitalisation when Fix ALL CAPS is applied.",
-                      justify='center', padding=(10, 10)).pack()
+        def _update_sr_label():
+            n = len(app.custom_replacements)
+            sr_label_var.set(f"({n} pair{'s' if n != 1 else ''})")
 
-            lf = ttk.LabelFrame(nd, text="Custom Names (saved across sessions)",
-                                padding=8)
-            lf.pack(fill='both', expand=True, padx=10, pady=5)
-
-            word_list = tk.Listbox(lf, height=8, font=('Courier', 10))
-            word_list.pack(fill='both', expand=True)
-            for w in app.custom_cap_words:
-                word_list.insert('end', w)
-
-            add_frame = ttk.Frame(lf)
-            add_frame.pack(fill='x', pady=(4, 0))
-            new_word_var = tk.StringVar()
-            word_entry = ttk.Entry(add_frame, textvariable=new_word_var)
-            word_entry.pack(side='left', fill='x', expand=True, padx=(0, 4))
-            word_entry.focus_set()
-            # Right-click context menu for copy/paste
-            _wm = tk.Menu(word_entry, tearoff=0)
-            _wm.add_command(label="Cut", command=lambda: word_entry.event_generate('<<Cut>>'))
-            _wm.add_command(label="Copy", command=lambda: word_entry.event_generate('<<Copy>>'))
-            _wm.add_command(label="Paste", command=lambda: word_entry.event_generate('<<Paste>>'))
-            _wm.add_separator()
-            _wm.add_command(label="Select All",
-                command=lambda: (word_entry.select_range(0, 'end'), word_entry.icursor('end')))
-            word_entry.bind('<Button-3>', lambda e, m=_wm: m.tk_popup(e.x_root, e.y_root))
-
-            def add_word():
-                word = new_word_var.get().strip()
-                if not word:
-                    return
-                if word.lower() not in [w.lower() for w in app.custom_cap_words]:
-                    app.custom_cap_words.append(word)
-                    word_list.insert('end', word)
-                    app.save_preferences()
-                new_word_var.set('')
-
-            def remove_word():
-                sel = word_list.curselection()
-                if sel:
-                    app.custom_cap_words.pop(sel[0])
-                    word_list.delete(sel[0])
-                    app.save_preferences()
-
-            ttk.Button(add_frame, text="Add", command=add_word).pack(side='right')
-            word_entry.bind('<Return>', lambda e: add_word())
-
-            ttk.Label(lf, text="Names are saved automatically and persist between sessions.",
-                      font=('Helvetica', 8), foreground='gray').pack(anchor='w')
-
-            btn_frame = ttk.Frame(nd, padding=(10, 8, 10, 10))
-            btn_frame.pack(fill='x')
-            ttk.Button(btn_frame, text="Remove Selected", command=remove_word).pack(side='left')
-            ttk.Button(btn_frame, text="Close", command=nd.destroy).pack(side='right')
+        sr_row = ttk.Frame(filters_frame)
+        sr_row.pack(fill='x', pady=(4, 0))
+        ttk.Checkbutton(sr_row, text="Apply search && replace",
+                        variable=opt_apply_sr).pack(side='left')
+        sr_label_var = tk.StringVar()
+        _update_sr_label()
+        ttk.Label(sr_row, textvariable=sr_label_var,
+                  foreground='gray', font=('Helvetica', 9)).pack(side='left', padx=(4, 0))
+        ttk.Button(sr_row, text="Edit...",
+                   command=lambda: _open_sr_dialog()).pack(side='left', padx=(6, 0))
 
         sel_frame = ttk.Frame(filters_frame)
         sel_frame.pack(fill='x', pady=(6, 0))
@@ -290,109 +412,22 @@ def open_batch_filter(app):
         def select_all_filters():
             for v in filter_vars.values():
                 v.set(True)
+            opt_apply_sr.set(True)
 
         def deselect_all_filters():
             for v in filter_vars.values():
                 v.set(False)
+            opt_apply_sr.set(False)
 
         ttk.Button(sel_frame, text="Select All", command=select_all_filters).pack(side='left', padx=(0, 4))
         ttk.Button(sel_frame, text="Deselect All", command=deselect_all_filters).pack(side='left')
 
-        # ── Populate: Search & Replace ────────────────────────────────────────
-        # Input row
-        sr_input = ttk.Frame(sr_frame)
-        sr_input.pack(fill='x')
+        # ══════════════════════════════════════════════════════════════════════
+        # Output section
+        # ══════════════════════════════════════════════════════════════════════
+        output_frame = ttk.LabelFrame(win, text="Output", padding=8)
+        output_frame.pack(fill='x', padx=10, pady=5)
 
-        ttk.Label(sr_input, text="Find:").pack(side='left')
-        sr_find_var = tk.StringVar()
-        sr_find_entry = ttk.Entry(sr_input, textvariable=sr_find_var, width=18)
-        sr_find_entry.pack(side='left', padx=(2, 6))
-
-        ttk.Label(sr_input, text="Replace:").pack(side='left')
-        sr_repl_var = tk.StringVar()
-        sr_repl_entry = ttk.Entry(sr_input, textvariable=sr_repl_var, width=18)
-        sr_repl_entry.pack(side='left', padx=(2, 6))
-
-        sr_case_var = tk.BooleanVar(value=False)
-
-        def sr_add_pair():
-            find = sr_find_var.get()
-            if not find:
-                return
-            repl = sr_repl_var.get()
-            pair = [find, repl, sr_case_var.get()]
-            # Avoid exact duplicates
-            if pair not in app.custom_replacements:
-                app.custom_replacements.append(pair)
-                case_str = " [Aa]" if not pair[2] else ""
-                sr_listbox.insert('end', f'"{find}" → "{repl}"{case_str}')
-                app.save_preferences()
-            sr_find_var.set('')
-            sr_repl_var.set('')
-
-        ttk.Button(sr_input, text="Add", command=sr_add_pair).pack(side='left', padx=2)
-
-        # Right-click copy/paste on find/replace entries
-        for entry in (sr_find_entry, sr_repl_entry):
-            _m = tk.Menu(entry, tearoff=0)
-            _m.add_command(label="Cut", command=lambda e=entry: e.event_generate('<<Cut>>'))
-            _m.add_command(label="Copy", command=lambda e=entry: e.event_generate('<<Copy>>'))
-            _m.add_command(label="Paste", command=lambda e=entry: e.event_generate('<<Paste>>'))
-            _m.add_separator()
-            _m.add_command(label="Select All",
-                command=lambda e=entry: (e.select_range(0, 'end'), e.icursor('end')))
-            entry.bind('<Button-3>', lambda ev, m=_m: m.tk_popup(ev.x_root, ev.y_root))
-
-        # Options row
-        sr_opts = ttk.Frame(sr_frame)
-        sr_opts.pack(fill='x', pady=(4, 4))
-        ttk.Checkbutton(sr_opts, text="Case sensitive",
-                        variable=sr_case_var).pack(side='left')
-
-        # Replacement list
-        sr_list_frame = ttk.Frame(sr_frame)
-        sr_list_frame.pack(fill='both', expand=True)
-
-        sr_scroll = ttk.Scrollbar(sr_list_frame, orient='vertical')
-        sr_scroll.pack(side='right', fill='y')
-
-        sr_listbox = tk.Listbox(sr_list_frame, height=4, font=('Courier', 9),
-                                yscrollcommand=sr_scroll.set)
-        sr_listbox.pack(fill='both', expand=True)
-        sr_scroll.config(command=sr_listbox.yview)
-
-        # Populate from saved replacements
-        for pair in app.custom_replacements:
-            find, repl = pair[0], pair[1]
-            case_sensitive = pair[2] if len(pair) > 2 else False
-            case_str = "" if case_sensitive else " [Aa]"
-            sr_listbox.insert('end', f'"{find}" → "{repl}"{case_str}')
-
-        def sr_remove_selected():
-            sel = sorted(sr_listbox.curselection(), reverse=True)
-            for idx in sel:
-                sr_listbox.delete(idx)
-                del app.custom_replacements[idx]
-            if sel:
-                app.save_preferences()
-
-        def sr_clear_all():
-            sr_listbox.delete(0, 'end')
-            app.custom_replacements.clear()
-            app.save_preferences()
-
-        sr_btn_frame = ttk.Frame(sr_frame)
-        sr_btn_frame.pack(fill='x', pady=(4, 0))
-        ttk.Button(sr_btn_frame, text="Remove Selected",
-                   command=sr_remove_selected).pack(side='left', padx=(0, 4))
-        ttk.Button(sr_btn_frame, text="Clear All",
-                   command=sr_clear_all).pack(side='left')
-        ttk.Label(sr_btn_frame, text="Saved across sessions",
-                  font=('Helvetica', 8), foreground='gray').pack(side='right')
-
-        sr_find_entry.bind('<Return>', lambda e: sr_add_pair())
-
-        # ── Populate: Output ──────────────────────────────────────────────────
         output_mode = tk.StringVar(value='overwrite')
         subfolder_name = tk.StringVar(value='filtered')
 
@@ -405,7 +440,12 @@ def open_batch_filter(app):
                         variable=output_mode, value='subfolder').pack(side='left')
         ttk.Entry(sub_row, textvariable=subfolder_name, width=20).pack(side='left', padx=(4, 0))
 
-        # ── Populate: Progress + Apply ────────────────────────────────────────
+        # ══════════════════════════════════════════════════════════════════════
+        # Progress + Apply
+        # ══════════════════════════════════════════════════════════════════════
+        progress_frame = ttk.Frame(win, padding=(10, 6, 10, 6))
+        progress_frame.pack(fill='x')
+
         progress_var = tk.DoubleVar(value=0)
         progress_bar = ttk.Progressbar(progress_frame, variable=progress_var,
                                         maximum=100)
@@ -413,6 +453,9 @@ def open_batch_filter(app):
 
         progress_label = ttk.Label(progress_frame, text="")
         progress_label.pack(side='right')
+
+        action_frame = ttk.Frame(win, padding=(10, 4, 10, 10))
+        action_frame.pack(fill='x')
 
         result_label = ttk.Label(action_frame, text="", foreground='green')
         result_label.pack(side='left')
@@ -437,10 +480,10 @@ def open_batch_filter(app):
                 active_filters.insert(hi_idx, fix_entry)
             # Strip the key, keep only (label, func)
             active_filters = [(label, func) for _, label, func in active_filters]
-            has_replacements = bool(app.custom_replacements)
+            has_replacements = opt_apply_sr.get() and bool(app.custom_replacements)
             if not active_filters and not has_replacements:
                 messagebox.showwarning("Nothing to Apply",
-                    "Select at least one filter or add search & replace pairs.",
+                    "Select at least one filter or enable search & replace.",
                     parent=win)
                 return
 
@@ -488,17 +531,18 @@ def open_batch_filter(app):
                     for f_label, f_func in active_filters:
                         cues = f_func(cues)
 
-                    # Apply search & replace pairs
-                    for pair in app.custom_replacements:
-                        find_str, repl_str = pair[0], pair[1]
-                        case_sensitive = pair[2] if len(pair) > 2 else False
-                        flags = 0 if case_sensitive else re.IGNORECASE
-                        pattern = re.escape(find_str)
-                        for cue in cues:
-                            cue['text'] = re.sub(pattern, repl_str, cue['text'],
-                                                 flags=flags)
-                    # Remove any cues that became empty after replacements
-                    cues = [c for c in cues if c['text'].strip()]
+                    # Apply search & replace pairs (only if checkbox is checked)
+                    if has_replacements:
+                        for pair in app.custom_replacements:
+                            find_str, repl_str = pair[0], pair[1]
+                            case_sensitive = pair[2] if len(pair) > 2 else False
+                            flags = 0 if case_sensitive else re.IGNORECASE
+                            pattern = re.escape(find_str)
+                            for cue in cues:
+                                cue['text'] = re.sub(pattern, repl_str, cue['text'],
+                                                     flags=flags)
+                        # Remove any cues that became empty after replacements
+                        cues = [c for c in cues if c['text'].strip()]
 
                     if not cues:
                         app.add_log(f"Batch: all cues removed from {os.path.basename(fpath)}, "
@@ -545,7 +589,7 @@ def open_batch_filter(app):
             apply_btn.configure(state='normal')
 
             filters_used = ", ".join(label for label, _ in active_filters)
-            if app.custom_replacements:
+            if has_replacements:
                 filters_used += f", {len(app.custom_replacements)} replacement(s)"
             result_label.configure(
                 text=f"Done — {success} succeeded, {errors} failed",
