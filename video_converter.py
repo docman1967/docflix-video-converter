@@ -3880,11 +3880,10 @@ class VideoConverter:
 
             for line in self.current_process.stdout:
                 if self.is_stopped:
-                    self.current_process.terminate()
                     try:
-                        self.current_process.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
                         self.current_process.kill()
+                    except OSError:
+                        pass
                     self.log("Conversion stopped by user", "WARNING")
                     return False
 
@@ -3975,15 +3974,16 @@ class VideoConverter:
         self.log("Conversion resumed", "INFO")
     
     def stop(self):
-        """Stop conversion — terminate then force-kill if needed."""
+        """Stop conversion — kill immediately (SIGKILL).
+        SIGTERM is unreliable with ffmpeg, and wait() can deadlock when
+        the conversion thread is reading stdout. SIGKILL is immediate
+        and the broken pipe exits the read loop in _run_process."""
         self.is_stopped = True
         if self.current_process:
-            self.current_process.terminate()
             try:
-                self.current_process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
                 self.current_process.kill()
-                self.current_process.wait(timeout=5)
+            except OSError:
+                pass
 
 # ============================================================================
 # Main Application Class
