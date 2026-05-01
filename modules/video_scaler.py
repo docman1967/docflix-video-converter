@@ -959,6 +959,10 @@ def open_video_scaler(app):
         except Exception:
             pass
 
+    # Force Tk to calculate geometry and render all widgets — prevents
+    # invisible/blank controls on high-DPI displays until mouse-over
+    win.update_idletasks()
+
     _log("Video Scaler ready -- add files and select a target resolution", 'INFO')
     _log("Tip: drag and drop video files onto this window", 'INFO')
 

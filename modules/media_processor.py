@@ -1344,6 +1344,10 @@ def open_media_processor(app):
         ttk.Button(close_frame, text="Close", command=_close_window).pack(side='right')
         win.protocol('WM_DELETE_WINDOW', _close_window)
 
+        # Force Tk to calculate geometry and render all widgets — prevents
+        # invisible/blank controls on high-DPI displays until mouse-over
+        win.update_idletasks()
+
         _log("Media Processor ready — add files and click Process All", 'INFO')
         _log("Tip: drag and drop video files onto this window", 'INFO')
         _log(f"Subtitle matching: *.{opt_sub_lang.get()}.srt / *.{opt_sub_lang.get()}.forced.srt", 'INFO')
