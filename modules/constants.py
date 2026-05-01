@@ -6,7 +6,7 @@ All shared constants, codec maps, extension sets, and GPU backend definitions.
 
 # ── App identity ──
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "2.2.6"
+APP_VERSION = "2.2.7"
 
 # ── Defaults ──
 DEFAULT_BITRATE = "2M"
