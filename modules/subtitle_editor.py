@@ -29,7 +29,7 @@ from .constants import (
 )
 from .utils import (
     create_tooltip, get_subtitle_streams, get_video_duration,
-    scaled_geometry, scaled_minsize,
+    scaled_geometry, scaled_minsize, ask_open_file, ask_save_file,
 )
 from .subtitle_filters import (
     parse_srt, write_srt, srt_ts_to_ms, ms_to_srt_ts,
@@ -424,7 +424,7 @@ def open_standalone_subtitle_editor(app):
             editor.after(50, _check_extract)
 
         def do_open_file():
-            path = filedialog.askopenfilename(
+            path = ask_open_file(
                 parent=editor,
                 title="Open Subtitle or Video File",
                 filetypes=[
@@ -616,7 +616,7 @@ def open_standalone_subtitle_editor(app):
             out_dir = str(Path(ref_path).parent) if ref_path else ''
             default_name = (f"{Path(ref_path).stem}.srt"
                             if ref_path else "subtitle.srt")
-            out_path = filedialog.asksaveasfilename(
+            out_path = ask_save_file(
                 parent=editor,
                 initialdir=out_dir,
                 initialfile=default_name,
@@ -646,7 +646,7 @@ def open_standalone_subtitle_editor(app):
             out_dir = str(Path(ref_path).parent) if ref_path else ''
             default_name = (f"{Path(ref_path).stem}.srt"
                             if ref_path else "subtitle.srt")
-            out_path = filedialog.asksaveasfilename(
+            out_path = ask_save_file(
                 parent=editor,
                 initialdir=out_dir,
                 initialfile=default_name,
@@ -1629,7 +1629,7 @@ def open_standalone_subtitle_editor(app):
                     except Exception:
                         pass
                 if not p:
-                    p = filedialog.askopenfilename(
+                    p = ask_open_file(
                         parent=qd, title="Select Video File",
                         initialdir=init_dir or None,
                         filetypes=[("Video files",
@@ -2002,7 +2002,7 @@ def open_standalone_subtitle_editor(app):
                 _load_waveform_for_video(vpath)
             else:
                 # Ask user to pick a video file
-                vpath = filedialog.askopenfilename(
+                vpath = ask_open_file(
                     parent=editor,
                     title="Select Video File for Waveform",
                     filetypes=[
@@ -2120,7 +2120,7 @@ def open_standalone_subtitle_editor(app):
                     except Exception:
                         pass
                 if not p:
-                    p = filedialog.askopenfilename(
+                    p = ask_open_file(
                         parent=sd,
                         title="Select Video File",
                         initialdir=init_dir or None,
@@ -4481,7 +4481,7 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
                     except Exception:
                         pass
                 if not p:
-                    p = filedialog.askopenfilename(
+                    p = ask_open_file(
                         parent=qd, title="Select Video File",
                         initialdir=init_dir or None,
                         filetypes=[("Video files",
@@ -4925,7 +4925,7 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
                     except Exception:
                         pass
                 if not p:
-                    p = filedialog.askopenfilename(
+                    p = ask_open_file(
                         parent=sd,
                         title="Select Video File",
                         initialdir=init_dir or None,
@@ -5917,7 +5917,7 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
                 return
             out_dir = app.output_dir or Path(filepath).parent
             default_name = f"{Path(filepath).stem}.edited.srt"
-            out_path = filedialog.asksaveasfilename(
+            out_path = ask_save_file(
                 parent=editor,
                 initialdir=str(out_dir),
                 initialfile=default_name,
