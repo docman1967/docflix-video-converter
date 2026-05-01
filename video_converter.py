@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "2.2.7"
+APP_VERSION = "2.2.8"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -8774,10 +8774,24 @@ def main():
         sys.argv.remove('--gpu-test-mode')
         print("*** GPU TEST MODE ENABLED — skipping GPU test encodes, detection only ***")
 
-    root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
+    root = TkinterDnD.Tk(className='docflix') if HAS_DND else tk.Tk(className='docflix')
 
     # Apply high-DPI scaling before any widgets are created
     _configure_dpi_scaling(root)
+
+    # Set taskbar/dock icon and name so it shows "Docflix" instead of "Tk"
+    try:
+        from PIL import Image, ImageTk
+        _icon_path = Path(__file__).parent / 'logo_transparent.png'
+        if not _icon_path.exists():
+            _icon_path = Path(__file__).parent / 'logo.png'
+        if _icon_path.exists():
+            _icon_img = Image.open(_icon_path)
+            _icon_photo = ImageTk.PhotoImage(_icon_img)
+            root.iconphoto(True, _icon_photo)
+            root._icon_ref = _icon_photo  # prevent garbage collection
+    except Exception:
+        pass
 
     # Hide window until fully built and positioned — prevents flicker/wrong-monitor flash
     root.withdraw()

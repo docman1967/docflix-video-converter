@@ -336,6 +336,7 @@ Categories=AudioVideo;Video;
 Keywords=video;convert;hevc;h265;mkv;ffmpeg;
 MimeType=video/x-matroska;video/mp4;video/x-msvideo;video/quicktime;video/x-ms-wmv;video/x-flv;video/webm;
 StartupNotify=false
+StartupWMClass=docflix
 EOF
 
 chmod +x "$DESKTOP_FILE"

@@ -11,6 +11,7 @@ VideoConverterApp — preferences, window centering, etc.
 
 import json
 import os
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
 
@@ -127,14 +128,28 @@ def create_standalone_root(title, geometry="960x650", minsize=(800, 550)):
     """
     try:
         from tkinterdnd2 import TkinterDnD
-        root = TkinterDnD.Tk()
+        root = TkinterDnD.Tk(className='docflix')
     except ImportError:
-        root = tk.Tk()
+        root = tk.Tk(className='docflix')
 
     # Apply high-DPI scaling before any widgets are created
     configure_dpi_scaling(root)
 
     root.title(title)
+
+    # Set taskbar/dock icon so it shows "Docflix" instead of "Tk"
+    try:
+        from PIL import Image, ImageTk
+        _icon_path = Path(__file__).parent.parent / 'logo_transparent.png'
+        if not _icon_path.exists():
+            _icon_path = Path(__file__).parent.parent / 'logo.png'
+        if _icon_path.exists():
+            _icon_img = Image.open(_icon_path)
+            _icon_photo = ImageTk.PhotoImage(_icon_img)
+            root.iconphoto(True, _icon_photo)
+            root._icon_ref = _icon_photo  # prevent garbage collection
+    except Exception:
+        pass
     root.geometry(geometry)
     root.minsize(*minsize)
 
