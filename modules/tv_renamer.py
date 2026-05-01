@@ -1760,7 +1760,13 @@ def open_tv_renamer(app):
             dlg.grab_set()
             app._center_on_main(dlg)
 
-            f = ttk.Frame(dlg, padding=20)
+            # Close button packed from bottom first so it's never clipped
+            close_frame = ttk.Frame(dlg, padding=(20, 4, 20, 12))
+            close_frame.pack(fill='x', side='bottom')
+            ttk.Button(close_frame, text="Close", command=dlg.destroy,
+                       width=8).pack(side='right')
+
+            f = ttk.Frame(dlg, padding=(20, 20, 20, 0))
             f.pack(fill='both', expand=True)
 
             ttk.Label(f, text="TV template:",
@@ -1943,6 +1949,8 @@ def open_tv_renamer(app):
             movie_folder_presets = [
                 ('{show} ({year})/{show} ({year})',
                  'Movie (2026)/Movie (2026)'),
+                ('{show} {year}/{show} {year}',
+                 'Movie 2026/Movie 2026'),
                 ('{show} ({year}) {{{tmdb}}}/{show} ({year})',
                  'Movie (2026) {tmdb-ID}/Movie (2026)'),
                 ('{show} ({year}) {{{tvdb}}}/{show} ({year})',
@@ -1965,10 +1973,7 @@ def open_tv_renamer(app):
                 ttk.Button(mv_col, text=desc, command=_mset,
                            width=34).pack(anchor='w', pady=1)
 
-            ttk.Button(f, text="Close", command=dlg.destroy,
-                       width=8).grid(row=7, column=1,
-                                     sticky='e', pady=(12, 0))
-
+            dlg.update_idletasks()
             dlg.wait_window()
 
         settings_menu.add_command(label="Filename Template...",
