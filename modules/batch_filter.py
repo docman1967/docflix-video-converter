@@ -240,8 +240,21 @@ def open_batch_filter(app):
             ttk.Button(btn_frame, text="Remove Selected", command=remove_word).pack(side='left')
             ttk.Button(btn_frame, text="Close", command=nd.destroy).pack(side='right')
 
+        # Pack bottom sections FIRST so they are never clipped.
+        # Action bar (Apply / Close)
+        action_frame = ttk.Frame(win, padding=(10, 4, 10, 10))
+        action_frame.pack(fill='x', side='bottom')
+
+        # Progress bar
+        progress_frame = ttk.Frame(win, padding=(10, 6, 10, 6))
+        progress_frame.pack(fill='x', side='bottom')
+
+        # Filters + output (fixed height, packed from bottom)
+        filters_frame = ttk.LabelFrame(win, text="Filters to Apply", padding=8)
+        filters_frame.pack(fill='x', side='bottom', padx=10, pady=5)
+
         # ══════════════════════════════════════════════════════════════════════
-        # Files section
+        # Files section (expands into remaining space)
         # ══════════════════════════════════════════════════════════════════════
         files_frame = ttk.LabelFrame(win, text="Subtitle Files", padding=8)
         files_frame.pack(fill='both', expand=True, padx=10, pady=(6, 5))
@@ -342,12 +355,7 @@ def open_batch_filter(app):
             win.drop_target_register(DND_FILES)
             win.dnd_bind('<<Drop>>', on_batch_drop)
 
-        # ══════════════════════════════════════════════════════════════════════
-        # Filters section
-        # ══════════════════════════════════════════════════════════════════════
-        filters_frame = ttk.LabelFrame(win, text="Filters to Apply", padding=8)
-        filters_frame.pack(fill='x', padx=10, pady=5)
-
+        # ── Populate: Filters ─────────────────────────────────────────────────
         # Define filters: (key, label, filter_function)
         filter_defs = [
             ('remove_hi',      "Remove HI  [brackets] (parens) Speaker:",  filter_remove_hi),
@@ -422,30 +430,20 @@ def open_batch_filter(app):
         ttk.Button(sel_frame, text="Select All", command=select_all_filters).pack(side='left', padx=(0, 4))
         ttk.Button(sel_frame, text="Deselect All", command=deselect_all_filters).pack(side='left')
 
-        # ══════════════════════════════════════════════════════════════════════
-        # Output section
-        # ══════════════════════════════════════════════════════════════════════
-        output_frame = ttk.LabelFrame(win, text="Output", padding=8)
-        output_frame.pack(fill='x', padx=10, pady=5)
-
+        # Output options (inline in filters section)
         output_mode = tk.StringVar(value='overwrite')
         subfolder_name = tk.StringVar(value='filtered')
 
-        ttk.Radiobutton(output_frame, text="Overwrite original files",
-                        variable=output_mode, value='overwrite').pack(anchor='w')
-
-        sub_row = ttk.Frame(output_frame)
-        sub_row.pack(fill='x', anchor='w')
-        ttk.Radiobutton(sub_row, text="Save to subfolder:",
+        out_row = ttk.Frame(filters_frame)
+        out_row.pack(fill='x', pady=(6, 0))
+        ttk.Label(out_row, text="Output:").pack(side='left', padx=(0, 4))
+        ttk.Radiobutton(out_row, text="Overwrite originals",
+                        variable=output_mode, value='overwrite').pack(side='left', padx=(0, 8))
+        ttk.Radiobutton(out_row, text="Save to subfolder:",
                         variable=output_mode, value='subfolder').pack(side='left')
-        ttk.Entry(sub_row, textvariable=subfolder_name, width=20).pack(side='left', padx=(4, 0))
+        ttk.Entry(out_row, textvariable=subfolder_name, width=16).pack(side='left', padx=(4, 0))
 
-        # ══════════════════════════════════════════════════════════════════════
-        # Progress + Apply
-        # ══════════════════════════════════════════════════════════════════════
-        progress_frame = ttk.Frame(win, padding=(10, 6, 10, 6))
-        progress_frame.pack(fill='x')
-
+        # ── Populate: Progress + Apply ────────────────────────────────────────
         progress_var = tk.DoubleVar(value=0)
         progress_bar = ttk.Progressbar(progress_frame, variable=progress_var,
                                         maximum=100)
@@ -453,9 +451,6 @@ def open_batch_filter(app):
 
         progress_label = ttk.Label(progress_frame, text="")
         progress_label.pack(side='right')
-
-        action_frame = ttk.Frame(win, padding=(10, 4, 10, 10))
-        action_frame.pack(fill='x')
 
         result_label = ttk.Label(action_frame, text="", foreground='green')
         result_label.pack(side='left')
