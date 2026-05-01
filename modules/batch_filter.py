@@ -41,8 +41,39 @@ def open_batch_filter(app):
 
         file_paths = []  # list of absolute paths
 
+        # Pack order matters: pack bottom sections first so they always
+        # have space, then let the file list expand into whatever remains.
+
         # ══════════════════════════════════════════════════════════════════════
-        # Files section
+        # Progress + Apply (pack FIRST from bottom so they're never clipped)
+        # ══════════════════════════════════════════════════════════════════════
+        action_frame = ttk.Frame(win, padding=(10, 4, 10, 10))
+        action_frame.pack(fill='x', side='bottom')
+
+        progress_frame = ttk.Frame(win, padding=(10, 6, 10, 6))
+        progress_frame.pack(fill='x', side='bottom')
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Output section (pack from bottom)
+        # ══════════════════════════════════════════════════════════════════════
+        output_frame = ttk.LabelFrame(win, text="Output", padding=8)
+        output_frame.pack(fill='x', side='bottom', padx=10, pady=5)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Search & Replace section (pack from bottom)
+        # ══════════════════════════════════════════════════════════════════════
+        sr_frame = ttk.LabelFrame(win, text="Search && Replace (applied to all files)",
+                                  padding=8)
+        sr_frame.pack(fill='x', side='bottom', padx=10, pady=5)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Filters section (pack from bottom)
+        # ══════════════════════════════════════════════════════════════════════
+        filters_frame = ttk.LabelFrame(win, text="Filters to Apply", padding=8)
+        filters_frame.pack(fill='x', side='bottom', padx=10, pady=5)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Files section (pack LAST — expands into remaining space)
         # ══════════════════════════════════════════════════════════════════════
         files_frame = ttk.LabelFrame(win, text="Subtitle Files", padding=8)
         files_frame.pack(fill='both', expand=True, padx=10, pady=(10, 5))
@@ -143,12 +174,7 @@ def open_batch_filter(app):
             win.drop_target_register(DND_FILES)
             win.dnd_bind('<<Drop>>', on_batch_drop)
 
-        # ══════════════════════════════════════════════════════════════════════
-        # Filters section
-        # ══════════════════════════════════════════════════════════════════════
-        filters_frame = ttk.LabelFrame(win, text="Filters to Apply", padding=8)
-        filters_frame.pack(fill='x', padx=10, pady=5)
-
+        # ── Populate: Filters ─────────────────────────────────────────────────
         if not hasattr(app, 'custom_cap_words'):
             app.custom_cap_words = []
 
@@ -272,13 +298,7 @@ def open_batch_filter(app):
         ttk.Button(sel_frame, text="Select All", command=select_all_filters).pack(side='left', padx=(0, 4))
         ttk.Button(sel_frame, text="Deselect All", command=deselect_all_filters).pack(side='left')
 
-        # ══════════════════════════════════════════════════════════════════════
-        # Search & Replace section
-        # ══════════════════════════════════════════════════════════════════════
-        sr_frame = ttk.LabelFrame(win, text="Search && Replace (applied to all files)",
-                                  padding=8)
-        sr_frame.pack(fill='x', padx=10, pady=5)
-
+        # ── Populate: Search & Replace ────────────────────────────────────────
         # Input row
         sr_input = ttk.Frame(sr_frame)
         sr_input.pack(fill='x')
@@ -372,12 +392,7 @@ def open_batch_filter(app):
 
         sr_find_entry.bind('<Return>', lambda e: sr_add_pair())
 
-        # ══════════════════════════════════════════════════════════════════════
-        # Output section
-        # ══════════════════════════════════════════════════════════════════════
-        output_frame = ttk.LabelFrame(win, text="Output", padding=8)
-        output_frame.pack(fill='x', padx=10, pady=5)
-
+        # ── Populate: Output ──────────────────────────────────────────────────
         output_mode = tk.StringVar(value='overwrite')
         subfolder_name = tk.StringVar(value='filtered')
 
@@ -390,12 +405,7 @@ def open_batch_filter(app):
                         variable=output_mode, value='subfolder').pack(side='left')
         ttk.Entry(sub_row, textvariable=subfolder_name, width=20).pack(side='left', padx=(4, 0))
 
-        # ══════════════════════════════════════════════════════════════════════
-        # Progress + Apply
-        # ══════════════════════════════════════════════════════════════════════
-        progress_frame = ttk.Frame(win, padding=(10, 6, 10, 6))
-        progress_frame.pack(fill='x')
-
+        # ── Populate: Progress + Apply ────────────────────────────────────────
         progress_var = tk.DoubleVar(value=0)
         progress_bar = ttk.Progressbar(progress_frame, variable=progress_var,
                                         maximum=100)
@@ -403,9 +413,6 @@ def open_batch_filter(app):
 
         progress_label = ttk.Label(progress_frame, text="")
         progress_label.pack(side='right')
-
-        action_frame = ttk.Frame(win, padding=(10, 4, 10, 10))
-        action_frame.pack(fill='x')
 
         result_label = ttk.Label(action_frame, text="", foreground='green')
         result_label.pack(side='left')
