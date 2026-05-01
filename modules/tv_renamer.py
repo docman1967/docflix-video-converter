@@ -1753,8 +1753,8 @@ def open_tv_renamer(app):
         def _open_template_settings():
             dlg = tk.Toplevel(win)
             dlg.title("Filename Template")
-            dlg.geometry("620x850")
-            dlg.minsize(580, 800)
+            dlg.geometry("860x750")
+            dlg.minsize(780, 650)
             dlg.resizable(True, True)
             dlg.transient(win)
             dlg.grab_set()
@@ -1843,26 +1843,19 @@ def open_tv_renamer(app):
                           row=4, column=0, columnspan=2, sticky='w',
                           pady=(16, 6))
 
+            # ── Variables reference ──
             vars_text = (
-                "TV variables:\n"
-                "  {show}       — Show name\n"
-                "  {season}     — Season number (zero-padded)\n"
-                "  {episode}    — Episode number (zero-padded)\n"
-                "  {title}      — Episode title\n"
-                "  {year}       — Air year\n"
-                "  {tvdb}       — TVDB ID (e.g. tvdb-475560)\n"
-                "  {tmdb}       — TMDB ID (e.g. tmdb-12345)\n"
+                "{show}     — Show / movie name\n"
+                "{season}   — Season number (zero-padded)\n"
+                "{episode}  — Episode number (zero-padded)\n"
+                "{title}    — Episode title\n"
+                "{year}     — Air / release year\n"
+                "{tvdb}     — TVDB ID (e.g. tvdb-475560)\n"
+                "{tmdb}     — TMDB ID (e.g. tmdb-12345)\n"
                 "\n"
-                "Movie variables:\n"
-                "  {show}       — Movie title\n"
-                "  {year}       — Release year\n"
-                "  {tvdb}       — TVDB ID\n"
-                "  {tmdb}       — TMDB ID\n"
-                "\n"
-                "Use / to create folders automatically:\n"
-                "  {show}/Season {season}/{show} S{season}E{episode} {title}"
+                "Use / to create folders automatically."
             )
-            vars_box = tk.Text(f, font=('Courier', 10), height=11, width=65,
+            vars_box = tk.Text(f, font=('Courier', 10), height=9, width=50,
                                wrap='none', relief='flat',
                                bg=f.winfo_toplevel().cget('bg'),
                                cursor='arrow')
@@ -1885,13 +1878,18 @@ def open_tv_renamer(app):
                           lambda e: vars_ctx.tk_popup(e.x_root, e.y_root))
             vars_box.bind('<Control-c>', _vars_copy)
 
-            # Preset templates — flat
-            ttk.Label(f, text="Flat presets:",
-                      font=('Helvetica', 9, 'bold')).grid(
-                          row=6, column=0, columnspan=2, sticky='w',
-                          pady=(12, 4))
+            # ── Presets: TV (left) and Movie (right) side by side ──
+            presets_frame = ttk.Frame(f)
+            presets_frame.grid(row=6, column=0, columnspan=2, sticky='ew',
+                               pady=(12, 0))
+            presets_frame.columnconfigure(0, weight=1)
+            presets_frame.columnconfigure(1, weight=1)
 
-            flat_presets = [
+            # ── TV presets (left column) ──
+            tv_col = ttk.LabelFrame(presets_frame, text="TV Presets", padding=6)
+            tv_col.grid(row=0, column=0, sticky='nsew', padx=(0, 4))
+
+            tv_flat_presets = [
                 ('{show} S{season}E{episode} {title}',
                  'Show S01E01 Title'),
                 ('{show} - S{season}E{episode} - {title}',
@@ -1901,23 +1899,7 @@ def open_tv_renamer(app):
                 ('{show} - {season}x{episode} - {title}',
                  'Show - 01x01 - Title'),
             ]
-            row = 7
-            for tmpl, desc in flat_presets:
-                def _set(t=tmpl):
-                    template_var.set(t)
-                ttk.Button(f, text=desc, command=_set, width=40).grid(
-                    row=row, column=0, columnspan=2, sticky='w',
-                    padx=(10, 0), pady=1)
-                row += 1
-
-            # Preset templates — with folders
-            ttk.Label(f, text="Folder presets:",
-                      font=('Helvetica', 9, 'bold')).grid(
-                          row=row, column=0, columnspan=2, sticky='w',
-                          pady=(12, 4))
-            row += 1
-
-            folder_presets = [
+            tv_folder_presets = [
                 ('{show}/Season {season}/{show} S{season}E{episode} {title}',
                  'Show/Season 01/Show S01E01 Title'),
                 ('{show}/Season {season}/{show} - S{season}E{episode} - {title}',
@@ -1925,45 +1907,66 @@ def open_tv_renamer(app):
                 ('{show}/S{season}/{show} S{season}E{episode} {title}',
                  'Show/S01/Show S01E01 Title'),
                 ('{show} {{{tvdb}}}/Season {season}/{show} S{season}E{episode} {title}',
-                 'Show {tvdb-475560}/Season 01/Show S01E01 Title'),
+                 'Show {tvdb-ID}/Season 01/Show S01E01 Title'),
                 ('{show} {{{tmdb}}}/Season {season}/{show} S{season}E{episode} {title}',
-                 'Show {tmdb-12345}/Season 01/Show S01E01 Title'),
+                 'Show {tmdb-ID}/Season 01/Show S01E01 Title'),
             ]
-            for tmpl, desc in folder_presets:
+
+            ttk.Label(tv_col, text="Flat:",
+                      font=('Helvetica', 9, 'bold')).pack(anchor='w', pady=(0, 2))
+            for tmpl, desc in tv_flat_presets:
                 def _set(t=tmpl):
                     template_var.set(t)
-                ttk.Button(f, text=desc, command=_set, width=40).grid(
-                    row=row, column=0, columnspan=2, sticky='w',
-                    padx=(10, 0), pady=1)
-                row += 1
+                ttk.Button(tv_col, text=desc, command=_set,
+                           width=38).pack(anchor='w', pady=1)
 
-            # Movie presets
-            ttk.Label(f, text="Movie presets:",
-                      font=('Helvetica', 9, 'bold')).grid(
-                          row=row, column=0, columnspan=2, sticky='w',
-                          pady=(12, 4))
-            row += 1
+            ttk.Label(tv_col, text="Folder:",
+                      font=('Helvetica', 9, 'bold')).pack(anchor='w', pady=(8, 2))
+            for tmpl, desc in tv_folder_presets:
+                def _set(t=tmpl):
+                    template_var.set(t)
+                ttk.Button(tv_col, text=desc, command=_set,
+                           width=38).pack(anchor='w', pady=1)
 
-            movie_presets = [
+            # ── Movie presets (right column) ──
+            mv_col = ttk.LabelFrame(presets_frame, text="Movie Presets", padding=6)
+            mv_col.grid(row=0, column=1, sticky='nsew', padx=(4, 0))
+
+            movie_flat_presets = [
                 ('{show} ({year})',
                  'Movie (2026)'),
                 ('{show} ({year}) {{{tmdb}}}',
                  'Movie (2026) {tmdb-12345}'),
                 ('{show} ({year}) {{{tvdb}}}',
                  'Movie (2026) {tvdb-475560}'),
+            ]
+            movie_folder_presets = [
                 ('{show} ({year})/{show} ({year})',
                  'Movie (2026)/Movie (2026)'),
+                ('{show} ({year}) {{{tmdb}}}/{show} ({year})',
+                 'Movie (2026) {tmdb-ID}/Movie (2026)'),
+                ('{show} ({year}) {{{tvdb}}}/{show} ({year})',
+                 'Movie (2026) {tvdb-ID}/Movie (2026)'),
             ]
-            for tmpl, desc in movie_presets:
+
+            ttk.Label(mv_col, text="Flat:",
+                      font=('Helvetica', 9, 'bold')).pack(anchor='w', pady=(0, 2))
+            for tmpl, desc in movie_flat_presets:
                 def _mset(t=tmpl):
                     movie_template_var.set(t)
-                ttk.Button(f, text=desc, command=_mset, width=40).grid(
-                    row=row, column=0, columnspan=2, sticky='w',
-                    padx=(10, 0), pady=1)
-                row += 1
+                ttk.Button(mv_col, text=desc, command=_mset,
+                           width=34).pack(anchor='w', pady=1)
+
+            ttk.Label(mv_col, text="Folder:",
+                      font=('Helvetica', 9, 'bold')).pack(anchor='w', pady=(8, 2))
+            for tmpl, desc in movie_folder_presets:
+                def _mset(t=tmpl):
+                    movie_template_var.set(t)
+                ttk.Button(mv_col, text=desc, command=_mset,
+                           width=34).pack(anchor='w', pady=1)
 
             ttk.Button(f, text="Close", command=dlg.destroy,
-                       width=8).grid(row=row, column=1,
+                       width=8).grid(row=7, column=1,
                                      sticky='e', pady=(12, 0))
 
             dlg.wait_window()
