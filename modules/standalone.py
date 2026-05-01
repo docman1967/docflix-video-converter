@@ -156,6 +156,16 @@ def create_standalone_root(title, geometry="960x650", minsize=(800, 550)):
             root._icon_ref = _icon_photo  # prevent garbage collection
     except Exception:
         pass
+    # Scale geometry for high-DPI displays
+    from .utils import get_dpi_scale
+    s = get_dpi_scale(root)
+    if s > 1.05:
+        # Parse WxH from geometry string and scale
+        import re as _re
+        m = _re.match(r'(\d+)x(\d+)', geometry)
+        if m:
+            geometry = f"{int(int(m.group(1)) * s)}x{int(int(m.group(2)) * s)}"
+        minsize = (int(minsize[0] * s), int(minsize[1] * s))
     root.geometry(geometry)
     root.minsize(*minsize)
 

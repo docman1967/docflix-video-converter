@@ -11,6 +11,8 @@ import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+from .utils import scaled_geometry, scaled_minsize
+
 from .subtitle_filters import (
     parse_srt, write_srt,
     filter_remove_hi, filter_remove_caps_hi,
@@ -34,8 +36,8 @@ def open_batch_filter(app):
 
         win = tk.Toplevel(app.root)
         win.title("Batch Filter Subtitles")
-        win.geometry("620x600")
-        win.minsize(620, 500)
+        win.geometry(scaled_geometry(win, 620, 600))
+        win.minsize(*scaled_minsize(win, 620, 500))
         win.resizable(True, True)
         app._center_on_main(win)
 

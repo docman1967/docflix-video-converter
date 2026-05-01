@@ -397,6 +397,38 @@ def ask_save_file(initialdir=None, initialfile=None, title="Save As",
     return result or ''
 
 
+def get_dpi_scale(widget):
+    """Return the DPI scale factor relative to the standard 96 DPI.
+    Returns 1.0 on a standard display, ~1.5 at 150% scaling, 2.0 at 200%, etc.
+    The widget must already exist (any Tk widget will do)."""
+    try:
+        tk_scaling = widget.tk.call('tk', 'scaling')
+        # Tk scaling of 1.333 = 96 DPI (standard), 2.666 = 192 DPI (2×)
+        return float(tk_scaling) / 1.333333
+    except Exception:
+        return 1.0
+
+
+def scaled_geometry(widget, width, height):
+    """Return a Tk geometry string scaled for the current DPI.
+    Usage: win.geometry(scaled_geometry(win, 920, 880))"""
+    s = get_dpi_scale(widget)
+    if s <= 1.05:  # No scaling needed at or below 100%
+        return f"{width}x{height}"
+    sw = int(width * s)
+    sh = int(height * s)
+    return f"{sw}x{sh}"
+
+
+def scaled_minsize(widget, width, height):
+    """Return a (width, height) tuple scaled for the current DPI.
+    Usage: win.minsize(*scaled_minsize(win, 750, 650))"""
+    s = get_dpi_scale(widget)
+    if s <= 1.05:
+        return (width, height)
+    return (int(width * s), int(height * s))
+
+
 def configure_dpi_scaling(root):
     """Configure Tk scaling for high-DPI displays.
 

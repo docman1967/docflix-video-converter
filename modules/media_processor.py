@@ -19,7 +19,7 @@ from tkinter import ttk, filedialog, messagebox
 
 from .constants import VIDEO_EXTENSIONS, EDITION_PRESETS
 from .chapters import generate_auto_chapters, chapters_to_ffmetadata
-from .utils import get_audio_info, get_subtitle_streams, ask_directory
+from .utils import get_audio_info, get_subtitle_streams, ask_directory, scaled_geometry, scaled_minsize
 
 try:
     from tkinterdnd2 import DND_FILES
@@ -36,8 +36,8 @@ def open_media_processor(app):
 
         win = tk.Toplevel(app.root)
         win.title("🔧 Media Processor")
-        win.geometry("920x880")
-        win.minsize(750, 650)
+        win.geometry(scaled_geometry(win, 920, 880))
+        win.minsize(*scaled_minsize(win, 750, 650))
         app._center_on_main(win)
 
         # ── State ──

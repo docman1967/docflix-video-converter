@@ -15,6 +15,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from .constants import VIDEO_EXTENSIONS, GPU_BACKENDS, VIDEO_CODEC_MAP
+from .utils import scaled_geometry, scaled_minsize
 
 try:
     from tkinterdnd2 import DND_FILES
@@ -185,8 +186,8 @@ def open_video_scaler(app):
 
     win = tk.Toplevel(app.root)
     win.title("Video Scaler")
-    win.geometry("920x750")
-    win.minsize(750, 550)
+    win.geometry(scaled_geometry(win, 920, 750))
+    win.minsize(*scaled_minsize(win, 750, 550))
     try:
         app._center_on_main(win)
     except Exception:

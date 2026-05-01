@@ -29,6 +29,7 @@ from .constants import (
 )
 from .utils import (
     create_tooltip, get_subtitle_streams, get_video_duration,
+    scaled_geometry, scaled_minsize,
 )
 from .subtitle_filters import (
     parse_srt, write_srt, srt_ts_to_ms, ms_to_srt_ts,
@@ -57,8 +58,8 @@ def open_standalone_subtitle_editor(app):
 
         editor = tk.Toplevel(app.root)
         editor.title("Subtitle Editor")
-        editor.geometry("950x650")
-        editor.minsize(700, 500)
+        editor.geometry(scaled_geometry(editor, 950, 650))
+        editor.minsize(*scaled_minsize(editor, 700, 500))
         editor.resizable(True, True)
         app._center_on_main(editor)
 
@@ -3361,7 +3362,7 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
             editor.title(f"Edit Subtitles — {os.path.basename(external_sub_path)}")
         else:
             editor.title(f"Edit Subtitles — Stream #{stream_index} — {os.path.basename(filepath)}")
-        editor.geometry("950x650")
+        editor.geometry(scaled_geometry(editor, 950, 650))
         editor.transient(app.root)
         editor.grab_set()
         app._center_on_main(editor)

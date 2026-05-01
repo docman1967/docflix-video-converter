@@ -17,7 +17,7 @@ from tkinter import ttk, filedialog, messagebox
 from .constants import (
     APP_NAME, APP_VERSION, VIDEO_EXTENSIONS, SUBTITLE_EXTENSIONS,
 )
-from .utils import create_tooltip
+from .utils import create_tooltip, scaled_geometry, scaled_minsize
 
 try:
     from tkinterdnd2 import DND_FILES
@@ -37,8 +37,8 @@ def open_tv_renamer(app):
 
         win = tk.Toplevel(app.root)
         win.title("📺 File Renamer")
-        win.geometry("960x650")
-        win.minsize(800, 550)
+        win.geometry(scaled_geometry(win, 960, 650))
+        win.minsize(*scaled_minsize(win, 800, 550))
         win.resizable(True, True)
         app._center_on_main(win)
 
