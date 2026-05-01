@@ -8410,7 +8410,11 @@ class VideoConverterApp:
             encoder        = file_settings['encoder']
             codec_info     = file_settings['codec_info']
             quality_mode   = file_settings['mode']
-            preset         = file_settings['preset']
+            # Use the correct preset for the active encoder
+            if encoder != 'cpu':
+                preset = file_settings.get('gpu_preset', file_settings['preset'])
+            else:
+                preset = file_settings['preset']
             audio_codec    = file_settings['audio_codec']
             audio_bitrate  = file_settings['audio_bitrate']
             skip_existing  = ov.get('skip_existing',    self.skip_existing.get())
