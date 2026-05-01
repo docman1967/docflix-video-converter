@@ -50,6 +50,9 @@ class StandaloneContext:
         self._tv_rename_template = prefs.get(
             'tv_rename_template',
             '{show} S{season}E{episode} {title}')
+        self._movie_rename_template = prefs.get(
+            'movie_rename_template',
+            '{show} ({year})')
         self._custom_rename_templates = prefs.get(
             'custom_rename_templates', [])
 
@@ -80,6 +83,9 @@ class StandaloneContext:
         prefs['tv_rename_template'] = getattr(
             self, '_tv_rename_template',
             '{show} S{season}E{episode} {title}')
+        prefs['movie_rename_template'] = getattr(
+            self, '_movie_rename_template',
+            '{show} ({year})')
         prefs['custom_rename_templates'] = getattr(
             self, '_custom_rename_templates', [])
         prefs['custom_cap_words'] = getattr(self, 'custom_cap_words', [])

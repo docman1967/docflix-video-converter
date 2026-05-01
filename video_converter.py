@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "2.2.9"
+APP_VERSION = "2.3.0"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -6646,6 +6646,7 @@ class VideoConverterApp:
             'tmdb_api_key':          getattr(self, '_tmdb_api_key', ''),
             'tv_rename_provider':    getattr(self, '_tv_rename_provider', 'TVDB'),
             'tv_rename_template':    getattr(self, '_tv_rename_template', '{show} S{season}E{episode} {title}'),
+            'movie_rename_template': getattr(self, '_movie_rename_template', '{show} ({year})'),
             'custom_rename_templates': getattr(self, '_custom_rename_templates', []),
         }
         try:
@@ -6711,6 +6712,8 @@ class VideoConverterApp:
             self._tv_rename_provider = prefs.get('tv_rename_provider', 'TVDB')
             self._tv_rename_template = prefs.get('tv_rename_template',
                                                   '{show} S{season}E{episode} {title}')
+            self._movie_rename_template = prefs.get('movie_rename_template',
+                                                     '{show} ({year})')
             self._custom_rename_templates = prefs.get(
                 'custom_rename_templates', [])
             # Media Processor

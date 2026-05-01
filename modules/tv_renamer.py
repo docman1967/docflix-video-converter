@@ -54,6 +54,8 @@ def open_tv_renamer(app):
         _saved_provider = getattr(app, '_tv_rename_provider', 'TVDB')
         _saved_template = getattr(app, '_tv_rename_template',
                                   '{show} S{season}E{episode} {title}')
+        _saved_movie_template = getattr(app, '_movie_rename_template',
+                                        '{show} ({year})')
 
         # ── TVDB API helpers ──
         def _tvdb_request(method, path, body=None, token=None):
@@ -528,7 +530,7 @@ def open_tv_renamer(app):
                 tags.append(t)
             return '.' + '.'.join(tags)
 
-        def _build_new_name(item, template, show_name):
+        def _build_new_name(item, template, show_name, movie_template=None):
             """Build a new filename (or relative path) from template and
             episode data.  When the template contains '/' separators the
             result is a relative path whose parent directories will be
@@ -537,26 +539,39 @@ def open_tv_renamer(app):
                 return None
             show_data = _all_shows.get(show_name, {})
 
-            # Choose sanitizer: path-aware when template contains '/'
-            sanitize = (_sanitize_path if '/' in template
-                        else _sanitize_filename)
-
             # Build provider ID variables for template
             sid = show_data.get('_series_id', '') if isinstance(show_data, dict) else ''
             prov = show_data.get('_provider', '') if isinstance(show_data, dict) else ''
             tvdb_id = f'tvdb-{sid}' if prov == 'tvdb' and sid else ''
             tmdb_id = f'tmdb-{sid}' if prov == 'tmdb' and sid else ''
 
-            # ── Movie mode — no season/episode needed ──
+            # ── Movie mode — uses movie template ──
             if isinstance(show_data, dict) and show_data.get('_is_movie'):
                 year = show_data.get('_year', '')
-                # For movies, use show name + year as filename
-                name = f"{show_name} ({year})" if year else show_name
+                m_tmpl = movie_template or '{show} ({year})'
+                # Choose sanitizer: path-aware when template contains '/'
+                sanitize = (_sanitize_path if '/' in m_tmpl
+                            else _sanitize_filename)
+                try:
+                    name = m_tmpl.format(
+                        show=show_name,
+                        year=year,
+                        tvdb=tvdb_id,
+                        tmdb=tmdb_id,
+                        # Provide TV vars as empty so shared templates don't crash
+                        season='', episode='', title='',
+                    )
+                except (KeyError, IndexError):
+                    name = f"{show_name} ({year})" if year else show_name
                 ext = item['ext']
                 sub_tags = ''
                 if ext in SUBTITLE_EXTENSIONS:
                     sub_tags = _detect_sub_tags(item['path'])
                 return sanitize(name) + sub_tags + ext
+
+            # Choose sanitizer for TV template
+            sanitize = (_sanitize_path if '/' in template
+                        else _sanitize_filename)
 
             # ── Date-based episode mode ──
             air_date = item.get('air_date')
@@ -1184,13 +1199,20 @@ def open_tv_renamer(app):
             t.start()
 
         template_var = tk.StringVar(value=_saved_template)
+        movie_template_var = tk.StringVar(value=_saved_movie_template)
 
-        # Save template on change
+        # Save templates on change
         def _on_template_change(*_):
             app._tv_rename_template = template_var.get()
             app.save_preferences()
             _refresh_preview()
         template_var.trace_add('write', _on_template_change)
+
+        def _on_movie_template_change(*_):
+            app._movie_rename_template = movie_template_var.get()
+            app.save_preferences()
+            _refresh_preview()
+        movie_template_var.trace_add('write', _on_movie_template_change)
 
         # ── Row 1: File list (treeview) ──
         tree_f = ttk.Frame(main_f)
@@ -1214,6 +1236,7 @@ def open_tv_renamer(app):
             """Update the treeview with current/new filenames."""
             tree.delete(*tree.get_children())
             template = template_var.get().strip()
+            m_template = movie_template_var.get().strip()
 
             for item in _file_items:
                 cur_name = os.path.basename(item['path'])
@@ -1231,7 +1254,8 @@ def open_tv_renamer(app):
                 has_date = item.get('air_date') is not None
                 if matched and (is_movie or has_ep or has_date):
                     try:
-                        new_name = _build_new_name(item, template, matched) or ''
+                        new_name = _build_new_name(item, template, matched,
+                                                   movie_template=m_template) or ''
                     except (KeyError, ValueError):
                         new_name = '(template error)'
 
@@ -1429,6 +1453,7 @@ def open_tv_renamer(app):
         def _do_rename():
             """Rename all files with valid new names."""
             template = template_var.get().strip()
+            m_template = movie_template_var.get().strip()
             if not template:
                 messagebox.showwarning("No Template", "Enter a filename template.",
                                        parent=win)
@@ -1444,7 +1469,8 @@ def open_tv_renamer(app):
                     if not matched:
                         skipped += 1
                         continue
-                    new_name = _build_new_name(item, template, matched)
+                    new_name = _build_new_name(item, template, matched,
+                                              movie_template=m_template)
                     if not new_name:
                         skipped += 1
                         continue
@@ -1737,16 +1763,20 @@ def open_tv_renamer(app):
             f = ttk.Frame(dlg, padding=20)
             f.pack(fill='both', expand=True)
 
-            ttk.Label(f, text="Filename template for TV episodes:",
+            ttk.Label(f, text="TV template:",
                       font=('Helvetica', 11)).grid(
-                          row=0, column=0, columnspan=2, sticky='w', pady=(0, 10))
-
-            ttk.Label(f, text="Template:").grid(
-                row=1, column=0, sticky='w', padx=(0, 8))
+                          row=0, column=0, sticky='w', padx=(0, 8), pady=(0, 6))
             t_entry = ttk.Entry(f, textvariable=template_var, width=50,
                                 font=('Helvetica', 10))
-            t_entry.grid(row=1, column=1, sticky='ew')
+            t_entry.grid(row=0, column=1, sticky='ew', pady=(0, 6))
             f.columnconfigure(1, weight=1)
+
+            ttk.Label(f, text="Movie template:",
+                      font=('Helvetica', 11)).grid(
+                          row=1, column=0, sticky='w', padx=(0, 8), pady=(0, 10))
+            m_entry = ttk.Entry(f, textvariable=movie_template_var, width=50,
+                                font=('Helvetica', 10))
+            m_entry.grid(row=1, column=1, sticky='ew', pady=(0, 10))
 
             # ── Custom templates (right below Template entry) ──
             _custom_templates = list(getattr(app, '_custom_rename_templates', []))
@@ -1814,13 +1844,20 @@ def open_tv_renamer(app):
                           pady=(16, 6))
 
             vars_text = (
-                "{show}       — Show name\n"
-                "{season}     — Season number (zero-padded)\n"
-                "{episode}    — Episode number (zero-padded)\n"
-                "{title}      — Episode title\n"
-                "{year}       — Air year\n"
-                "{tvdb}       — TVDB ID (e.g. tvdb-475560)\n"
-                "{tmdb}       — TMDB ID (e.g. tmdb-12345)\n"
+                "TV variables:\n"
+                "  {show}       — Show name\n"
+                "  {season}     — Season number (zero-padded)\n"
+                "  {episode}    — Episode number (zero-padded)\n"
+                "  {title}      — Episode title\n"
+                "  {year}       — Air year\n"
+                "  {tvdb}       — TVDB ID (e.g. tvdb-475560)\n"
+                "  {tmdb}       — TMDB ID (e.g. tmdb-12345)\n"
+                "\n"
+                "Movie variables:\n"
+                "  {show}       — Movie title\n"
+                "  {year}       — Release year\n"
+                "  {tvdb}       — TVDB ID\n"
+                "  {tmdb}       — TMDB ID\n"
                 "\n"
                 "Use / to create folders automatically:\n"
                 "  {show}/Season {season}/{show} S{season}E{episode} {title}"
@@ -1896,6 +1933,31 @@ def open_tv_renamer(app):
                 def _set(t=tmpl):
                     template_var.set(t)
                 ttk.Button(f, text=desc, command=_set, width=40).grid(
+                    row=row, column=0, columnspan=2, sticky='w',
+                    padx=(10, 0), pady=1)
+                row += 1
+
+            # Movie presets
+            ttk.Label(f, text="Movie presets:",
+                      font=('Helvetica', 9, 'bold')).grid(
+                          row=row, column=0, columnspan=2, sticky='w',
+                          pady=(12, 4))
+            row += 1
+
+            movie_presets = [
+                ('{show} ({year})',
+                 'Movie (2026)'),
+                ('{show} ({year}) {{{tmdb}}}',
+                 'Movie (2026) {tmdb-12345}'),
+                ('{show} ({year}) {{{tvdb}}}',
+                 'Movie (2026) {tvdb-475560}'),
+                ('{show} ({year})/{show} ({year})',
+                 'Movie (2026)/Movie (2026)'),
+            ]
+            for tmpl, desc in movie_presets:
+                def _mset(t=tmpl):
+                    movie_template_var.set(t)
+                ttk.Button(f, text=desc, command=_mset, width=40).grid(
                     row=row, column=0, columnspan=2, sticky='w',
                     padx=(10, 0), pady=1)
                 row += 1
