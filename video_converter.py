@@ -6938,10 +6938,16 @@ class VideoConverterApp:
         from completed files, plus the current file's remaining ETA, to estimate
         how long the rest of the batch will take.
 
+        Dynamically scans self.files by status so the ETA updates correctly
+        when files are added or removed during conversion.
+
         Returns seconds remaining, or None if not enough data.
         """
-        if len(self.files) <= 1:
-            return None  # No batch ETA for single files
+        # Count pending files (not yet completed/skipped/failed)
+        pending_count = sum(1 for f in self.files
+                          if f.get('status') in ('Pending', None, '⏳ Converting'))
+        if pending_count <= 0:
+            return None
 
         # Calculate average speed from completed files
         if self._batch_speed_samples:
@@ -6951,11 +6957,10 @@ class VideoConverterApp:
         else:
             avg_speed = None
 
-        # Sum durations of files not yet started (after current)
+        # Sum durations of files still pending (not yet started)
         remaining_duration = 0.0
-        for j in range(self.current_file_index + 1, len(self.files)):
-            fi = self.files[j]
-            if fi.get('status') not in ('skipped',):
+        for fi in self.files:
+            if fi.get('status') in ('Pending', None):
                 remaining_duration += fi.get('duration_secs', 0) or 0
 
         # Estimate time for remaining files
@@ -6965,7 +6970,12 @@ class VideoConverterApp:
             # No completed files yet — use current file's progress to estimate speed
             import time as _time
             wall_so_far = _time.monotonic() - self._file_start_time
-            cur_dur = (self.files[self.current_file_index].get('duration_secs') or 0)
+            # Find the currently converting file by status
+            cur_dur = 0
+            for fi in self.files:
+                if fi.get('status') == '⏳ Converting':
+                    cur_dur = fi.get('duration_secs', 0) or 0
+                    break
             if wall_so_far > 2 and cur_dur > 0:
                 # Estimate speed from current file progress
                 cur_speed = cur_dur / (wall_so_far + (current_file_eta or 0))
@@ -6976,7 +6986,7 @@ class VideoConverterApp:
             return None
 
         # Add current file's remaining time
-        batch_remaining = (current_file_eta or 0) + remaining_files_eta
+        batch_remaining = (current_file_eta or 0) + (remaining_files_eta or 0)
         return batch_remaining if batch_remaining > 0 else None
 
     def update_progress(self, percent, details='', fps=None, eta=None, pass_label=None):
@@ -6994,8 +7004,8 @@ class VideoConverterApp:
             if eta is not None:
                 pass_str = f" ({pass_label})" if pass_label else ""
                 self.eta_label.configure(text=f"ETA{pass_str}: {format_time(eta)}")
-            # Batch ETA (only show when multiple files)
-            if len(self.files) > 1 and self.is_converting:
+            # Batch ETA (show whenever there are pending files beyond the current one)
+            if self.is_converting:
                 batch_eta = self._calc_batch_eta(current_file_eta=eta)
                 if batch_eta is not None:
                     self.batch_eta_label.configure(
