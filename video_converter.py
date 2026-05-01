@@ -7447,7 +7447,6 @@ class VideoConverterApp:
         dlg = tk.Toplevel(self.root)
         dlg.title(f"Media Details — {os.path.basename(filepath)}")
         dlg.geometry("620x520")
-        dlg.transient(self.root)
         dlg.resizable(True, True)
         self._center_on_main(dlg)
 
