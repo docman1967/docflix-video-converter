@@ -8491,8 +8491,9 @@ class VideoConverterApp:
             success = self.converter.convert_file(input_path, output_path, file_settings)
 
             # ── GPU → CPU fallback ──
-            # If GPU encoding failed, retry with CPU settings automatically
-            if not success and file_settings.get('encoder', 'cpu') != 'cpu':
+            # If GPU encoding failed (but NOT stopped by user), retry with CPU
+            if (not success and not self.converter.is_stopped
+                    and file_settings.get('encoder', 'cpu') != 'cpu'):
                 gpu_encoder = file_settings['encoder']
                 gpu_label = GPU_BACKENDS.get(gpu_encoder, {}).get('label', gpu_encoder)
                 self.add_log(f"GPU encoding failed ({gpu_label}), retrying with CPU...",
