@@ -83,6 +83,13 @@ uninstall() {
         found=1
     fi
 
+    # Remove subtitle editor desktop entry
+    local subs_desktop="$DESKTOP_DIR/docflix-subs.desktop"
+    if [[ -f "$subs_desktop" ]]; then
+        rm -f "$subs_desktop"
+        success "Removed desktop entry: $subs_desktop"
+    fi
+
     if [[ -f "$ICON_FILE" ]]; then
         rm -f "$ICON_FILE"
         success "Removed icon: $ICON_FILE"
@@ -341,6 +348,27 @@ EOF
 
 chmod +x "$DESKTOP_FILE"
 success "Desktop entry created: $DESKTOP_FILE"
+
+# Subtitle Editor .desktop file (for "Open with" on subtitle files)
+SUBS_DESKTOP="$DESKTOP_DIR/docflix-subs.desktop"
+cat > "$SUBS_DESKTOP" <<EOF
+[Desktop Entry]
+Name=Docflix Subtitle Editor
+Comment=Edit subtitle files (SRT, ASS, SSA, VTT)
+Exec=$BIN_DIR/docflix-subs %F
+Terminal=false
+Type=Application
+Icon=$ICON_FILE
+Categories=AudioVideo;Video;
+Keywords=subtitle;srt;ass;edit;
+MimeType=application/x-subrip;text/x-ssa;text/x-ass;text/vtt;text/plain;
+StartupNotify=false
+StartupWMClass=docflix
+NoDisplay=true
+EOF
+
+chmod +x "$SUBS_DESKTOP"
+success "Desktop entry created: $SUBS_DESKTOP"
 
 # Refresh the desktop database so the app appears in the launcher
 if command -v update-desktop-database &>/dev/null; then

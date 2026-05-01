@@ -3234,6 +3234,18 @@ def open_standalone_subtitle_editor(app):
 
         editor.protocol('WM_DELETE_WINDOW', on_editor_close)
 
+        # Auto-open file passed via command line (e.g. "Open with" from file manager)
+        _start_path = getattr(app, '_open_file_on_start', None)
+        if _start_path and os.path.isfile(_start_path):
+            def _auto_open():
+                ext = Path(_start_path).suffix.lower()
+                if ext in VIDEO_EXTENSIONS:
+                    load_video_subtitle(_start_path)
+                else:
+                    load_file(_start_path)
+            editor.after(100, _auto_open)
+            app._open_file_on_start = None  # only open once
+
         if not getattr(app, '_standalone_mode', False):
             editor.wait_window()
 
@@ -5965,7 +5977,9 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
 
 
 def main():
-    """Launch Subtitle Editor as a standalone application."""
+    """Launch Subtitle Editor as a standalone application.
+    Accepts an optional file path as a command-line argument."""
+    import sys
     from .standalone import create_standalone_root
 
     root, app = create_standalone_root(
@@ -5985,7 +5999,13 @@ def main():
         from .batch_filter import open_batch_filter as _bf
         app.open_batch_filter = lambda: _bf(app)
 
+    # Capture file argument before opening editor
+    open_path = None
+    if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
+        open_path = os.path.abspath(sys.argv[1])
+
     app._standalone_mode = True
+    app._open_file_on_start = open_path
     root.withdraw()
     open_standalone_subtitle_editor(app)
 
