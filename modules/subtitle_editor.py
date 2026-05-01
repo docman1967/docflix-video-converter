@@ -582,6 +582,8 @@ def open_standalone_subtitle_editor(app):
                     app.add_log(f"Subtitle re-muxed into video: {len(cues)} entries "
                                  f"({removed} removed) → {os.path.basename(video_path)}",
                                  'SUCCESS')
+                    # Reset baseline so unsaved-changes check is accurate
+                    original_cues[:] = [dict(c) for c in cues]
                     messagebox.showinfo("Saved",
                         f"Subtitle stream #{stream_idx} saved back to:\n"
                         f"{os.path.basename(video_path)}",
@@ -598,6 +600,8 @@ def open_standalone_subtitle_editor(app):
                     f.write(write_srt(cues))
                 app.add_log(f"Subtitle saved: {len(cues)} entries ({removed} removed) → "
                              f"{os.path.basename(current_path[0])}", 'SUCCESS')
+                # Reset baseline so unsaved-changes check is accurate
+                original_cues[:] = [dict(c) for c in cues]
 
         def do_save_as():
             if not cues:
@@ -5875,6 +5879,8 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
 
                 app.add_log(f"Subtitle re-muxed into video: {len(cues)} entries "
                              f"({removed} removed) → {os.path.basename(filepath)}", 'SUCCESS')
+                # Reset baseline so unsaved-changes check is accurate
+                original_cues[:] = [dict(c) for c in cues]
                 messagebox.showinfo("Saved",
                     f"Subtitle stream #{stream_index} saved back to:\n"
                     f"{os.path.basename(filepath)}",

@@ -893,9 +893,28 @@ def open_media_processor(app):
                         'flac': ('flac',),
                     }
                     match_set = codec_aliases.get(target_codec, (target_codec,))
-                    if src_codec in match_set:
+                    # Compare source bitrate against target bitrate
+                    src_br_raw = audio[0].get('bit_rate', '') if audio else ''
+                    try:
+                        src_kbps = int(src_br_raw) // 1000 if src_br_raw else 0
+                    except (ValueError, TypeError):
+                        src_kbps = 0
+                    # Parse target bitrate (e.g. '384k' → 384)
+                    tgt_str = audio_bitrate.lower().rstrip('k')
+                    try:
+                        tgt_kbps = int(tgt_str)
+                    except (ValueError, TypeError):
+                        tgt_kbps = 0
+                    # Skip transcoding only if codec AND bitrate match
+                    # (10% tolerance for bitrate comparison)
+                    bitrate_matches = (
+                        src_kbps == 0 or tgt_kbps == 0
+                        or abs(src_kbps - tgt_kbps) <= tgt_kbps * 0.10
+                    )
+                    if src_codec in match_set and bitrate_matches:
                         cmd.extend(['-c:a', 'copy'])
-                        _log(f"  Audio: already {src_codec.upper()}, copying", 'SKIP')
+                        _log(f"  Audio: already {src_codec.upper()}"
+                             f" @ {src_kbps}k, copying", 'SKIP')
                     else:
                         LOSSLESS = {'flac'}
                         EXPERIMENTAL = {'opus', 'vorbis'}

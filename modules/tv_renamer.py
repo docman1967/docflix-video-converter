@@ -382,26 +382,26 @@ def open_tv_renamer(app):
             if not _all_shows:
                 return None
             fname = os.path.splitext(os.path.basename(item['path']))[0]
-            cleaned = _clean_show_name(fname).lower()
+            cleaned = _normalize_for_match(_clean_show_name(fname))
             if not cleaned:
                 return None
 
             best_match = None
             best_score = 0.0
             for show_name in _all_shows:
-                show_lower = show_name.lower()
+                show_norm = _normalize_for_match(show_name)
                 # Exact match
-                if show_lower == cleaned:
+                if show_norm == cleaned:
                     return show_name
                 # Show name contained in filename
-                if show_lower in cleaned:
-                    score = len(show_lower) / max(len(cleaned), 1)
+                if show_norm in cleaned:
+                    score = len(show_norm) / max(len(cleaned), 1)
                     if score > best_score:
                         best_score = score
                         best_match = show_name
                 # Filename contained in show name
-                elif cleaned in show_lower:
-                    score = len(cleaned) / max(len(show_lower), 1) * 0.8
+                elif cleaned in show_norm:
+                    score = len(cleaned) / max(len(show_norm), 1) * 0.8
                     if score > best_score:
                         best_score = score
                         best_match = show_name
@@ -410,7 +410,7 @@ def open_tv_renamer(app):
             if best_score < 0.4:
                 cleaned_words = set(cleaned.split())
                 for show_name in _all_shows:
-                    show_words = set(show_name.lower().split())
+                    show_words = set(_normalize_for_match(show_name).split())
                     if show_words and cleaned_words:
                         overlap = len(cleaned_words & show_words) / len(show_words)
                         if overlap > best_score and overlap >= 0.5:
@@ -688,9 +688,24 @@ def open_tv_renamer(app):
 
         # ── Row 0: Loaded Shows ──
 
+        def _normalize_for_match(text):
+            """Normalize a show name for comparison: lowercase, collapse
+            '&' / 'and' / ':' differences, and squash extra whitespace."""
+            t = text.lower()
+            t = t.replace('&', ' and ')
+            t = t.replace(':', ' ')
+            t = re.sub(r'\s+', ' ', t).strip()
+            return t
+
         def _clean_show_name(raw):
             """Strip episode info, quality tags, and release group from a show name."""
-            name = re.sub(r'[._\-]', ' ', raw).strip()
+            # Replace dots and underscores with spaces, but preserve hyphens
+            # that are part of the show name (e.g. 9-1-1, S.W.A.T., X-Men)
+            name = re.sub(r'[._]', ' ', raw).strip()
+            # Replace hyphens that act as word separators (surrounded by spaces
+            # or at the boundary of a release group like "h264-GRACE") but keep
+            # hyphens between non-space characters (e.g. "9-1-1", "X-Men")
+            name = re.sub(r'(?<=\s)-|-(?=\s)', ' ', name)
             # Truncate at episode markers (including multi-episode S01E01E02)
             name = re.sub(r'\s*[Ss]\d{1,2}\s*[Ee]\d.*', '', name)
             name = re.sub(r'\s*\d{1,2}[xX]\d.*', '', name)
@@ -955,6 +970,16 @@ def open_tv_renamer(app):
                 return None
             prov = provider_var.get()
             results = _provider_search(query)
+            # Retry with And↔& swap if initial search found nothing
+            if not results:
+                alt = None
+                if re.search(r'\bAnd\b', query, re.IGNORECASE):
+                    alt = re.sub(r'\bAnd\b', '&', query, flags=re.IGNORECASE)
+                elif '&' in query:
+                    alt = query.replace('&', 'And')
+                if alt:
+                    _log(f"  Retrying search as \"{alt}\"...")
+                    results = _provider_search(alt)
             if not results:
                 _log(f"  No {prov} results for \"{query}\"", 'WARNING')
                 return None
@@ -964,15 +989,19 @@ def open_tv_renamer(app):
             # query or vice versa), then decide whether to prompt the user.
             # This catches cases like "Ghosts" returning "Ghosts", "Ghosts (US)",
             # "Ghosts (2019)", "Ghosts (DE)" — all should be presented.
-            query_lower = query.lower()
+            # Normalize both sides so "And" matches "&" and colons are ignored.
+            query_norm = _normalize_for_match(query)
             close_matches = []
             seen_ids = set()
             for r in results[:15]:  # limit to top 15
-                rname = r.get('name', r.get('objectName', '')).lower()
+                rname = r.get('name', r.get('objectName', ''))
+                rname_norm = _normalize_for_match(rname)
                 rid = r.get('tvdb_id', r.get('id', ''))
                 if rid in seen_ids:
                     continue
-                if rname == query_lower or query_lower in rname or rname in query_lower:
+                if (rname_norm == query_norm
+                        or query_norm in rname_norm
+                        or rname_norm in query_norm):
                     close_matches.append(r)
                     seen_ids.add(rid)
 

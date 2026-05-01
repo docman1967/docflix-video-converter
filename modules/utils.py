@@ -478,6 +478,216 @@ def configure_dpi_scaling(root):
     except Exception:
         pass
 
+    # Scale ttk checkbox / radiobutton indicators to match font size
+    _scale_check_radio_indicators(root)
+
+
+def _scale_check_radio_indicators(root):
+    """Create scaled checkbox and radiobutton indicator images.
+
+    The clam (and most ttk) themes use fixed-size bitmap indicators that
+    don't respond to ``tk scaling``.  This draws replacement images via
+    tk.PhotoImage so they match the surrounding text on high-DPI displays.
+    """
+    try:
+        from tkinter import ttk
+        import tkinter.font as tkfont
+
+        style = ttk.Style()
+
+        # Determine indicator size from the default font's line height
+        try:
+            font = tkfont.nametofont('TkDefaultFont')
+            font_height = font.metrics('linespace')
+        except Exception:
+            font_height = 16
+        size = max(13, font_height)
+        # Keep size odd so the checkmark / dot centers cleanly
+        if size % 2 == 0:
+            size += 1
+
+        # ── Helper: draw a border + fill on a PhotoImage ──
+        def _make_box(sz, fill, border):
+            img = tk.PhotoImage(width=sz, height=sz)
+            # Fill entire image with border color, then fill interior
+            img.put(border, to=(0, 0, sz, sz))
+            img.put(fill, to=(2, 2, sz - 2, sz - 2))
+            return img
+
+        def _make_checked_box(sz, fill, border, check_color):
+            img = _make_box(sz, fill, border)
+            # Draw an X mark (two diagonal strokes)
+            pad = max(3, sz // 4)
+            thickness = max(1, sz // 8)
+            # Stroke 1: top-left to bottom-right
+            for i in range(sz - 2 * pad):
+                x = pad + i
+                y = pad + i
+                for t in range(thickness):
+                    if x + t < sz - 2 and y < sz - 2:
+                        img.put(check_color, to=(x + t, y, x + t + 1, y + 1))
+                    if y + t < sz - 2 and x < sz - 2:
+                        img.put(check_color, to=(x, y + t, x + 1, y + t + 1))
+            # Stroke 2: top-right to bottom-left
+            for i in range(sz - 2 * pad):
+                x = sz - pad - 1 - i
+                y = pad + i
+                for t in range(thickness):
+                    if x - t >= 2 and y < sz - 2:
+                        img.put(check_color, to=(x - t, y, x - t + 1, y + 1))
+                    if y + t < sz - 2 and x >= 2:
+                        img.put(check_color, to=(x, y + t, x + 1, y + t + 1))
+            return img
+
+        def _make_radio(sz, fill, border):
+            """Draw a circle for radiobutton indicators."""
+            img = tk.PhotoImage(width=sz, height=sz)
+            # Transparent background
+            img.put('', to=(0, 0, sz, sz))
+            cx, cy = sz // 2, sz // 2
+            r_outer = sz // 2 - 1
+            r_inner = r_outer - 2
+            for y in range(sz):
+                for x in range(sz):
+                    dx, dy = x - cx, y - cy
+                    dist_sq = dx * dx + dy * dy
+                    if dist_sq <= r_outer * r_outer:
+                        if dist_sq <= r_inner * r_inner:
+                            img.put(fill, to=(x, y, x + 1, y + 1))
+                        else:
+                            img.put(border, to=(x, y, x + 1, y + 1))
+            return img
+
+        def _make_radio_selected(sz, fill, border, dot_color):
+            img = _make_radio(sz, fill, border)
+            cx, cy = sz // 2, sz // 2
+            r_dot = max(2, sz // 5)
+            for y in range(sz):
+                for x in range(sz):
+                    dx, dy = x - cx, y - cy
+                    if dx * dx + dy * dy <= r_dot * r_dot:
+                        img.put(dot_color, to=(x, y, x + 1, y + 1))
+            return img
+
+        # ── Colors ──
+        bg       = '#ffffff'
+        border   = '#888888'
+        active   = '#eeeeee'
+        check    = '#000000'
+        disabled_bg = '#d9d9d9'
+        disabled_chk = '#a0a0a0'
+
+        # ── Checkbox images ──
+        cb_unchecked    = _make_box(size, bg, border)
+        cb_checked      = _make_checked_box(size, bg, border, check)
+        cb_unchecked_a  = _make_box(size, active, border)
+        cb_checked_a    = _make_checked_box(size, active, border, check)
+        cb_unchecked_d  = _make_box(size, disabled_bg, disabled_chk)
+        cb_checked_d    = _make_checked_box(size, disabled_bg, disabled_chk, disabled_chk)
+
+        # ── Radiobutton images ──
+        rb_unchecked    = _make_radio(size, bg, border)
+        rb_selected     = _make_radio_selected(size, bg, border, check)
+        rb_unchecked_a  = _make_radio(size, active, border)
+        rb_selected_a   = _make_radio_selected(size, active, border, check)
+        rb_unchecked_d  = _make_radio(size, disabled_bg, disabled_chk)
+        rb_selected_d   = _make_radio_selected(size, disabled_bg, disabled_chk, disabled_chk)
+
+        # Keep references so images aren't garbage-collected
+        root._scaled_indicators = [
+            cb_unchecked, cb_checked, cb_unchecked_a, cb_checked_a,
+            cb_unchecked_d, cb_checked_d,
+            rb_unchecked, rb_selected, rb_unchecked_a, rb_selected_a,
+            rb_unchecked_d, rb_selected_d,
+        ]
+
+        # ── Apply to ttk style ──
+        style.element_create('custom_check', 'image', cb_unchecked,
+            ('disabled selected', cb_checked_d),
+            ('disabled', cb_unchecked_d),
+            ('active selected', cb_checked_a),
+            ('active', cb_unchecked_a),
+            ('selected', cb_checked),
+        )
+        style.layout('TCheckbutton', [
+            ('Checkbutton.padding', {'sticky': 'nswe', 'children': [
+                ('custom_check', {'side': 'left', 'sticky': ''}),
+                ('Checkbutton.focus', {'side': 'left', 'sticky': '',
+                    'children': [
+                        ('Checkbutton.label', {'sticky': 'nswe'}),
+                    ]}),
+            ]}),
+        ])
+
+        style.element_create('custom_radio', 'image', rb_unchecked,
+            ('disabled selected', rb_selected_d),
+            ('disabled', rb_unchecked_d),
+            ('active selected', rb_selected_a),
+            ('active', rb_unchecked_a),
+            ('selected', rb_selected),
+        )
+        style.layout('TRadiobutton', [
+            ('Radiobutton.padding', {'sticky': 'nswe', 'children': [
+                ('custom_radio', {'side': 'left', 'sticky': ''}),
+                ('Radiobutton.focus', {'side': 'left', 'sticky': '',
+                    'children': [
+                        ('Radiobutton.label', {'sticky': 'nswe'}),
+                    ]}),
+            ]}),
+        ])
+
+    except Exception:
+        pass  # never break app startup over indicator scaling
+
+    # ── Style Combobox and Button widgets: white when active, gray when disabled ──
+    try:
+        from tkinter import ttk
+        style = ttk.Style()
+
+        # Combobox: white fieldbackground when readonly, gray when disabled
+        style.map('TCombobox',
+            fieldbackground=[
+                ('disabled', '#d9d9d9'),
+                ('readonly', '#ffffff'),
+            ],
+            background=[
+                ('disabled', '#d9d9d9'),
+                ('readonly', '#ffffff'),
+                ('active', '#eeeeee'),
+            ],
+            foreground=[
+                ('disabled', '#a0a0a0'),
+            ],
+        )
+
+        # TButton: white background when normal, gray when disabled
+        style.map('TButton',
+            background=[
+                ('disabled', '#d9d9d9'),
+                ('pressed', '#c0c0c0'),
+                ('active', '#eeeeee'),
+                ('!disabled', '#ffffff'),
+            ],
+            foreground=[
+                ('disabled', '#a0a0a0'),
+            ],
+        )
+
+        # Entry: white when normal, gray when disabled/readonly
+        style.map('TEntry',
+            fieldbackground=[
+                ('disabled', '#d9d9d9'),
+                ('readonly', '#d9d9d9'),
+                ('!disabled !readonly', '#ffffff'),
+            ],
+            foreground=[
+                ('disabled', '#a0a0a0'),
+                ('readonly', '#a0a0a0'),
+            ],
+        )
+    except Exception:
+        pass
+
 
 def center_window_on_screen(win):
     """Center a Toplevel or Tk window on the screen containing the
