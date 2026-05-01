@@ -259,18 +259,6 @@ def open_batch_filter(app):
         files_frame = ttk.LabelFrame(win, text="Subtitle Files", padding=8)
         files_frame.pack(fill='both', expand=True, padx=10, pady=(6, 5))
 
-        list_frame = ttk.Frame(files_frame)
-        list_frame.pack(fill='both', expand=True)
-
-        list_scroll = ttk.Scrollbar(list_frame, orient='vertical')
-        list_scroll.pack(side='right', fill='y')
-
-        file_listbox = tk.Listbox(list_frame, height=8, font=('Courier', 9),
-                                  selectmode='extended',
-                                  yscrollcommand=list_scroll.set)
-        file_listbox.pack(fill='both', expand=True)
-        list_scroll.config(command=file_listbox.yview)
-
         file_count_var = tk.StringVar(value="0 files loaded")
 
         def _update_file_count():
@@ -317,17 +305,27 @@ def open_batch_filter(app):
             file_paths.clear()
             _update_file_count()
 
+        # Buttons packed ABOVE the listbox so they're never clipped
         btn_frame = ttk.Frame(files_frame)
-        btn_frame.pack(fill='x', pady=(6, 0))
+        btn_frame.pack(fill='x', pady=(0, 4))
         ttk.Button(btn_frame, text="Add Files...", command=add_files).pack(side='left', padx=(0, 4))
         ttk.Button(btn_frame, text="Remove Selected", command=remove_selected).pack(side='left', padx=4)
         ttk.Button(btn_frame, text="Clear All", command=clear_all).pack(side='left', padx=4)
         ttk.Label(btn_frame, textvariable=file_count_var,
                   foreground='gray').pack(side='right')
 
-        # Drag-and-drop hint
-        ttk.Label(files_frame, text="Drag and drop subtitle files here",
-                  font=('Helvetica', 9), foreground='gray').pack(anchor='center', pady=(4, 0))
+        # File listbox (expands to fill remaining space)
+        list_frame = ttk.Frame(files_frame)
+        list_frame.pack(fill='both', expand=True)
+
+        list_scroll = ttk.Scrollbar(list_frame, orient='vertical')
+        list_scroll.pack(side='right', fill='y')
+
+        file_listbox = tk.Listbox(list_frame, height=4, font=('Courier', 9),
+                                  selectmode='extended',
+                                  yscrollcommand=list_scroll.set)
+        file_listbox.pack(fill='both', expand=True)
+        list_scroll.config(command=file_listbox.yview)
 
         # DnD registration
         def on_batch_drop(event):
