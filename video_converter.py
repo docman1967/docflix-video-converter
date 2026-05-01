@@ -8653,7 +8653,10 @@ class VideoConverterApp:
             self.root.after(500, _ask_rename)
     
     def update_file_status(self, index, status):
-        """Update status of a file in the tree"""
+        """Update status of a file in both the tree and the files list."""
+        # Update the data model so batch ETA can scan by status
+        if 0 <= index < len(self.files):
+            self.files[index]['status'] = status
         def _update():
             item = self.file_tree.get_children()[index]
             values = list(self.file_tree.item(item, 'values'))
