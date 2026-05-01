@@ -34,7 +34,8 @@ def open_batch_filter(app):
 
         win = tk.Toplevel(app.root)
         win.title("Batch Filter Subtitles")
-        win.geometry("620x700")
+        win.geometry("620x860")
+        win.minsize(620, 750)
         win.resizable(True, True)
         app._center_on_main(win)
 
@@ -276,7 +277,7 @@ def open_batch_filter(app):
         # ══════════════════════════════════════════════════════════════════════
         sr_frame = ttk.LabelFrame(win, text="Search && Replace (applied to all files)",
                                   padding=8)
-        sr_frame.pack(fill='both', expand=True, padx=10, pady=5)
+        sr_frame.pack(fill='x', padx=10, pady=5)
 
         # Input row
         sr_input = ttk.Frame(sr_frame)
@@ -554,6 +555,10 @@ def open_batch_filter(app):
 
         ttk.Button(action_frame, text="Close", command=_close_window).pack(side='right')
         win.protocol('WM_DELETE_WINDOW', _close_window)
+
+        # Force Tk to calculate geometry and render all widgets — prevents
+        # invisible/blank controls on high-DPI displays until mouse-over
+        win.update_idletasks()
 
         if not getattr(app, '_standalone_mode', False):
             win.wait_window()
