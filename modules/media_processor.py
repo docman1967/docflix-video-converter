@@ -15,11 +15,11 @@ import shutil
 import subprocess
 import threading
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, messagebox
 
 from .constants import VIDEO_EXTENSIONS, EDITION_PRESETS
 from .chapters import generate_auto_chapters, chapters_to_ffmetadata
-from .utils import get_audio_info, get_subtitle_streams, ask_directory, scaled_geometry, scaled_minsize
+from .utils import get_audio_info, get_subtitle_streams, ask_directory, ask_open_files, scaled_geometry, scaled_minsize
 
 try:
     from tkinterdnd2 import DND_FILES
@@ -103,7 +103,7 @@ def open_media_processor(app):
         toolbar.grid(row=0, column=0, sticky='ew', pady=(0, 6))
 
         def _add_files():
-            paths = filedialog.askopenfilenames(
+            paths = ask_open_files(
                 parent=win,
                 title="Select Video Files",
                 filetypes=[("Video files", "*.mkv *.mp4 *.avi *.mov *.wmv *.flv *.webm *.ts *.m2ts *.mts"),
@@ -443,7 +443,7 @@ def open_media_processor(app):
                     sub_list.insert('end', f"[{stype}] {os.path.basename(spath)}")
 
             def _add_sub():
-                paths = filedialog.askopenfilenames(
+                paths = ask_open_files(
                     parent=win,
                     title="Select Subtitle Files",
                     filetypes=[("Subtitle files", "*.srt *.ass *.ssa *.vtt *.sub"),

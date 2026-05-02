@@ -9,9 +9,9 @@ import os
 from pathlib import Path
 import re
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, messagebox
 
-from .utils import scaled_geometry, scaled_minsize
+from .utils import scaled_geometry, scaled_minsize, ask_open_files, ask_directory
 
 from .subtitle_filters import (
     parse_srt, write_srt,
@@ -283,7 +283,7 @@ def open_batch_filter(app):
                 app.add_log(f"Batch filter: added {added} subtitle file(s)", 'INFO')
 
         def add_files():
-            paths = filedialog.askopenfilenames(
+            paths = ask_open_files(
                 parent=win,
                 title="Select Subtitle Files",
                 filetypes=[
@@ -294,6 +294,21 @@ def open_batch_filter(app):
             )
             if paths:
                 _add_paths(paths)
+
+        def add_folder():
+            folder = ask_directory(parent=win, title="Select Folder")
+            if folder:
+                sub_exts = {'.srt', '.ass', '.ssa', '.vtt', '.sub'}
+                paths = []
+                for root_dir, dirs, fnames in os.walk(folder):
+                    dirs[:] = [d for d in dirs if not d.startswith('.')]
+                    for fn in sorted(fnames):
+                        if fn.startswith('.'):
+                            continue
+                        if Path(fn).suffix.lower() in sub_exts:
+                            paths.append(os.path.join(root_dir, fn))
+                if paths:
+                    _add_paths(paths)
 
         def remove_selected():
             selected = sorted(file_listbox.curselection(), reverse=True)
@@ -311,6 +326,7 @@ def open_batch_filter(app):
         btn_frame = ttk.Frame(files_frame)
         btn_frame.pack(fill='x', pady=(0, 4))
         ttk.Button(btn_frame, text="Add Files...", command=add_files).pack(side='left', padx=(0, 4))
+        ttk.Button(btn_frame, text="Add Folder...", command=add_folder).pack(side='left', padx=(0, 4))
         ttk.Button(btn_frame, text="Remove Selected", command=remove_selected).pack(side='left', padx=4)
         ttk.Button(btn_frame, text="Clear All", command=clear_all).pack(side='left', padx=4)
         ttk.Label(btn_frame, textvariable=file_count_var,

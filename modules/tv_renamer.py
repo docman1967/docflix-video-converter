@@ -12,12 +12,12 @@ import re
 import subprocess
 import threading
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, messagebox
 
 from .constants import (
     APP_NAME, APP_VERSION, VIDEO_EXTENSIONS, SUBTITLE_EXTENSIONS,
 )
-from .utils import create_tooltip, scaled_geometry, scaled_minsize
+from .utils import create_tooltip, scaled_geometry, scaled_minsize, ask_open_files, ask_directory
 
 try:
     from tkinterdnd2 import DND_FILES
@@ -1664,7 +1664,7 @@ def open_tv_renamer(app):
         create_tooltip(clear_btn, "Remove all files from the list")
 
         def _browse_files():
-            paths = filedialog.askopenfilenames(
+            paths = ask_open_files(
                 parent=win, title="Select Video Files",
                 filetypes=[("Video files", "*.mkv *.mp4 *.avi *.mov *.ts *.m2ts"),
                            ("All files", "*.*")])
@@ -1672,7 +1672,7 @@ def open_tv_renamer(app):
                 _add_paths(list(paths))
 
         def _browse_folder():
-            path = filedialog.askdirectory(parent=win, title="Select Folder")
+            path = ask_directory(parent=win, title="Select Folder")
             if path:
                 _add_paths([path])
 
@@ -1753,10 +1753,9 @@ def open_tv_renamer(app):
         def _open_template_settings():
             dlg = tk.Toplevel(win)
             dlg.title("Filename Template")
-            dlg.geometry("860x750")
-            dlg.minsize(780, 650)
+            dlg.geometry(scaled_geometry(dlg, 860, 750))
+            dlg.minsize(*scaled_minsize(dlg, 780, 650))
             dlg.resizable(True, True)
-            dlg.transient(win)
             dlg.grab_set()
             app._center_on_main(dlg)
 

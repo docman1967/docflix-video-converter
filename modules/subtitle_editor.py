@@ -4844,7 +4844,7 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
         view_menu_int = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="View", menu=view_menu_int)
         view_menu_int.add_command(label="Show/Hide Timeline",
-                                  command=_toggle_timeline_int,
+                                  command=lambda: _toggle_timeline_int(),
                                   accelerator="Ctrl+T")
         editor.bind('<Control-t>', lambda e: _toggle_timeline_int())
         editor.bind('<Control-T>', lambda e: _toggle_timeline_int())

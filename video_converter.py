@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Video Converter"
-APP_VERSION = "2.3.3"
+APP_VERSION = "2.3.4"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -7444,9 +7444,11 @@ class VideoConverterApp:
             messagebox.showerror("Media Details Error", str(e))
             return
 
+        from modules.utils import scaled_geometry, scaled_minsize
         dlg = tk.Toplevel(self.root)
         dlg.title(f"Media Details — {os.path.basename(filepath)}")
-        dlg.geometry("620x520")
+        dlg.geometry(scaled_geometry(dlg, 620, 520))
+        dlg.minsize(*scaled_minsize(dlg, 500, 400))
         dlg.resizable(True, True)
         self._center_on_main(dlg)
 

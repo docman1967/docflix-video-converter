@@ -12,6 +12,8 @@ import subprocess
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+from .utils import scaled_geometry, scaled_minsize
+
 
 # ═══════════════════════════════════════════════════════════════════
 # ffprobe helpers
@@ -714,8 +716,8 @@ def show_enhanced_media_info(app, filepath):
     # ── Window ──
     dlg = tk.Toplevel(app.root)
     dlg.title(f'Enhanced Media Details — {os.path.basename(filepath)}')
-    dlg.geometry('780x620')
-    dlg.minsize(600, 400)
+    dlg.geometry(scaled_geometry(dlg, 780, 620))
+    dlg.minsize(*scaled_minsize(dlg, 600, 400))
     dlg.resizable(True, True)
     try:
         app._center_on_main(dlg)

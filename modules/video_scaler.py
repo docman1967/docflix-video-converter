@@ -12,10 +12,10 @@ from pathlib import Path
 import subprocess
 import threading
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, messagebox
 
 from .constants import VIDEO_EXTENSIONS, GPU_BACKENDS, VIDEO_CODEC_MAP
-from .utils import scaled_geometry, scaled_minsize
+from .utils import scaled_geometry, scaled_minsize, ask_open_files, ask_directory
 
 try:
     from tkinterdnd2 import DND_FILES
@@ -234,7 +234,7 @@ def open_video_scaler(app):
     toolbar.grid(row=0, column=0, sticky='ew', pady=(0, 4))
 
     def _add_files():
-        paths = filedialog.askopenfilenames(
+        paths = ask_open_files(
             parent=win, title="Select Video Files",
             filetypes=[("Video files", "*.mkv *.mp4 *.avi *.mov *.wmv *.flv *.webm *.ts *.m2ts *.mts"),
                        ("All files", "*.*")])
@@ -243,7 +243,7 @@ def open_video_scaler(app):
         _rebuild_tree()
 
     def _add_folder():
-        folder = filedialog.askdirectory(parent=win, title="Select Folder")
+        folder = ask_directory(parent=win, title="Select Folder")
         if folder:
             added = 0
             for root_dir, dirs, fnames in os.walk(folder):
@@ -390,7 +390,7 @@ def open_video_scaler(app):
     out_entry.pack(side='left', padx=(0, 4))
     ttk.Button(row3, text="Browse...",
                command=lambda: opt_output_folder.set(
-                   filedialog.askdirectory(parent=win, title="Select Output Folder")
+                   ask_directory(parent=win, title="Select Output Folder")
                    or opt_output_folder.get())).pack(side='left')
 
     # Initialize presets
