@@ -57,7 +57,7 @@ def open_standalone_subtitle_editor(app):
         import tempfile
 
         editor = tk.Toplevel(app.root)
-        editor.title("Subtitle Editor")
+        editor.title("Docflix Subtitle Editor")
         editor.geometry(scaled_geometry(editor, 950, 650))
         editor.minsize(*scaled_minsize(editor, 700, 500))
         editor.resizable(True, True)
@@ -181,7 +181,7 @@ def open_standalone_subtitle_editor(app):
                     srt_text = f.read()
                 os.unlink(tmp_srt.name)
 
-            title = f"Subtitle Editor — {os.path.basename(sub_path)}"
+            title = f"Docflix Subtitle Editor — {os.path.basename(sub_path)}"
             if _load_cues_into_editor(srt_text, title, sub_path):
                 app.add_log(f"Opened subtitle file: {os.path.basename(sub_path)} "
                              f"({len(cues)} entries)", 'INFO')
@@ -400,7 +400,7 @@ def open_standalone_subtitle_editor(app):
 
                 # Build title
                 lang = chosen['language'] if chosen['language'] != 'und' else '?'
-                title_str = (f"Subtitle Editor — Stream #{stream_index} ({lang}) — "
+                title_str = (f"Docflix Subtitle Editor — Stream #{stream_index} ({lang}) — "
                              f"{os.path.basename(video_path)}")
 
                 if _load_cues_into_editor(srt_text, title_str, tmp_srt.name):
@@ -628,7 +628,7 @@ def open_standalone_subtitle_editor(app):
             with open(out_path, 'w', encoding='utf-8') as f:
                 f.write(write_srt(cues))
             current_path[0] = out_path
-            editor.title(f"Subtitle Editor — {os.path.basename(out_path)}")
+            editor.title(f"Docflix Subtitle Editor — {os.path.basename(out_path)}")
             app.add_log(f"Subtitle saved as: {out_path}", 'SUCCESS')
 
         def do_export():
@@ -5984,7 +5984,7 @@ def main():
     from .standalone import create_standalone_root
 
     root, app = create_standalone_root(
-        title="Subtitle Editor",
+        title="Docflix Subtitle Editor",
         geometry="900x650",
         minsize=(700, 500),
     )

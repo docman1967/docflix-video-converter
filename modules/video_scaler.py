@@ -1,5 +1,5 @@
 """
-Docflix Media Suite — Video Scaler
+Docflix Media Suite — Docflix Media Rescale
 
 Standalone tool for batch resizing/scaling video files.
 Supports CPU and GPU-accelerated scaling (NVIDIA NVENC,
@@ -182,10 +182,10 @@ def _build_scale_filter(target_w, target_h, backend_id=None):
 # ═══════════════════════════════════════════════════════════════════
 
 def open_video_scaler(app):
-    """Open the Video Scaler tool window."""
+    """Open the Docflix Media Rescale tool window."""
 
     win = tk.Toplevel(app.root)
-    win.title("Video Scaler")
+    win.title("Docflix Media Rescale")
     win.geometry(scaled_geometry(win, 920, 750))
     win.minsize(*scaled_minsize(win, 750, 550))
     try:
@@ -433,7 +433,7 @@ def open_video_scaler(app):
     close_frame.grid(row=5, column=0, sticky='e', pady=(0, 0))
 
     def _save_scaler_prefs():
-        """Save Video Scaler settings to preferences."""
+        """Save Docflix Media Rescale settings to preferences."""
         sp = {
             'resolution':    opt_resolution.get(),
             'custom_w':      opt_custom_w.get(),
@@ -871,15 +871,15 @@ def open_video_scaler(app):
         if processing[0]:
             return
         if not files:
-            messagebox.showinfo("Video Scaler", "Add files first.", parent=win)
+            messagebox.showinfo("Docflix Media Rescale", "Add files first.", parent=win)
             return
         if _get_target(files[0]) is None:
-            messagebox.showinfo("Video Scaler",
+            messagebox.showinfo("Docflix Media Rescale",
                                 "Resolution is set to 'Original' — nothing to scale.",
                                 parent=win)
             return
         if opt_output_mode.get() == 'folder' and not opt_output_folder.get():
-            messagebox.showinfo("Video Scaler",
+            messagebox.showinfo("Docflix Media Rescale",
                                 "Please select an output folder.", parent=win)
             return
 
@@ -964,7 +964,7 @@ def open_video_scaler(app):
     # invisible/blank controls on high-DPI displays until mouse-over
     win.update_idletasks()
 
-    _log("Video Scaler ready -- add files and select a target resolution", 'INFO')
+    _log("Docflix Media Rescale ready -- add files and select a target resolution", 'INFO')
     _log("Tip: drag and drop video files onto this window", 'INFO')
 
 
@@ -973,11 +973,11 @@ def open_video_scaler(app):
 # ═══════════════════════════════════════════════════════════════════
 
 def main():
-    """Standalone entry point for the Video Scaler."""
+    """Standalone entry point for the Docflix Media Rescale."""
     from .standalone import create_standalone_root
 
     root, app = create_standalone_root(
-        title="Video Scaler",
+        title="Docflix Media Rescale",
         geometry="920x750",
         minsize=(750, 550),
     )

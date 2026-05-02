@@ -35,7 +35,7 @@ def open_media_processor(app):
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         win = tk.Toplevel(app.root)
-        win.title("🔧 Media Processor")
+        win.title("🔧 Docflix Media Processor")
         win.geometry(scaled_geometry(win, 920, 880))
         win.minsize(*scaled_minsize(win, 750, 650))
         app._center_on_main(win)
@@ -1348,7 +1348,7 @@ def open_media_processor(app):
         # invisible/blank controls on high-DPI displays until mouse-over
         win.update_idletasks()
 
-        _log("Media Processor ready — add files and click Process All", 'INFO')
+        _log("Docflix Media Processor ready — add files and click Process All", 'INFO')
         _log("Tip: drag and drop video files onto this window", 'INFO')
         _log(f"Subtitle matching: *.{opt_sub_lang.get()}.srt / *.{opt_sub_lang.get()}.forced.srt", 'INFO')
 
@@ -1360,7 +1360,7 @@ def main():
     from .standalone import create_standalone_root
 
     root, app = create_standalone_root(
-        title="Media Processor",
+        title="Docflix Media Processor",
         geometry="920x880",
         minsize=(750, 650),
     )

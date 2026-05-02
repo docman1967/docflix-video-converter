@@ -1,5 +1,5 @@
 """
-Docflix Media Suite — File Renamer
+Docflix Media Suite — Media Renamer
 
 Batch rename TV show and movie files using episode data
 from TVDB or TMDB. Can run as standalone tool or as part
@@ -36,7 +36,7 @@ def open_tv_renamer(app):
         TMDB_IMG_BASE = 'https://image.tmdb.org/t/p'
 
         win = tk.Toplevel(app.root)
-        win.title("📺 File Renamer")
+        win.title("📺 Docflix Media Renamer")
         win.geometry(scaled_geometry(win, 960, 650))
         win.minsize(*scaled_minsize(win, 800, 550))
         win.resizable(True, True)
@@ -2054,8 +2054,8 @@ def open_tv_renamer(app):
         menubar.add_cascade(label="Help", menu=help_menu)
 
         def _show_about():
-            messagebox.showinfo("About File Renamer",
-                f"File Renamer\n"
+            messagebox.showinfo("About Docflix Media Renamer",
+                f"Docflix Media Renamer\n"
                 f"Part of {APP_NAME} v{APP_VERSION}\n\n"
                 f"Rename video and subtitle files using\n"
                 f"episode data from TVDB or TMDB.\n\n"
@@ -2088,7 +2088,7 @@ def open_tv_renamer(app):
             tree.get_children()))
         win.bind('<Delete>', lambda e: _remove_selected_files())
 
-        _log(f"File Renamer ready — provider: {provider_var.get()}")
+        _log(f"Docflix Media Renamer ready — provider: {provider_var.get()}")
         _log("Drag and drop video files or folders to begin")
 
 
@@ -2098,7 +2098,7 @@ def main():
     from .standalone import create_standalone_root
 
     root, app = create_standalone_root(
-        title="\U0001f4fa File Renamer",
+        title="\U0001f4fa Docflix Media Renamer",
         geometry="960x650",
         minsize=(800, 550),
     )

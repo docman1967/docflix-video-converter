@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.4.1"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -4189,9 +4189,6 @@ class VideoConverterApp:
         tools_menu.add_separator()
         tools_menu.add_command(label="Media Details...",
                                accelerator="Ctrl+I",
-                               command=self.show_media_info)
-        tools_menu.add_command(label="Enhanced Media Details...",
-                               accelerator="Ctrl+Shift+I",
                                command=self.show_enhanced_media_info)
         tools_menu.add_command(label="Test Encode (30s)...",
                                accelerator="Ctrl+T",
@@ -4201,17 +4198,17 @@ class VideoConverterApp:
                                accelerator="Ctrl+Shift+F",
                                command=self.open_output_folder)
         tools_menu.add_separator()
-        tools_menu.add_command(label="✏ Subtitle Editor...",
+        tools_menu.add_command(label="Docflix Subtitle Editor...",
                                command=self.open_standalone_subtitle_editor)
-        tools_menu.add_command(label="📦 Batch Filter Subtitles...",
+        tools_menu.add_command(label="Batch Filter Subtitles...",
                                command=self.open_batch_filter)
         tools_menu.add_separator()
-        tools_menu.add_command(label="🔧 Media Processor...",
+        tools_menu.add_command(label="Docflix Media Processor...",
                                accelerator="Ctrl+M",
                                command=self.open_media_processor)
-        tools_menu.add_command(label="📺 File Renamer...",
+        tools_menu.add_command(label="Docflix Media Renamer...",
                                command=self.open_tv_renamer)
-        tools_menu.add_command(label="📐 Video Scaler...",
+        tools_menu.add_command(label="Docflix Media Rescale...",
                                accelerator="Ctrl+Shift+R",
                                command=self.open_video_scaler)
         # Help menu
@@ -4236,8 +4233,7 @@ class VideoConverterApp:
         self.root.bind('<F1>',        lambda e: self.show_keyboard_shortcuts())
         self.root.bind('<Control-p>', lambda e: self.play_source_file())
         self.root.bind('<Control-P>', lambda e: self.play_output_file())
-        self.root.bind('<Control-i>', lambda e: self.show_media_info())
-        self.root.bind('<Control-I>', lambda e: self.show_enhanced_media_info())
+        self.root.bind('<Control-i>', lambda e: self.show_enhanced_media_info())
         self.root.bind('<Control-t>', lambda e: self.test_encode())
         self.root.bind('<Control-F>', lambda e: self.open_output_folder())
         self.root.bind('<Control-m>', lambda e: self.open_media_processor())
@@ -5825,7 +5821,7 @@ class VideoConverterApp:
                 spec.loader.exec_module(mod)
                 mod.open_standalone_subtitle_editor(self)
             else:
-                messagebox.showerror("Subtitle Editor", "modules/subtitle_editor.py not found.")
+                messagebox.showerror("Docflix Subtitle Editor", "modules/subtitle_editor.py not found.")
 
     def open_media_processor(self):
         """Open the Media Processor window."""
@@ -5842,11 +5838,11 @@ class VideoConverterApp:
                 spec.loader.exec_module(mod)
                 mod.open_media_processor(self)
             else:
-                messagebox.showerror("Media Processor", "modules/media_processor.py not found.")
+                messagebox.showerror("Docflix Media Processor", "modules/media_processor.py not found.")
 
     # ── File Renamer ────────────────────────────────────────────────────
     def open_video_scaler(self):
-        """Open the Video Scaler tool."""
+        """Open the Docflix Media Rescale tool."""
         try:
             from modules.video_scaler import open_video_scaler
             open_video_scaler(self)
@@ -5860,7 +5856,7 @@ class VideoConverterApp:
                 spec.loader.exec_module(mod)
                 mod.open_video_scaler(self)
             else:
-                messagebox.showerror("Video Scaler", "modules/video_scaler.py not found.")
+                messagebox.showerror("Docflix Media Rescale", "modules/video_scaler.py not found.")
 
     def open_tv_renamer(self):
         """Open the File Renamer tool."""
@@ -5877,7 +5873,7 @@ class VideoConverterApp:
                 spec.loader.exec_module(mod)
                 mod.open_tv_renamer(self)
             else:
-                messagebox.showerror("TV Renamer", "modules/tv_renamer.py not found.")
+                messagebox.showerror("Docflix Media Renamer", "modules/tv_renamer.py not found.")
 
     def open_batch_filter(self):
         """Open the Batch Filter window."""
@@ -6141,7 +6137,7 @@ class VideoConverterApp:
                 mod.show_subtitle_editor(self, filepath, stream_index, file_info,
                                           external_sub_path=external_sub_path)
             else:
-                messagebox.showerror("Subtitle Editor", "modules/subtitle_editor.py not found.")
+                messagebox.showerror("Docflix Subtitle Editor", "modules/subtitle_editor.py not found.")
 
     def on_drop(self, event):
         """Handle files/folders dropped onto the file list."""
@@ -6808,10 +6804,10 @@ class VideoConverterApp:
             ("Tools", [
                 ("Ctrl+P",         "Play Source File"),
                 ("Ctrl+Shift+P",   "Play Output File"),
-                ("Ctrl+I",         "Media Details"),
+                ("Ctrl+I",         "Media Details (Enhanced)"),
                 ("Ctrl+T",         "Test Encode (30s)"),
                 ("Ctrl+Shift+F",   "Open Output Folder"),
-                ("Ctrl+M",         "Media Processor"),
+                ("Ctrl+M",         "Docflix Media Processor"),
             ]),
             ("File List", [
                 ("Delete",         "Remove selected file from list"),
@@ -7418,107 +7414,6 @@ class VideoConverterApp:
         self.add_log("Recent folders cleared.", 'INFO')
 
     # ── Tools ────────────────────────────────────────────────────────────────
-
-    def show_media_info(self):
-        """Run ffprobe on the selected file and show a formatted info dialog."""
-        item, index = self._get_selected_file_index()
-        if index is None:
-            messagebox.showinfo("Media Details", "Please select a file from the list first.")
-            return
-        filepath = self.files[index]['path']
-
-        try:
-            result = subprocess.run(
-                ['ffprobe', '-v', 'quiet',
-                 '-print_format', 'json',
-                 '-show_format', '-show_streams',
-                 filepath],
-                capture_output=True, text=True, timeout=15
-            )
-            if result.returncode != 0:
-                messagebox.showerror("Media Details Error", result.stderr[:300])
-                return
-            import json as _json
-            data = _json.loads(result.stdout)
-        except Exception as e:
-            messagebox.showerror("Media Details Error", str(e))
-            return
-
-        from modules.utils import scaled_geometry, scaled_minsize
-        dlg = tk.Toplevel(self.root)
-        dlg.title(f"Media Details — {os.path.basename(filepath)}")
-        dlg.geometry(scaled_geometry(dlg, 620, 520))
-        dlg.minsize(*scaled_minsize(dlg, 500, 400))
-        dlg.resizable(True, True)
-        self._center_on_main(dlg)
-
-        text = scrolledtext.ScrolledText(dlg, wrap='word', font=('Courier', 9))
-        text.pack(fill='both', expand=True, padx=8, pady=8)
-
-        fmt = data.get('format', {})
-        lines = []
-        lines.append(f"{'='*50}")
-        lines.append(f"  FILE: {os.path.basename(filepath)}")
-        lines.append(f"{'='*50}")
-        lines.append(f"  Format:    {fmt.get('format_long_name', fmt.get('format_name', '?'))}")
-        dur = float(fmt.get('duration', 0))
-        lines.append(f"  Duration:  {format_duration(dur)} ({dur:.2f}s)")
-        size = int(fmt.get('size', 0))
-        lines.append(f"  File Size: {format_size(size)}")
-        br = int(fmt.get('bit_rate', 0))
-        lines.append(f"  Bitrate:   {br // 1000} kbps" if br else "  Bitrate:   ?")
-
-        for i, stream in enumerate(data.get('streams', [])):
-            lines.append("")
-            ctype = stream.get('codec_type', '?').upper()
-            cname = stream.get('codec_long_name', stream.get('codec_name', '?'))
-            lines.append(f"  STREAM #{stream.get('index','?')} — {ctype}")
-            lines.append(f"  {'─'*46}")
-            lines.append(f"    Codec:      {cname}")
-            if ctype == 'VIDEO':
-                lines.append(f"    Resolution: {stream.get('width','?')}x{stream.get('height','?')}")
-                lines.append(f"    Frame Rate: {stream.get('r_frame_rate','?')}")
-                lines.append(f"    Pixel Fmt:  {stream.get('pix_fmt','?')}")
-                lines.append(f"    Profile:    {stream.get('profile','?')}")
-                sbr = stream.get('bit_rate')
-                if sbr:
-                    lines.append(f"    Bitrate:    {int(sbr)//1000} kbps")
-            elif ctype == 'AUDIO':
-                lines.append(f"    Sample Rate: {stream.get('sample_rate','?')} Hz")
-                lines.append(f"    Channels:    {stream.get('channels','?')}")
-                lines.append(f"    Layout:      {stream.get('channel_layout','?')}")
-                sbr = stream.get('bit_rate')
-                if sbr:
-                    lines.append(f"    Bitrate:     {int(sbr)//1000} kbps")
-            elif ctype == 'SUBTITLE':
-                tags = stream.get('tags', {})
-                disp = stream.get('disposition', {})
-                lang  = tags.get('language', '?')
-                title = tags.get('title', '')
-                lines.append(f"    Language:   {lang.upper()}")
-                if title:
-                    lines.append(f"    Title:      {title}")
-                lines.append(f"    Codec:      {stream.get('codec_name','?')}")
-                flags = []
-                if disp.get('forced'):  flags.append('Forced')
-                if disp.get('hearing_impaired'): flags.append('SDH')
-                if disp.get('default'): flags.append('Default')
-                if disp.get('commentary'): flags.append('Commentary')
-                if flags:
-                    lines.append(f"    Flags:      {', '.join(flags)}")
-            else:
-                tags = stream.get('tags', {})
-                lang = tags.get('language')
-                title = tags.get('title')
-                if lang:  lines.append(f"    Language:   {lang}")
-                if title: lines.append(f"    Title:      {title}")
-
-        lines.append("")
-        lines.append(f"{'='*50}")
-        text.insert('end', '\n'.join(lines))
-        text.configure(state='disabled')
-
-        ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=(0, 8))
 
     def show_enhanced_media_info(self):
         """Show the enhanced media info dialog for the selected file."""
