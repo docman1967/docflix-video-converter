@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — Preferences Management
+Docflix Media Suite — Preferences Management
 
 Save, load, and reset user preferences. These methods are
 designed to be mixed into the VideoConverterApp class.

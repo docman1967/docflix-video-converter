@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — Media Processor
+Docflix Media Suite — Media Processor
 
 Standalone remux-only post-processing tool for already-encoded
 files. Supports audio conversion, metadata cleanup, subtitle

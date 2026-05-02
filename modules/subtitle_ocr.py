@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — Bitmap Subtitle OCR
+Docflix Media Suite — Bitmap Subtitle OCR
 
 Convert PGS/VobSub bitmap subtitles to SRT text via
 Tesseract OCR. Single-pass rendering, parallel OCR,

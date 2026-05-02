@@ -1,12 +1,12 @@
 """
-Docflix Video Converter — Constants and Configuration
+Docflix Media Suite — Constants and Configuration
 
 All shared constants, codec maps, extension sets, and GPU backend definitions.
 """
 
 # ── App identity ──
-APP_NAME = "Docflix Video Converter"
-APP_VERSION = "2.3.4"
+APP_NAME = "Docflix Media Suite"
+APP_VERSION = "2.4.0"
 
 # ── Defaults ──
 DEFAULT_BITRATE = "2M"

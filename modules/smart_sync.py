@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — Smart Sync (Whisper-based)
+Docflix Media Suite — Smart Sync (Whisper-based)
 
 Auto-sync subtitles to video audio using faster-whisper
 (Standard engine) or WhisperX (Precise engine) speech

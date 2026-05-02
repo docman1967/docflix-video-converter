@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — Video Scaler
+Docflix Media Suite — Video Scaler
 
 Standalone tool for batch resizing/scaling video files.
 Supports CPU and GPU-accelerated scaling (NVIDIA NVENC,

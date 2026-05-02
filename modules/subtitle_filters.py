@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — Subtitle Filters and SRT Utilities
+Docflix Media Suite — Subtitle Filters and SRT Utilities
 
 SRT parsing/writing, all subtitle filter functions (Remove HI, Fix CAPS,
 Remove Tags, Remove Ads, etc.), and timing manipulation utilities.

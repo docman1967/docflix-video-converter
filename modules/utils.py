@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — Shared Utility Functions
+Docflix Media Suite — Shared Utility Functions
 
 Format helpers, ffprobe wrappers, tooltip widget, and other
 utilities used across multiple modules.

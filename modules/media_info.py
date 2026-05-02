@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — Enhanced Media Details
+Docflix Media Suite — Enhanced Media Details
 
 Comprehensive media file analysis tool using ffprobe.
 Displays container, video, audio, subtitle, chapter, and

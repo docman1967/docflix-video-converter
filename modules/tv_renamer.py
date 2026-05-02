@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — File Renamer
+Docflix Media Suite — File Renamer
 
 Batch rename TV show and movie files using episode data
 from TVDB or TMDB. Can run as standalone tool or as part

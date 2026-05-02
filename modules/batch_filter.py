@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — Batch Filter
+Docflix Media Suite — Batch Filter
 
 Apply subtitle filters to multiple files at once.
 Supports all filter types plus search/replace pairs.

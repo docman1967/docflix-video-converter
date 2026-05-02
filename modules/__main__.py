@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — Package Entry Point
+Docflix Media Suite — Package Entry Point
 
 Allows running the app via:
     python -m modules           # Full app

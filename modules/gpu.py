@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — GPU Detection & Verification
+Docflix Media Suite — GPU Detection & Verification
 
 GPU backend detection (NVIDIA NVENC, Intel QSV, AMD VAAPI),
 test encode verification, ffmpeg availability check,

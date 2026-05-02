@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — Conversion Engine
+Docflix Media Suite — Conversion Engine
 
 The VideoConverter class builds and runs ffmpeg commands
 for video transcoding. Supports CPU and GPU encoding,

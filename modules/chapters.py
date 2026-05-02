@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — Chapter Utilities
+Docflix Media Suite — Chapter Utilities
 
 Generate, parse, and write chapter data for ffmpeg injection.
 Chapters are stored as a list of dicts:

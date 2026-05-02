@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #===============================================================================
-# Docflix Video Converter — Installer
+# Docflix Media Suite — Installer
 #
 # Usage:
 #   ./install.sh              Install or update
@@ -18,7 +18,7 @@ set -euo pipefail
 #───────────────────────────────────────────────────────────────────────────────
 # Config
 #───────────────────────────────────────────────────────────────────────────────
-APP_NAME="Docflix Video Converter"
+APP_NAME="Docflix Media Suite"
 APP_CMD="docflix"
 INSTALL_DIR="$HOME/.local/share/docflix"
 ICON_DIR="$HOME/.local/share/icons"
@@ -332,8 +332,8 @@ header "Creating desktop launcher..."
 
 cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
-Name=Docflix Video Converter
-Comment=Batch convert MKV videos to H.265/HEVC
+Name=Docflix Media Suite
+Comment=Batch video converter, subtitle editor, and media tools
 Exec=bash $INSTALL_DIR/run_converter.sh %F
 Path=$INSTALL_DIR
 Terminal=false
@@ -409,7 +409,7 @@ echo -e "  ${GREEN}✅ Installation complete!${NC}"
 echo "========================================="
 echo ""
 echo "  Launch options:"
-echo "    • Search your app menu for \"Docflix Video Converter\""
+echo "    • Search your app menu for \"Docflix Media Suite\""
 echo "    • Or run from a terminal:  docflix"
 echo ""
 echo "  Standalone tools:"

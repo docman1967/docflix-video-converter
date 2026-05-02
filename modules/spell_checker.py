@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — Subtitle Spell Checker
+Docflix Media Suite — Subtitle Spell Checker
 
 Interactive spell check dialog for subtitle cues. Uses pyspellchecker
 for detection, with custom dictionary and character name support.

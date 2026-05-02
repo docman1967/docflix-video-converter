@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Docflix Video Converter - Standalone GUI Application
+Docflix Media Suite - Standalone GUI Application
 Convert MKV videos to H.265/HEVC format with CPU or GPU encoding
 
 Features:
@@ -48,8 +48,8 @@ except ImportError:
 # Configuration
 # ============================================================================
 
-APP_NAME = "Docflix Video Converter"
-APP_VERSION = "2.3.4"
+APP_NAME = "Docflix Media Suite"
+APP_VERSION = "2.4.0"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"

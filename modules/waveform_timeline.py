@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — Waveform Timeline Widget
+Docflix Media Suite — Waveform Timeline Widget
 
 Audio waveform display with subtitle cue overlay for visual timing
 adjustment.  Extracts audio from video via ffmpeg, renders the waveform

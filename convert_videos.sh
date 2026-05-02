@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 #===============================================================================
-# Video Converter Script - MKV to H.265/HEVC
+# Docflix Media Suite — CLI Batch Converter (H.265/HEVC)
 # Converts all MKV files in current directory to optimized H.265 format
 # Supports CPU (libx265) and GPU encoding (NVIDIA NVENC, Intel QSV, AMD VAAPI)
 #===============================================================================
@@ -395,7 +395,7 @@ main() {
     local c_folder="${PWD##*/}"
 
     log_info "========================================="
-    log_info "Video Converter Started"
+    log_info "Docflix Media Suite — CLI Converter Started"
     log_info "========================================="
     log_info "Working directory: ${p_folder}"
     case "$GPU_BACKEND" in

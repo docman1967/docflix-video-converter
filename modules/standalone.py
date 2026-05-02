@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — Standalone Context
+Docflix Media Suite — Standalone Context
 
 Lightweight application context for running individual tools
 (Subtitle Editor, TV Show Renamer, Media Processor) as standalone

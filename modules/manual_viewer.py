@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — Built-in Manual Viewer
+Docflix Media Suite — Built-in Manual Viewer
 
 Native Tkinter manual viewer with sidebar navigation and
 formatted text display. No external browser or dependencies.
@@ -58,7 +58,7 @@ MANUAL_SECTIONS = [
         ("p", ""),
         ("h3", "Launching the App"),
         ("table_header", "Method|Command"),
-        ("table_row", "App menu|Search \"Docflix Video Converter\""),
+        ("table_row", "App menu|Search \"Docflix Media Suite\""),
         ("table_row", "Terminal|docflix"),
         ("table_row", "Open a file|docflix /path/to/video.mkv"),
         ("table_row", "From source|python3 video_converter.py"),
@@ -523,7 +523,7 @@ def show_manual(app):
         app: The VideoConverterApp or StandaloneContext instance.
     """
     win = tk.Toplevel(app.root)
-    win.title("Docflix Video Converter \u2014 User Manual")
+    win.title("Docflix Media Suite \u2014 User Manual")
     win.geometry("960x700")
     win.minsize(700, 500)
     win.resizable(True, True)
@@ -634,7 +634,7 @@ def show_manual(app):
         text.delete('1.0', 'end')
 
         # Title
-        text.insert('end', 'Docflix Video Converter\n', 'h2')
+        text.insert('end', 'Docflix Media Suite\n', 'h2')
         text.insert('end', 'User Manual \u2014 Version 2.0.7\n\n', 'p')
 
         for sect_idx, (section_title, lines) in enumerate(MANUAL_SECTIONS):

@@ -1,5 +1,5 @@
 """
-Docflix Video Converter
+Docflix Media Suite
 
 Batch convert video files to H.265/HEVC format using ffmpeg,
 with support for CPU and multi-GPU encoding (NVIDIA NVENC,

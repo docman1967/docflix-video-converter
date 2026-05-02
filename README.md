@@ -1,4 +1,4 @@
-# 🎬 Docflix Video Converter
+# 🎬 Docflix Media Suite
 
 A batch video converter that encodes files to **H.265/HEVC** (and other codecs) using `ffmpeg`, with support for CPU and **multi-GPU** encoding (NVIDIA NVENC, Intel QSV, AMD VAAPI). Includes a full-featured desktop GUI, a standalone media processor for remux post-processing, a subtitle editor with OCR and Whisper-based auto-sync, a TV show renamer, and a headless CLI tool.
 
@@ -6,7 +6,7 @@ A batch video converter that encodes files to **H.265/HEVC** (and other codecs) 
 
 ## Screenshots
 
-![Docflix Video Converter](screenshot.png)
+![Docflix Media Suite](screenshot.png)
 
 ---
 

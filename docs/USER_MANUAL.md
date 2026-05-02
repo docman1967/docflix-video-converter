@@ -1,4 +1,4 @@
-# Docflix Video Converter — User Manual
+# Docflix Media Suite — User Manual
 
 **Version 2.0.5** | &copy; 2026 Tony Davis | MIT License
 
@@ -71,7 +71,7 @@ No `sudo` required. To uninstall: `./install.sh --uninstall`
 
 | Method | Command |
 |---|---|
-| App menu | Search "Docflix Video Converter" |
+| App menu | Search "Docflix Media Suite" |
 | Terminal | `docflix` |
 | Open a file | `docflix /path/to/video.mkv` |
 | From source | `python3 video_converter.py` |
@@ -583,4 +583,4 @@ Reset: Settings > Reset to Defaults, or delete `preferences.json`.
 
 ---
 
-*Docflix Video Converter v2.0.5 -- &copy; 2026 Tony Davis -- MIT License*
+*Docflix Media Suite v2.0.5 -- &copy; 2026 Tony Davis -- MIT License*

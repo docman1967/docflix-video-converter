@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launcher for Video Converter standalone application
+# Launcher for Docflix Media Suite application
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -9,7 +9,7 @@ mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/video_converter_$(date +%Y%m%d_%H%M%S).log"
 
 echo "========================================="
-echo "🎬 Video Converter"
+echo "🎬 Docflix Media Suite"
 echo "========================================="
 echo ""
 
@@ -40,7 +40,7 @@ if ! command -v ffmpeg &> /dev/null; then
     echo ""
 fi
 
-echo "Starting Video Converter..."
+echo "Starting Docflix Media Suite..."
 echo "Log file: $LOG_FILE"
 echo ""
 

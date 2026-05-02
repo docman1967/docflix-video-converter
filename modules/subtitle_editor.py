@@ -1,5 +1,5 @@
 """
-Docflix Video Converter — Subtitle Editor
+Docflix Media Suite — Subtitle Editor
 
 Full-featured subtitle editor with inline text editing,
 filters, timing tools, search/replace, spell check,
