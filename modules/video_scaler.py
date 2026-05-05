@@ -185,18 +185,33 @@ def open_video_scaler(app):
     """Open the Docflix Media Rescale tool window."""
 
     win = tk.Toplevel(app.root)
+    win.withdraw()
     win.title("Docflix Media Rescale")
-    win.geometry(scaled_geometry(win, 920, 750))
+    geom_str = scaled_geometry(win, 920, 750)
+    win.geometry(geom_str)
     win.minsize(*scaled_minsize(win, 750, 550))
+    win.update_idletasks()
     try:
-        app._center_on_main(win)
+        import re as _re
+        gm = _re.match(r'(\d+)x(\d+)', geom_str)
+        dw = int(gm.group(1)) if gm else win.winfo_reqwidth()
+        dh = int(gm.group(2)) if gm else win.winfo_reqheight()
+        pw = app.root.winfo_width()
+        ph = app.root.winfo_height()
+        px = app.root.winfo_x()
+        py = app.root.winfo_y()
+        x = px + (pw - dw) // 2
+        y = py + (ph - dh) // 2
+        win.geometry(f'{dw}x{dh}+{max(0, x)}+{max(0, y)}')
     except Exception:
         pass
+    win.deiconify()
 
     # ── State ──
     files = []          # list of dicts: path, name, width, height, duration, codec, target, status
     processing = [False]
     stop_flag = [False]
+    current_proc = [None]  # hold reference to running ffmpeg subprocess
 
     # ── Load saved preferences ──
     _sp = getattr(app, '_scaler_prefs', {})
@@ -238,25 +253,21 @@ def open_video_scaler(app):
             parent=win, title="Select Video Files",
             filetypes=[("Video files", "*.mkv *.mp4 *.avi *.mov *.wmv *.flv *.webm *.ts *.m2ts *.mts"),
                        ("All files", "*.*")])
-        for p in paths:
-            _add_one_file(p)
-        _rebuild_tree()
+        if paths:
+            _add_files_threaded(list(paths))
 
     def _add_folder():
         folder = ask_directory(parent=win, title="Select Folder")
         if folder:
-            added = 0
+            collected = []
             for root_dir, dirs, fnames in os.walk(folder):
-                # Skip hidden directories
                 dirs[:] = [d for d in dirs if not d.startswith('.')]
                 for fn in sorted(fnames):
                     if fn.startswith('.'):
                         continue
                     if Path(fn).suffix.lower() in VIDEO_EXTENSIONS:
-                        _add_one_file(os.path.join(root_dir, fn))
-                        added += 1
-            _rebuild_tree()
-            _log(f"Added {added} file(s) from {folder}", 'INFO')
+                        collected.append(os.path.join(root_dir, fn))
+            _add_files_threaded(collected, source_label=f"from {folder}")
 
     ttk.Button(toolbar, text="Add Files", command=_add_files).pack(side='left', padx=(0, 4))
     ttk.Button(toolbar, text="Add Folder", command=_add_folder).pack(side='left', padx=(0, 4))
@@ -488,14 +499,16 @@ def open_video_scaler(app):
         else:
             win.after(0, _do)
 
+    _scanning = [False]  # mutable flag to prevent overlapping scans
+
     def _add_one_file(filepath):
-        """Add a single file to the list."""
+        """Add a single file to the list (called from any thread)."""
         # Skip duplicates
         for f in files:
             if f['path'] == filepath:
-                return
+                return False
         if Path(filepath).suffix.lower() not in VIDEO_EXTENSIONS:
-            return
+            return False
 
         w, h, dur, codec = _probe_video_info(filepath)
         size_bytes = os.path.getsize(filepath) if os.path.isfile(filepath) else 0
@@ -514,6 +527,45 @@ def open_video_scaler(app):
             'size_str': size_str,
             'status': '',
         })
+        return True
+
+    def _add_files_threaded(file_paths, source_label=""):
+        """Probe and add files in a background thread with progress feedback."""
+        if _scanning[0]:
+            _log("Scan already in progress — please wait", 'WARNING')
+            return
+        _scanning[0] = True
+        total = len(file_paths)
+        if total == 0:
+            _scanning[0] = False
+            return
+
+        def _worker():
+            added = 0
+            import time
+            t0 = time.monotonic()
+            for i, p in enumerate(file_paths):
+                pct = (i / total) * 100
+                elapsed = time.monotonic() - t0
+                if i > 0:
+                    per_file = elapsed / i
+                    eta = per_file * (total - i)
+                    eta_str = f"Scanning {i + 1}/{total} — ETA {int(eta)}s"
+                else:
+                    eta_str = f"Scanning 1/{total}…"
+                _update_progress(pct, eta_str)
+                if _add_one_file(p):
+                    added += 1
+            elapsed = time.monotonic() - t0
+            label = f" {source_label}" if source_label else ""
+            _log(f"Added {added} file(s){label} in {elapsed:.1f}s", 'INFO')
+            def _finish():
+                _rebuild_tree()
+                _reset_progress()
+                _scanning[0] = False
+            win.after(0, _finish)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _get_target(f):
         """Get target resolution (w, h) for a file, or None for Original."""
@@ -686,13 +738,21 @@ def open_video_scaler(app):
         # (which may deliver padded frames for cropped H.264 content)
         scale_vf = _build_scale_filter(target_w, target_h, bid if bid != 'cpu' else None)
         if scale_vf:
-            # Append setsar=1:1 to force square pixels in the output.
-            # Without this, the encoder may inherit the source SAR and
-            # set a non-square SAR (e.g. 8:9) that squishes the image.
-            cmd.extend(['-vf', f'{scale_vf},setsar=1:1'])
+            if bid != 'cpu' and bid in GPU_BACKENDS:
+                # GPU path: keep frames in GPU memory for the encoder.
+                # Use scale_cuda only; SAR is set via encoder option below.
+                cmd.extend(['-vf', scale_vf])
+            else:
+                # CPU path: straightforward filter chain with setsar
+                cmd.extend(['-vf', f'{scale_vf},setsar=1:1'])
 
         # Video encoder
         cmd.extend(['-c:v', video_enc])
+
+        # Force square pixels (SAR 1:1) for GPU path — can't use setsar
+        # filter on hardware frames, so set it as an encoder/muxer option
+        if bid != 'cpu' and bid in GPU_BACKENDS:
+            cmd.extend(['-sar', '1:1'])
 
         # Preset
         preset = opt_preset.get()
@@ -767,11 +827,18 @@ def open_video_scaler(app):
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1)
+            current_proc[0] = proc
 
             # ffmpeg outputs progress with \r (carriage return), not \n
             # Read character by character and split on \r or \n
             line_buf = []
             while True:
+                if stop_flag[0]:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                    break
                 ch = proc.stdout.read(1)
                 if not ch:
                     break
@@ -819,7 +886,19 @@ def open_video_scaler(app):
                     line_buf.append(ch)
 
             proc.wait()
+            current_proc[0] = None
             elapsed = _time.monotonic() - file_start_time
+
+            # If stopped by user, clean up partial file and return
+            if stop_flag[0]:
+                if os.path.isfile(out_path):
+                    try:
+                        os.remove(out_path)
+                    except OSError:
+                        pass
+                _log(f"  Stopped: {f['name']}", 'WARNING')
+                win.after(0, lambda: _update_status(i, 'Stopped'))
+                return False
 
             if proc.returncode == 0 and os.path.isfile(out_path):
                 size = os.path.getsize(out_path)
@@ -916,34 +995,50 @@ def open_video_scaler(app):
 
     def _stop():
         stop_flag[0] = True
+        # Kill running ffmpeg process immediately (SIGKILL)
+        if current_proc[0]:
+            try:
+                current_proc[0].kill()
+            except OSError:
+                pass
 
     # ── Drag and drop ──
     if HAS_DND:
         try:
-            win.drop_target_register(DND_FILES)
-            def _on_drop(event):
-                raw = event.data
+            def _parse_drop_paths(raw):
+                """Parse file paths from drag-and-drop event data."""
                 paths = []
                 if 'file://' in raw:
                     from urllib.parse import unquote, urlparse
-                    for token in raw.split():
-                        token = token.strip()
-                        if token.startswith('file://'):
-                            parsed = urlparse(token)
-                            paths.append(unquote(parsed.path))
-                elif raw.startswith('{') and raw.endswith('}'):
-                    paths = [raw[1:-1]]
+                    # file:// URIs may be separated by \r\n or \n, not just spaces
+                    import re as _dnd_re
+                    uris = _dnd_re.findall(r'file://\S+', raw)
+                    for uri in uris:
+                        parsed = urlparse(uri)
+                        paths.append(unquote(parsed.path))
+                elif raw.startswith('{'):
+                    # Tk wraps paths with spaces in braces: {/path/with spaces}
+                    import re as _dnd_re
+                    paths = _dnd_re.findall(r'\{([^}]+)\}', raw)
+                    # Also grab any non-braced tokens
+                    remainder = _dnd_re.sub(r'\{[^}]+\}', '', raw).strip()
+                    if remainder:
+                        paths.extend(remainder.split())
                 else:
                     paths = raw.split()
+                return paths
 
-                added = 0
+            def _on_drop(event):
+                raw = event.data
+                paths = _parse_drop_paths(raw)
+
+                collected = []
                 for p in paths:
                     p = p.strip()
-                    if not p or p.startswith('.'):
+                    if not p or os.path.basename(p).startswith('.'):
                         continue
                     if os.path.isfile(p) and Path(p).suffix.lower() in VIDEO_EXTENSIONS:
-                        _add_one_file(p)
-                        added += 1
+                        collected.append(p)
                     elif os.path.isdir(p):
                         for root_dir, dirs, fnames in os.walk(p):
                             dirs[:] = [d for d in dirs if not d.startswith('.')]
@@ -951,11 +1046,14 @@ def open_video_scaler(app):
                                 if fn.startswith('.'):
                                     continue
                                 if Path(fn).suffix.lower() in VIDEO_EXTENSIONS:
-                                    _add_one_file(os.path.join(root_dir, fn))
-                                    added += 1
-                if added:
-                    _rebuild_tree()
-                    _log(f"Added {added} file(s) via drag-and-drop", 'INFO')
+                                    collected.append(os.path.join(root_dir, fn))
+                if collected:
+                    _add_files_threaded(collected, source_label="via drag-and-drop")
+
+            # Register DnD on both the tree widget and the window for broad coverage
+            tree.drop_target_register(DND_FILES)
+            tree.dnd_bind('<<Drop>>', _on_drop)
+            win.drop_target_register(DND_FILES)
             win.dnd_bind('<<Drop>>', _on_drop)
         except Exception:
             pass

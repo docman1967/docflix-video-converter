@@ -6,7 +6,7 @@ All shared constants, codec maps, extension sets, and GPU backend definitions.
 
 # ── App identity ──
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "2.4.1"
+APP_VERSION = "2.5.0"
 
 # ── Defaults ──
 DEFAULT_BITRATE = "2M"
@@ -49,7 +49,7 @@ GPU_BACKENDS = {
     'nvenc': {
         'label':        'NVIDIA (NVENC)',
         'short':        'NVENC',
-        'hwaccel':      ['-hwaccel', 'cuda'],
+        'hwaccel':      ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'],
         'scale_filter': 'scale_cuda=format=yuv420p',
         'detect_encoders': ['hevc_nvenc'],
         'detect_cmd':   ['nvidia-smi', '--query-gpu=name',
@@ -228,6 +228,9 @@ SUBTITLE_LANGUAGES = [
     ('tur', 'Turkish'),
     ('vie', 'Vietnamese'),
 ]
+
+# Lookup dict: 3-letter code → human-readable name
+LANG_CODE_TO_NAME = {code: name for code, name in SUBTITLE_LANGUAGES}
 
 
 # ── GPU helper functions ──

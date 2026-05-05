@@ -3996,7 +3996,7 @@ class VideoConverterApp:
         self.root = root
         self.root.title(f"{APP_NAME} v{APP_VERSION}")
         self.root.geometry("1200x800")
-        self.root.minsize(900, 600)
+        self.root.minsize(800, 500)
         
         # State
         self.working_dir = Path.home()
@@ -4102,16 +4102,22 @@ class VideoConverterApp:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(2, weight=1)  # file list is now the expanding row
+        main_frame.rowconfigure(1, weight=1)  # paned window is the expanding row
 
         # Header
         self.setup_header(main_frame)
 
-        # Settings panel
-        self.setup_settings(main_frame)
+        # PanedWindow for settings + file list (user can drag the divider)
+        self.main_paned = ttk.PanedWindow(main_frame, orient='vertical')
+        self.main_paned.grid(row=1, column=0, sticky="nsew", pady=(0, 5))
 
-        # File list
-        self.setup_file_list(main_frame)
+        # Settings panel (top pane)
+        self.setup_settings(self.main_paned)
+        self.main_paned.add(self.settings_frame, weight=0)
+
+        # File list (bottom pane)
+        self.setup_file_list(self.main_paned)
+        self.main_paned.add(self.file_list_frame, weight=1)
 
         # Status bar
         self.setup_status_bar(main_frame)
@@ -4359,12 +4365,68 @@ class VideoConverterApp:
                    command=self.reset_output_folder).grid(row=0, column=4)
 
     def setup_settings(self, parent):
-        """Setup settings panel"""
-        self.settings_frame = ttk.LabelFrame(parent, text="Settings", padding=10)
-        self.settings_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        settings_frame = self.settings_frame
+        """Setup settings panel with scrollable canvas for small screens"""
+        self.settings_frame = ttk.LabelFrame(parent, text="Settings", padding=(10, 5))
+        self.settings_frame.columnconfigure(0, weight=1)
+        self.settings_frame.rowconfigure(0, weight=1)
+
+        # Scrollable canvas inside the LabelFrame
+        self._settings_canvas = tk.Canvas(self.settings_frame, highlightthickness=0,
+                                          borderwidth=0)
+        self._settings_scrollbar = ttk.Scrollbar(self.settings_frame, orient='vertical',
+                                                  command=self._settings_canvas.yview)
+        self._settings_canvas.configure(yscrollcommand=self._settings_scrollbar.set)
+
+        # Inner frame holds all settings widgets
+        settings_frame = ttk.Frame(self._settings_canvas)
+        self._settings_inner = settings_frame
+        self._settings_canvas_win = self._settings_canvas.create_window(
+            (0, 0), window=settings_frame, anchor='nw')
+
+        self._settings_canvas.grid(row=0, column=0, sticky='nsew')
+        # Scrollbar starts hidden — shown only when content overflows
+        self._settings_scrollbar.grid(row=0, column=1, sticky='ns')
+        self._settings_scrollbar.grid_remove()
+
+        # Keep canvas window width in sync with canvas width
+        def _on_canvas_configure(event):
+            self._settings_canvas.itemconfigure(self._settings_canvas_win, width=event.width)
+        self._settings_canvas.bind('<Configure>', _on_canvas_configure)
+
+        # Update scrollregion and show/hide scrollbar when inner frame resizes
+        def _on_inner_configure(event):
+            self._settings_canvas.configure(scrollregion=self._settings_canvas.bbox('all'))
+            # Show scrollbar only when content is taller than visible area
+            canvas_h = self._settings_canvas.winfo_height()
+            inner_h = settings_frame.winfo_reqheight()
+            if inner_h > canvas_h > 1:
+                self._settings_scrollbar.grid()
+            else:
+                self._settings_scrollbar.grid_remove()
+        settings_frame.bind('<Configure>', _on_inner_configure)
+
+        # Mouse wheel scrolling
+        def _on_mousewheel(event):
+            if self._settings_canvas.winfo_height() < settings_frame.winfo_reqheight():
+                self._settings_canvas.yview_scroll(int(-1 * (event.delta or event.num)), 'units')
+        def _on_wheel_up(event):
+            if self._settings_canvas.winfo_height() < settings_frame.winfo_reqheight():
+                self._settings_canvas.yview_scroll(-3, 'units')
+        def _on_wheel_down(event):
+            if self._settings_canvas.winfo_height() < settings_frame.winfo_reqheight():
+                self._settings_canvas.yview_scroll(3, 'units')
+
+        # Bind mousewheel to canvas and all descendants
+        def _bind_wheel(widget):
+            widget.bind('<Button-4>', _on_wheel_up, add='+')
+            widget.bind('<Button-5>', _on_wheel_down, add='+')
+            widget.bind('<MouseWheel>', _on_mousewheel, add='+')
+        _bind_wheel(self._settings_canvas)
+        _bind_wheel(settings_frame)
+        self._settings_bind_wheel = _bind_wheel
+
         settings_frame.columnconfigure(1, weight=1)
-        
+
         # Video Codec selector - Row 0
         row = 0
         ttk.Label(settings_frame, text="Video Codec:").grid(row=row, column=0, sticky='w')
@@ -4674,6 +4736,13 @@ class VideoConverterApp:
                 _on_add_chapters_toggle()
         self.strip_chapters.trace_add('write', _on_strip_chapters_trace)
 
+        # Bind mousewheel to all child widgets inside the scrollable settings
+        def _bind_wheel_recursive(widget):
+            self._settings_bind_wheel(widget)
+            for child in widget.winfo_children():
+                _bind_wheel_recursive(child)
+        _bind_wheel_recursive(settings_frame)
+
 
     def _edition_custom_var(self):
         """Return the StringVar for the custom edition entry."""
@@ -4684,7 +4753,7 @@ class VideoConverterApp:
     def setup_file_list(self, parent):
         """Setup file list section"""
         file_frame = ttk.LabelFrame(parent, text="Video Files", padding=10)
-        file_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
+        self.file_list_frame = file_frame
         file_frame.columnconfigure(0, weight=1)
         file_frame.rowconfigure(1, weight=1)
         
@@ -6401,10 +6470,11 @@ class VideoConverterApp:
 
     def toggle_settings_panel(self):
         """Show or hide the settings panel."""
-        if self.settings_frame.winfo_viewable():
-            self.settings_frame.grid_remove()
+        panes = self.main_paned.panes()
+        if str(self.settings_frame) in panes:
+            self.main_paned.forget(self.settings_frame)
         else:
-            self.settings_frame.grid()
+            self.main_paned.insert(0, self.settings_frame, weight=0)
 
     # ── Preferences ──────────────────────────────────────────────────────────
 
@@ -6872,7 +6942,7 @@ class VideoConverterApp:
     def setup_status_bar(self, parent):
         """Setup status bar"""
         status_frame = ttk.Frame(parent)
-        status_frame.grid(row=3, column=0, sticky="ew")
+        status_frame.grid(row=2, column=0, sticky="ew")
 
         self.status_label = ttk.Label(status_frame, text="Ready")
         self.status_label.pack(side='left')
@@ -8741,18 +8811,38 @@ def main():
     # Create application
     app = VideoConverterApp(root)
 
-    # Center on the monitor that contains the mouse pointer
+    # Center on the monitor that contains the mouse pointer, fitting to screen
     root.update_idletasks()
-    width  = root.winfo_width()
-    height = root.winfo_height()
-    # winfo_pointerx/y gives the current mouse position — always on the active monitor
-    ptr_x  = root.winfo_pointerx()
-    ptr_y  = root.winfo_pointery()
-    x = ptr_x - (width  // 2)
-    y = ptr_y - (height // 2)
-    # Clamp so the window never goes off-screen
-    x = max(0, x)
-    y = max(0, y)
+    ptr_x = root.winfo_pointerx()
+    ptr_y = root.winfo_pointery()
+
+    # Detect the actual monitor the mouse is on (xrandr gives per-monitor geometry)
+    mon_x, mon_y, mon_w, mon_h = 0, 0, root.winfo_screenwidth(), root.winfo_screenheight()
+    try:
+        import subprocess as _sp, re as _re
+        _xr = _sp.run(['xrandr', '--query'], capture_output=True, text=True, timeout=3)
+        for _m in _re.finditer(r'\bconnected\s+(?:primary\s+)?(\d+)x(\d+)\+(\d+)\+(\d+)', _xr.stdout):
+            mw, mh, mx, my = int(_m.group(1)), int(_m.group(2)), int(_m.group(3)), int(_m.group(4))
+            if mx <= ptr_x < mx + mw and my <= ptr_y < my + mh:
+                mon_x, mon_y, mon_w, mon_h = mx, my, mw, mh
+                break
+    except Exception:
+        pass
+
+    # Reserve space for taskbar/panel and margin
+    avail_w = mon_w - 40
+    avail_h = mon_h - 80
+    # Desired size — shrink to fit if monitor is smaller
+    width = min(1200, avail_w)
+    height = min(800, avail_h)
+    root.geometry(f'{width}x{height}')
+    root.update_idletasks()
+    # Center on the detected monitor
+    x = mon_x + (mon_w - width) // 2
+    y = mon_y + (mon_h - height) // 2
+    # Clamp so the window stays within the monitor bounds
+    x = max(mon_x, min(x, mon_x + mon_w - width))
+    y = max(mon_y, min(y, mon_y + mon_h - height - 60))
     root.geometry(f'{width}x{height}+{x}+{y}')
 
     # Now show it — single, clean appearance on the right monitor

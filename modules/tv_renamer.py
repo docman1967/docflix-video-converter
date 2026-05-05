@@ -36,11 +36,28 @@ def open_tv_renamer(app):
         TMDB_IMG_BASE = 'https://image.tmdb.org/t/p'
 
         win = tk.Toplevel(app.root)
+        win.withdraw()
         win.title("📺 Docflix Media Renamer")
-        win.geometry(scaled_geometry(win, 960, 650))
+        geom_str = scaled_geometry(win, 960, 650)
+        win.geometry(geom_str)
         win.minsize(*scaled_minsize(win, 800, 550))
         win.resizable(True, True)
-        app._center_on_main(win)
+        win.update_idletasks()
+        try:
+            import re as _re
+            gm = _re.match(r'(\d+)x(\d+)', geom_str)
+            dw = int(gm.group(1)) if gm else win.winfo_reqwidth()
+            dh = int(gm.group(2)) if gm else win.winfo_reqheight()
+            pw = app.root.winfo_width()
+            ph = app.root.winfo_height()
+            px = app.root.winfo_x()
+            py = app.root.winfo_y()
+            x = px + (pw - dw) // 2
+            y = py + (ph - dh) // 2
+            win.geometry(f'{dw}x{dh}+{max(0, x)}+{max(0, y)}')
+        except Exception:
+            pass
+        win.deiconify()
 
         # ── State ──
         _tvdb_token = [None]
@@ -480,7 +497,7 @@ def open_tv_renamer(app):
             before the extension. Language is detected from filename first,
             then verified/detected from file content via langdetect."""
             stem = os.path.splitext(os.path.basename(filename))[0].lower()
-            parts = stem.split('.')
+            parts = re.split(r'[\.\s_\-]+', stem)
             tags = []
             # Walk trailing dot-separated tokens for known tags
             # Common patterns: .eng.forced.srt, .en.sdh.srt, .forced.srt
@@ -1477,6 +1494,8 @@ def open_tv_renamer(app):
                     old_path = item['path']
                     new_path = os.path.join(os.path.dirname(old_path), new_name)
                     if old_path == new_path:
+                        item['_renamed'] = True
+                        renamed += 1
                         continue
                     if os.path.exists(new_path):
                         _log(f"Skipped (exists): {new_name}", 'WARNING')

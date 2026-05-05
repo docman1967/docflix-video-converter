@@ -17,7 +17,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from .constants import VIDEO_EXTENSIONS, EDITION_PRESETS
+from .constants import VIDEO_EXTENSIONS, EDITION_PRESETS, LANG_CODE_TO_NAME
 from .chapters import generate_auto_chapters, chapters_to_ffmetadata
 from .utils import get_audio_info, get_subtitle_streams, ask_directory, ask_open_files, scaled_geometry, scaled_minsize
 
@@ -35,10 +35,28 @@ def open_media_processor(app):
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         win = tk.Toplevel(app.root)
+        win.withdraw()
         win.title("🔧 Docflix Media Processor")
-        win.geometry(scaled_geometry(win, 920, 880))
-        win.minsize(*scaled_minsize(win, 750, 650))
-        app._center_on_main(win)
+        geom_str = scaled_geometry(win, 920, 720)
+        win.geometry(geom_str)
+        win.minsize(*scaled_minsize(win, 750, 520))
+        win.update_idletasks()
+        try:
+            # Parse requested size from geometry string (e.g. "920x720")
+            import re as _re
+            gm = _re.match(r'(\d+)x(\d+)', geom_str)
+            dw = int(gm.group(1)) if gm else win.winfo_reqwidth()
+            dh = int(gm.group(2)) if gm else win.winfo_reqheight()
+            pw = app.root.winfo_width()
+            ph = app.root.winfo_height()
+            px = app.root.winfo_x()
+            py = app.root.winfo_y()
+            x = px + (pw - dw) // 2
+            y = py + (ph - dh) // 2
+            win.geometry(f'{dw}x{dh}+{max(0, x)}+{max(0, y)}')
+        except Exception:
+            pass
+        win.deiconify()
 
         # ── State ──
         mp_files = []        # list of dicts
@@ -90,6 +108,234 @@ def open_media_processor(app):
         _edition_custom_sv = tk.StringVar(value='')
         opt_add_chapters   = tk.BooleanVar(value=_mp.get('add_chapters', False))
         opt_ch_interval    = tk.IntVar(value=_mp.get('chapter_interval', 5))
+
+        # Track naming templates
+        opt_name_tracks    = tk.BooleanVar(value=_mp.get('name_tracks', False))
+        opt_name_video     = tk.StringVar(value=_mp.get('name_video', ''))
+        opt_name_audio     = tk.StringVar(value=_mp.get('name_audio', '{lang} - {codec} {channels}'))
+        opt_name_sub       = tk.StringVar(value=_mp.get('name_sub', '{lang}{flags}'))
+
+        def _resolve_track_name(template, info):
+            """Resolve a track naming template using stream info dict.
+            Supported variables: {lang}, {codec}, {channels}, {bitrate}, {flags}"""
+            if not template:
+                return ''
+            lang_code = info.get('language', 'und')
+            lang_name = LANG_CODE_TO_NAME.get(lang_code, lang_code.upper() if lang_code != 'und' else '')
+
+            codec_raw = info.get('codec_name', '')
+            codec_display = codec_raw.upper()
+            # Friendly codec names
+            _codec_names = {
+                'aac': 'AAC', 'ac3': 'AC3', 'eac3': 'EAC3', 'mp3': 'MP3',
+                'opus': 'Opus', 'flac': 'FLAC', 'dts': 'DTS', 'truehd': 'TrueHD',
+                'pcm_s16le': 'PCM', 'pcm_s24le': 'PCM', 'pcm_s32le': 'PCM',
+                'vorbis': 'Vorbis', 'subrip': 'SRT', 'ass': 'ASS',
+                'webvtt': 'WebVTT', 'mov_text': 'SRT',
+                'hevc': 'HEVC', 'h264': 'H.264', 'av1': 'AV1', 'mpeg2video': 'MPEG-2',
+            }
+            codec_display = _codec_names.get(codec_raw, codec_display)
+
+            # Channel layout
+            channels = info.get('channels', 0)
+            ch_map = {1: 'Mono', 2: '2.0', 6: '5.1', 8: '7.1'}
+            ch_display = ch_map.get(channels, f'{channels}ch' if channels else '')
+
+            # Bitrate
+            bitrate_raw = info.get('bit_rate', '')
+            if bitrate_raw and bitrate_raw.isdigit():
+                br_kbps = int(bitrate_raw) // 1000
+                br_display = f'{br_kbps}k'
+            else:
+                br_display = ''
+
+            # Flags (for subtitles: SDH, Forced, Commentary)
+            # Check disposition flags first, then fall back to parsing track title
+            flags_parts = []
+            title_raw = (info.get('title', '') or '').lower()
+            # SDH / Hearing Impaired
+            if info.get('sdh') or info.get('hearing_impaired'):
+                flags_parts.append('SDH')
+            elif any(kw in title_raw for kw in ('sdh', 'hearing', 'cc', ' hi')):
+                flags_parts.append('SDH')
+            # Forced
+            if info.get('forced'):
+                if 'Forced' not in flags_parts:
+                    flags_parts.append('Forced')
+            elif 'forced' in title_raw:
+                flags_parts.append('Forced')
+            # Commentary
+            if info.get('comment'):
+                flags_parts.append('Commentary')
+            elif 'comment' in title_raw:
+                flags_parts.append('Commentary')
+            flags_display = (' - ' + ' / '.join(flags_parts)) if flags_parts else ''
+
+            result = template.replace('{lang}', lang_name)
+            result = result.replace('{codec}', codec_display)
+            result = result.replace('{channels}', ch_display)
+            result = result.replace('{bitrate}', br_display)
+            result = result.replace('{flags}', flags_display)
+            # Clean up double spaces and trailing separators
+            result = re.sub(r'\s{2,}', ' ', result).strip()
+            result = re.sub(r'[\s\-]+$', '', result).strip()
+            return result
+
+        # ── Menu bar ──
+        menubar = tk.Menu(win)
+        win.configure(menu=menubar)
+        settings_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Settings", menu=settings_menu)
+        settings_menu.add_command(label="Preferences...",
+                                 command=lambda: _open_settings_dialog())
+
+        def _open_settings_dialog():
+            """Open the settings dialog for cleanup, subtitle, output, and processing options."""
+            if mp_processing[0]:
+                return  # don't allow settings changes during processing
+
+            dlg = tk.Toplevel(win)
+            dlg.title("Preferences")
+            dlg.geometry(scaled_geometry(dlg, 500, 660))
+            dlg.minsize(*scaled_minsize(dlg, 440, 580))
+            dlg.transient(win)
+            dlg.grab_set()
+            dlg.resizable(True, True)
+            app._center_on_main(dlg)
+
+            fr = ttk.Frame(dlg, padding=12)
+            fr.pack(fill='both', expand=True)
+            fr.columnconfigure(0, weight=1)
+
+            pad = {'padx': 8, 'pady': 2}
+
+            # ── Cleanup ──
+            cleanup_fr = ttk.LabelFrame(fr, text="Cleanup", padding=6)
+            cleanup_fr.grid(row=0, column=0, sticky='ew', **pad)
+            cr = ttk.Frame(cleanup_fr)
+            cr.pack(fill='x')
+            ttk.Checkbutton(cr, text="Strip chapters",
+                            variable=opt_strip_chapters).pack(side='left', padx=4)
+            ttk.Checkbutton(cr, text="Strip tags",
+                            variable=opt_strip_tags).pack(side='left', padx=4)
+            ttk.Checkbutton(cr, text="Strip existing subtitles",
+                            variable=opt_strip_subs).pack(side='left', padx=4)
+
+            # ── Subtitles ──
+            sub_fr = ttk.LabelFrame(fr, text="Subtitles", padding=6)
+            sub_fr.grid(row=1, column=0, sticky='ew', **pad)
+            sr = ttk.Frame(sub_fr)
+            sr.pack(fill='x')
+            ttk.Checkbutton(sr, text="Mux external subtitles",
+                            variable=opt_mux_subs).pack(side='left', padx=(4, 8))
+            ttk.Label(sr, text="Lang:").pack(side='left', padx=(8, 2))
+            ttk.Entry(sr, textvariable=opt_sub_lang, width=4).pack(side='left', padx=(0, 4))
+            ttk.Button(sr, text="Rescan", command=_rescan_subs, width=7).pack(side='left', padx=4)
+
+            # ── Chapters ──
+            ch_fr = ttk.LabelFrame(fr, text="Chapters", padding=6)
+            ch_fr.grid(row=2, column=0, sticky='ew', **pad)
+            chr_ = ttk.Frame(ch_fr)
+            chr_.pack(fill='x')
+
+            _ch_spin = tk.Spinbox(chr_, textvariable=opt_ch_interval,
+                                  from_=1, to=60, width=3, state='disabled')
+
+            def _toggle_ch():
+                _ch_spin.configure(state='normal' if opt_add_chapters.get() else 'disabled')
+                if opt_add_chapters.get():
+                    opt_strip_chapters.set(False)
+
+            ttk.Checkbutton(chr_, text="Add chapters every",
+                            variable=opt_add_chapters,
+                            command=_toggle_ch).pack(side='left', padx=(4, 2))
+            _ch_spin.pack(side='left', padx=(0, 2))
+            ttk.Label(chr_, text="min").pack(side='left')
+            _toggle_ch()
+
+            # ── Output ──
+            out_fr = ttk.LabelFrame(fr, text="Output", padding=6)
+            out_fr.grid(row=3, column=0, sticky='ew', **pad)
+
+            or1 = ttk.Frame(out_fr)
+            or1.pack(fill='x', pady=(0, 4))
+            ttk.Radiobutton(or1, text="Replace in-place", variable=opt_output_mode,
+                            value='inplace', command=lambda: _toggle_out()).pack(side='left', padx=(4, 8))
+            ttk.Radiobutton(or1, text="Save to folder:", variable=opt_output_mode,
+                            value='folder', command=lambda: _toggle_out()).pack(side='left', padx=(0, 4))
+            _out_entry = ttk.Entry(or1, textvariable=opt_output_folder, width=20, state='disabled')
+            _out_entry.pack(side='left', padx=(0, 4))
+            _out_btn = ttk.Button(or1, text="Browse…", state='disabled',
+                command=lambda: opt_output_folder.set(
+                    ask_directory(title="Select Output Folder", parent=dlg) or opt_output_folder.get()))
+            _out_btn.pack(side='left')
+
+            or2 = ttk.Frame(out_fr)
+            or2.pack(fill='x')
+            ttk.Label(or2, text="Container:").pack(side='left', padx=(4, 2))
+            ttk.Combobox(or2, textvariable=opt_container,
+                         values=('.mkv', '.mp4'), width=5, state='readonly').pack(side='left')
+
+            def _toggle_out():
+                st = 'normal' if opt_output_mode.get() == 'folder' else 'disabled'
+                _out_entry.configure(state=st)
+                _out_btn.configure(state=st)
+            _toggle_out()
+
+            # ── Track Names ──
+            tags_fr = ttk.LabelFrame(fr, text="Track Names", padding=6)
+            tags_fr.grid(row=4, column=0, sticky='ew', **pad)
+            tags_fr.columnconfigure(1, weight=1)
+
+            _name_entries = []
+
+            def _toggle_name_fields():
+                st = 'normal' if opt_name_tracks.get() else 'disabled'
+                for w in _name_entries:
+                    w.configure(state=st)
+
+            ttk.Checkbutton(tags_fr, text="Set track names from templates",
+                            variable=opt_name_tracks,
+                            command=_toggle_name_fields).grid(
+                row=0, column=0, columnspan=2, sticky='w', padx=4, pady=(0, 4))
+
+            ttk.Label(tags_fr, text="Video:").grid(row=1, column=0, sticky='w', padx=(4, 2), pady=1)
+            _nv = ttk.Entry(tags_fr, textvariable=opt_name_video, width=36)
+            _nv.grid(row=1, column=1, sticky='ew', padx=(0, 4), pady=1)
+            _name_entries.append(_nv)
+
+            ttk.Label(tags_fr, text="Audio:").grid(row=2, column=0, sticky='w', padx=(4, 2), pady=1)
+            _na = ttk.Entry(tags_fr, textvariable=opt_name_audio, width=36)
+            _na.grid(row=2, column=1, sticky='ew', padx=(0, 4), pady=1)
+            _name_entries.append(_na)
+
+            ttk.Label(tags_fr, text="Subtitle:").grid(row=3, column=0, sticky='w', padx=(4, 2), pady=1)
+            _ns = ttk.Entry(tags_fr, textvariable=opt_name_sub, width=36)
+            _ns.grid(row=3, column=1, sticky='ew', padx=(0, 4), pady=1)
+            _name_entries.append(_ns)
+
+            _toggle_name_fields()
+
+            vars_text = "{lang}  {codec}  {channels}  {bitrate}  {flags}"
+            ttk.Label(tags_fr, text=f"Variables: {vars_text}",
+                      foreground='gray').grid(row=4, column=0, columnspan=2,
+                                              sticky='w', padx=4, pady=(4, 0))
+
+            # ── Processing ──
+            proc_fr = ttk.LabelFrame(fr, text="Processing", padding=6)
+            proc_fr.grid(row=5, column=0, sticky='ew', **pad)
+            pr = ttk.Frame(proc_fr)
+            pr.pack(fill='x')
+            ttk.Checkbutton(pr, text="Parallel",
+                            variable=opt_parallel).pack(side='left', padx=(4, 8))
+            ttk.Label(pr, text="Jobs:").pack(side='left', padx=(0, 2))
+            ttk.Spinbox(pr, textvariable=opt_max_jobs, from_=1, to=32,
+                        width=3).pack(side='left')
+
+            # ── Close button ──
+            btn_fr = ttk.Frame(fr)
+            btn_fr.grid(row=6, column=0, sticky='e', pady=(8, 0))
+            ttk.Button(btn_fr, text="Close", command=dlg.destroy).pack(side='right')
 
         # ── Layout ──
         main_frame = ttk.Frame(win, padding=10)
@@ -167,6 +413,7 @@ def open_media_processor(app):
                 'size': size,
                 'audio_info': audio,
                 'audio_display': acodec,
+                'sub_info': subs,
                 'sub_count': len(subs),
                 'ext_subs': ext_subs_found,
                 'status': 'Ready',
@@ -277,6 +524,8 @@ def open_media_processor(app):
                            command=lambda: _show_file_override(index))
             ctx.add_command(label="📎 Manage Subtitles...",
                            command=lambda: _show_sub_manager(index))
+            ctx.add_command(label="Media Details...",
+                           command=lambda: _show_media_details(index))
             ctx.add_separator()
             ctx.add_command(label="🔄 Re-probe File",
                            command=lambda: _reprobe_file(index))
@@ -293,6 +542,28 @@ def open_media_processor(app):
             del mp_files[index]
             _rebuild_tree()
 
+        def _show_media_details(index):
+            """Open the Enhanced Media Details dialog for the selected file."""
+            filepath = mp_files[index]['path']
+            try:
+                from .media_info import show_enhanced_media_info
+                show_enhanced_media_info(app, filepath, parent=win)
+            except ImportError:
+                try:
+                    import importlib.util
+                    _mi_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                            'media_info.py')
+                    if os.path.exists(_mi_path):
+                        spec = importlib.util.spec_from_file_location('media_info', _mi_path)
+                        mod = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(mod)
+                        mod.show_enhanced_media_info(app, filepath, parent=win)
+                    else:
+                        messagebox.showerror("Media Details",
+                                             "modules/media_info.py not found.")
+                except Exception as e:
+                    messagebox.showerror("Media Details", f"Could not open Media Details:\n{e}")
+
         def _clear_override(index):
             mp_files[index]['overrides'] = {}
             _rebuild_tree()
@@ -304,6 +575,7 @@ def open_media_processor(app):
             audio = get_audio_info(f['path'])
             subs = get_subtitle_streams(f['path'])
             f['audio_info'] = audio
+            f['sub_info'] = subs
             f['sub_count'] = len(subs)
             f['size'] = os.path.getsize(f['path']) if os.path.exists(f['path']) else 0
             f['ext_subs'] = _detect_ext_subs(f['path'])
@@ -510,20 +782,20 @@ def open_media_processor(app):
             ttk.Button(bot, text="Cancel", command=dlg.destroy).pack(side='right')
             _refresh()
 
-        # Double-click opens override dialog
+        # Double-click opens Media Details
         def _on_double_click(event):
             item = tree.identify_row(event.y)
             if item and not mp_processing[0]:
                 items = tree.get_children()
                 index = list(items).index(item)
-                _show_file_override(index)
+                _show_media_details(index)
         tree.bind('<Double-1>', _on_double_click)
 
         # ── Operations panel ──
         ops_frame = ttk.LabelFrame(main_frame, text="Operations", padding=8)
         ops_frame.grid(row=2, column=0, sticky='ew', pady=(0, 6))
 
-        # Row 1: Audio + strip options
+        # Row 1: Audio conversion
         ops_row1 = ttk.Frame(ops_frame)
         ops_row1.pack(fill='x', pady=2)
 
@@ -542,29 +814,11 @@ def open_media_processor(app):
         mp_br_combo = ttk.Combobox(ops_row1, textvariable=opt_audio_bitrate,
                                    values=('128k', '192k', '256k', '320k', '384k', '448k', '512k', '640k'),
                                    width=6, state='readonly')
-        mp_br_combo.pack(side='left', padx=(0, 16))
+        mp_br_combo.pack(side='left')
 
-        ttk.Checkbutton(ops_row1, text="Strip chapters",
-                       variable=opt_strip_chapters).pack(side='left', padx=4)
-        ttk.Checkbutton(ops_row1, text="Strip tags",
-                       variable=opt_strip_tags).pack(side='left', padx=4)
-
-        # Row 2: Strip subs + mux subs + sub language
+        # Row 2: Track metadata
         ops_row2 = ttk.Frame(ops_frame)
         ops_row2.pack(fill='x', pady=2)
-
-        ttk.Checkbutton(ops_row2, text="Strip existing subtitles",
-                       variable=opt_strip_subs).pack(side='left', padx=(0, 4))
-        ttk.Checkbutton(ops_row2, text="Mux external subtitles",
-                       variable=opt_mux_subs).pack(side='left', padx=(16, 4))
-        ttk.Label(ops_row2, text="Lang:").pack(side='left', padx=(8, 2))
-        sub_lang_entry = ttk.Entry(ops_row2, textvariable=opt_sub_lang, width=4)
-        sub_lang_entry.pack(side='left', padx=(0, 4))
-        ttk.Button(ops_row2, text="🔄 Rescan", command=_rescan_subs, width=8).pack(side='left', padx=4)
-
-        # Row 3: Track metadata
-        ops_row3 = ttk.Frame(ops_frame)
-        ops_row3.pack(fill='x', pady=2)
 
         def _toggle_meta_fields():
             st = 'normal' if opt_set_metadata.get() else 'disabled'
@@ -572,37 +826,36 @@ def open_media_processor(app):
             mp_ma.configure(state=st)
             mp_ms.configure(state=st)
 
-        ttk.Checkbutton(ops_row3, text="Set track metadata:",
+        ttk.Checkbutton(ops_row2, text="Set track metadata:",
                        variable=opt_set_metadata, command=_toggle_meta_fields).pack(side='left', padx=(0, 4))
-        ttk.Label(ops_row3, text="V:").pack(side='left')
-        mp_mv = ttk.Entry(ops_row3, textvariable=opt_meta_video, width=4)
+        ttk.Label(ops_row2, text="V:").pack(side='left')
+        mp_mv = ttk.Entry(ops_row2, textvariable=opt_meta_video, width=4)
         mp_mv.pack(side='left', padx=(2, 6))
-        ttk.Label(ops_row3, text="A:").pack(side='left')
-        mp_ma = ttk.Entry(ops_row3, textvariable=opt_meta_audio, width=4)
+        ttk.Label(ops_row2, text="A:").pack(side='left')
+        mp_ma = ttk.Entry(ops_row2, textvariable=opt_meta_audio, width=4)
         mp_ma.pack(side='left', padx=(2, 6))
-        ttk.Label(ops_row3, text="S:").pack(side='left')
-        mp_ms = ttk.Entry(ops_row3, textvariable=opt_meta_sub, width=4)
+        ttk.Label(ops_row2, text="S:").pack(side='left')
+        mp_ms = ttk.Entry(ops_row2, textvariable=opt_meta_sub, width=4)
         mp_ms.pack(side='left', padx=(2, 0))
 
         _toggle_meta_fields()
         _toggle_audio_controls()
 
-        # Row 3b: Edition tagging
-        # Row 3b: Edition tagging + Chapter insertion (combined row)
-        ops_row3b = ttk.Frame(ops_frame)
-        ops_row3b.pack(fill='x', pady=2)
+        # Row 3: Edition tagging
+        ops_row3 = ttk.Frame(ops_frame)
+        ops_row3.pack(fill='x', pady=2)
 
-        ttk.Label(ops_row3b, text="Edition:").pack(side='left', padx=(0, 2))
-        mp_edition_combo = ttk.Combobox(ops_row3b, textvariable=opt_edition_tag,
+        ttk.Label(ops_row3, text="Edition:").pack(side='left', padx=(0, 2))
+        mp_edition_combo = ttk.Combobox(ops_row3, textvariable=opt_edition_tag,
                                          values=EDITION_PRESETS, width=18, state='readonly')
         mp_edition_combo.pack(side='left', padx=(0, 4))
 
-        mp_edition_custom = ttk.Entry(ops_row3b, textvariable=_edition_custom_sv, width=18)
+        mp_edition_custom = ttk.Entry(ops_row3, textvariable=_edition_custom_sv, width=18)
 
         if opt_edition_tag.get() and opt_edition_tag.get() not in EDITION_PRESETS:
             _edition_custom_sv.set(opt_edition_tag.get())
             mp_edition_combo.set('Custom...')
-            mp_edition_custom.pack(side='left', padx=(0, 4))
+            mp_edition_custom.pack(side='left', padx=(0, 4))  # show custom entry on load
 
         def _on_mp_edition_select(event=None):
             sel = mp_edition_combo.get()
@@ -619,62 +872,8 @@ def open_media_processor(app):
                 opt_edition_tag.set(_edition_custom_sv.get())
         _edition_custom_sv.trace_add('write', _on_mp_edition_custom)
 
-        ttk.Checkbutton(ops_row3b, text="Plex",
+        ttk.Checkbutton(ops_row3, text="Plex",
                         variable=opt_edition_fn).pack(side='left', padx=(4, 0))
-
-        # Separator
-        ttk.Separator(ops_row3b, orient='vertical').pack(side='left', fill='y', padx=8)
-
-        def _toggle_ch_spin():
-            mp_ch_spin.configure(state='normal' if opt_add_chapters.get() else 'disabled')
-            if opt_add_chapters.get():
-                opt_strip_chapters.set(False)
-
-        ttk.Checkbutton(ops_row3b, text="Chapters every",
-                        variable=opt_add_chapters,
-                        command=_toggle_ch_spin).pack(side='left', padx=(0, 2))
-        mp_ch_spin = tk.Spinbox(ops_row3b, textvariable=opt_ch_interval,
-                                from_=1, to=60, width=3, state='disabled')
-        mp_ch_spin.pack(side='left', padx=(0, 2))
-        ttk.Label(ops_row3b, text="min").pack(side='left')
-        _toggle_ch_spin()
-
-        # Row 4: Output + parallel + container
-        # Row 4: Output
-        ops_row4 = ttk.Frame(ops_frame)
-        ops_row4.pack(fill='x', pady=2)
-
-        ttk.Label(ops_row4, text="Output:").pack(side='left', padx=(0, 4))
-        ttk.Radiobutton(ops_row4, text="Replace in-place", variable=opt_output_mode,
-                        value='inplace', command=lambda: _toggle_output_folder()).pack(side='left', padx=(0, 4))
-        ttk.Radiobutton(ops_row4, text="Save to folder:", variable=opt_output_mode,
-                        value='folder', command=lambda: _toggle_output_folder()).pack(side='left', padx=(0, 4))
-        mp_out_entry = ttk.Entry(ops_row4, textvariable=opt_output_folder, width=24, state='disabled')
-        mp_out_entry.pack(side='left', padx=(0, 4))
-        mp_out_btn = ttk.Button(ops_row4, text="Browse…", state='disabled',
-            command=lambda: opt_output_folder.set(
-                ask_directory(title="Select Output Folder", parent=win) or opt_output_folder.get()))
-        mp_out_btn.pack(side='left')
-
-        # Row 5: Container + parallel
-        ops_row5 = ttk.Frame(ops_frame)
-        ops_row5.pack(fill='x', pady=2)
-
-        ttk.Label(ops_row5, text="Container:").pack(side='left', padx=(0, 2))
-        ttk.Combobox(ops_row5, textvariable=opt_container,
-                     values=('.mkv', '.mp4'), width=5, state='readonly').pack(side='left', padx=(0, 12))
-
-        ttk.Checkbutton(ops_row5, text="Parallel",
-                       variable=opt_parallel).pack(side='left', padx=(0, 2))
-        ttk.Label(ops_row5, text="Jobs:").pack(side='left', padx=(0, 2))
-        ttk.Spinbox(ops_row5, textvariable=opt_max_jobs, from_=1, to=32,
-                    width=3).pack(side='left')
-
-        def _toggle_output_folder():
-            st = 'normal' if opt_output_mode.get() == 'folder' else 'disabled'
-            mp_out_entry.configure(state=st)
-            mp_out_btn.configure(state=st)
-        _toggle_output_folder()
 
         # ── Progress bar ──
         progress_frame = ttk.Frame(main_frame)
@@ -939,6 +1138,7 @@ def open_media_processor(app):
                 out_sub_idx = f.get('sub_count', 0)
 
             do_set_meta = _ov(f, 'set_metadata', opt_set_metadata)
+            do_name_tracks = opt_name_tracks.get()
             s_lang = _ov(f, 'meta_sub', opt_meta_sub)
             for idx, (stype, spath) in enumerate(sub_inputs):
                 si = out_sub_idx + idx
@@ -946,11 +1146,25 @@ def open_media_processor(app):
                 cmd.extend([f'-c:s:{si}', sub_codec])
                 sub_lang = s_lang if do_set_meta else opt_sub_lang.get()
                 cmd.extend([f'-metadata:s:s:{si}', f'language={sub_lang}'])
+                if do_name_tracks and opt_name_sub.get():
+                    # Build info dict for template resolution
+                    sub_tpl_info = {
+                        'language': sub_lang,
+                        'codec_name': 'subrip',
+                        'forced': stype == 'forced',
+                        'sdh': False,
+                    }
+                    title = _resolve_track_name(opt_name_sub.get(), sub_tpl_info)
+                    if title:
+                        cmd.extend([f'-metadata:s:s:{si}', f'title={title}'])
+                else:
+                    if stype == 'main':
+                        cmd.extend([f'-metadata:s:s:{si}', 'title=English'])
+                    elif stype == 'forced':
+                        cmd.extend([f'-metadata:s:s:{si}', 'title=Forced'])
                 if stype == 'main':
-                    cmd.extend([f'-metadata:s:s:{si}', 'title=English'])
                     cmd.extend([f'-disposition:s:{si}', 'default'])
                 elif stype == 'forced':
-                    cmd.extend([f'-metadata:s:s:{si}', 'title=Forced'])
                     cmd.extend([f'-disposition:s:{si}', 'forced'])
 
             # ── Chapters ──
@@ -968,11 +1182,59 @@ def open_media_processor(app):
                 v_lang = _ov(f, 'meta_video', opt_meta_video)
                 a_lang = _ov(f, 'meta_audio', opt_meta_audio)
                 cmd.extend(['-metadata', 'title='])
-                cmd.extend(['-metadata:s:v:0', f'language={v_lang}', '-metadata:s:v:0', 'title='])
-                cmd.extend(['-metadata:s:a:0', f'language={a_lang}', '-metadata:s:a:0', 'title='])
-                if (not do_strip_subs and f.get('sub_count', 0) > 0) or sub_inputs:
+                # Video track(s): language + title
+                cmd.extend(['-metadata:s:v:0', f'language={v_lang}'])
+                if do_name_tracks and opt_name_video.get():
+                    v_info = {'language': v_lang, 'codec_name': '', 'channels': 0}
+                    v_title = _resolve_track_name(opt_name_video.get(), v_info)
+                    cmd.extend(['-metadata:s:v:0', f'title={v_title}'])
+                else:
+                    cmd.extend(['-metadata:s:v:0', 'title='])
+                # Audio track(s): language + title per stream
+                audio_streams = f.get('audio_info') or []
+                if audio_streams:
+                    for ai, ainfo in enumerate(audio_streams):
+                        cmd.extend([f'-metadata:s:a:{ai}', f'language={a_lang}'])
+                        if do_name_tracks and opt_name_audio.get():
+                            a_title = _resolve_track_name(opt_name_audio.get(), ainfo)
+                            cmd.extend([f'-metadata:s:a:{ai}', f'title={a_title}'])
+                        else:
+                            cmd.extend([f'-metadata:s:a:{ai}', 'title='])
+                else:
+                    cmd.extend(['-metadata:s:a:0', f'language={a_lang}', '-metadata:s:a:0', 'title='])
+                # Internal subtitle track(s): language + title per stream
+                if not do_strip_subs and f.get('sub_count', 0) > 0:
+                    int_subs = f.get('sub_info') or []
                     if not sub_inputs:
-                        cmd.extend([f'-metadata:s:s:0', f'language={s_lang}'])
+                        for si_idx, sinfo in enumerate(int_subs):
+                            cmd.extend([f'-metadata:s:s:{si_idx}', f'language={s_lang}'])
+                            if do_name_tracks and opt_name_sub.get():
+                                s_title = _resolve_track_name(opt_name_sub.get(), sinfo)
+                                cmd.extend([f'-metadata:s:s:{si_idx}', f'title={s_title}'])
+                        if not int_subs:
+                            cmd.extend([f'-metadata:s:s:0', f'language={s_lang}'])
+            elif do_name_tracks:
+                # Track naming without full metadata set — apply titles only
+                # Video
+                if opt_name_video.get():
+                    v_info = {'language': 'und', 'codec_name': '', 'channels': 0}
+                    v_title = _resolve_track_name(opt_name_video.get(), v_info)
+                    if v_title:
+                        cmd.extend(['-metadata:s:v:0', f'title={v_title}'])
+                # Audio
+                if opt_name_audio.get():
+                    audio_streams = f.get('audio_info') or []
+                    for ai, ainfo in enumerate(audio_streams):
+                        a_title = _resolve_track_name(opt_name_audio.get(), ainfo)
+                        if a_title:
+                            cmd.extend([f'-metadata:s:a:{ai}', f'title={a_title}'])
+                # Internal subtitles
+                if opt_name_sub.get() and not do_strip_subs:
+                    int_subs = f.get('sub_info') or []
+                    for si_idx, sinfo in enumerate(int_subs):
+                        s_title = _resolve_track_name(opt_name_sub.get(), sinfo)
+                        if s_title:
+                            cmd.extend([f'-metadata:s:s:{si_idx}', f'title={s_title}'])
 
             # ── Edition tag ──
             edition = _ov(f, 'edition_tag', opt_edition_tag)
@@ -1251,21 +1513,24 @@ def open_media_processor(app):
         try:
             win.drop_target_register('DND_Files')
             def _on_drop(event):
-                raw = event.data
-                # Parse file:// URIs and space-separated paths
+                raw = event.data.strip()
+                # Parse dropped paths — three formats:
+                # 1. file:// URIs separated by \r\n or spaces
+                # 2. Tcl list: {/path with spaces/file.mkv} {/another/file.mkv}
+                # 3. Plain space-separated paths: /path/file1.mkv /path/file2.mkv
                 paths = []
                 if 'file://' in raw:
                     from urllib.parse import unquote, urlparse
-                    for token in raw.split():
+                    for token in re.split(r'[\r\n\s]+', raw):
                         token = token.strip()
                         if token.startswith('file://'):
                             parsed = urlparse(token)
                             paths.append(unquote(parsed.path))
-                elif raw.startswith('{') and raw.endswith('}'):
-                    # Tcl list format for paths with spaces
-                    paths = [p.strip('{}') for p in re.findall(r'\{[^}]+\}|[^\s]+', raw)]
                 else:
-                    paths = raw.split()
+                    # Tcl list format handles both braced and unbraced paths
+                    # {/path with spaces/file.mkv} becomes one token
+                    # /path/file.mkv becomes one token
+                    paths = [p.strip('{}') for p in re.findall(r'\{[^}]+\}|[^\s]+', raw)]
 
                 added = 0
                 for p in paths:
@@ -1311,6 +1576,10 @@ def open_media_processor(app):
                 'edition_in_filename': opt_edition_fn.get(),
                 'add_chapters':   opt_add_chapters.get(),
                 'chapter_interval': opt_ch_interval.get(),
+                'name_tracks':    opt_name_tracks.get(),
+                'name_video':     opt_name_video.get(),
+                'name_audio':     opt_name_audio.get(),
+                'name_sub':       opt_name_sub.get(),
             }
             app._media_proc_prefs = mp_prefs
             # Write to shared preferences file

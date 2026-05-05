@@ -35,11 +35,28 @@ def open_batch_filter(app):
         import tempfile
 
         win = tk.Toplevel(app.root)
+        win.withdraw()
         win.title("Batch Filter Subtitles")
-        win.geometry(scaled_geometry(win, 620, 600))
+        geom_str = scaled_geometry(win, 620, 600)
+        win.geometry(geom_str)
         win.minsize(*scaled_minsize(win, 620, 500))
         win.resizable(True, True)
-        app._center_on_main(win)
+        win.update_idletasks()
+        try:
+            import re as _re
+            gm = _re.match(r'(\d+)x(\d+)', geom_str)
+            dw = int(gm.group(1)) if gm else win.winfo_reqwidth()
+            dh = int(gm.group(2)) if gm else win.winfo_reqheight()
+            pw = app.root.winfo_width()
+            ph = app.root.winfo_height()
+            px = app.root.winfo_x()
+            py = app.root.winfo_y()
+            x = px + (pw - dw) // 2
+            y = py + (ph - dh) // 2
+            win.geometry(f'{dw}x{dh}+{max(0, x)}+{max(0, y)}')
+        except Exception:
+            pass
+        win.deiconify()
 
         file_paths = []  # list of absolute paths
 

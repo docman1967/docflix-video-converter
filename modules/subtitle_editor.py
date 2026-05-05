@@ -57,11 +57,28 @@ def open_standalone_subtitle_editor(app):
         import tempfile
 
         editor = tk.Toplevel(app.root)
+        editor.withdraw()
         editor.title("Docflix Subtitle Editor")
-        editor.geometry(scaled_geometry(editor, 950, 650))
+        geom_str = scaled_geometry(editor, 950, 650)
+        editor.geometry(geom_str)
         editor.minsize(*scaled_minsize(editor, 700, 500))
         editor.resizable(True, True)
-        app._center_on_main(editor)
+        editor.update_idletasks()
+        try:
+            import re as _re
+            gm = _re.match(r'(\d+)x(\d+)', geom_str)
+            dw = int(gm.group(1)) if gm else editor.winfo_reqwidth()
+            dh = int(gm.group(2)) if gm else editor.winfo_reqheight()
+            pw = app.root.winfo_width()
+            ph = app.root.winfo_height()
+            px = app.root.winfo_x()
+            py = app.root.winfo_y()
+            x = px + (pw - dw) // 2
+            y = py + (ph - dh) // 2
+            editor.geometry(f'{dw}x{dh}+{max(0, x)}+{max(0, y)}')
+        except Exception:
+            pass
+        editor.deiconify()
 
         # ── Shared mutable state ──
         cues = []
