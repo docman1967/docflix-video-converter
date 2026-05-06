@@ -17,7 +17,8 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from .constants import VIDEO_EXTENSIONS, EDITION_PRESETS, LANG_CODE_TO_NAME
+from .constants import (VIDEO_EXTENSIONS, EDITION_PRESETS, LANG_CODE_TO_NAME,
+                        SUBTITLE_LANGUAGES)
 from .chapters import generate_auto_chapters, chapters_to_ffmetadata
 from .utils import get_audio_info, get_subtitle_streams, ask_directory, ask_open_files, scaled_geometry, scaled_minsize
 
@@ -94,6 +95,7 @@ def open_media_processor(app):
         opt_meta_sub       = tk.StringVar(value=_mp.get('meta_sub', 'eng'))
         opt_mux_subs       = tk.BooleanVar(value=_mp.get('mux_subs', False))
         opt_sub_lang       = tk.StringVar(value=_mp.get('sub_lang', 'eng'))
+        opt_all_subs       = tk.BooleanVar(value=_mp.get('all_subs', False))
         opt_output_mode    = tk.StringVar(value=_mp.get('output_mode', 'inplace'))
         opt_output_folder  = tk.StringVar(value=_mp.get('output_folder', ''))
         opt_container      = tk.StringVar(value=_mp.get('container', '.mkv'))
@@ -228,9 +230,27 @@ def open_media_processor(app):
             sr.pack(fill='x')
             ttk.Checkbutton(sr, text="Mux external subtitles",
                             variable=opt_mux_subs).pack(side='left', padx=(4, 8))
-            ttk.Label(sr, text="Lang:").pack(side='left', padx=(8, 2))
-            ttk.Entry(sr, textvariable=opt_sub_lang, width=4).pack(side='left', padx=(0, 4))
+            _lang_lbl = ttk.Label(sr, text="Lang:")
+            _lang_lbl.pack(side='left', padx=(8, 2))
+            _lang_entry = ttk.Entry(sr, textvariable=opt_sub_lang, width=4)
+            _lang_entry.pack(side='left', padx=(0, 4))
             ttk.Button(sr, text="Rescan", command=_rescan_subs, width=7).pack(side='left', padx=4)
+
+            sr2 = ttk.Frame(sub_fr)
+            sr2.pack(fill='x', pady=(4, 0))
+
+            def _toggle_all_subs():
+                if opt_all_subs.get():
+                    _lang_entry.configure(state='disabled')
+                    _lang_lbl.configure(foreground='gray')
+                else:
+                    _lang_entry.configure(state='normal')
+                    _lang_lbl.configure(foreground='')
+
+            ttk.Checkbutton(sr2, text="Include all subtitle languages",
+                            variable=opt_all_subs,
+                            command=_toggle_all_subs).pack(side='left', padx=(4, 8))
+            _toggle_all_subs()  # apply initial state
 
             # ── Chapters ──
             ch_fr = ttk.LabelFrame(fr, text="Chapters", padding=6)
@@ -371,23 +391,103 @@ def open_media_processor(app):
             _rebuild_tree()
             _log(f"Scanned folder: {count} video file(s) found", 'INFO')
 
+        # 2-letter → 3-letter language code mapping
+        _lang2to3 = {
+            'en': 'eng', 'es': 'spa', 'fr': 'fra', 'de': 'deu',
+            'it': 'ita', 'pt': 'por', 'ru': 'rus', 'ja': 'jpn',
+            'ko': 'kor', 'zh': 'zho', 'ar': 'ara', 'hi': 'hin',
+            'nl': 'nld', 'pl': 'pol', 'sv': 'swe', 'tr': 'tur',
+            'vi': 'vie',
+        }
+        # ISO 639-2/B (bibliographic) → ISO 639-2/T (terminological) mapping
+        # Some languages have two 3-letter codes; subtitle files commonly use
+        # the /B variant while we store the /T variant internally.
+        _lang_alt3 = {
+            'ger': 'deu', 'fre': 'fra', 'dut': 'nld', 'chi': 'zho',
+            'cze': 'ces', 'gre': 'ell', 'rum': 'ron', 'per': 'fas',
+            'mac': 'mkd', 'may': 'msa', 'bur': 'mya', 'tib': 'bod',
+            'wel': 'cym', 'baq': 'eus', 'arm': 'hye', 'geo': 'kat',
+            'ice': 'isl', 'alb': 'sqi',
+        }
+
         def _detect_ext_subs(filepath):
             """Detect matching subtitle files alongside a video file.
-            Uses the configured subtitle language code."""
+
+            If opt_all_subs is enabled, scans for all known language codes.
+            Otherwise uses the configured subtitle language code.
+            Each result is a dict: {'path', 'lang', 'type', 'sdh'}.
+            English subtitles are sorted first.
+            """
             base = os.path.splitext(filepath)[0]
-            lang = opt_sub_lang.get().strip() or 'eng'
             ext_subs_found = []
-            # Try language-specific patterns first
-            main_srt = f"{base}.{lang}.srt"
-            forced_srt = f"{base}.{lang}.forced.srt"
-            # Fallback: bare .srt (no language code)
-            bare_srt = f"{base}.srt"
-            if os.path.isfile(main_srt):
-                ext_subs_found.append(('main', main_srt))
-            elif os.path.isfile(bare_srt):
-                ext_subs_found.append(('main', bare_srt))
-            if os.path.isfile(forced_srt):
-                ext_subs_found.append(('forced', forced_srt))
+            seen_paths = set()
+
+            def _check_lang(lang):
+                """Check for subtitle files matching a given 3-letter language code.
+                Also checks 2-letter and alternate 3-letter (ISO 639-2/B) variants."""
+                # Build list of code variants to check
+                codes_to_check = [lang]
+                # 2-letter variant (e.g. deu → de)
+                short = {v: k for k, v in _lang2to3.items()}.get(lang)
+                if short:
+                    codes_to_check.append(short)
+                # Alternate 3-letter /B variant (e.g. deu → ger)
+                alt = {v: k for k, v in _lang_alt3.items()}.get(lang)
+                if alt:
+                    codes_to_check.append(alt)
+
+                # Patterns: .code.srt, .code.forced.srt, .code.sdh.srt,
+                #           .code.hi.srt, .code.cc.srt
+                for code in codes_to_check:
+                    patterns = [
+                        (f"{base}.{code}.srt",            'main',   False),
+                        (f"{base}.{code}.forced.srt",     'forced', False),
+                        (f"{base}.{code}.sdh.srt",        'main',   True),
+                        (f"{base}.{code}.hi.srt",         'main',   True),
+                        (f"{base}.{code}.cc.srt",         'main',   True),
+                    ]
+                    for path, stype, sdh in patterns:
+                        if os.path.isfile(path) and path not in seen_paths:
+                            seen_paths.add(path)
+                            ext_subs_found.append({
+                                'path': path, 'lang': lang,
+                                'type': stype, 'sdh': sdh,
+                            })
+
+            if opt_all_subs.get():
+                # Scan all known language codes
+                for code, _name in SUBTITLE_LANGUAGES:
+                    if code == 'und':
+                        continue
+                    _check_lang(code)
+            else:
+                # Single configured language
+                lang = opt_sub_lang.get().strip() or 'eng'
+                _check_lang(lang)
+
+            # Fallback: no language code in filename → default to English
+            bare_patterns = [
+                (f"{base}.srt",            'main',   False),
+                (f"{base}.forced.srt",     'forced', False),
+                (f"{base}.sdh.srt",        'main',   True),
+                (f"{base}.hi.srt",         'main',   True),
+                (f"{base}.cc.srt",         'main',   True),
+            ]
+            for path, stype, sdh in bare_patterns:
+                if os.path.isfile(path) and path not in seen_paths:
+                    seen_paths.add(path)
+                    ext_subs_found.append({
+                        'path': path, 'lang': 'eng',
+                        'type': stype, 'sdh': sdh,
+                    })
+
+            # Sort: English first, then by language, forced/sdh after main
+            def _sort_key(s):
+                type_order = 0 if s['type'] == 'main' and not s['sdh'] else (
+                    1 if s['type'] == 'forced' else 2)
+                return (0 if s['lang'] == 'eng' else 1, s['lang'], type_order)
+            ext_subs_found.sort(key=_sort_key)
+
             return ext_subs_found
 
         def _add_one_file(filepath):
@@ -429,7 +529,10 @@ def open_media_processor(app):
             for f in mp_files:
                 f['ext_subs'] = _detect_ext_subs(f['path'])
             _rebuild_tree()
-            _log(f"Re-scanned subtitles with language code: {opt_sub_lang.get()}", 'INFO')
+            if opt_all_subs.get():
+                _log("Re-scanned subtitles for all languages", 'INFO')
+            else:
+                _log(f"Re-scanned subtitles with language code: {opt_sub_lang.get()}", 'INFO')
 
         ttk.Button(toolbar, text="📂 Add Files...", command=_add_files).pack(side='left', padx=2)
         ttk.Button(toolbar, text="📁 Add Folder...", command=_add_folder).pack(side='left', padx=2)
@@ -442,15 +545,55 @@ def open_media_processor(app):
         tree_frame.rowconfigure(0, weight=1)
 
         columns = ('name', 'audio', 'subs', 'ext_subs', 'size', 'status')
-        tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=6)
+        tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=6,
+                            selectmode='extended')
         tree.grid(row=0, column=0, sticky='nsew')
 
-        tree.heading('name',     text='Filename')
-        tree.heading('audio',    text='Audio')
-        tree.heading('subs',     text='Int Subs')
-        tree.heading('ext_subs', text='Ext Subs')
-        tree.heading('size',     text='Size')
-        tree.heading('status',   text='Status')
+        # ── Column sorting state ──
+        mp_sort_col = [None]
+        mp_sort_reverse = [False]
+        mp_col_labels = {
+            'name': 'Filename', 'audio': 'Audio', 'subs': 'Int Subs',
+            'ext_subs': 'Ext Subs', 'size': 'Size', 'status': 'Status'
+        }
+
+        def _sort_by_column(col):
+            if mp_sort_col[0] == col:
+                mp_sort_reverse[0] = not mp_sort_reverse[0]
+            else:
+                mp_sort_col[0] = col
+                mp_sort_reverse[0] = False
+
+            def sort_key(f):
+                if col == 'name':
+                    return f.get('name', '').lower()
+                elif col == 'audio':
+                    return f.get('audio_display', '').lower()
+                elif col == 'subs':
+                    return f.get('sub_count', 0)
+                elif col == 'ext_subs':
+                    return len(f.get('ext_subs', []))
+                elif col == 'size':
+                    return f.get('size', 0)
+                elif col == 'status':
+                    return f.get('status', '').lower()
+                return ''
+
+            mp_files.sort(key=sort_key, reverse=mp_sort_reverse[0])
+            _rebuild_tree()
+
+            # Update headers with sort arrow
+            arrow = ' ▼' if mp_sort_reverse[0] else ' ▲'
+            for c, lbl in mp_col_labels.items():
+                indicator = arrow if c == col else ''
+                tree.heading(c, text=lbl + indicator)
+
+        tree.heading('name',     text='Filename',  command=lambda: _sort_by_column('name'))
+        tree.heading('audio',    text='Audio',     command=lambda: _sort_by_column('audio'))
+        tree.heading('subs',     text='Int Subs',  command=lambda: _sort_by_column('subs'))
+        tree.heading('ext_subs', text='Ext Subs',  command=lambda: _sort_by_column('ext_subs'))
+        tree.heading('size',     text='Size',      command=lambda: _sort_by_column('size'))
+        tree.heading('status',   text='Status',    command=lambda: _sort_by_column('status'))
 
         tree.column('name',     width=280, minwidth=150)
         tree.column('audio',    width=80,  minwidth=60,  anchor='center')
@@ -463,11 +606,23 @@ def open_media_processor(app):
         scrollbar.grid(row=0, column=1, sticky='ns')
         tree.configure(yscrollcommand=scrollbar.set)
 
+        def _ext_sub_label(s):
+            """Build a short display label for an external subtitle dict."""
+            lang = s.get('lang', 'und')
+            stype = s.get('type', 'main')
+            sdh = s.get('sdh', False)
+            parts = [lang]
+            if stype == 'forced':
+                parts.append('forced')
+            if sdh:
+                parts.append('sdh')
+            return '.'.join(parts)
+
         def _rebuild_tree():
             tree.delete(*tree.get_children())
             for f in mp_files:
                 size_mb = f'{f["size"] / (1024*1024):.1f} MB'
-                ext_str = ', '.join(t for t, _ in f['ext_subs']) if f['ext_subs'] else '—'
+                ext_str = ', '.join(_ext_sub_label(s) for s in f['ext_subs']) if f['ext_subs'] else '—'
                 name_display = f['name']
                 if f.get('overrides'):
                     name_display = '⚙️ ' + name_display
@@ -488,7 +643,7 @@ def open_media_processor(app):
             if index < len(items):
                 f = mp_files[index]
                 size_mb = f'{f["size"] / (1024*1024):.1f} MB'
-                ext_str = ', '.join(t for t, _ in f['ext_subs']) if f['ext_subs'] else '—'
+                ext_str = ', '.join(_ext_sub_label(s) for s in f['ext_subs']) if f['ext_subs'] else '—'
                 name_display = f['name']
                 if f.get('overrides'):
                     name_display = '⚙️ ' + name_display
@@ -509,6 +664,28 @@ def open_media_processor(app):
                 del mp_files[idx]
             _rebuild_tree()
         tree.bind('<Delete>', _on_delete)
+
+        # ── Shift+Arrow multi-select ──
+        def _shift_arrow(evt, direction):
+            items = tree.get_children()
+            if not items:
+                return 'break'
+            sel = tree.selection()
+            focus = tree.focus()
+            if not focus:
+                return 'break'
+            idx = list(items).index(focus)
+            new_idx = idx + direction
+            if new_idx < 0 or new_idx >= len(items):
+                return 'break'
+            new_item = items[new_idx]
+            tree.focus(new_item)
+            tree.see(new_item)
+            tree.selection_add(new_item)
+            return 'break'
+
+        tree.bind('<Shift-Up>',   lambda e: _shift_arrow(e, -1))
+        tree.bind('<Shift-Down>', lambda e: _shift_arrow(e, 1))
 
         # ── Right-click context menu (per-file overrides + subtitle management) ──
         def _show_context_menu(event):
@@ -699,7 +876,7 @@ def open_media_processor(app):
             dlg.resizable(True, True)
             app._center_on_main(dlg)
 
-            subs = list(f['ext_subs'])  # work on a copy
+            subs = [dict(s) for s in f['ext_subs']]  # work on a deep copy
 
             fr = ttk.Frame(dlg, padding=12)
             fr.pack(fill='both', expand=True)
@@ -711,8 +888,13 @@ def open_media_processor(app):
 
             def _refresh():
                 sub_list.delete(0, 'end')
-                for stype, spath in subs:
-                    sub_list.insert('end', f"[{stype}] {os.path.basename(spath)}")
+                for s in subs:
+                    lang = s.get('lang', 'und')
+                    lang_name = LANG_CODE_TO_NAME.get(lang, lang)
+                    stype = s.get('type', 'main')
+                    sdh = ' SDH' if s.get('sdh') else ''
+                    sub_list.insert('end',
+                        f"[{lang_name} — {stype}{sdh}] {os.path.basename(s['path'])}")
 
             def _add_sub():
                 paths = ask_open_files(
@@ -721,13 +903,26 @@ def open_media_processor(app):
                     filetypes=[("Subtitle files", "*.srt *.ass *.ssa *.vtt *.sub"),
                                ("All files", "*.*")])
                 for p in paths:
-                    # Guess type from filename
-                    bn = os.path.basename(p).lower()
-                    if 'forced' in bn:
-                        stype = 'forced'
-                    else:
-                        stype = 'main'
-                    subs.append((stype, p))
+                    # Detect language from filename tokens
+                    stem_tokens = Path(p).stem.lower().split('.')
+                    lang = opt_sub_lang.get().strip() or 'eng'
+                    for token in reversed(stem_tokens[1:]):
+                        if token in _lang2to3:
+                            lang = _lang2to3[token]
+                            break
+                        elif token in _lang_alt3:
+                            lang = _lang_alt3[token]
+                            break
+                        elif any(token == lc for lc, _ in SUBTITLE_LANGUAGES):
+                            lang = token
+                            break
+                    # Detect type/flags from filename
+                    stype = 'forced' if 'forced' in stem_tokens else 'main'
+                    sdh = 'sdh' in stem_tokens or 'cc' in stem_tokens or 'hi' in stem_tokens
+                    subs.append({
+                        'path': p, 'lang': lang,
+                        'type': stype, 'sdh': sdh,
+                    })
                 _refresh()
 
             def _remove_sub():
@@ -741,9 +936,16 @@ def open_media_processor(app):
                 sel = sub_list.curselection()
                 if sel:
                     i = sel[0]
-                    stype, spath = subs[i]
-                    new_type = 'forced' if stype == 'main' else 'main'
-                    subs[i] = (new_type, spath)
+                    s = subs[i]
+                    # Cycle: main → forced → main (sdh) → forced
+                    if s['type'] == 'main' and not s.get('sdh'):
+                        s['type'] = 'forced'
+                    elif s['type'] == 'forced':
+                        s['type'] = 'main'
+                        s['sdh'] = True
+                    else:
+                        s['type'] = 'main'
+                        s['sdh'] = False
                     _refresh()
 
             def _move_up():
@@ -766,7 +968,7 @@ def open_media_processor(app):
             btn_fr.grid(row=1, column=0, sticky='ew', pady=(6,0))
             ttk.Button(btn_fr, text="Add...", command=_add_sub).pack(side='left', padx=2)
             ttk.Button(btn_fr, text="Remove", command=_remove_sub).pack(side='left', padx=2)
-            ttk.Button(btn_fr, text="Toggle Main/Forced", command=_toggle_type).pack(side='left', padx=2)
+            ttk.Button(btn_fr, text="Toggle Type", command=_toggle_type).pack(side='left', padx=2)
             ttk.Separator(btn_fr, orient='vertical').pack(side='left', fill='y', padx=6)
             ttk.Button(btn_fr, text="⬆ Up", command=_move_up, width=4).pack(side='left', padx=2)
             ttk.Button(btn_fr, text="⬇ Down", command=_move_down, width=5).pack(side='left', padx=2)
@@ -774,7 +976,7 @@ def open_media_processor(app):
             bot = ttk.Frame(dlg, padding=(12,0,12,12))
             bot.pack(fill='x')
             def _save_subs():
-                f['ext_subs'] = list(subs)
+                f['ext_subs'] = [dict(s) for s in subs]
                 _rebuild_tree()
                 _log(f"Subtitles updated for: {f['name']} ({len(subs)} file(s))", 'INFO')
                 dlg.destroy()
@@ -876,24 +1078,26 @@ def open_media_processor(app):
                         variable=opt_edition_fn).pack(side='left', padx=(4, 0))
 
         # ── Progress bar ──
+        # Pack layout: buttons reserved on right first, progress bar fills remainder
         progress_frame = ttk.Frame(main_frame)
         progress_frame.grid(row=3, column=0, sticky='ew', pady=(0, 6))
-        progress_frame.columnconfigure(1, weight=1)
 
         mp_progress_var = tk.DoubleVar(value=0)
-        mp_progress_label = ttk.Label(progress_frame, text="Ready")
-        mp_progress_label.grid(row=0, column=0, sticky='w', padx=(0, 8))
-        mp_progress_bar = ttk.Progressbar(progress_frame, variable=mp_progress_var,
-                                          maximum=100, mode='determinate')
-        mp_progress_bar.grid(row=0, column=1, sticky='ew')
 
-        # ── Action buttons ──
+        # Action buttons — pack right first so they're always visible
         btn_frame = ttk.Frame(progress_frame)
-        btn_frame.grid(row=0, column=2, padx=(8, 0))
+        btn_frame.pack(side='right', padx=(8, 0))
         process_btn = ttk.Button(btn_frame, text="▶ Process All", command=lambda: _start_processing())
         process_btn.pack(side='left', padx=2)
         stop_btn = ttk.Button(btn_frame, text="⏹ Stop", command=lambda: _stop_processing(), state='disabled')
         stop_btn.pack(side='left', padx=2)
+
+        # Label and progress bar fill remaining space
+        mp_progress_label = ttk.Label(progress_frame, text="Ready")
+        mp_progress_label.pack(side='left', padx=(0, 8))
+        mp_progress_bar = ttk.Progressbar(progress_frame, variable=mp_progress_var,
+                                          maximum=100, mode='determinate')
+        mp_progress_bar.pack(side='left', fill='x', expand=True)
 
         # ── Log ──
         log_frame = ttk.LabelFrame(main_frame, text="Log", padding=5)
@@ -921,12 +1125,27 @@ def open_media_processor(app):
         log_text.tag_configure('WARNING', foreground='#dcdcaa')
         log_text.tag_configure('ERROR',   foreground='#f44747')
         log_text.tag_configure('SKIP',    foreground='#569cd6')
+        log_text.tag_configure('FILENAME', foreground='#6aff6a')
 
-        def _log(msg, level='INFO'):
+        def _log(msg, level='INFO', filename=None):
             def _do():
                 log_text.configure(state='normal')
                 ts = datetime.now().strftime('%H:%M:%S')
-                log_text.insert('end', f"[{ts}] [{level}] {msg}\n", level)
+                if filename:
+                    # Insert prefix, then filename in green, then remainder
+                    prefix = f"[{ts}] [{level}] "
+                    # Split msg around the filename
+                    idx = msg.find(filename)
+                    if idx >= 0:
+                        before = msg[:idx]
+                        after = msg[idx + len(filename):]
+                        log_text.insert('end', prefix + before, level)
+                        log_text.insert('end', filename, 'FILENAME')
+                        log_text.insert('end', after + '\n', level)
+                    else:
+                        log_text.insert('end', f"{prefix}{msg}\n", level)
+                else:
+                    log_text.insert('end', f"[{ts}] [{level}] {msg}\n", level)
                 log_text.see('end')
                 log_text.configure(state='disabled')
             # Safe to call from any thread
@@ -1026,9 +1245,9 @@ def open_media_processor(app):
             sub_inputs = []
             do_mux = _ov(f, 'mux_subs', opt_mux_subs)
             if do_mux:
-                for stype, spath in f['ext_subs']:
-                    cmd.extend(['-i', spath])
-                    sub_inputs.append((stype, spath))
+                for s in f['ext_subs']:
+                    cmd.extend(['-i', s['path']])
+                    sub_inputs.append(s)
 
             # Chapter injection
             ch_meta_path = None
@@ -1059,7 +1278,7 @@ def open_media_processor(app):
                 cmd.extend(['-map', '0:s?'])
 
             # Map external subtitle inputs
-            for idx, (stype, spath) in enumerate(sub_inputs):
+            for idx, s in enumerate(sub_inputs):
                 input_idx = 1 + idx
                 cmd.extend(['-map', f'{input_idx}:0'])
 
@@ -1140,32 +1359,48 @@ def open_media_processor(app):
             do_set_meta = _ov(f, 'set_metadata', opt_set_metadata)
             do_name_tracks = opt_name_tracks.get()
             s_lang = _ov(f, 'meta_sub', opt_meta_sub)
-            for idx, (stype, spath) in enumerate(sub_inputs):
+            eng_default_set = False  # track whether we've set an English default
+            for idx, s in enumerate(sub_inputs):
                 si = out_sub_idx + idx
                 sub_codec = 'mov_text' if out_ext == '.mp4' else 'srt'
                 cmd.extend([f'-c:s:{si}', sub_codec])
-                sub_lang = s_lang if do_set_meta else opt_sub_lang.get()
+                stype = s.get('type', 'main')
+                sdh = s.get('sdh', False)
+                # Use per-subtitle language; fall back to metadata override
+                sub_lang = s.get('lang', 'eng')
+                if do_set_meta and s.get('lang', 'eng') == (opt_sub_lang.get().strip() or 'eng'):
+                    sub_lang = s_lang  # apply metadata language override for primary lang
                 cmd.extend([f'-metadata:s:s:{si}', f'language={sub_lang}'])
                 if do_name_tracks and opt_name_sub.get():
-                    # Build info dict for template resolution
                     sub_tpl_info = {
                         'language': sub_lang,
                         'codec_name': 'subrip',
                         'forced': stype == 'forced',
-                        'sdh': False,
+                        'sdh': sdh,
                     }
                     title = _resolve_track_name(opt_name_sub.get(), sub_tpl_info)
                     if title:
                         cmd.extend([f'-metadata:s:s:{si}', f'title={title}'])
                 else:
-                    if stype == 'main':
-                        cmd.extend([f'-metadata:s:s:{si}', 'title=English'])
-                    elif stype == 'forced':
-                        cmd.extend([f'-metadata:s:s:{si}', 'title=Forced'])
-                if stype == 'main':
-                    cmd.extend([f'-disposition:s:{si}', 'default'])
-                elif stype == 'forced':
-                    cmd.extend([f'-disposition:s:{si}', 'forced'])
+                    lang_name = LANG_CODE_TO_NAME.get(sub_lang, sub_lang)
+                    if stype == 'forced':
+                        cmd.extend([f'-metadata:s:s:{si}', f'title={lang_name} - Forced'])
+                    elif sdh:
+                        cmd.extend([f'-metadata:s:s:{si}', f'title={lang_name} - SDH'])
+                    else:
+                        cmd.extend([f'-metadata:s:s:{si}', f'title={lang_name}'])
+                # Disposition: English main (non-SDH) gets default; forced gets forced;
+                # SDH gets hearing_impaired
+                disp_parts = []
+                if stype == 'main' and not sdh and sub_lang == 'eng' and not eng_default_set:
+                    disp_parts.append('default')
+                    eng_default_set = True
+                if stype == 'forced':
+                    disp_parts.append('forced')
+                if sdh:
+                    disp_parts.append('hearing_impaired')
+                if disp_parts:
+                    cmd.extend([f'-disposition:s:{si}', '+'.join(disp_parts)])
 
             # ── Chapters ──
             if ch_meta_path:
@@ -1359,7 +1594,9 @@ def open_media_processor(app):
 
                     out_size = os.path.getsize(final_path) if os.path.exists(final_path) else 0
                     out_mb = f'{out_size / (1024*1024):.1f} MB' if out_size else '?'
-                    _log(f"  ✅ Done — output: {out_mb}", 'SUCCESS')
+                    final_name = os.path.basename(final_path)
+                    _log(f"  ✅ Done — {final_name} ({out_mb})", 'SUCCESS',
+                         filename=final_name)
                     win.after(0, lambda idx=i: _update_tree_status(idx, '✅ Done'))
                     return ('done', i)
                 else:
@@ -1460,7 +1697,8 @@ def open_media_processor(app):
                 cleaned = 0
                 for f in mp_files:
                     if f['status'] == '✅ Done':
-                        for stype, spath in f.get('ext_subs', []):
+                        for s in f.get('ext_subs', []):
+                            spath = s['path']
                             if os.path.exists(spath):
                                 try:
                                     os.remove(spath)
@@ -1567,6 +1805,7 @@ def open_media_processor(app):
                 'meta_sub':       opt_meta_sub.get(),
                 'mux_subs':       opt_mux_subs.get(),
                 'sub_lang':       opt_sub_lang.get(),
+                'all_subs':       opt_all_subs.get(),
                 'output_mode':    opt_output_mode.get(),
                 'output_folder':  opt_output_folder.get(),
                 'container':      opt_container.get(),
@@ -1619,7 +1858,10 @@ def open_media_processor(app):
 
         _log("Docflix Media Processor ready — add files and click Process All", 'INFO')
         _log("Tip: drag and drop video files onto this window", 'INFO')
-        _log(f"Subtitle matching: *.{opt_sub_lang.get()}.srt / *.{opt_sub_lang.get()}.forced.srt", 'INFO')
+        if opt_all_subs.get():
+            _log("Subtitle matching: all languages (*.eng.srt, *.deu.srt, etc.)", 'INFO')
+        else:
+            _log(f"Subtitle matching: *.{opt_sub_lang.get()}.srt / *.{opt_sub_lang.get()}.forced.srt", 'INFO')
 
     # ── TV Show Renamer ────────────────────────────────────────────────────
 

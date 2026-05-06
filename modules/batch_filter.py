@@ -16,7 +16,7 @@ from .utils import scaled_geometry, scaled_minsize, ask_open_files, ask_director
 from .subtitle_filters import (
     parse_srt, write_srt,
     filter_remove_hi, filter_remove_caps_hi,
-    filter_remove_music_notes, filter_fix_caps,
+    filter_remove_music_notes, filter_fix_music_notes, filter_fix_caps,
     filter_remove_tags, filter_remove_ads,
     filter_remove_offscreen_quotes,
     filter_remove_leading_dashes,
@@ -396,6 +396,7 @@ def open_batch_filter(app):
             ('remove_ads',     "Remove Ads / Credits",
              lambda c: filter_remove_ads(c, app.custom_ad_patterns)),
             ('remove_music',   "Remove Stray Notes  ♪ ♫",        filter_remove_music_notes),
+            ('fix_music',      "Fix Music Notes  ♪ (OCR)",        filter_fix_music_notes),
             ('remove_dashes',  "Remove Leading Dashes  -",        filter_remove_leading_dashes),
             ('remove_caps_hi', "Remove ALL CAPS HI (UK style)",   filter_remove_caps_hi),
             ('remove_quotes',  "Remove Off-Screen Quotes ' ' (UK style)", filter_remove_offscreen_quotes),

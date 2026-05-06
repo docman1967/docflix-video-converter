@@ -214,7 +214,8 @@ def filter_remove_hi(cues):
         re.compile(r'\(.*?\)', re.DOTALL),
     ]
     speaker_pattern = re.compile(
-        r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}[A-Za-z]:\s*\n?', re.MULTILINE)
+        r'^(-?\s*)(?:[A-Za-z][A-Za-z\d\'\.]*|[A-Z][A-Za-z\s\d\'\.#]{1,29}[A-Za-z\d]):\s*\n?',
+        re.MULTILINE)
     caps_hi_label = re.compile(
         r'^(-?\s*)(?:[A-Z]{4,}|[A-Z][A-Z\-]*-[A-Z\-]*)'
         r'(?:\s+(?:[A-Z]{4,}|[A-Z][A-Z\-]*-[A-Z\-]*))*:\s*',
@@ -242,7 +243,7 @@ def filter_remove_hi(cues):
         lines = [line for line in lines if not caps_hi_checker(line)]
         text = '\n'.join(lines)
         text = re.sub(
-            r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}[A-Za-z]\s+:\s*', r'\1',
+            r'^(-?\s*)(?:[A-Za-z][A-Za-z\d\'\.]*|[A-Z][A-Za-z\s\d\'\.#]{1,29}[A-Za-z\d])\s+:\s*', r'\1',
             text, flags=re.MULTILINE)
         text = re.sub(r'^\s*:\s*', '', text, flags=re.MULTILINE)
         text = re.sub(r'\n\s*:\s*', '\n', text)
@@ -285,6 +286,57 @@ def filter_remove_music_notes(cues):
         stripped = re.sub(r'[♪♫\s\-]', '', cue['text'])
         if stripped:
             result.append(cue)
+    return result
+
+
+def fix_music_note_text(text):
+    """Fix common OCR misreads of music note symbols (♪).
+
+    Tesseract frequently misreads ♪ as: 2 > $ & £ © » # * ? Sf D> P If f
+    This function replaces those misreads with ♪ at start/end of lines
+    and in other common positions. Returns the corrected text.
+    """
+    # End-of-line garbled ♪: Sf, D>, P, If, f (various misreadings)
+    text = re.sub(r'\s+[SD][f>]\s*$', ' ♪', text, flags=re.MULTILINE)
+    text = re.sub(r'\s+P\s*$', ' ♪', text, flags=re.MULTILINE)
+    text = re.sub(r'\s+If\s*$', ' ♪', text, flags=re.MULTILINE)
+    text = re.sub(r'\s+f\s*$', ' ♪', text, flags=re.MULTILINE)
+
+    # Fix $f / £f ligature (garbled ♪♪ or ♪): replace with ♪
+    text = re.sub(r'[\$£]f\b', '♪', text)
+
+    # Fix -) at start of line (misread -♪)
+    text = re.sub(r'^-\)\s*', '-♪ ', text, flags=re.MULTILINE)
+
+    # Music note marker after [Speaker] brackets: [Ozians] $ text → [Ozians] ♪ text
+    text = re.sub(r'(\])\s*[2>$&£©»#*?]+\s*', r'\1 ♪ ', text)
+
+    # Start-of-line markers: 2, >, $, &, £, ©, », #, *, ? (with optional leading -)
+    text = re.sub(r'^(-?)[2>$&£©»#*?]+\s*(?=[A-Za-z\'\u2018\u2019"/])',
+                  r'\1♪ ', text, flags=re.MULTILINE)
+
+    # End-of-line markers
+    text = re.sub(r'\s+[>£&©$»#*]\s*$', ' ♪', text, flags=re.MULTILINE)
+
+    # Entire cue is just garbage chars — replace with single ♪
+    stripped = text.strip()
+    if (len(stripped) <= 3 and stripped
+            and all(c in 'Jjd}]){><%#@~^*_=2$&£©»♪ ' for c in stripped)):
+        return '♪'
+
+    return text
+
+
+def filter_fix_music_notes(cues):
+    """Apply OCR music note fixes to all cues.
+
+    Wrapper around fix_music_note_text() for batch processing.
+    Modifies cue text in-place (returns new list). Does not remove cues.
+    """
+    result = []
+    for cue in cues:
+        fixed = fix_music_note_text(cue['text'])
+        result.append({**cue, 'text': fixed})
     return result
 
 

@@ -620,6 +620,7 @@ def open_standalone_subtitle_editor(app):
                              f"{os.path.basename(current_path[0])}", 'SUCCESS')
                 # Reset baseline so unsaved-changes check is accurate
                 original_cues[:] = [dict(c) for c in cues]
+                _flash_saved(f"✓ Saved — {len(cues)} entries")
 
         def do_save_as():
             if not cues:
@@ -647,6 +648,7 @@ def open_standalone_subtitle_editor(app):
             current_path[0] = out_path
             editor.title(f"Docflix Subtitle Editor — {os.path.basename(out_path)}")
             app.add_log(f"Subtitle saved as: {out_path}", 'SUCCESS')
+            _flash_saved(f"✓ Saved as — {os.path.basename(out_path)}")
 
         def do_export():
             if not cues:
@@ -745,10 +747,213 @@ def open_standalone_subtitle_editor(app):
         filter_menu.add_command(label="Remove Ads / Credits", command=apply_remove_ads)
         filter_menu.add_command(label="Remove Stray Notes  ♪ ♫",
                                 command=lambda: apply_filter(filter_remove_music_notes, "Remove Stray Notes"))
+
+        def _show_fix_music_notes_preview():
+            """Show preview of OCR music note fixes before applying."""
+            from .subtitle_filters import fix_music_note_text
+            nonlocal cues
+
+            # Find cues where fix_music_note_text changes the text
+            fixes = []
+            for i, cue in enumerate(cues):
+                fixed = fix_music_note_text(cue['text'])
+                if fixed != cue['text']:
+                    fixes.append((i, cue, fixed))
+
+            if not fixes:
+                messagebox.showinfo("No Matches",
+                    "No music note OCR misreads found.", parent=editor)
+                return
+
+            pw = tk.Toplevel(editor)
+            pw.title(f"Fix Music Notes — {len(fixes)} cues matched")
+            pw.geometry(scaled_geometry(pw, 750, 500))
+            pw.minsize(400, 300)
+
+            ttk.Label(pw, text="Uncheck cues you want to skip:",
+                      font=('Helvetica', 10, 'bold')).pack(anchor='w', padx=10, pady=(10, 4))
+
+            def _select_all():
+                for _, var, _ in check_vars:
+                    var.set(True)
+            def _select_none():
+                for _, var, _ in check_vars:
+                    var.set(False)
+
+            def _apply():
+                nonlocal cues
+                push_undo()
+                apply_indices = {idx: fixed for idx, var, fixed
+                                 in check_vars if var.get()}
+                if not apply_indices:
+                    pw.destroy()
+                    return
+                new_cues = []
+                for i, cue in enumerate(cues):
+                    if i in apply_indices:
+                        new_cues.append({**cue, 'text': apply_indices[i]})
+                    else:
+                        new_cues.append(cue)
+                cues = new_cues
+                app.add_log(f"Filter 'Fix Music Notes': {len(apply_indices)} "
+                             f"cues fixed", 'INFO')
+                refresh_tree(cues)
+                pw.destroy()
+
+            # Bottom buttons — pack before canvas so they anchor to bottom
+            bot_btn = ttk.Frame(pw)
+            bot_btn.pack(side='bottom', fill='x', padx=10, pady=(0, 10))
+            ttk.Button(bot_btn, text="Apply Checked", command=_apply).pack(side='left', padx=(0, 4))
+            ttk.Button(bot_btn, text="Cancel", command=pw.destroy).pack(side='left')
+
+            top_btn = ttk.Frame(pw)
+            top_btn.pack(side='bottom', fill='x', padx=10, pady=(4, 4))
+            ttk.Button(top_btn, text="Select All", command=_select_all).pack(side='left', padx=(0, 4))
+            ttk.Button(top_btn, text="Select None", command=_select_none).pack(side='left')
+            ttk.Label(top_btn, text=f"{len(fixes)} cues matched",
+                      foreground='gray').pack(side='left', padx=(10, 0))
+
+            # Scrollable checkbox list — fills remaining space
+            canvas = tk.Canvas(pw)
+            v_scroll = ttk.Scrollbar(pw, orient='vertical', command=canvas.yview)
+            scroll_frame = ttk.Frame(canvas)
+            scroll_frame.bind('<Configure>',
+                lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+            canvas.create_window((0, 0), window=scroll_frame, anchor='nw')
+            canvas.configure(yscrollcommand=v_scroll.set)
+            v_scroll.pack(side='right', fill='y', pady=4)
+            canvas.pack(side='left', fill='both', expand=True, padx=(10, 0), pady=4)
+
+            def _on_mousewheel(event):
+                canvas.yview_scroll(-1 * (event.delta // 120 or (
+                    -1 if event.num == 4 else 1)), 'units')
+            canvas.bind('<MouseWheel>', _on_mousewheel)
+            canvas.bind('<Button-4>', _on_mousewheel)
+            canvas.bind('<Button-5>', _on_mousewheel)
+
+            check_vars = []
+            for idx, cue, fixed in fixes:
+                var = tk.BooleanVar(value=True)
+                check_vars.append((idx, var, fixed))
+                frame = ttk.Frame(scroll_frame)
+                frame.pack(fill='x', padx=4, pady=2)
+                ttk.Checkbutton(frame, variable=var).pack(side='left')
+                time_str = f"{cue['start']} → {cue['end']}"
+                before_text = cue['text'].replace('\n', ' │ ')
+                after_text = fixed.replace('\n', ' │ ')
+                ttk.Label(frame,
+                          text=f"#{idx+1}  {time_str}\n"
+                               f"  Before: {before_text}\n"
+                               f"  After:   {after_text}",
+                          wraplength=630, justify='left').pack(side='left', padx=(4, 0))
+
+        filter_menu.add_command(label="Fix Music Notes  ♪ (OCR)",
+                                command=_show_fix_music_notes_preview)
         filter_menu.add_command(label="Remove Leading Dashes  -",
                                 command=lambda: apply_filter(filter_remove_leading_dashes, "Remove Leading Dashes"))
+
+        def _show_caps_hi_preview():
+            """Show preview window of cues to be removed by ALL CAPS HI filter."""
+            from .subtitle_filters import _is_caps_hi_line
+            nonlocal cues
+
+            # Find cues that would be fully or partially removed
+            removals = []
+            for i, cue in enumerate(cues):
+                lines = cue['text'].split('\n')
+                caps_lines = [line for line in lines if _is_caps_hi_line(line)]
+                if caps_lines:
+                    removals.append((i, cue, caps_lines))
+
+            if not removals:
+                messagebox.showinfo("No Matches",
+                    "No ALL CAPS HI cues found to remove.", parent=editor)
+                return
+
+            pw = tk.Toplevel(editor)
+            pw.title(f"Remove ALL CAPS HI — {len(removals)} cues matched")
+            pw.geometry(scaled_geometry(pw, 700, 500))
+            pw.transient(editor)
+            pw.grab_set()
+
+            ttk.Label(pw, text="Uncheck cues you want to keep:",
+                      font=('Helvetica', 10, 'bold')).pack(anchor='w', padx=10, pady=(10, 4))
+
+            # Scrollable checkbox list
+            canvas = tk.Canvas(pw)
+            v_scroll = ttk.Scrollbar(pw, orient='vertical', command=canvas.yview)
+            scroll_frame = ttk.Frame(canvas)
+            scroll_frame.bind('<Configure>',
+                lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+            canvas.create_window((0, 0), window=scroll_frame, anchor='nw')
+            canvas.configure(yscrollcommand=v_scroll.set)
+            canvas.pack(side='left', fill='both', expand=True, padx=(10, 0), pady=4)
+            v_scroll.pack(side='right', fill='y', pady=4)
+
+            def _on_mousewheel(event):
+                canvas.yview_scroll(-1 * (event.delta // 120 or (
+                    -1 if event.num == 4 else 1)), 'units')
+            canvas.bind('<MouseWheel>', _on_mousewheel)
+            canvas.bind('<Button-4>', _on_mousewheel)
+            canvas.bind('<Button-5>', _on_mousewheel)
+
+            check_vars = []
+            for idx, cue, caps_lines in removals:
+                var = tk.BooleanVar(value=True)
+                check_vars.append((idx, var))
+                frame = ttk.Frame(scroll_frame)
+                frame.pack(fill='x', padx=4, pady=2)
+                ttk.Checkbutton(frame, variable=var).pack(side='left')
+                time_str = f"{cue['start']} → {cue['end']}"
+                text_preview = cue['text'].replace('\n', ' │ ')
+                ttk.Label(frame, text=f"#{idx+1}  {time_str}  —  {text_preview}",
+                          wraplength=580, justify='left').pack(side='left', padx=(4, 0))
+
+            btn_frame = ttk.Frame(pw)
+            btn_frame.pack(fill='x', padx=10, pady=(4, 10))
+
+            def _select_all():
+                for _, var in check_vars:
+                    var.set(True)
+            def _select_none():
+                for _, var in check_vars:
+                    var.set(False)
+
+            def _apply():
+                nonlocal cues
+                push_undo()
+                remove_indices = {idx for idx, var in check_vars if var.get()}
+                if not remove_indices:
+                    pw.destroy()
+                    return
+                new_cues = []
+                for i, cue in enumerate(cues):
+                    if i in remove_indices:
+                        lines = cue['text'].split('\n')
+                        kept_lines = [l for l in lines if not _is_caps_hi_line(l)]
+                        text = '\n'.join(kept_lines).strip()
+                        text = re.sub(r'^\s*-?\s*$', '', text, flags=re.MULTILINE)
+                        text = re.sub(r'\n{2,}', '\n', text).strip()
+                        if text:
+                            new_cues.append({**cue, 'text': text})
+                    else:
+                        new_cues.append(cue)
+                removed = len(cues) - len(new_cues)
+                cues = new_cues
+                app.add_log(f"Filter 'Remove CAPS HI': {removed} entries removed, "
+                             f"{len(cues)} remaining", 'INFO')
+                refresh_tree(cues)
+                pw.destroy()
+
+            ttk.Button(btn_frame, text="Select All", command=_select_all).pack(side='left', padx=(0, 4))
+            ttk.Button(btn_frame, text="Select None", command=_select_none).pack(side='left')
+            ttk.Label(btn_frame, text=f"{len(removals)} cues matched",
+                      foreground='gray').pack(side='left', padx=(10, 0))
+            ttk.Button(btn_frame, text="Cancel", command=pw.destroy).pack(side='right', padx=(4, 0))
+            ttk.Button(btn_frame, text="Remove Checked", command=_apply).pack(side='right')
+
         filter_menu.add_command(label="Remove ALL CAPS HI  (UK style)",
-                                command=lambda: apply_filter(filter_remove_caps_hi, "Remove CAPS HI"))
+                                command=_show_caps_hi_preview)
         filter_menu.add_command(label="Remove Off-Screen Quotes  ' '  (UK style)",
                                 command=lambda: apply_filter(filter_remove_offscreen_quotes, "Remove Off-Screen Quotes"))
         filter_menu.add_separator()
@@ -3088,6 +3293,27 @@ def open_standalone_subtitle_editor(app):
 
         tree.bind('<<TreeviewSelect>>', _on_tree_select)
 
+        # ── Shift+Arrow multi-select ──
+        def _shift_arrow(evt, direction):
+            items = tree.get_children()
+            if not items:
+                return 'break'
+            focus = tree.focus()
+            if not focus:
+                return 'break'
+            idx = list(items).index(focus)
+            new_idx = idx + direction
+            if new_idx < 0 or new_idx >= len(items):
+                return 'break'
+            new_item = items[new_idx]
+            tree.focus(new_item)
+            tree.see(new_item)
+            tree.selection_add(new_item)
+            return 'break'
+
+        tree.bind('<Shift-Up>',   lambda e: _shift_arrow(e, -1))
+        tree.bind('<Shift-Down>', lambda e: _shift_arrow(e, 1))
+
         # Build paned layout: top_paned (video | tree) in vertical paned with timeline
         top_paned.add(tree_frame, stretch='always')
         paned.add(top_paned, stretch='always')
@@ -3140,6 +3366,13 @@ def open_standalone_subtitle_editor(app):
 
         stats_label = ttk.Label(status_frame, text="0 entries")
         stats_label.pack(side='left')
+
+        saved_label = ttk.Label(status_frame, text="", foreground='green')
+        saved_label.pack(side='left', padx=(10, 0))
+
+        def _flash_saved(msg="✓ Saved"):
+            saved_label.configure(text=msg)
+            editor.after(3000, lambda: saved_label.configure(text=""))
 
         ttk.Button(status_frame, text="💾 Save", command=do_save_file).pack(side='right', padx=(4, 0))
         ttk.Button(status_frame, text="📤 Export SRT", command=do_export).pack(side='right', padx=4)
@@ -3800,10 +4033,210 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
         filter_menu.add_command(label="Remove Ads / Credits", command=apply_remove_ads)
         filter_menu.add_command(label="Remove Stray Notes  ♪ ♫",
                                 command=lambda: apply_filter(filter_remove_music_notes, "Remove Stray Notes"))
+
+        def _show_fix_music_notes_preview_int():
+            """Show preview of OCR music note fixes before applying."""
+            from .subtitle_filters import fix_music_note_text
+            nonlocal cues
+
+            fixes = []
+            for i, cue in enumerate(cues):
+                fixed = fix_music_note_text(cue['text'])
+                if fixed != cue['text']:
+                    fixes.append((i, cue, fixed))
+
+            if not fixes:
+                messagebox.showinfo("No Matches",
+                    "No music note OCR misreads found.", parent=editor)
+                return
+
+            pw = tk.Toplevel(editor)
+            pw.title(f"Fix Music Notes — {len(fixes)} cues matched")
+            pw.geometry(scaled_geometry(pw, 750, 500))
+            pw.minsize(400, 300)
+
+            ttk.Label(pw, text="Uncheck cues you want to skip:",
+                      font=('Helvetica', 10, 'bold')).pack(anchor='w', padx=10, pady=(10, 4))
+
+            def _select_all():
+                for _, var, _ in check_vars:
+                    var.set(True)
+            def _select_none():
+                for _, var, _ in check_vars:
+                    var.set(False)
+
+            def _apply():
+                nonlocal cues
+                push_undo()
+                apply_indices = {idx: fixed for idx, var, fixed
+                                 in check_vars if var.get()}
+                if not apply_indices:
+                    pw.destroy()
+                    return
+                new_cues = []
+                for i, cue in enumerate(cues):
+                    if i in apply_indices:
+                        new_cues.append({**cue, 'text': apply_indices[i]})
+                    else:
+                        new_cues.append(cue)
+                cues = new_cues
+                app.add_log(f"Filter 'Fix Music Notes': {len(apply_indices)} "
+                             f"cues fixed", 'INFO')
+                refresh_tree(cues)
+                pw.destroy()
+
+            # Bottom buttons — pack before canvas so they anchor to bottom
+            bot_btn = ttk.Frame(pw)
+            bot_btn.pack(side='bottom', fill='x', padx=10, pady=(0, 10))
+            ttk.Button(bot_btn, text="Apply Checked", command=_apply).pack(side='left', padx=(0, 4))
+            ttk.Button(bot_btn, text="Cancel", command=pw.destroy).pack(side='left')
+
+            top_btn = ttk.Frame(pw)
+            top_btn.pack(side='bottom', fill='x', padx=10, pady=(4, 4))
+            ttk.Button(top_btn, text="Select All", command=_select_all).pack(side='left', padx=(0, 4))
+            ttk.Button(top_btn, text="Select None", command=_select_none).pack(side='left')
+            ttk.Label(top_btn, text=f"{len(fixes)} cues matched",
+                      foreground='gray').pack(side='left', padx=(10, 0))
+
+            # Scrollable checkbox list — fills remaining space
+            canvas = tk.Canvas(pw)
+            v_scroll = ttk.Scrollbar(pw, orient='vertical', command=canvas.yview)
+            scroll_frame = ttk.Frame(canvas)
+            scroll_frame.bind('<Configure>',
+                lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+            canvas.create_window((0, 0), window=scroll_frame, anchor='nw')
+            canvas.configure(yscrollcommand=v_scroll.set)
+            v_scroll.pack(side='right', fill='y', pady=4)
+            canvas.pack(side='left', fill='both', expand=True, padx=(10, 0), pady=4)
+
+            def _on_mousewheel(event):
+                canvas.yview_scroll(-1 * (event.delta // 120 or (
+                    -1 if event.num == 4 else 1)), 'units')
+            canvas.bind('<MouseWheel>', _on_mousewheel)
+            canvas.bind('<Button-4>', _on_mousewheel)
+            canvas.bind('<Button-5>', _on_mousewheel)
+
+            check_vars = []
+            for idx, cue, fixed in fixes:
+                var = tk.BooleanVar(value=True)
+                check_vars.append((idx, var, fixed))
+                frame = ttk.Frame(scroll_frame)
+                frame.pack(fill='x', padx=4, pady=2)
+                ttk.Checkbutton(frame, variable=var).pack(side='left')
+                time_str = f"{cue['start']} → {cue['end']}"
+                before_text = cue['text'].replace('\n', ' │ ')
+                after_text = fixed.replace('\n', ' │ ')
+                ttk.Label(frame,
+                          text=f"#{idx+1}  {time_str}\n"
+                               f"  Before: {before_text}\n"
+                               f"  After:   {after_text}",
+                          wraplength=630, justify='left').pack(side='left', padx=(4, 0))
+
+        filter_menu.add_command(label="Fix Music Notes  ♪ (OCR)",
+                                command=_show_fix_music_notes_preview_int)
         filter_menu.add_command(label="Remove Leading Dashes  -",
                                 command=lambda: apply_filter(filter_remove_leading_dashes, "Remove Leading Dashes"))
+
+        def _show_caps_hi_preview_int():
+            """Show preview window of cues to be removed by ALL CAPS HI filter."""
+            from .subtitle_filters import _is_caps_hi_line
+            nonlocal cues
+
+            removals = []
+            for i, cue in enumerate(cues):
+                lines = cue['text'].split('\n')
+                caps_lines = [line for line in lines if _is_caps_hi_line(line)]
+                if caps_lines:
+                    removals.append((i, cue, caps_lines))
+
+            if not removals:
+                messagebox.showinfo("No Matches",
+                    "No ALL CAPS HI cues found to remove.", parent=editor)
+                return
+
+            pw = tk.Toplevel(editor)
+            pw.title(f"Remove ALL CAPS HI — {len(removals)} cues matched")
+            pw.geometry(scaled_geometry(pw, 700, 500))
+            pw.transient(editor)
+            pw.grab_set()
+
+            ttk.Label(pw, text="Uncheck cues you want to keep:",
+                      font=('Helvetica', 10, 'bold')).pack(anchor='w', padx=10, pady=(10, 4))
+
+            canvas = tk.Canvas(pw)
+            v_scroll = ttk.Scrollbar(pw, orient='vertical', command=canvas.yview)
+            scroll_frame = ttk.Frame(canvas)
+            scroll_frame.bind('<Configure>',
+                lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+            canvas.create_window((0, 0), window=scroll_frame, anchor='nw')
+            canvas.configure(yscrollcommand=v_scroll.set)
+            canvas.pack(side='left', fill='both', expand=True, padx=(10, 0), pady=4)
+            v_scroll.pack(side='right', fill='y', pady=4)
+
+            def _on_mousewheel(event):
+                canvas.yview_scroll(-1 * (event.delta // 120 or (
+                    -1 if event.num == 4 else 1)), 'units')
+            canvas.bind('<MouseWheel>', _on_mousewheel)
+            canvas.bind('<Button-4>', _on_mousewheel)
+            canvas.bind('<Button-5>', _on_mousewheel)
+
+            check_vars = []
+            for idx, cue, caps_lines in removals:
+                var = tk.BooleanVar(value=True)
+                check_vars.append((idx, var))
+                frame = ttk.Frame(scroll_frame)
+                frame.pack(fill='x', padx=4, pady=2)
+                ttk.Checkbutton(frame, variable=var).pack(side='left')
+                time_str = f"{cue['start']} → {cue['end']}"
+                text_preview = cue['text'].replace('\n', ' │ ')
+                ttk.Label(frame, text=f"#{idx+1}  {time_str}  —  {text_preview}",
+                          wraplength=580, justify='left').pack(side='left', padx=(4, 0))
+
+            btn_frame = ttk.Frame(pw)
+            btn_frame.pack(fill='x', padx=10, pady=(4, 10))
+
+            def _select_all():
+                for _, var in check_vars:
+                    var.set(True)
+            def _select_none():
+                for _, var in check_vars:
+                    var.set(False)
+
+            def _apply():
+                nonlocal cues
+                push_undo()
+                remove_indices = {idx for idx, var in check_vars if var.get()}
+                if not remove_indices:
+                    pw.destroy()
+                    return
+                new_cues = []
+                for i, cue in enumerate(cues):
+                    if i in remove_indices:
+                        lines = cue['text'].split('\n')
+                        kept_lines = [l for l in lines if not _is_caps_hi_line(l)]
+                        text = '\n'.join(kept_lines).strip()
+                        text = re.sub(r'^\s*-?\s*$', '', text, flags=re.MULTILINE)
+                        text = re.sub(r'\n{2,}', '\n', text).strip()
+                        if text:
+                            new_cues.append({**cue, 'text': text})
+                    else:
+                        new_cues.append(cue)
+                removed = len(cues) - len(new_cues)
+                cues = new_cues
+                app.add_log(f"Filter 'Remove CAPS HI': {removed} entries removed, "
+                             f"{len(cues)} remaining", 'INFO')
+                refresh_tree(cues)
+                pw.destroy()
+
+            ttk.Button(btn_frame, text="Select All", command=_select_all).pack(side='left', padx=(0, 4))
+            ttk.Button(btn_frame, text="Select None", command=_select_none).pack(side='left')
+            ttk.Label(btn_frame, text=f"{len(removals)} cues matched",
+                      foreground='gray').pack(side='left', padx=(10, 0))
+            ttk.Button(btn_frame, text="Cancel", command=pw.destroy).pack(side='right', padx=(4, 0))
+            ttk.Button(btn_frame, text="Remove Checked", command=_apply).pack(side='right')
+
         filter_menu.add_command(label="Remove ALL CAPS HI  (UK style)",
-                                command=lambda: apply_filter(filter_remove_caps_hi, "Remove CAPS HI"))
+                                command=_show_caps_hi_preview_int)
         filter_menu.add_command(label="Remove Off-Screen Quotes  ' '  (UK style)",
                                 command=lambda: apply_filter(filter_remove_offscreen_quotes, "Remove Off-Screen Quotes"))
         filter_menu.add_separator()
@@ -5732,6 +6165,27 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
 
         tree.bind('<<TreeviewSelect>>', _on_tree_select_int)
 
+        # ── Shift+Arrow multi-select ──
+        def _shift_arrow_int(evt, direction):
+            items = tree.get_children()
+            if not items:
+                return 'break'
+            focus = tree.focus()
+            if not focus:
+                return 'break'
+            idx = list(items).index(focus)
+            new_idx = idx + direction
+            if new_idx < 0 or new_idx >= len(items):
+                return 'break'
+            new_item = items[new_idx]
+            tree.focus(new_item)
+            tree.see(new_item)
+            tree.selection_add(new_item)
+            return 'break'
+
+        tree.bind('<Shift-Up>',   lambda e: _shift_arrow_int(e, -1))
+        tree.bind('<Shift-Down>', lambda e: _shift_arrow_int(e, 1))
+
         # Build paned layout
         top_paned.add(tree_frame, stretch='always')
         paned.add(top_paned, stretch='always')
@@ -5780,6 +6234,13 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
         stats_label = ttk.Label(status_frame,
                                 text=f"{len(cues)} entries │ 0 modified │ 0 removed")
         stats_label.pack(side='left')
+
+        saved_label = ttk.Label(status_frame, text="", foreground='green')
+        saved_label.pack(side='left', padx=(10, 0))
+
+        def _flash_saved(msg="✓ Saved"):
+            saved_label.configure(text=msg)
+            editor.after(3000, lambda: saved_label.configure(text=""))
 
         def do_save():
             """Save edited subtitles (for encoding pipeline or external file)."""

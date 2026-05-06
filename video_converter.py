@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.6.0"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -4799,7 +4799,8 @@ class VideoConverterApp:
         
         # File list
         columns = ('name', 'size', 'duration', 'est_size', 'status')
-        self.file_tree = ttk.Treeview(file_frame, columns=columns, show='headings', height=8)
+        self.file_tree = ttk.Treeview(file_frame, columns=columns, show='headings', height=8,
+                                          selectmode='extended')
         self.file_tree.grid(row=1, column=0, sticky="nsew")
 
         # Scale row height for high-DPI / fractional scaling displays
@@ -4861,6 +4862,27 @@ class VideoConverterApp:
             self.root.after_idle(self.show_subtitle_dialog)
         self.file_tree.bind('<Double-1>', on_file_double_click)
         self.file_tree.bind('<Delete>', lambda e: self.remove_selected_file())
+
+        # ── Shift+Arrow multi-select ──
+        def _shift_arrow(evt, direction):
+            items = self.file_tree.get_children()
+            if not items:
+                return 'break'
+            focus = self.file_tree.focus()
+            if not focus:
+                return 'break'
+            idx = list(items).index(focus)
+            new_idx = idx + direction
+            if new_idx < 0 or new_idx >= len(items):
+                return 'break'
+            new_item = items[new_idx]
+            self.file_tree.focus(new_item)
+            self.file_tree.see(new_item)
+            self.file_tree.selection_add(new_item)
+            return 'break'
+
+        self.file_tree.bind('<Shift-Up>',   lambda e: _shift_arrow(e, -1))
+        self.file_tree.bind('<Shift-Down>', lambda e: _shift_arrow(e, 1))
 
         file_frame.rowconfigure(1, weight=1)
 

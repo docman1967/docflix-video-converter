@@ -286,10 +286,51 @@ def open_video_scaler(app):
 
     tree = ttk.Treeview(tree_frame, columns=('source_res', 'target_res', 'size', 'status'),
                         show='headings', selectmode='extended')
-    tree.heading('source_res', text='Source')
-    tree.heading('target_res', text='Target')
-    tree.heading('size', text='Size')
-    tree.heading('status', text='Status')
+
+    # ── Column sorting state ──
+    _sort_col = [None]
+    _sort_reverse = [False]
+    _col_labels = {
+        '#0': 'Filename', 'source_res': 'Source',
+        'target_res': 'Target', 'size': 'Size', 'status': 'Status'
+    }
+
+    def _sort_by_column(col):
+        if _sort_col[0] == col:
+            _sort_reverse[0] = not _sort_reverse[0]
+        else:
+            _sort_col[0] = col
+            _sort_reverse[0] = False
+
+        def sort_key(f):
+            if col == '#0':
+                return f.get('name', '').lower()
+            elif col == 'source_res':
+                return (f.get('width') or 0) * (f.get('height') or 0)
+            elif col == 'target_res':
+                return (f.get('width') or 0) * (f.get('height') or 0)
+            elif col == 'size':
+                try:
+                    return os.path.getsize(f['path'])
+                except Exception:
+                    return 0
+            elif col == 'status':
+                return f.get('status', '').lower()
+            return ''
+
+        files.sort(key=sort_key, reverse=_sort_reverse[0])
+        _rebuild_tree()
+
+        # Update headers with sort arrow
+        arrow = ' ▼' if _sort_reverse[0] else ' ▲'
+        for c, lbl in _col_labels.items():
+            indicator = arrow if c == col else ''
+            tree.heading(c, text=lbl + indicator)
+
+    tree.heading('source_res', text='Source',  command=lambda: _sort_by_column('source_res'))
+    tree.heading('target_res', text='Target',  command=lambda: _sort_by_column('target_res'))
+    tree.heading('size', text='Size',          command=lambda: _sort_by_column('size'))
+    tree.heading('status', text='Status',      command=lambda: _sort_by_column('status'))
 
     tree.column('source_res', width=100, minwidth=80)
     tree.column('target_res', width=100, minwidth=80)
@@ -300,12 +341,33 @@ def open_video_scaler(app):
     tree['displaycolumns'] = ('source_res', 'target_res', 'size', 'status')
     tree['show'] = ('tree', 'headings')
     tree.column('#0', width=300, minwidth=200)
-    tree.heading('#0', text='Filename')
+    tree.heading('#0', text='Filename', command=lambda: _sort_by_column('#0'))
 
     tree_scroll = ttk.Scrollbar(tree_frame, orient='vertical', command=tree.yview)
     tree.configure(yscrollcommand=tree_scroll.set)
     tree.grid(row=0, column=0, sticky='nsew')
     tree_scroll.grid(row=0, column=1, sticky='ns')
+
+    # ── Shift+Arrow multi-select ──
+    def _shift_arrow(evt, direction):
+        items = tree.get_children()
+        if not items:
+            return 'break'
+        focus = tree.focus()
+        if not focus:
+            return 'break'
+        idx = list(items).index(focus)
+        new_idx = idx + direction
+        if new_idx < 0 or new_idx >= len(items):
+            return 'break'
+        new_item = items[new_idx]
+        tree.focus(new_item)
+        tree.see(new_item)
+        tree.selection_add(new_item)
+        return 'break'
+
+    tree.bind('<Shift-Up>',   lambda e: _shift_arrow(e, -1))
+    tree.bind('<Shift-Down>', lambda e: _shift_arrow(e, 1))
 
     # ── Settings panel ──
     settings_frame = ttk.Frame(main_frame, padding=(0, 4))

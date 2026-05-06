@@ -557,10 +557,13 @@ def open_tv_renamer(app):
             show_data = _all_shows.get(show_name, {})
 
             # Build provider ID variables for template
+            # Both {tvdb} and {tmdb} resolve to the active provider's ID
+            # so either template variable works regardless of provider
             sid = show_data.get('_series_id', '') if isinstance(show_data, dict) else ''
             prov = show_data.get('_provider', '') if isinstance(show_data, dict) else ''
-            tvdb_id = f'tvdb-{sid}' if prov == 'tvdb' and sid else ''
-            tmdb_id = f'tmdb-{sid}' if prov == 'tmdb' and sid else ''
+            provider_id = f'{prov}-{sid}' if prov and sid else ''
+            tvdb_id = provider_id
+            tmdb_id = provider_id
 
             # ── Movie mode — uses movie template ──
             if isinstance(show_data, dict) and show_data.get('_is_movie'):
@@ -791,8 +794,6 @@ def open_tv_renamer(app):
             dlg.geometry("700x500")
             dlg.minsize(500, 350)
             dlg.resizable(True, True)
-            dlg.transient(win)
-            dlg.grab_set()
 
             ttk.Label(dlg, text=f"Multiple shows found for \"{query}\":",
                       font=('Helvetica', 11, 'bold'),
@@ -815,8 +816,15 @@ def open_tv_renamer(app):
             canvas.configure(yscrollcommand=scrollbar.set)
 
             # Make scroll_frame fill canvas width on resize
+            _resize_after_id = [None]
             def _on_canvas_resize(event):
                 canvas.itemconfig(canvas_win, width=event.width)
+                # Debounced redraw to fix thumbnail dropout at high DPI
+                if _resize_after_id[0]:
+                    canvas.after_cancel(_resize_after_id[0])
+                _resize_after_id[0] = canvas.after(
+                    100, lambda: canvas.configure(
+                        scrollregion=canvas.bbox('all')))
             canvas.bind('<Configure>', _on_canvas_resize)
 
             canvas.pack(side='left', fill='both', expand=True)
@@ -969,6 +977,12 @@ def open_tv_renamer(app):
                     rf = row_frames[idx]
                     for child in rf.grid_slaves(row=0, column=0):
                         child.configure(image=photo, width=0)
+                        child._photo = photo  # prevent GC on resize
+                        # Re-bind click events after image loads
+                        child.bind('<Button-1>',
+                                   lambda e, i=idx: _select_row(i))
+                        child.bind('<Double-1>',
+                                   lambda e, i=idx: (_select_row(i), _ok()))
                         break
                 except Exception:
                     pass
@@ -990,7 +1004,7 @@ def open_tv_renamer(app):
                 dlg.destroy()
             dlg.protocol('WM_DELETE_WINDOW', _on_close)
 
-            app._center_on_main(dlg)
+            _center_on_parent(dlg, win)
             win.wait_window(dlg)
             return chosen[0]
 
@@ -1375,6 +1389,27 @@ def open_tv_renamer(app):
 
         tree.bind('<Button-3>', _on_tree_right_click)
 
+        # ── Shift+Arrow multi-select ──
+        def _shift_arrow(evt, direction):
+            items = tree.get_children()
+            if not items:
+                return 'break'
+            focus = tree.focus()
+            if not focus:
+                return 'break'
+            idx = list(items).index(focus)
+            new_idx = idx + direction
+            if new_idx < 0 or new_idx >= len(items):
+                return 'break'
+            new_item = items[new_idx]
+            tree.focus(new_item)
+            tree.see(new_item)
+            tree.selection_add(new_item)
+            return 'break'
+
+        tree.bind('<Shift-Up>',   lambda e: _shift_arrow(e, -1))
+        tree.bind('<Shift-Down>', lambda e: _shift_arrow(e, 1))
+
         # ── Drag and drop ──
         _RENAME_EXTENSIONS = VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS
 
@@ -1604,7 +1639,7 @@ def open_tv_renamer(app):
             dlg.resizable(False, False)
             dlg.transient(win)
             dlg.grab_set()
-            app._center_on_main(dlg)
+            _center_on_parent(dlg, win)
 
             f = ttk.Frame(dlg, padding=16)
             f.pack(fill='both', expand=True)
@@ -1669,6 +1704,22 @@ def open_tv_renamer(app):
         undo_btn.pack(side='left', padx=2)
         create_tooltip(undo_btn, "Undo the last rename operation")
 
+
+        def _refresh_shows():
+            """Re-query the provider for all shows and refresh previews."""
+            if not _file_items:
+                _log("No files loaded — add files first", 'WARNING')
+                return
+            _all_shows.clear()
+            for item in _file_items:
+                item.pop('matched_show', None)
+            _log(f"Refreshing from {provider_var.get()}...")
+            _auto_load_shows()
+
+        refresh_btn = ttk.Button(btn_f, text="🔄 Refresh", command=_refresh_shows,
+                                 width=10)
+        refresh_btn.pack(side='left', padx=2)
+        create_tooltip(refresh_btn, "Re-query the provider for all shows")
 
         def _clear_files():
             _file_items.clear()
@@ -1769,6 +1820,26 @@ def open_tv_renamer(app):
                                        value='TMDB')
 
         # Template dialog
+        def _center_on_parent(dlg, parent):
+            """Center a dialog over its parent window."""
+            parent.update_idletasks()
+            dlg.update_idletasks()
+            px, py = parent.winfo_x(), parent.winfo_y()
+            pw, ph = parent.winfo_width(), parent.winfo_height()
+            dw, dh = dlg.winfo_width(), dlg.winfo_height()
+            if dw <= 1 or dh <= 1:
+                geo = dlg.geometry()
+                try:
+                    size_part = geo.split('+')[0]
+                    if 'x' in size_part:
+                        dw, dh = map(int, size_part.split('x'))
+                except (ValueError, IndexError):
+                    dw = dlg.winfo_reqwidth()
+                    dh = dlg.winfo_reqheight()
+            x = max(0, px + (pw - dw) // 2)
+            y = max(0, py + (ph - dh) // 2)
+            dlg.geometry(f"{dw}x{dh}+{x}+{y}")
+
         def _open_template_settings():
             dlg = tk.Toplevel(win)
             dlg.title("Filename Template")
@@ -1776,7 +1847,7 @@ def open_tv_renamer(app):
             dlg.minsize(*scaled_minsize(dlg, 780, 650))
             dlg.resizable(True, True)
             dlg.grab_set()
-            app._center_on_main(dlg)
+            _center_on_parent(dlg, win)
 
             # Close button packed from bottom first so it's never clipped
             close_frame = ttk.Frame(dlg, padding=(20, 4, 20, 12))
@@ -1787,12 +1858,35 @@ def open_tv_renamer(app):
             f = ttk.Frame(dlg, padding=(20, 20, 20, 0))
             f.pack(fill='both', expand=True)
 
+            def _save_tv_template():
+                tmpl = template_var.get().strip()
+                if not tmpl:
+                    return
+                if tmpl not in _custom_templates:
+                    _custom_templates.append(tmpl)
+                    app._custom_rename_templates = _custom_templates
+                    app.save_preferences()
+                    _refresh_custom_list()
+
+            def _save_movie_template():
+                tmpl = movie_template_var.get().strip()
+                if not tmpl:
+                    return
+                if tmpl not in _custom_templates:
+                    _custom_templates.append(tmpl)
+                    app._custom_rename_templates = _custom_templates
+                    app.save_preferences()
+                    _refresh_custom_list()
+
             ttk.Label(f, text="TV template:",
                       font=('Helvetica', 11)).grid(
                           row=0, column=0, sticky='w', padx=(0, 8), pady=(0, 6))
             t_entry = ttk.Entry(f, textvariable=template_var, width=50,
                                 font=('Helvetica', 10))
             t_entry.grid(row=0, column=1, sticky='ew', pady=(0, 6))
+            ttk.Button(f, text="Save", width=5,
+                       command=_save_tv_template).grid(
+                           row=0, column=2, padx=(4, 0), pady=(0, 6))
             f.columnconfigure(1, weight=1)
 
             ttk.Label(f, text="Movie template:",
@@ -1801,11 +1895,14 @@ def open_tv_renamer(app):
             m_entry = ttk.Entry(f, textvariable=movie_template_var, width=50,
                                 font=('Helvetica', 10))
             m_entry.grid(row=1, column=1, sticky='ew', pady=(0, 10))
+            ttk.Button(f, text="Save", width=5,
+                       command=_save_movie_template).grid(
+                           row=1, column=2, padx=(4, 0), pady=(0, 10))
 
             # ── Custom templates (right below Template entry) ──
             _custom_templates = list(getattr(app, '_custom_rename_templates', []))
 
-            ttk.Label(f, text="Saved:").grid(
+            ttk.Label(f, text="Saved\nTemplates:").grid(
                 row=2, column=0, sticky='nw', padx=(0, 8), pady=(6, 0))
 
             custom_frame = ttk.Frame(f)
@@ -2006,7 +2103,7 @@ def open_tv_renamer(app):
             dlg.resizable(True, True)
             dlg.transient(win)
             dlg.grab_set()
-            app._center_on_main(dlg)
+            _center_on_parent(dlg, win)
 
             f = ttk.Frame(dlg, padding=20)
             f.pack(fill='both', expand=True)
