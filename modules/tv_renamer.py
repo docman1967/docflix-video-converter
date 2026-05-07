@@ -2520,11 +2520,15 @@ def open_tv_renamer(app):
 
                 # Build folder prefix
                 if is_movie:
+                    if folder == 'movie_year':
+                        base_folder = '{show} {year}'
+                    else:
+                        base_folder = '{show} ({year})'
                     if prov != 'none' and prov_loc in ('folder', 'both'):
                         id_tag = '{{{tvdb}}}' if prov == 'tvdb' else '{{{tmdb}}}'
-                        folder_name = '{show} ({year}) ' + id_tag
+                        folder_name = base_folder + ' ' + id_tag
                     else:
-                        folder_name = '{show} ({year})'
+                        folder_name = base_folder
                     return f'{folder_name}/{name_part}'
                 else:
                     if prov != 'none' and prov_loc in ('folder', 'both'):
@@ -2635,6 +2639,10 @@ def open_tv_renamer(app):
                         ttk.Radiobutton(step_frame,
                                          text="Yes — Movie (Year)/filename",
                                          variable=_folders, value='season').pack(
+                                             anchor='w', pady=4, padx=10)
+                        ttk.Radiobutton(step_frame,
+                                         text="Yes — Movie Year/filename",
+                                         variable=_folders, value='movie_year').pack(
                                              anchor='w', pady=4, padx=10)
                     else:
                         ttk.Radiobutton(step_frame,
