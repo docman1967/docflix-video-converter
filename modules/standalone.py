@@ -55,6 +55,10 @@ class StandaloneContext:
             '{show} ({year})')
         self._custom_rename_templates = prefs.get(
             'custom_rename_templates', [])
+        self._custom_tv_templates = prefs.get(
+            'custom_tv_templates', [])
+        self._custom_movie_templates = prefs.get(
+            'custom_movie_templates', [])
 
         # Subtitle editor
         self.custom_cap_words = prefs.get('custom_cap_words', [])
@@ -88,6 +92,10 @@ class StandaloneContext:
             '{show} ({year})')
         prefs['custom_rename_templates'] = getattr(
             self, '_custom_rename_templates', [])
+        prefs['custom_tv_templates'] = getattr(
+            self, '_custom_tv_templates', [])
+        prefs['custom_movie_templates'] = getattr(
+            self, '_custom_movie_templates', [])
         prefs['custom_cap_words'] = getattr(self, 'custom_cap_words', [])
         prefs['custom_spell_words'] = getattr(
             self, 'custom_spell_words', [])

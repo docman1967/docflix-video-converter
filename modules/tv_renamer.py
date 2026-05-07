@@ -26,6 +26,104 @@ except ImportError:
     HAS_DND = False
 
 
+# ── Video file probing for template variables ──
+
+_VCODEC_MAP = {
+    'hevc': 'x265', 'h265': 'x265', 'h264': 'x264', 'avc': 'x264',
+    'av1': 'AV1', 'vp9': 'VP9', 'vp8': 'VP8', 'mpeg4': 'MPEG4',
+    'mpeg2video': 'MPEG2', 'mpeg1video': 'MPEG1', 'prores': 'ProRes',
+    'theora': 'Theora', 'wmv3': 'WMV', 'vc1': 'VC1',
+}
+
+_ACODEC_MAP = {
+    'aac': 'AAC', 'ac3': 'AC3', 'eac3': 'EAC3', 'dts': 'DTS',
+    'truehd': 'TrueHD', 'flac': 'FLAC', 'opus': 'Opus',
+    'vorbis': 'Vorbis', 'mp3': 'MP3', 'mp2': 'MP2',
+    'pcm_s16le': 'PCM', 'pcm_s24le': 'PCM', 'pcm_s32le': 'PCM',
+    'wmav2': 'WMA', 'alac': 'ALAC',
+}
+
+# Keywords to detect source from filename
+_SOURCE_PATTERNS = [
+    ('REMUX', 'REMUX'), ('BluRay', 'BluRay'), ('BDRip', 'BDRip'),
+    ('WEB-DL', 'WEB-DL'), ('WEBRip', 'WEBRip'), ('WEB', 'WEB'),
+    ('HDTV', 'HDTV'), ('DVDRip', 'DVDRip'), ('DVD', 'DVD'),
+    ('BRRip', 'BRRip'), ('CAM', 'CAM'), ('TS', 'TS'),
+]
+
+
+def _probe_media_tags(filepath):
+    """Probe a video file for resolution, codecs, and HDR info.
+    Returns a dict with keys: resolution, vcodec, acodec, hdr, source."""
+    tags = {'resolution': '', 'vcodec': '', 'acodec': '', 'hdr': '', 'source': ''}
+    try:
+        cmd = [
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_streams', '-show_entries',
+            'stream=codec_type,codec_name,width,height,color_transfer,color_primaries',
+            filepath,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if result.returncode != 0:
+            return tags
+        import json as _j
+        data = _j.loads(result.stdout)
+        for s in data.get('streams', []):
+            if s.get('codec_type') == 'video' and not tags['vcodec']:
+                # Resolution
+                w = s.get('width', 0)
+                h = s.get('height', 0)
+                if h >= 2000 or w >= 3800:
+                    tags['resolution'] = '2160p'
+                elif h >= 1000 or w >= 1900:
+                    tags['resolution'] = '1080p'
+                elif h >= 700 or w >= 1200:
+                    tags['resolution'] = '720p'
+                elif h > 0:
+                    tags['resolution'] = '480p'
+                # Video codec
+                codec = s.get('codec_name', '').lower()
+                tags['vcodec'] = _VCODEC_MAP.get(codec, codec.upper() if codec else '')
+                # HDR detection
+                ct = s.get('color_transfer', '')
+                cp = s.get('color_primaries', '')
+                if 'smpte2084' in ct or 'arib-std-b67' in ct:
+                    if 'bt2020' in cp:
+                        tags['hdr'] = 'HDR10'
+                    else:
+                        tags['hdr'] = 'HDR'
+                elif ct and 'bt709' not in ct and 'unknown' not in ct:
+                    tags['hdr'] = 'HDR'
+                else:
+                    tags['hdr'] = 'SDR'
+            elif s.get('codec_type') == 'audio' and not tags['acodec']:
+                codec = s.get('codec_name', '').lower()
+                tags['acodec'] = _ACODEC_MAP.get(codec, codec.upper() if codec else '')
+                # Check for Atmos (TrueHD with object audio)
+                if codec == 'truehd':
+                    profile = s.get('profile', '')
+                    if 'atmos' in profile.lower():
+                        tags['acodec'] = 'Atmos'
+                # Check for DTS-HD
+                elif codec == 'dts':
+                    profile = s.get('profile', '')
+                    if 'hd ma' in profile.lower() or 'hd-ma' in profile.lower():
+                        tags['acodec'] = 'DTS-HD'
+                    elif 'hd hra' in profile.lower():
+                        tags['acodec'] = 'DTS-HD HRA'
+    except Exception:
+        pass
+
+    # Source detection from filename
+    fname_upper = os.path.basename(filepath).upper()
+    for pattern, label in _SOURCE_PATTERNS:
+        if pattern.upper() in fname_upper:
+            tags['source'] = label
+            break
+
+    return tags
+
+
 def open_tv_renamer(app):
         import urllib.request
         import urllib.parse
@@ -568,6 +666,24 @@ def open_tv_renamer(app):
             tvdb_id = provider_id
             tmdb_id = provider_id
 
+            # Media tags — from probed video or matched video for subtitles
+            mt = item.get('media_tags', {})
+            if not mt and item.get('ext') in SUBTITLE_EXTENSIONS:
+                # Try to get tags from a matching video file
+                for other in _file_items:
+                    if (other.get('ext') in VIDEO_EXTENSIONS
+                            and other.get('matched_show') == show_name
+                            and other.get('media_tags')):
+                        mt = other['media_tags']
+                        break
+            media_vars = {
+                'resolution': mt.get('resolution', ''),
+                'vcodec': mt.get('vcodec', ''),
+                'acodec': mt.get('acodec', ''),
+                'hdr': mt.get('hdr', ''),
+                'source': mt.get('source', ''),
+            }
+
             # ── Movie mode — uses movie template ──
             if isinstance(show_data, dict) and show_data.get('_is_movie'):
                 year = show_data.get('_year', '')
@@ -583,6 +699,7 @@ def open_tv_renamer(app):
                         tmdb=tmdb_id,
                         # Provide TV vars as empty so shared templates don't crash
                         season='', episode='', title='',
+                        **media_vars,
                     )
                 except (KeyError, IndexError):
                     name = f"{show_name} ({year})" if year else show_name
@@ -612,6 +729,7 @@ def open_tv_renamer(app):
                         year=ep_data.get('year', air_date[:4]),
                         tvdb=tvdb_id,
                         tmdb=tmdb_id,
+                        **media_vars,
                     )
                 else:
                     # No episode data found — use date as title
@@ -656,6 +774,7 @@ def open_tv_renamer(app):
                     year=year,
                     tvdb=tvdb_id,
                     tmdb=tmdb_id,
+                    **media_vars,
                 )
             else:
                 # Single episode
@@ -670,6 +789,7 @@ def open_tv_renamer(app):
                     year=ep_data.get('year', '') if ep_data else '',
                     tvdb=tvdb_id,
                     tmdb=tmdb_id,
+                    **media_vars,
                 )
             ext = item['ext']
             # For subtitle files, preserve language/forced/SDH tags
@@ -1161,7 +1281,7 @@ def open_tv_renamer(app):
 
             # ── Progress bar ──
             prog_f = ttk.Frame(main_f)
-            prog_f.grid(row=5, column=0, columnspan=3, sticky='ew',
+            prog_f.grid(row=6, column=0, columnspan=3, sticky='ew',
                         padx=4, pady=(2, 0))
             prog_lbl = ttk.Label(prog_f, text="Loading shows...",
                                  font=('Helvetica', 9))
@@ -1468,6 +1588,9 @@ def open_tv_renamer(app):
                                     item['air_date'] = e
                                     item['season'] = None
                                     item['episode'] = None
+                                # Probe video files for media tags
+                                if ext in VIDEO_EXTENSIONS:
+                                    item['media_tags'] = _probe_media_tags(fp)
                                 _file_items.append(item)
                                 added += 1
                 elif os.path.isfile(p):
@@ -1480,6 +1603,8 @@ def open_tv_renamer(app):
                             item['air_date'] = e
                             item['season'] = None
                             item['episode'] = None
+                        if ext in VIDEO_EXTENSIONS:
+                            item['media_tags'] = _probe_media_tags(p)
                         _file_items.append(item)
                         added += 1
             _v = sum(1 for i in _file_items if i['ext'] in VIDEO_EXTENSIONS)
@@ -1533,9 +1658,27 @@ def open_tv_renamer(app):
         except Exception:
             pass
 
-        # ── Row 3: Buttons ──
+        # ── Selection preview label ──
+        _sel_preview = ttk.Label(main_f, text="", font=('Courier', 9),
+                                  foreground='#336', anchor='w')
+        _sel_preview.grid(row=3, column=0, columnspan=3, sticky='ew',
+                          padx=6, pady=(2, 0))
+
+        def _on_tree_select(event=None):
+            sel = tree.selection()
+            if sel:
+                vals = tree.item(sel[0], 'values')
+                if vals and len(vals) > 2 and vals[2]:
+                    _sel_preview.configure(text=f"New: {vals[2]}")
+                else:
+                    _sel_preview.configure(text=f"Current: {vals[0]}" if vals else "")
+            else:
+                _sel_preview.configure(text="")
+        tree.bind('<<TreeviewSelect>>', _on_tree_select)
+
+        # ── Row 4: Buttons ──
         btn_f = ttk.Frame(main_f)
-        btn_f.grid(row=3, column=0, columnspan=3, sticky='ew', padx=4, pady=(4, 0))
+        btn_f.grid(row=4, column=0, columnspan=3, sticky='ew', padx=4, pady=(4, 0))
 
         def _do_rename():
             """Rename all files with valid new names."""
@@ -1550,6 +1693,8 @@ def open_tv_renamer(app):
             errors = 0
             batch_history = []  # [(old_path, new_path), ...]
             created_dirs = []   # track dirs created for undo cleanup
+            # Track parent folder renames so we only rename each once
+            _renamed_parents = {}  # old_parent → new_parent
             for item in _file_items:
                 try:
                     matched = item.get('matched_show')
@@ -1562,7 +1707,47 @@ def open_tv_renamer(app):
                         skipped += 1
                         continue
                     old_path = item['path']
-                    new_path = os.path.join(os.path.dirname(old_path), new_name)
+
+                    # If parent was already renamed by a previous file, update path
+                    orig_parent = os.path.dirname(old_path)
+                    if orig_parent in _renamed_parents:
+                        old_path = os.path.join(
+                            _renamed_parents[orig_parent],
+                            os.path.basename(old_path))
+
+                    if '/' in new_name:
+                        # Folder template: first component renames the parent dir,
+                        # remaining components are subfolders within it
+                        parts = new_name.split('/')
+                        show_folder = parts[0]
+                        remaining = os.path.join(*parts[1:]) if len(parts) > 1 else parts[0]
+
+                        current_parent = os.path.dirname(old_path)
+                        current_parent_name = os.path.basename(current_parent)
+                        grandparent = os.path.dirname(current_parent)
+
+                        # Rename parent folder if needed (only once per folder)
+                        if current_parent_name != show_folder:
+                            new_parent = os.path.join(grandparent, show_folder)
+                            if orig_parent not in _renamed_parents:
+                                if not os.path.exists(new_parent):
+                                    os.rename(current_parent, new_parent)
+                                    _renamed_parents[orig_parent] = new_parent
+                                    batch_history.append((current_parent, new_parent))
+                                    _log(f"  Renamed folder: {current_parent_name} → {show_folder}")
+                                elif new_parent == current_parent:
+                                    pass  # same folder, no rename needed
+                                else:
+                                    _log(f"  Folder already exists: {show_folder}", 'WARNING')
+                            current_parent = _renamed_parents.get(orig_parent, current_parent)
+                            old_path = os.path.join(current_parent, os.path.basename(old_path))
+
+                        # Build new path within the (renamed) parent
+                        new_path = os.path.join(current_parent, remaining)
+                    else:
+                        # Flat template: rename within the same directory
+                        new_path = os.path.join(os.path.dirname(old_path), new_name)
+
                     if old_path == new_path:
                         item['_renamed'] = True
                         renamed += 1
@@ -1571,7 +1756,7 @@ def open_tv_renamer(app):
                         _log(f"Skipped (exists): {new_name}", 'WARNING')
                         skipped += 1
                         continue
-                    # Create parent directories if the template has folders
+                    # Create subdirectories if needed (e.g. Season 01)
                     new_dir = os.path.dirname(new_path)
                     if new_dir and not os.path.exists(new_dir):
                         os.makedirs(new_dir, exist_ok=True)
@@ -1624,14 +1809,24 @@ def open_tv_renamer(app):
                 saved_items = []
             undone = 0
             errors = 0
-            # Build a set of old paths that were successfully restored
+
+            # Separate folder renames from file renames —
+            # folder renames are entries where new_path is a directory
+            file_renames = []
+            folder_renames = []
+            for old_path, new_path in batch:
+                if os.path.isdir(new_path) or (
+                        not os.path.exists(new_path) and not os.path.splitext(new_path)[1]):
+                    folder_renames.append((old_path, new_path))
+                else:
+                    file_renames.append((old_path, new_path))
+
+            # Phase 1: Undo file renames (reverse order)
             restored_old_paths = set()
-            # Reverse in reverse order for safety
-            for old_path, new_path in reversed(batch):
+            for old_path, new_path in reversed(file_renames):
                 try:
                     if os.path.exists(new_path) and not os.path.exists(old_path):
                         os.rename(new_path, old_path)
-                        # Update any items still in the list
                         for item in _file_items:
                             if item['path'] == new_path:
                                 item['path'] = old_path
@@ -1644,35 +1839,73 @@ def open_tv_renamer(app):
                 except Exception as e:
                     _log(f"Undo error: {e}", 'ERROR')
                     errors += 1
-            # Restore items that were removed from the list after rename
-            if saved_items and restored_old_paths:
-                existing_paths = {f['path'] for f in _file_items}
-                for item in saved_items:
-                    # Find the original path for this item
-                    orig_path = None
-                    for old_path, new_path in batch:
-                        if new_path == item['path'] and old_path in restored_old_paths:
-                            orig_path = old_path
-                            break
-                    if orig_path and orig_path not in existing_paths:
-                        item['path'] = orig_path
-                        item.pop('_renamed', None)
-                        _file_items.append(item)
-            # Clean up empty directories created during rename (deepest first)
+
+            # Phase 2: Clean up empty subdirectories (Season folders etc.)
             for d in sorted(created_dirs, key=len, reverse=True):
                 try:
                     if os.path.isdir(d) and not os.listdir(d):
                         os.rmdir(d)
-                        # Also try to remove parent dirs if empty
-                        parent = os.path.dirname(d)
-                        while parent and parent != os.path.dirname(parent):
-                            if os.path.isdir(parent) and not os.listdir(parent):
-                                os.rmdir(parent)
-                                parent = os.path.dirname(parent)
-                            else:
-                                break
                 except OSError:
-                    pass  # directory not empty or already removed
+                    pass
+
+            # Phase 3: Undo folder renames (reverse order — after files moved out)
+            for old_path, new_path in reversed(folder_renames):
+                try:
+                    if os.path.exists(new_path) and not os.path.exists(old_path):
+                        os.rename(new_path, old_path)
+                        # Update restored file paths to reflect parent rename
+                        for item in _file_items:
+                            if item['path'].startswith(new_path + os.sep):
+                                item['path'] = item['path'].replace(
+                                    new_path, old_path, 1)
+                        undone += 1
+                    else:
+                        _log(f"Cannot undo folder: {os.path.basename(new_path)}", 'WARNING')
+                        errors += 1
+                except Exception as e:
+                    _log(f"Undo folder error: {e}", 'ERROR')
+                    errors += 1
+
+            # Phase 4: Clean up any remaining empty directories
+            # (parent folder after rename-back may have empty subdirs)
+            for d in sorted(created_dirs, key=len, reverse=True):
+                try:
+                    if os.path.isdir(d) and not os.listdir(d):
+                        os.rmdir(d)
+                except OSError:
+                    pass
+            # Also walk up from created_dirs to clean empty parents
+            for d in sorted(created_dirs, key=len, reverse=True):
+                parent = os.path.dirname(d)
+                while parent and parent != os.path.dirname(parent):
+                    try:
+                        if os.path.isdir(parent) and not os.listdir(parent):
+                            os.rmdir(parent)
+                            parent = os.path.dirname(parent)
+                        else:
+                            break
+                    except OSError:
+                        break
+
+            # Restore items that were removed from the list after rename
+            if saved_items and (restored_old_paths or folder_renames):
+                existing_paths = {f['path'] for f in _file_items}
+                for item in saved_items:
+                    orig_path = None
+                    for old_path, new_path in file_renames:
+                        if new_path == item['path'] and old_path in restored_old_paths:
+                            orig_path = old_path
+                            break
+                    # Also check if the path needs parent folder adjustment
+                    if orig_path:
+                        for fold_old, fold_new in folder_renames:
+                            if orig_path.startswith(fold_new + os.sep):
+                                orig_path = orig_path.replace(fold_new, fold_old, 1)
+                                break
+                    if orig_path and orig_path not in existing_paths:
+                        item['path'] = orig_path
+                        item.pop('_renamed', None)
+                        _file_items.append(item)
             msg = f"Undone {undone} rename(s)"
             if errors:
                 msg += f" ({errors} errors)"
@@ -1804,8 +2037,8 @@ def open_tv_renamer(app):
 
         # ── Row 4: Log ──
         log_f = ttk.LabelFrame(main_f, text="Log", padding=4)
-        log_f.grid(row=4, column=0, columnspan=3, sticky='nsew', padx=4, pady=(4, 0))
-        main_f.rowconfigure(4, weight=1)
+        log_f.grid(row=5, column=0, columnspan=3, sticky='nsew', padx=4, pady=(4, 0))
+        main_f.rowconfigure(5, weight=1)
         log_text = tk.Text(log_f, height=4, wrap='word', font=('Courier', 9),
                            state='disabled', bg='#1e1e1e', fg='#d4d4d4')
         log_scroll = ttk.Scrollbar(log_f, orient='vertical', command=log_text.yview)
@@ -1908,41 +2141,53 @@ def open_tv_renamer(app):
             # Close button packed from bottom first so it's never clipped
             close_frame = ttk.Frame(dlg, padding=(20, 4, 20, 12))
             close_frame.pack(fill='x', side='bottom')
-            ttk.Button(close_frame, text="Close", command=dlg.destroy,
+            ttk.Button(close_frame, text="Close",
+                       command=lambda: _on_close(),
                        width=8).pack(side='right')
+            ttk.Button(close_frame, text="Template Wizard...",
+                       command=lambda: (_on_close(), _open_template_wizard()),
+                       width=16).pack(side='left')
 
-            f = ttk.Frame(dlg, padding=(20, 20, 20, 0))
-            f.pack(fill='both', expand=True)
+            # Scrollable content area
+            _canvas = tk.Canvas(dlg, highlightthickness=0)
+            _vscroll = ttk.Scrollbar(dlg, orient='vertical', command=_canvas.yview)
+            _canvas.configure(yscrollcommand=_vscroll.set)
+            _vscroll.pack(side='right', fill='y')
+            _canvas.pack(side='left', fill='both', expand=True)
 
-            def _save_tv_template():
-                tmpl = template_var.get().strip()
-                if not tmpl:
-                    return
-                if tmpl not in _custom_templates:
-                    _custom_templates.append(tmpl)
-                    app._custom_rename_templates = _custom_templates
-                    app.save_preferences()
-                    _refresh_custom_list()
+            f = ttk.Frame(_canvas, padding=(20, 20, 20, 0))
+            _canvas_win = _canvas.create_window((0, 0), window=f, anchor='nw')
 
-            def _save_movie_template():
-                tmpl = movie_template_var.get().strip()
-                if not tmpl:
-                    return
-                if tmpl not in _custom_templates:
-                    _custom_templates.append(tmpl)
-                    app._custom_rename_templates = _custom_templates
-                    app.save_preferences()
-                    _refresh_custom_list()
+            def _on_frame_configure(event):
+                _canvas.configure(scrollregion=_canvas.bbox('all'))
+            f.bind('<Configure>', _on_frame_configure)
 
+            def _on_canvas_configure(event):
+                _canvas.itemconfig(_canvas_win, width=event.width)
+            _canvas.bind('<Configure>', _on_canvas_configure)
+
+            def _on_mousewheel(event):
+                _canvas.yview_scroll(event.delta // 120 or (
+                    -1 if event.num == 4 else 1), 'units')
+            # Use bind_all on the dialog so mousewheel works on any widget
+            dlg.bind_all('<Button-4>', _on_mousewheel)
+            dlg.bind_all('<Button-5>', _on_mousewheel)
+            dlg.bind_all('<MouseWheel>', _on_mousewheel)
+            # Clean up bind_all when dialog closes to prevent bleed-through
+            def _on_close():
+                dlg.unbind_all('<Button-4>')
+                dlg.unbind_all('<Button-5>')
+                dlg.unbind_all('<MouseWheel>')
+                dlg.destroy()
+            dlg.protocol('WM_DELETE_WINDOW', _on_close)
+
+            # ── Active template entries ──
             ttk.Label(f, text="TV template:",
                       font=('Helvetica', 11)).grid(
                           row=0, column=0, sticky='w', padx=(0, 8), pady=(0, 6))
             t_entry = ttk.Entry(f, textvariable=template_var, width=50,
                                 font=('Helvetica', 10))
             t_entry.grid(row=0, column=1, sticky='ew', pady=(0, 6))
-            ttk.Button(f, text="Save", width=5,
-                       command=_save_tv_template).grid(
-                           row=0, column=2, padx=(4, 0), pady=(0, 6))
             f.columnconfigure(1, weight=1)
 
             ttk.Label(f, text="Movie template:",
@@ -1951,96 +2196,36 @@ def open_tv_renamer(app):
             m_entry = ttk.Entry(f, textvariable=movie_template_var, width=50,
                                 font=('Helvetica', 10))
             m_entry.grid(row=1, column=1, sticky='ew', pady=(0, 10))
-            ttk.Button(f, text="Save", width=5,
-                       command=_save_movie_template).grid(
-                           row=1, column=2, padx=(4, 0), pady=(0, 10))
-
-            # ── Custom templates (right below Template entry) ──
-            _custom_templates = list(getattr(app, '_custom_rename_templates', []))
-
-            ttk.Label(f, text="Saved\nTemplates:").grid(
-                row=2, column=0, sticky='nw', padx=(0, 8), pady=(6, 0))
-
-            custom_frame = ttk.Frame(f)
-            custom_frame.grid(row=2, column=1, sticky='ew', pady=(6, 0))
-
-            custom_listbox = tk.Listbox(custom_frame, height=3,
-                                         font=('Courier', 9))
-            custom_listbox.pack(side='left', fill='both', expand=True)
-            custom_scroll = ttk.Scrollbar(custom_frame, orient='vertical',
-                                           command=custom_listbox.yview)
-            custom_scroll.pack(side='right', fill='y')
-            custom_listbox.configure(yscrollcommand=custom_scroll.set)
-
-            def _refresh_custom_list():
-                custom_listbox.delete(0, 'end')
-                for t in _custom_templates:
-                    custom_listbox.insert('end', t)
-
-            _refresh_custom_list()
-
-            def _use_custom(event=None):
-                sel = custom_listbox.curselection()
-                if sel:
-                    template_var.set(_custom_templates[sel[0]])
-
-            custom_listbox.bind('<Double-1>', _use_custom)
-
-            custom_btn_frame = ttk.Frame(f)
-            custom_btn_frame.grid(row=3, column=1, sticky='w',
-                                   pady=(2, 0))
-
-            def _save_custom():
-                tmpl = template_var.get().strip()
-                if not tmpl:
-                    return
-                if tmpl not in _custom_templates:
-                    _custom_templates.append(tmpl)
-                    app._custom_rename_templates = _custom_templates
-                    app.save_preferences()
-                    _refresh_custom_list()
-
-            def _delete_custom():
-                sel = custom_listbox.curselection()
-                if sel:
-                    _custom_templates.pop(sel[0])
-                    app._custom_rename_templates = _custom_templates
-                    app.save_preferences()
-                    _refresh_custom_list()
-
-            ttk.Button(custom_btn_frame, text="Use", width=6,
-                       command=_use_custom).pack(side='left', padx=2)
-            ttk.Button(custom_btn_frame, text="Save Current", width=12,
-                       command=_save_custom).pack(side='left', padx=2)
-            ttk.Button(custom_btn_frame, text="Delete", width=8,
-                       command=_delete_custom).pack(side='left', padx=2)
-
-            ttk.Label(f, text="Available variables:",
-                      font=('Helvetica', 10, 'bold')).grid(
-                          row=4, column=0, columnspan=2, sticky='w',
-                          pady=(16, 6))
 
             # ── Variables reference ──
+            ttk.Label(f, text="Available variables:",
+                      font=('Helvetica', 10, 'bold')).grid(
+                          row=2, column=0, columnspan=2, sticky='w',
+                          pady=(6, 4))
             vars_text = (
-                "{show}     — Show / movie name\n"
-                "{season}   — Season number (zero-padded)\n"
-                "{episode}  — Episode number (zero-padded)\n"
-                "{title}    — Episode title\n"
-                "{year}     — Air / release year\n"
-                "{tvdb}     — TVDB ID (e.g. tvdb-475560)\n"
-                "{tmdb}     — TMDB ID (e.g. tmdb-12345)\n"
+                "{show}       — Show / movie name\n"
+                "{season}     — Season number (zero-padded)\n"
+                "{episode}    — Episode number (zero-padded)\n"
+                "{title}      — Episode title\n"
+                "{year}       — Air / release year\n"
+                "{tvdb}       — TVDB ID (e.g. tvdb-475560)\n"
+                "{tmdb}       — TMDB ID (e.g. tmdb-12345)\n"
+                "{resolution} — Auto-detected (e.g. 1080p)\n"
+                "{vcodec}     — Auto-detected (e.g. x265)\n"
+                "{acodec}     — Auto-detected (e.g. AAC)\n"
+                "{source}     — From filename (e.g. BluRay)\n"
+                "{hdr}        — Auto-detected (e.g. HDR10)\n"
                 "\n"
                 "Use / to create folders automatically."
             )
-            vars_box = tk.Text(f, font=('Courier', 10), height=9, width=50,
+            vars_box = tk.Text(f, font=('Courier', 10), height=14, width=50,
                                wrap='none', relief='flat',
                                bg=f.winfo_toplevel().cget('bg'),
                                cursor='arrow')
             vars_box.insert('1.0', vars_text)
             vars_box.configure(state='disabled')
-            vars_box.grid(row=5, column=0, columnspan=2, sticky='w',
+            vars_box.grid(row=3, column=0, columnspan=2, sticky='w',
                           padx=(15, 0))
-            # Enable select + copy on the read-only text widget
             def _vars_copy(event=None):
                 try:
                     sel = vars_box.get('sel.first', 'sel.last')
@@ -2057,15 +2242,99 @@ def open_tv_renamer(app):
 
             # ── Presets: TV (left) and Movie (right) side by side ──
             presets_frame = ttk.Frame(f)
-            presets_frame.grid(row=6, column=0, columnspan=2, sticky='ew',
+            presets_frame.grid(row=4, column=0, columnspan=2, sticky='ew',
                                pady=(12, 0))
             presets_frame.columnconfigure(0, weight=1)
             presets_frame.columnconfigure(1, weight=1)
 
-            # ── TV presets (left column) ──
-            tv_col = ttk.LabelFrame(presets_frame, text="TV Presets", padding=6)
-            tv_col.grid(row=0, column=0, sticky='nsew', padx=(0, 4))
+            # ── Custom template data (separate lists for TV and Movie) ──
+            _custom_tv = list(getattr(app, '_custom_tv_templates', []))
+            _custom_mv = list(getattr(app, '_custom_movie_templates', []))
+            # One-time migration: move old shared list to TV, then clear it
+            _old_shared = list(getattr(app, '_custom_rename_templates', []))
+            if _old_shared:
+                if not _custom_tv:
+                    _custom_tv = list(_old_shared)
+                    app._custom_tv_templates = _custom_tv
+                app._custom_rename_templates = []
+                app.save_preferences()
 
+            def _save_prefs():
+                app._custom_tv_templates = _custom_tv
+                app._custom_movie_templates = _custom_mv
+                app.save_preferences()
+
+            # ── Helper: build a preset column with custom section ──
+            def _build_preset_column(parent, label, flat_presets, folder_presets,
+                                     target_var, custom_list):
+                col = ttk.LabelFrame(parent, text=label, padding=6)
+
+                def _refresh_custom():
+                    # Clear old custom buttons
+                    for w in col.winfo_children():
+                        if getattr(w, '_is_custom', False):
+                            w.destroy()
+                    # Add custom template buttons
+                    for tmpl in custom_list:
+                        desc = tmpl
+                        # Truncate long templates for display
+                        if len(desc) > 42:
+                            desc = desc[:39] + '...'
+                        btn_f = ttk.Frame(col)
+                        btn_f.pack(anchor='w', pady=1)
+                        btn_f._is_custom = True
+                        def _use(t=tmpl):
+                            target_var.set(t)
+                        ttk.Button(btn_f, text=desc, command=_use,
+                                   width=34).pack(side='left')
+                        def _del(t=tmpl):
+                            if t in custom_list:
+                                custom_list.remove(t)
+                                _save_prefs()
+                                _refresh_custom()
+                        ttk.Button(btn_f, text="✕", width=2,
+                                   command=_del).pack(side='left', padx=(2, 0))
+                    # "+ Save Current" button at the end
+                    save_f = ttk.Frame(col)
+                    save_f.pack(anchor='w', pady=(4, 0))
+                    save_f._is_custom = True
+                    def _save():
+                        tmpl = target_var.get().strip()
+                        if not tmpl:
+                            return
+                        if tmpl not in custom_list:
+                            custom_list.append(tmpl)
+                            _save_prefs()
+                            _refresh_custom()
+                    ttk.Button(save_f, text="+ Save Current",
+                               command=_save).pack(side='left')
+
+                # Built-in Flat presets
+                ttk.Label(col, text="Flat:",
+                          font=('Helvetica', 9, 'bold')).pack(anchor='w', pady=(0, 2))
+                for tmpl, desc in flat_presets:
+                    def _set(t=tmpl):
+                        target_var.set(t)
+                    ttk.Button(col, text=desc, command=_set,
+                               width=38).pack(anchor='w', pady=1)
+
+                # Built-in Folder presets
+                ttk.Label(col, text="Folder:",
+                          font=('Helvetica', 9, 'bold')).pack(anchor='w', pady=(8, 2))
+                for tmpl, desc in folder_presets:
+                    def _set(t=tmpl):
+                        target_var.set(t)
+                    ttk.Button(col, text=desc, command=_set,
+                               width=38).pack(anchor='w', pady=1)
+
+                # Custom section
+                ttk.Label(col, text="Custom:",
+                          font=('Helvetica', 9, 'bold')).pack(anchor='w', pady=(8, 2))
+                _refresh_custom()
+
+                return col
+
+            # ── TV presets (left column) ──
             tv_flat_presets = [
                 ('{show} S{season}E{episode} {title}',
                  'Show S01E01 Title'),
@@ -2088,27 +2357,13 @@ def open_tv_renamer(app):
                 ('{show} {{{tmdb}}}/Season {season}/{show} S{season}E{episode} {title}',
                  'Show {tmdb-ID}/Season 01/Show S01E01 Title'),
             ]
-
-            ttk.Label(tv_col, text="Flat:",
-                      font=('Helvetica', 9, 'bold')).pack(anchor='w', pady=(0, 2))
-            for tmpl, desc in tv_flat_presets:
-                def _set(t=tmpl):
-                    template_var.set(t)
-                ttk.Button(tv_col, text=desc, command=_set,
-                           width=38).pack(anchor='w', pady=1)
-
-            ttk.Label(tv_col, text="Folder:",
-                      font=('Helvetica', 9, 'bold')).pack(anchor='w', pady=(8, 2))
-            for tmpl, desc in tv_folder_presets:
-                def _set(t=tmpl):
-                    template_var.set(t)
-                ttk.Button(tv_col, text=desc, command=_set,
-                           width=38).pack(anchor='w', pady=1)
+            tv_col = _build_preset_column(
+                presets_frame, "TV Presets",
+                tv_flat_presets, tv_folder_presets,
+                template_var, _custom_tv)
+            tv_col.grid(row=0, column=0, sticky='nsew', padx=(0, 4))
 
             # ── Movie presets (right column) ──
-            mv_col = ttk.LabelFrame(presets_frame, text="Movie Presets", padding=6)
-            mv_col.grid(row=0, column=1, sticky='nsew', padx=(4, 0))
-
             movie_flat_presets = [
                 ('{show} ({year})',
                  'Movie (2026)'),
@@ -2127,28 +2382,445 @@ def open_tv_renamer(app):
                 ('{show} ({year}) {{{tvdb}}}/{show} ({year})',
                  'Movie (2026) {tvdb-ID}/Movie (2026)'),
             ]
-
-            ttk.Label(mv_col, text="Flat:",
-                      font=('Helvetica', 9, 'bold')).pack(anchor='w', pady=(0, 2))
-            for tmpl, desc in movie_flat_presets:
-                def _mset(t=tmpl):
-                    movie_template_var.set(t)
-                ttk.Button(mv_col, text=desc, command=_mset,
-                           width=34).pack(anchor='w', pady=1)
-
-            ttk.Label(mv_col, text="Folder:",
-                      font=('Helvetica', 9, 'bold')).pack(anchor='w', pady=(8, 2))
-            for tmpl, desc in movie_folder_presets:
-                def _mset(t=tmpl):
-                    movie_template_var.set(t)
-                ttk.Button(mv_col, text=desc, command=_mset,
-                           width=34).pack(anchor='w', pady=1)
+            mv_col = _build_preset_column(
+                presets_frame, "Movie Presets",
+                movie_flat_presets, movie_folder_presets,
+                movie_template_var, _custom_mv)
+            mv_col.grid(row=0, column=1, sticky='nsew', padx=(4, 0))
 
             dlg.update_idletasks()
             dlg.wait_window()
 
         settings_menu.add_command(label="Filename Template...",
                                   command=_open_template_settings)
+
+        # ── Template Wizard ──
+        def _open_template_wizard():
+            wiz = tk.Toplevel(win)
+            wiz.withdraw()
+            wiz.title("Template Wizard")
+            wiz.geometry(scaled_geometry(wiz, 560, 420))
+            wiz.minsize(*scaled_minsize(wiz, 480, 380))
+            wiz.resizable(True, True)
+
+            # Wizard state
+            _step = [0]
+            _type = tk.StringVar(value='tv')           # tv or movie
+            _style = tk.StringVar(value='compact')     # compact, dashes, classic, classic_dashes
+            _mv_style = tk.StringVar(value='year_paren')  # year_paren, year_bare
+            _folders = tk.StringVar(value='none')      # none, season, s_short
+            _provider = tk.StringVar(value='none')     # none, tvdb, tmdb
+            _prov_location = tk.StringVar(value='folder')  # folder, filename, both
+            # Extras — checkboxes for auto-probed tags
+            _extra_resolution = tk.BooleanVar(value=False)
+            _extra_vcodec = tk.BooleanVar(value=False)
+            _extra_acodec = tk.BooleanVar(value=False)
+            _extra_source = tk.BooleanVar(value=False)
+            _extra_hdr = tk.BooleanVar(value=False)
+            _extra_custom = tk.StringVar(value='')
+
+            # Navigation buttons — packed at bottom first
+            nav_frame = ttk.Frame(wiz, padding=(16, 8, 16, 12))
+            nav_frame.pack(side='bottom', fill='x')
+
+            back_btn = ttk.Button(nav_frame, text="< Back", width=8)
+            back_btn.pack(side='left')
+            cancel_btn = ttk.Button(nav_frame, text="Cancel", width=8,
+                                     command=wiz.destroy)
+            cancel_btn.pack(side='right', padx=(4, 0))
+            apply_btn = ttk.Button(nav_frame, text="Apply", width=8)
+            apply_btn.pack(side='right', padx=(4, 0))
+            save_btn = ttk.Button(nav_frame, text="Save as Custom", width=14)
+            save_btn.pack(side='right', padx=(4, 0))
+            next_btn = ttk.Button(nav_frame, text="Next >", width=8)
+            next_btn.pack(side='right')
+
+            # Content area
+            content = ttk.Frame(wiz, padding=(24, 16, 24, 0))
+            content.pack(fill='both', expand=True)
+
+            # Step indicator
+            step_label = ttk.Label(content, text="",
+                                    font=('Helvetica', 9), foreground='gray')
+            step_label.pack(anchor='w', pady=(0, 4))
+
+            # Title for each step
+            title_label = ttk.Label(content, text="",
+                                     font=('Helvetica', 13, 'bold'))
+            title_label.pack(anchor='w', pady=(0, 10))
+
+            # Frame for step-specific widgets (cleared each step)
+            step_frame = ttk.Frame(content)
+            step_frame.pack(fill='both', expand=True)
+
+            # Preview at bottom of content
+            ttk.Separator(content).pack(fill='x', pady=(8, 6))
+            preview_label = ttk.Label(content, text="Template:",
+                                       font=('Helvetica', 9, 'bold'))
+            preview_label.pack(anchor='w')
+            preview_tmpl = ttk.Label(content, text="",
+                                      font=('Courier', 10), foreground='#336')
+            preview_tmpl.pack(anchor='w', pady=(2, 0))
+            preview_ex_label = ttk.Label(content, text="Example:",
+                                          font=('Helvetica', 9, 'bold'))
+            preview_ex_label.pack(anchor='w', pady=(4, 0))
+            preview_example = ttk.Label(content, text="",
+                                         font=('Courier', 10), foreground='#363')
+            preview_example.pack(anchor='w', pady=(2, 0))
+
+            def _build_template():
+                """Build the template string from wizard choices."""
+                is_movie = _type.get() == 'movie'
+                prov = _provider.get()
+                prov_loc = _prov_location.get()
+
+                # Build the filename part
+                if is_movie:
+                    if _mv_style.get() == 'year_paren':
+                        name_part = '{show} ({year})'
+                    else:
+                        name_part = '{show} {year}'
+                else:
+                    style = _style.get()
+                    if style == 'compact':
+                        name_part = '{show} S{season}E{episode} {title}'
+                    elif style == 'dashes':
+                        name_part = '{show} - S{season}E{episode} - {title}'
+                    elif style == 'classic':
+                        name_part = '{show} {season}x{episode} {title}'
+                    else:  # classic_dashes
+                        name_part = '{show} - {season}x{episode} - {title}'
+
+                # Append auto-probed media tag variables to filename
+                extras = []
+                if _extra_resolution.get():
+                    extras.append('{resolution}')
+                if _extra_vcodec.get():
+                    extras.append('{vcodec}')
+                if _extra_acodec.get():
+                    extras.append('{acodec}')
+                if _extra_source.get():
+                    extras.append('{source}')
+                if _extra_hdr.get():
+                    extras.append('{hdr}')
+                custom = _extra_custom.get().strip()
+                if custom:
+                    extras.append(custom)
+                if extras:
+                    name_part = name_part + ' ' + ' '.join(extras)
+
+                # Append provider ID to filename if requested
+                if prov != 'none' and prov_loc in ('filename', 'both'):
+                    id_tag = '{{{tvdb}}}' if prov == 'tvdb' else '{{{tmdb}}}'
+                    name_part = f'{name_part} {id_tag}'
+
+                folder = _folders.get()
+                if folder == 'none':
+                    return name_part
+
+                # Build folder prefix
+                if is_movie:
+                    if prov != 'none' and prov_loc in ('folder', 'both'):
+                        id_tag = '{{{tvdb}}}' if prov == 'tvdb' else '{{{tmdb}}}'
+                        folder_name = '{show} ({year}) ' + id_tag
+                    else:
+                        folder_name = '{show} ({year})'
+                    return f'{folder_name}/{name_part}'
+                else:
+                    if prov != 'none' and prov_loc in ('folder', 'both'):
+                        id_tag = '{{{tvdb}}}' if prov == 'tvdb' else '{{{tmdb}}}'
+                        show_dir = '{show} ' + id_tag
+                    else:
+                        show_dir = '{show}'
+
+                    if folder == 'season':
+                        return f'{show_dir}/Season {{season}}/{name_part}'
+                    else:  # s_short
+                        return f'{show_dir}/S{{season}}/{name_part}'
+
+            def _build_example(tmpl):
+                """Generate an example filename from the template."""
+                try:
+                    return tmpl.format(
+                        show='Breaking Bad', season='01', episode='01',
+                        title='Pilot', year='2008',
+                        tvdb='tvdb-81189', tmdb='tmdb-1396',
+                        resolution='1080p', vcodec='x265', acodec='AAC',
+                        source='BluRay', hdr='HDR10')
+                except (KeyError, IndexError):
+                    return '(preview unavailable)'
+
+            def _update_preview(*_):
+                tmpl = _build_template()
+                preview_tmpl.configure(text=tmpl)
+                preview_example.configure(text=_build_example(tmpl))
+
+            # Attach trace to all vars for live preview
+            for var in (_type, _style, _mv_style, _folders, _provider,
+                        _prov_location, _extra_resolution, _extra_vcodec,
+                        _extra_acodec, _extra_source, _extra_hdr, _extra_custom):
+                var.trace_add('write', _update_preview)
+
+            # ── Step definitions ──
+            steps_tv = ['type', 'style', 'folders', 'provider', 'extras', 'confirm']
+            steps_movie = ['type', 'mv_style', 'folders', 'provider', 'extras', 'confirm']
+
+            def _get_steps():
+                return steps_movie if _type.get() == 'movie' else steps_tv
+
+            def _show_step():
+                # Clear step frame
+                for w in step_frame.winfo_children():
+                    w.destroy()
+
+                steps = _get_steps()
+                idx = _step[0]
+                step_name = steps[idx]
+                total = len(steps)
+                step_label.configure(text=f"Step {idx + 1} of {total}")
+
+                # Nav button state
+                back_btn.configure(state='normal' if idx > 0 else 'disabled')
+                is_last = idx == total - 1
+                next_btn.pack_forget()
+                apply_btn.pack_forget()
+                save_btn.pack_forget()
+                if is_last:
+                    save_btn.pack(side='right', padx=(4, 0))
+                    apply_btn.pack(side='right', padx=(4, 0))
+                else:
+                    next_btn.pack(side='right')
+
+                if step_name == 'type':
+                    title_label.configure(text="What are you renaming?")
+                    ttk.Radiobutton(step_frame, text="TV Shows",
+                                     variable=_type, value='tv').pack(
+                                         anchor='w', pady=4, padx=10)
+                    ttk.Radiobutton(step_frame, text="Movies",
+                                     variable=_type, value='movie').pack(
+                                         anchor='w', pady=4, padx=10)
+
+                elif step_name == 'style':
+                    title_label.configure(text="How should the filename look?")
+                    styles = [
+                        ('compact', 'Show S01E01 Title'),
+                        ('dashes', 'Show - S01E01 - Title'),
+                        ('classic', 'Show 01x01 Title'),
+                        ('classic_dashes', 'Show - 01x01 - Title'),
+                    ]
+                    for val, desc in styles:
+                        ttk.Radiobutton(step_frame, text=desc,
+                                         variable=_style, value=val).pack(
+                                             anchor='w', pady=4, padx=10)
+
+                elif step_name == 'mv_style':
+                    title_label.configure(text="How should the filename look?")
+                    styles = [
+                        ('year_paren', 'Movie (2008)'),
+                        ('year_bare', 'Movie 2008'),
+                    ]
+                    for val, desc in styles:
+                        ttk.Radiobutton(step_frame, text=desc,
+                                         variable=_mv_style, value=val).pack(
+                                             anchor='w', pady=4, padx=10)
+
+                elif step_name == 'folders':
+                    title_label.configure(text="Organize into folders?")
+                    is_movie = _type.get() == 'movie'
+                    ttk.Radiobutton(step_frame,
+                                     text="No — all files stay in current folder",
+                                     variable=_folders, value='none').pack(
+                                         anchor='w', pady=4, padx=10)
+                    if is_movie:
+                        ttk.Radiobutton(step_frame,
+                                         text="Yes — Movie (Year)/filename",
+                                         variable=_folders, value='season').pack(
+                                             anchor='w', pady=4, padx=10)
+                    else:
+                        ttk.Radiobutton(step_frame,
+                                         text="Yes — Show/Season 01/filename",
+                                         variable=_folders, value='season').pack(
+                                             anchor='w', pady=4, padx=10)
+                        ttk.Radiobutton(step_frame,
+                                         text="Yes — Show/S01/filename",
+                                         variable=_folders, value='s_short').pack(
+                                             anchor='w', pady=4, padx=10)
+
+                elif step_name == 'provider':
+                    title_label.configure(
+                        text="Include a database ID?")
+                    # Provider selection
+                    current_prov = provider_var.get()  # TVDB or TMDB
+                    ttk.Radiobutton(step_frame, text="No ID",
+                                     variable=_provider, value='none').pack(
+                                         anchor='w', pady=4, padx=10)
+                    ttk.Radiobutton(step_frame,
+                                     text=f"TVDB ID  (e.g. tvdb-81189)"
+                                     + ("  — current provider" if current_prov == 'TVDB' else ""),
+                                     variable=_provider, value='tvdb').pack(
+                                         anchor='w', pady=4, padx=10)
+                    ttk.Radiobutton(step_frame,
+                                     text=f"TMDB ID  (e.g. tmdb-1396)"
+                                     + ("  — current provider" if current_prov == 'TMDB' else ""),
+                                     variable=_provider, value='tmdb').pack(
+                                         anchor='w', pady=4, padx=10)
+
+                    # Location sub-options (only shown when a provider is selected)
+                    loc_frame = ttk.LabelFrame(step_frame, text="Where to put the ID",
+                                                padding=6)
+                    loc_frame.pack(anchor='w', fill='x', padx=10, pady=(10, 4))
+                    has_folders = _folders.get() != 'none'
+                    ttk.Radiobutton(loc_frame,
+                                     text="In the filename  (e.g. ...Title {tmdb-1396}.mkv)",
+                                     variable=_prov_location, value='filename').pack(
+                                         anchor='w', pady=2)
+                    folder_rb = ttk.Radiobutton(loc_frame,
+                                     text="In the folder name  (e.g. Show {tmdb-1396}/...)",
+                                     variable=_prov_location, value='folder')
+                    folder_rb.pack(anchor='w', pady=2)
+                    both_rb = ttk.Radiobutton(loc_frame,
+                                     text="Both  (folder and filename)",
+                                     variable=_prov_location, value='both')
+                    both_rb.pack(anchor='w', pady=2)
+                    if not has_folders:
+                        folder_rb.configure(state='disabled')
+                        both_rb.configure(state='disabled')
+                        if _prov_location.get() in ('folder', 'both'):
+                            _prov_location.set('filename')
+                        ttk.Label(loc_frame,
+                                   text="(Enable folder structure in the previous step "
+                                   "to use folder placement)",
+                                   foreground='gray',
+                                   font=('Helvetica', 8)).pack(anchor='w', padx=20)
+
+                    def _toggle_loc_frame(*_):
+                        if _provider.get() == 'none':
+                            for child in loc_frame.winfo_children():
+                                if isinstance(child, ttk.Radiobutton):
+                                    child.configure(state='disabled')
+                        else:
+                            for child in loc_frame.winfo_children():
+                                if isinstance(child, ttk.Radiobutton):
+                                    if child in (folder_rb, both_rb) and not has_folders:
+                                        child.configure(state='disabled')
+                                    else:
+                                        child.configure(state='normal')
+                    _provider.trace_add('write', _toggle_loc_frame)
+                    _toggle_loc_frame()
+
+                elif step_name == 'extras':
+                    title_label.configure(text="Add media tags?  (optional)")
+                    ttk.Label(step_frame,
+                               text="Check the tags to include. Values are auto-detected\n"
+                               "from each video file using ffprobe.",
+                               foreground='gray',
+                               font=('Helvetica', 9)).pack(anchor='w', padx=10, pady=(0, 8))
+
+                    grid_f = ttk.Frame(step_frame)
+                    grid_f.pack(fill='x', padx=10)
+
+                    tags = [
+                        (_extra_resolution, 'Resolution',   '{resolution}', 'e.g. 1080p, 2160p'),
+                        (_extra_vcodec,     'Video codec',  '{vcodec}',     'e.g. x265, x264, AV1'),
+                        (_extra_acodec,     'Audio codec',  '{acodec}',     'e.g. AAC, DTS, TrueHD'),
+                        (_extra_source,     'Source',        '{source}',     'e.g. BluRay, WEB-DL (from filename)'),
+                        (_extra_hdr,        'HDR',           '{hdr}',        'e.g. HDR10, SDR'),
+                    ]
+                    for var, label, var_name, hint in tags:
+                        row_f = ttk.Frame(grid_f)
+                        row_f.pack(fill='x', pady=3)
+                        ttk.Checkbutton(row_f, text=label,
+                                         variable=var).pack(side='left')
+                        ttk.Label(row_f, text=f"  {var_name}  — {hint}",
+                                   foreground='gray',
+                                   font=('Helvetica', 8)).pack(side='left')
+
+                    ttk.Separator(grid_f).pack(fill='x', pady=(8, 6))
+                    custom_f = ttk.Frame(grid_f)
+                    custom_f.pack(fill='x')
+                    ttk.Label(custom_f, text="Custom text:").pack(side='left', padx=(0, 8))
+                    ttk.Entry(custom_f, textvariable=_extra_custom,
+                              width=20).pack(side='left', fill='x', expand=True)
+
+                elif step_name == 'confirm':
+                    title_label.configure(text="Your template is ready!")
+                    ttk.Label(step_frame,
+                               text="Click Apply to use this template now,\n"
+                               "or Save as Custom to keep it for later.",
+                               font=('Helvetica', 10)).pack(
+                                   anchor='w', pady=4, padx=10)
+
+                _update_preview()
+
+            def _next():
+                steps = _get_steps()
+                if _step[0] < len(steps) - 1:
+                    _step[0] += 1
+                    _show_step()
+
+            def _back():
+                if _step[0] > 0:
+                    _step[0] -= 1
+                    _show_step()
+
+            def _switch_provider_if_needed():
+                """Switch the active provider to match the wizard's choice."""
+                prov = _provider.get()
+                if prov == 'none':
+                    return
+                target = 'TVDB' if prov == 'tvdb' else 'TMDB'
+                if provider_var.get() != target:
+                    provider_var.set(target)
+                    _log(f"Wizard: switched provider to {target}")
+
+            def _apply():
+                tmpl = _build_template()
+                _switch_provider_if_needed()
+                if _type.get() == 'movie':
+                    movie_template_var.set(tmpl)
+                else:
+                    template_var.set(tmpl)
+                _log(f"Wizard: applied {'movie' if _type.get() == 'movie' else 'TV'} "
+                     f"template: {tmpl}")
+                wiz.destroy()
+
+            def _save_and_apply():
+                tmpl = _build_template()
+                _switch_provider_if_needed()
+                is_movie = _type.get() == 'movie'
+                if is_movie:
+                    movie_template_var.set(tmpl)
+                    customs = list(getattr(app, '_custom_movie_templates', []))
+                    if tmpl not in customs:
+                        customs.append(tmpl)
+                        app._custom_movie_templates = customs
+                        app.save_preferences()
+                else:
+                    template_var.set(tmpl)
+                    customs = list(getattr(app, '_custom_tv_templates', []))
+                    if tmpl not in customs:
+                        customs.append(tmpl)
+                        app._custom_tv_templates = customs
+                        app.save_preferences()
+                _log(f"Wizard: saved and applied {'movie' if is_movie else 'TV'} "
+                     f"template: {tmpl}")
+                wiz.destroy()
+
+            next_btn.configure(command=_next)
+            back_btn.configure(command=_back)
+            apply_btn.configure(command=_apply)
+            save_btn.configure(command=_save_and_apply)
+
+            # Show first step
+            _show_step()
+
+            # Center and show
+            wiz.update_idletasks()
+            _center_on_parent(wiz, win)
+            wiz.deiconify()
+
+        settings_menu.add_command(label="Template Wizard...",
+                                  command=_open_template_wizard)
 
         # TMDB Key dialog
         def _open_api_key_settings():
