@@ -543,8 +543,11 @@ def open_tv_renamer(app):
                 lang = filename_lang if filename_lang else 'eng'
 
             tags.append(lang)
+            seen = set()
             for t in found_tags:
-                tags.append(t)
+                if t not in seen:
+                    tags.append(t)
+                    seen.add(t)
             return '.' + '.'.join(tags)
 
         def _build_new_name(item, template, show_name, movie_template=None):
@@ -751,8 +754,8 @@ def open_tv_renamer(app):
             # Truncate at common release tags
             name = re.sub(r'\s*(?:WEB|HDTV|BluRay|BDRip|DVDRip|REMUX|PROPER).*',
                           '', name, flags=re.IGNORECASE)
-            # Strip trailing year (e.g. "Rise Of The Conqueror 2026")
-            name = re.sub(r'\s+(?:19|20)\d{2}\s*$', '', name)
+            # Strip trailing year (e.g. "Rise Of The Conqueror 2026" or "Movie (2026)")
+            name = re.sub(r'\s+\(?(?:19|20)\d{2}\)?\s*$', '', name)
             return name.strip()
 
         def _remove_show_for_selected():
@@ -1120,9 +1123,13 @@ def open_tv_renamer(app):
                 _log("No files loaded — add files first", 'WARNING')
                 return
 
-            # Extract unique show names from filenames
+            # Extract unique show names from video filenames only —
+            # subtitle files contain language/forced/sdh tags that pollute
+            # the show name and cause failed API searches
             show_names = set()
             for item in _file_items:
+                if item.get('ext') in SUBTITLE_EXTENSIONS:
+                    continue
                 fname = os.path.splitext(os.path.basename(item['path']))[0]
                 cleaned = _clean_show_name(fname).strip()
                 if cleaned:
@@ -1154,7 +1161,7 @@ def open_tv_renamer(app):
 
             # ── Progress bar ──
             prog_f = ttk.Frame(main_f)
-            prog_f.grid(row=4, column=0, columnspan=3, sticky='ew',
+            prog_f.grid(row=5, column=0, columnspan=3, sticky='ew',
                         padx=4, pady=(2, 0))
             prog_lbl = ttk.Label(prog_f, text="Loading shows...",
                                  font=('Helvetica', 9))
@@ -1245,18 +1252,44 @@ def open_tv_renamer(app):
             _refresh_preview()
         movie_template_var.trace_add('write', _on_movie_template_change)
 
-        # ── Row 1: File list (treeview) ──
-        tree_f = ttk.Frame(main_f)
-        tree_f.grid(row=1, column=0, columnspan=3, sticky='nsew', padx=4, pady=4)
-        main_f.rowconfigure(1, weight=1)
+        # ── Row 1: Template display ──
+        tmpl_display = ttk.Frame(main_f)
+        tmpl_display.grid(row=1, column=0, columnspan=3, sticky='ew', padx=6, pady=(2, 0))
+        tmpl_display.columnconfigure(1, weight=1)
+        tmpl_display.columnconfigure(3, weight=1)
 
-        columns = ('current', 'new_name')
+        ttk.Label(tmpl_display, text="TV:", font=('Helvetica', 9, 'bold')).grid(
+            row=0, column=0, sticky='w', padx=(0, 4))
+        _tv_tmpl_lbl = ttk.Label(tmpl_display, text=template_var.get(),
+                                  font=('Helvetica', 9), foreground='#336')
+        _tv_tmpl_lbl.grid(row=0, column=1, sticky='w')
+
+        ttk.Label(tmpl_display, text="Movie:", font=('Helvetica', 9, 'bold')).grid(
+            row=0, column=2, sticky='w', padx=(16, 4))
+        _mv_tmpl_lbl = ttk.Label(tmpl_display, text=movie_template_var.get(),
+                                  font=('Helvetica', 9), foreground='#633')
+        _mv_tmpl_lbl.grid(row=0, column=3, sticky='w')
+
+        def _update_tmpl_labels(*_):
+            _tv_tmpl_lbl.configure(text=template_var.get())
+            _mv_tmpl_lbl.configure(text=movie_template_var.get())
+        template_var.trace_add('write', _update_tmpl_labels)
+        movie_template_var.trace_add('write', _update_tmpl_labels)
+
+        # ── Row 2: File list (treeview) ──
+        tree_f = ttk.Frame(main_f)
+        tree_f.grid(row=2, column=0, columnspan=3, sticky='nsew', padx=4, pady=4)
+        main_f.rowconfigure(2, weight=1)
+
+        columns = ('current', 'type', 'new_name')
         tree = ttk.Treeview(tree_f, columns=columns, show='headings',
                             selectmode='extended')
         tree.heading('current', text='Current Filename')
+        tree.heading('type', text='Type')
         tree.heading('new_name', text='New Filename')
-        tree.column('current', width=350, minwidth=150)
-        tree.column('new_name', width=400, minwidth=150)
+        tree.column('current', width=320, minwidth=150)
+        tree.column('type', width=55, minwidth=45, anchor='center')
+        tree.column('new_name', width=380, minwidth=150)
 
         tree_scroll = ttk.Scrollbar(tree_f, orient='vertical', command=tree.yview)
         tree.configure(yscrollcommand=tree_scroll.set)
@@ -1283,7 +1316,9 @@ def open_tv_renamer(app):
                             and _all_shows.get(matched, {}).get('_is_movie'))
                 has_ep = (s is not None and e is not None)
                 has_date = item.get('air_date') is not None
+                type_label = '—'
                 if matched and (is_movie or has_ep or has_date):
+                    type_label = 'Movie' if is_movie else 'TV'
                     try:
                         new_name = _build_new_name(item, template, matched,
                                                    movie_template=m_template) or ''
@@ -1291,7 +1326,7 @@ def open_tv_renamer(app):
                         new_name = '(template error)'
 
                 iid = tree.insert('', 'end',
-                                  values=(cur_name, new_name))
+                                  values=(cur_name, type_label, new_name))
                 # Color rows without matches
                 if not new_name or new_name == '(template error)':
                     tree.item(iid, tags=('nomatch',))
@@ -1326,9 +1361,9 @@ def open_tv_renamer(app):
             if not sel:
                 return
             vals = tree.item(sel[0], 'values')
-            if vals and len(vals) > 1 and vals[1]:
+            if vals and len(vals) > 2 and vals[2]:
                 win.clipboard_clear()
-                win.clipboard_append(vals[1])
+                win.clipboard_append(vals[2])
 
         def _on_tree_right_click(event):
             iid = tree.identify_row(event.y)
@@ -1345,7 +1380,7 @@ def open_tv_renamer(app):
                     command=_set_episode_for_selected)
                 # Copy new name
                 vals = tree.item(sel[0], 'values')
-                if vals and len(vals) > 1 and vals[1]:
+                if vals and len(vals) > 2 and vals[2]:
                     _tree_ctx.add_command(
                         label="Copy New Name",
                         command=_copy_new_name)
@@ -1498,9 +1533,9 @@ def open_tv_renamer(app):
         except Exception:
             pass
 
-        # ── Row 2: Buttons ──
+        # ── Row 3: Buttons ──
         btn_f = ttk.Frame(main_f)
-        btn_f.grid(row=2, column=0, columnspan=3, sticky='ew', padx=4, pady=(4, 0))
+        btn_f.grid(row=3, column=0, columnspan=3, sticky='ew', padx=4, pady=(4, 0))
 
         def _do_rename():
             """Rename all files with valid new names."""
@@ -1549,11 +1584,13 @@ def open_tv_renamer(app):
                 except Exception as e:
                     _log(f"Error renaming: {e}", 'ERROR')
                     errors += 1
-            # Save undo history (include created dirs for cleanup)
+            # Save undo history (include created dirs and removed items for restore)
+            renamed_items = [i.copy() for i in _file_items if i.get('_renamed')]
             if batch_history:
                 _rename_history.append({
                     'renames': batch_history,
                     'created_dirs': created_dirs,
+                    'items': renamed_items,
                 })
             # Remove successfully renamed files from the list
             _file_items[:] = [i for i in _file_items if not i.get('_renamed')]
@@ -1580,21 +1617,26 @@ def open_tv_renamer(app):
             if isinstance(entry, dict):
                 batch = entry['renames']
                 created_dirs = entry.get('created_dirs', [])
+                saved_items = entry.get('items', [])
             else:
                 batch = entry
                 created_dirs = []
+                saved_items = []
             undone = 0
             errors = 0
+            # Build a set of old paths that were successfully restored
+            restored_old_paths = set()
             # Reverse in reverse order for safety
             for old_path, new_path in reversed(batch):
                 try:
                     if os.path.exists(new_path) and not os.path.exists(old_path):
                         os.rename(new_path, old_path)
-                        # Update _file_items to reflect the old path
+                        # Update any items still in the list
                         for item in _file_items:
                             if item['path'] == new_path:
                                 item['path'] = old_path
                                 break
+                        restored_old_paths.add(old_path)
                         undone += 1
                     else:
                         _log(f"Cannot undo: {os.path.basename(new_path)}", 'WARNING')
@@ -1602,6 +1644,20 @@ def open_tv_renamer(app):
                 except Exception as e:
                     _log(f"Undo error: {e}", 'ERROR')
                     errors += 1
+            # Restore items that were removed from the list after rename
+            if saved_items and restored_old_paths:
+                existing_paths = {f['path'] for f in _file_items}
+                for item in saved_items:
+                    # Find the original path for this item
+                    orig_path = None
+                    for old_path, new_path in batch:
+                        if new_path == item['path'] and old_path in restored_old_paths:
+                            orig_path = old_path
+                            break
+                    if orig_path and orig_path not in existing_paths:
+                        item['path'] = orig_path
+                        item.pop('_renamed', None)
+                        _file_items.append(item)
             # Clean up empty directories created during rename (deepest first)
             for d in sorted(created_dirs, key=len, reverse=True):
                 try:
@@ -1746,10 +1802,10 @@ def open_tv_renamer(app):
             if path:
                 _add_paths([path])
 
-        # ── Row 3: Log ──
+        # ── Row 4: Log ──
         log_f = ttk.LabelFrame(main_f, text="Log", padding=4)
-        log_f.grid(row=3, column=0, columnspan=3, sticky='nsew', padx=4, pady=(4, 0))
-        main_f.rowconfigure(3, weight=1)
+        log_f.grid(row=4, column=0, columnspan=3, sticky='nsew', padx=4, pady=(4, 0))
+        main_f.rowconfigure(4, weight=1)
         log_text = tk.Text(log_f, height=4, wrap='word', font=('Courier', 9),
                            state='disabled', bg='#1e1e1e', fg='#d4d4d4')
         log_scroll = ttk.Scrollbar(log_f, orient='vertical', command=log_text.yview)

@@ -326,6 +326,10 @@ def open_batch_filter(app):
                             paths.append(os.path.join(root_dir, fn))
                 if paths:
                     _add_paths(paths)
+                else:
+                    messagebox.showinfo("No Subtitles Found",
+                        "No subtitle files found in the selected folder.",
+                        parent=win)
 
         def remove_selected():
             selected = sorted(file_listbox.curselection(), reverse=True)
@@ -364,29 +368,46 @@ def open_batch_filter(app):
 
         # DnD registration
         def on_batch_drop(event):
-            raw = event.data
+            raw = event.data.strip()
             paths = []
-            i = 0
-            while i < len(raw):
-                if raw[i] == '{':
-                    end = raw.find('}', i)
-                    paths.append(raw[i + 1:end])
-                    i = end + 2
-                elif raw[i] == ' ':
-                    i += 1
+            if 'file://' in raw:
+                from urllib.parse import unquote, urlparse
+                for token in re.split(r'[\r\n\s]+', raw):
+                    token = token.strip()
+                    if token.startswith('file://'):
+                        parsed = urlparse(token)
+                        paths.append(unquote(parsed.path))
+            else:
+                # Tcl list format: {/path with spaces} or /plain/path
+                paths = [p.strip('{}') for p in re.findall(r'\{[^}]+\}|[^\s]+', raw)]
+
+            # Expand directories recursively
+            sub_exts = {'.srt', '.ass', '.ssa', '.vtt', '.sub'}
+            expanded = []
+            for p in paths:
+                if os.path.isdir(p):
+                    for ext in sub_exts:
+                        for fp in Path(p).rglob(f'*{ext}'):
+                            if fp.is_file() and not any(
+                                    part.startswith('.') for part in fp.relative_to(p).parts):
+                                expanded.append(str(fp))
                 else:
-                    end = raw.find(' ', i)
-                    if end == -1:
-                        paths.append(raw[i:])
-                        break
-                    else:
-                        paths.append(raw[i:end])
-                        i = end + 1
-            _add_paths(paths)
+                    expanded.append(p)
+            if expanded:
+                _add_paths(expanded)
+            else:
+                messagebox.showinfo("No Subtitles Found",
+                    "No subtitle files found in the dropped items.",
+                    parent=win)
 
         if HAS_DND:
             win.drop_target_register(DND_FILES)
             win.dnd_bind('<<Drop>>', on_batch_drop)
+            try:
+                file_listbox.drop_target_register(DND_FILES)
+                file_listbox.dnd_bind('<<Drop>>', on_batch_drop)
+            except Exception:
+                pass
 
         # ── Populate: Filters ─────────────────────────────────────────────────
         # Define filters: (key, label, filter_function)

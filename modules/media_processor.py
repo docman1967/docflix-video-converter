@@ -17,8 +17,8 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from .constants import (VIDEO_EXTENSIONS, EDITION_PRESETS, LANG_CODE_TO_NAME,
-                        SUBTITLE_LANGUAGES)
+from .constants import (VIDEO_EXTENSIONS, SUBTITLE_EXTENSIONS, EDITION_PRESETS,
+                        LANG_CODE_TO_NAME, SUBTITLE_LANGUAGES)
 from .chapters import generate_auto_chapters, chapters_to_ffmetadata
 from .utils import get_audio_info, get_subtitle_streams, ask_directory, ask_open_files, scaled_geometry, scaled_minsize
 
@@ -66,6 +66,20 @@ def open_media_processor(app):
         mp_lock = threading.Lock()  # protects mp_files during parallel access
         mp_batch_total = [0]          # total files in current batch
         mp_batch_done = [0]           # files completed so far
+
+        def _play_notification_sound():
+            """Play the freedesktop completion sound via ffplay."""
+            sound = '/usr/share/sounds/freedesktop/stereo/complete.oga'
+            if not os.path.exists(sound):
+                return
+            def _play():
+                try:
+                    subprocess.run(
+                        ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', sound],
+                        timeout=10)
+                except Exception:
+                    pass
+            threading.Thread(target=_play, daemon=True).start()
 
         # ── Options ──
         # Map display names → ffmpeg codec names (subset for remux use)
@@ -368,28 +382,75 @@ def open_media_processor(app):
         toolbar = ttk.Frame(main_frame)
         toolbar.grid(row=0, column=0, sticky='ew', pady=(0, 6))
 
+        _scanning = [False]  # prevent overlapping scans
+
+        def _add_files_threaded(file_paths, source_label="files"):
+            """Probe and add a list of file paths in a background thread
+            with progress shown in the existing progress bar."""
+            if _scanning[0] or not file_paths:
+                return
+            # De-duplicate against already loaded files
+            existing = {f['path'] for f in mp_files}
+            to_add = [p for p in file_paths if p not in existing]
+            if not to_add:
+                return
+            _scanning[0] = True
+            total = len(to_add)
+
+            def _worker():
+                import time as _time
+                start = _time.monotonic()
+                added = 0
+                for i, fp in enumerate(to_add):
+                    # Progress update
+                    elapsed = _time.monotonic() - start
+                    rate = (i + 1) / elapsed if elapsed > 0.1 else 0
+                    eta = f" — ETA {int((total - i - 1) / rate)}s" if rate > 0 else ""
+                    pct = ((i + 1) / total) * 100
+                    win.after(0, lambda p=pct: mp_progress_var.set(p))
+                    win.after(0, lambda n=i+1, t=total, e=eta:
+                              mp_progress_label.configure(
+                                  text=f"Scanning {n}/{t}{e}"))
+                    try:
+                        _add_one_file(fp)
+                        added += 1
+                    except Exception:
+                        pass
+                    # Periodic tree refresh every 20 files
+                    if added > 0 and added % 20 == 0:
+                        win.after(0, _rebuild_tree)
+
+                elapsed = _time.monotonic() - start
+                win.after(0, _rebuild_tree)
+                win.after(0, lambda: mp_progress_var.set(0))
+                win.after(0, lambda: mp_progress_label.configure(text="Ready"))
+                _log(f"Added {added} {source_label} ({elapsed:.1f}s)", 'INFO')
+                _scanning[0] = False
+
+            threading.Thread(target=_worker, daemon=True).start()
+
         def _add_files():
             paths = ask_open_files(
                 parent=win,
                 title="Select Video Files",
                 filetypes=[("Video files", "*.mkv *.mp4 *.avi *.mov *.wmv *.flv *.webm *.ts *.m2ts *.mts"),
                            ("All files", "*.*")])
-            for p in paths:
-                _add_one_file(p)
-            _rebuild_tree()
+            if paths:
+                _add_files_threaded(list(paths), "file(s)")
 
         def _add_folder():
             folder = ask_directory(title="Select Folder with Video Files", parent=win)
             if not folder:
                 return
-            count = 0
+            # Collect paths first (fast), then probe in background
+            file_paths = []
             for ext in VIDEO_EXTENSIONS:
-                for fp in Path(folder).glob(f'*{ext}'):
-                    if fp.is_file() and not fp.name.startswith('.'):
-                        _add_one_file(str(fp))
-                        count += 1
-            _rebuild_tree()
-            _log(f"Scanned folder: {count} video file(s) found", 'INFO')
+                for fp in Path(folder).rglob(f'*{ext}'):
+                    if fp.is_file() and not any(
+                            part.startswith('.') for part in fp.relative_to(folder).parts):
+                        file_paths.append(str(fp))
+            if file_paths:
+                _add_files_threaded(file_paths, "video file(s) from folder")
 
         # 2-letter → 3-letter language code mapping
         _lang2to3 = {
@@ -410,75 +471,107 @@ def open_media_processor(app):
             'ice': 'isl', 'alb': 'sqi',
         }
 
+        # All known language codes for subtitle tag detection
+        _ALL_LANG_CODES = set()
+        for _code, _name in SUBTITLE_LANGUAGES:
+            if _code != 'und':
+                _ALL_LANG_CODES.add(_code)
+        _ALL_LANG_CODES.update(_lang2to3.keys())        # 2-letter codes
+        _ALL_LANG_CODES.update(_lang_alt3.keys())        # /B 3-letter alternates
+        _TAG_FORCED = {'forced'}
+        _TAG_SDH = {'sdh', 'hi', 'cc'}
+        _SUB_EXTENSIONS = SUBTITLE_EXTENSIONS  # .srt .ass .ssa .vtt .sub .idx .sup
+
+        def _normalize_lang(code):
+            """Normalize a language code to its canonical 3-letter form."""
+            code = code.lower()
+            # 2-letter → 3-letter
+            if code in _lang2to3:
+                return _lang2to3[code]
+            # /B alternate → /T canonical (e.g. ger → deu)
+            if code in _lang_alt3:
+                return _lang_alt3[code]
+            return code
+
         def _detect_ext_subs(filepath):
             """Detect matching subtitle files alongside a video file.
 
-            If opt_all_subs is enabled, scans for all known language codes.
-            Otherwise uses the configured subtitle language code.
+            Uses fuzzy matching: finds all subtitle files in the same
+            directory whose name starts with the video's base name, then
+            parses the remaining tokens for language, forced, and SDH tags.
+
+            Defaults: language='eng', type='main', sdh=False.
+
             Each result is a dict: {'path', 'lang', 'type', 'sdh'}.
             English subtitles are sorted first.
             """
-            base = os.path.splitext(filepath)[0]
+            video_dir = os.path.dirname(filepath)
+            video_stem = os.path.splitext(os.path.basename(filepath))[0]
+            video_stem_lower = video_stem.lower()
             ext_subs_found = []
             seen_paths = set()
 
-            def _check_lang(lang):
-                """Check for subtitle files matching a given 3-letter language code.
-                Also checks 2-letter and alternate 3-letter (ISO 639-2/B) variants."""
-                # Build list of code variants to check
-                codes_to_check = [lang]
-                # 2-letter variant (e.g. deu → de)
-                short = {v: k for k, v in _lang2to3.items()}.get(lang)
-                if short:
-                    codes_to_check.append(short)
-                # Alternate 3-letter /B variant (e.g. deu → ger)
-                alt = {v: k for k, v in _lang_alt3.items()}.get(lang)
-                if alt:
-                    codes_to_check.append(alt)
+            # Scan all subtitle files in the same directory
+            try:
+                entries = os.listdir(video_dir)
+            except OSError:
+                return []
 
-                # Patterns: .code.srt, .code.forced.srt, .code.sdh.srt,
-                #           .code.hi.srt, .code.cc.srt
-                for code in codes_to_check:
-                    patterns = [
-                        (f"{base}.{code}.srt",            'main',   False),
-                        (f"{base}.{code}.forced.srt",     'forced', False),
-                        (f"{base}.{code}.sdh.srt",        'main',   True),
-                        (f"{base}.{code}.hi.srt",         'main',   True),
-                        (f"{base}.{code}.cc.srt",         'main',   True),
-                    ]
-                    for path, stype, sdh in patterns:
-                        if os.path.isfile(path) and path not in seen_paths:
-                            seen_paths.add(path)
-                            ext_subs_found.append({
-                                'path': path, 'lang': lang,
-                                'type': stype, 'sdh': sdh,
-                            })
+            for fname in entries:
+                if fname.startswith('.'):
+                    continue
+                fpath = os.path.join(video_dir, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                name_lower = fname.lower()
+                ext = os.path.splitext(name_lower)[1]
+                if ext not in _SUB_EXTENSIONS:
+                    continue
 
-            if opt_all_subs.get():
-                # Scan all known language codes
-                for code, _name in SUBTITLE_LANGUAGES:
-                    if code == 'und':
+                # Check if this subtitle belongs to this video —
+                # its name must start with the video's stem
+                sub_stem = os.path.splitext(fname)[0]
+                sub_stem_lower = sub_stem.lower()
+                if not sub_stem_lower.startswith(video_stem_lower):
+                    continue
+
+                # Get the suffix after the video stem (e.g. ".eng.forced")
+                suffix = sub_stem[len(video_stem):]
+
+                # Parse suffix tokens for language, forced, sdh
+                tokens = re.split(r'[\.\s_\-]+', suffix.lower())
+                tokens = [t for t in tokens if t]  # drop empty
+
+                lang = None
+                is_forced = False
+                is_sdh = False
+
+                for tok in tokens:
+                    if tok in _TAG_FORCED:
+                        is_forced = True
+                    elif tok in _TAG_SDH:
+                        is_sdh = True
+                    elif tok in _ALL_LANG_CODES and lang is None:
+                        lang = _normalize_lang(tok)
+
+                # Default language
+                if lang is None:
+                    lang = 'eng'
+
+                # Filter by language preference (unless "all" mode)
+                if not opt_all_subs.get():
+                    target_lang = opt_sub_lang.get().strip() or 'eng'
+                    target_norm = _normalize_lang(target_lang)
+                    if lang != target_norm:
                         continue
-                    _check_lang(code)
-            else:
-                # Single configured language
-                lang = opt_sub_lang.get().strip() or 'eng'
-                _check_lang(lang)
 
-            # Fallback: no language code in filename → default to English
-            bare_patterns = [
-                (f"{base}.srt",            'main',   False),
-                (f"{base}.forced.srt",     'forced', False),
-                (f"{base}.sdh.srt",        'main',   True),
-                (f"{base}.hi.srt",         'main',   True),
-                (f"{base}.cc.srt",         'main',   True),
-            ]
-            for path, stype, sdh in bare_patterns:
-                if os.path.isfile(path) and path not in seen_paths:
-                    seen_paths.add(path)
+                stype = 'forced' if is_forced else 'main'
+
+                if fpath not in seen_paths:
+                    seen_paths.add(fpath)
                     ext_subs_found.append({
-                        'path': path, 'lang': 'eng',
-                        'type': stype, 'sdh': sdh,
+                        'path': fpath, 'lang': lang,
+                        'type': stype, 'sdh': is_sdh,
                     })
 
             # Sort: English first, then by language, forced/sdh after main
@@ -1592,6 +1685,11 @@ def open_media_processor(app):
                     else:
                         final_path = out_path
 
+                    # Track whether subtitles were muxed for this file
+                    do_mux = _ov(f, 'mux_subs', opt_mux_subs)
+                    if do_mux and f.get('ext_subs'):
+                        f['_subs_muxed'] = True
+
                     out_size = os.path.getsize(final_path) if os.path.exists(final_path) else 0
                     out_mb = f'{out_size / (1024*1024):.1f} MB' if out_size else '?'
                     final_name = os.path.basename(final_path)
@@ -1692,11 +1790,11 @@ def open_media_processor(app):
                  f"{total - completed[0] - failed[0]} skipped/stopped", 'SUCCESS')
             _log("═" * 50, 'INFO')
 
-            # Clean up .srt files if muxing was enabled
-            if opt_mux_subs.get() and completed[0] > 0:
+            # Clean up subtitle files only for files that had subs muxed
+            if completed[0] > 0:
                 cleaned = 0
                 for f in mp_files:
-                    if f['status'] == '✅ Done':
+                    if f.get('_subs_muxed') and f['status'] == '✅ Done':
                         for s in f.get('ext_subs', []):
                             spath = s['path']
                             if os.path.exists(spath):
@@ -1714,6 +1812,16 @@ def open_media_processor(app):
                 for i, f in enumerate(mp_files):
                     if f['status'] == '✅ Done' and os.path.exists(f['path']):
                         _reprobe_file(i)
+
+            # Play completion notification sound
+            if completed[0] > 0 and not mp_stop[0]:
+                _play_notification_sound()
+
+            win.after(0, lambda c=completed[0], t=total: messagebox.showinfo(
+                "Processing Complete",
+                f"{c} of {t} file(s) processed successfully."
+                + (f"\n{failed[0]} failed." if failed[0] else ""),
+                parent=win))
 
             win.after(0, lambda: process_btn.configure(state='normal'))
             win.after(0, lambda: stop_btn.configure(state='disabled'))
@@ -1770,20 +1878,19 @@ def open_media_processor(app):
                     # /path/file.mkv becomes one token
                     paths = [p.strip('{}') for p in re.findall(r'\{[^}]+\}|[^\s]+', raw)]
 
-                added = 0
+                # Collect all file paths first (fast), then probe in background
+                file_paths = []
                 for p in paths:
                     if os.path.isfile(p) and os.path.splitext(p)[1].lower() in VIDEO_EXTENSIONS:
-                        _add_one_file(p)
-                        added += 1
+                        file_paths.append(p)
                     elif os.path.isdir(p):
                         for ext in VIDEO_EXTENSIONS:
-                            for fp in Path(p).glob(f'*{ext}'):
-                                if fp.is_file() and not fp.name.startswith('.'):
-                                    _add_one_file(str(fp))
-                                    added += 1
-                if added:
-                    _rebuild_tree()
-                    _log(f"Added {added} file(s) via drag-and-drop", 'INFO')
+                            for fp in Path(p).rglob(f'*{ext}'):
+                                if fp.is_file() and not any(
+                                        part.startswith('.') for part in fp.relative_to(p).parts):
+                                    file_paths.append(str(fp))
+                if file_paths:
+                    _add_files_threaded(file_paths, "file(s) via drag-and-drop")
 
             win.dnd_bind('<<Drop>>', _on_drop)
         except Exception:

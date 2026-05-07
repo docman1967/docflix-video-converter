@@ -96,9 +96,37 @@ def get_video_pix_fmt(filepath):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SRT Parser & Subtitle Filters
+# Size Estimation
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
+def _probe_video_bitrate(filepath, duration):
+    """Probe the source video stream bitrate in bits/sec.
+
+    Tries ffprobe's stream-level bit_rate first, then falls back to
+    estimating from total file size minus a rough audio allowance.
+    """
+    try:
+        cmd = [
+            'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=bit_rate',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            filepath,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            val = result.stdout.strip()
+            if val and val != 'N/A':
+                return float(val)
+    except Exception:
+        pass
+    # Fallback: estimate from file size (subtract ~256kbps for audio)
+    try:
+        src_size = Path(filepath).stat().st_size
+        total_bps = (src_size * 8) / duration
+        return max(0, total_bps - 256_000)
+    except Exception:
+        return 0
 
 
 def estimate_output_size(filepath, settings):
@@ -121,8 +149,7 @@ def estimate_output_size(filepath, settings):
         if transcode_mode in ('video', 'both'):
             if codec_info.get('cpu_encoder') == 'copy':
                 # Copy — use source video bitrate as estimate
-                src_size = Path(filepath).stat().st_size
-                video_bps = (src_size * 8) / duration
+                video_bps = _probe_video_bitrate(filepath, duration)
             elif quality_mode == 'bitrate':
                 bitrate_str = settings.get('bitrate', '2M')
                 multiplier = 1_000_000 if 'M' in bitrate_str else 1_000
@@ -145,6 +172,9 @@ def estimate_output_size(filepath, settings):
                     video_bps = 100_000_000 * (0.90 ** (crf - 10))
                 else:  # VP9
                     video_bps = 5_000_000 * (0.85 ** (crf - 33))
+        elif transcode_mode == 'audio':
+            # Audio-only mode: video is copied through, include source video bitrate
+            video_bps = _probe_video_bitrate(filepath, duration)
 
         # Audio bitrate estimate (bits/sec)
         audio_bps = 0

@@ -206,7 +206,10 @@ def filter_remove_hi(cues):
     """Remove hearing-impaired annotations and speaker labels.
 
     Removes: [brackets], (parentheses), speaker labels (Name:),
-    and ALL CAPS HI descriptor labels (HIGH-PITCHED:, MUFFLED:, etc.)
+    and ALL CAPS HI descriptor labels with colons (HIGH-PITCHED:, MUFFLED:, etc.)
+
+    Does NOT remove standalone ALL CAPS HI lines (UK style) —
+    use filter_remove_caps_hi() for that.
     """
     hi_patterns = [
         re.compile(r'\[.*?\]', re.DOTALL),
@@ -230,8 +233,6 @@ def filter_remove_hi(cues):
             return m.group(0)
         return m.group(1)
 
-    caps_hi_checker = _build_caps_hi_checker()
-
     result = []
     for cue in cues:
         text = cue['text']
@@ -239,9 +240,6 @@ def filter_remove_hi(cues):
         for pat in hi_patterns:
             text = pat.sub('', text)
         text = speaker_pattern.sub(_speaker_replace, text)
-        lines = text.split('\n')
-        lines = [line for line in lines if not caps_hi_checker(line)]
-        text = '\n'.join(lines)
         text = re.sub(
             r'^(-?\s*)(?:[A-Za-z][A-Za-z\d\'\.]*|[A-Z][A-Za-z\s\d\'\.#]{1,29}[A-Za-z\d])\s+:\s*', r'\1',
             text, flags=re.MULTILINE)

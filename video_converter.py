@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "2.6.0"
+APP_VERSION = "2.7.0"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -2795,6 +2795,36 @@ def get_video_duration(filepath):
         pass
     return None
 
+
+def _probe_video_bitrate(filepath, duration):
+    """Probe the source video stream bitrate in bits/sec.
+
+    Tries ffprobe's stream-level bit_rate first, then falls back to
+    estimating from total file size minus a rough audio allowance.
+    """
+    try:
+        cmd = [
+            'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=bit_rate',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            filepath,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            val = result.stdout.strip()
+            if val and val != 'N/A':
+                return float(val)
+    except Exception:
+        pass
+    # Fallback: estimate from file size (subtract ~256kbps for audio)
+    try:
+        src_size = Path(filepath).stat().st_size
+        total_bps = (src_size * 8) / duration
+        return max(0, total_bps - 256_000)
+    except Exception:
+        return 0
+
+
 def estimate_output_size(filepath, settings):
     """
     Estimate output file size based on codec settings and source duration.
@@ -2815,8 +2845,7 @@ def estimate_output_size(filepath, settings):
         if transcode_mode in ('video', 'both'):
             if codec_info.get('cpu_encoder') == 'copy':
                 # Copy — use source video bitrate as estimate
-                src_size = Path(filepath).stat().st_size
-                video_bps = (src_size * 8) / duration
+                video_bps = _probe_video_bitrate(filepath, duration)
             elif quality_mode == 'bitrate':
                 bitrate_str = settings.get('bitrate', '2M')
                 multiplier = 1_000_000 if 'M' in bitrate_str else 1_000
@@ -2839,6 +2868,9 @@ def estimate_output_size(filepath, settings):
                     video_bps = 100_000_000 * (0.90 ** (crf - 10))
                 else:  # VP9
                     video_bps = 5_000_000 * (0.85 ** (crf - 33))
+        elif transcode_mode == 'audio':
+            # Audio-only mode: video is copied through, include source video bitrate
+            video_bps = _probe_video_bitrate(filepath, duration)
 
         # Audio bitrate estimate (bits/sec)
         audio_bps = 0
@@ -4628,8 +4660,6 @@ class VideoConverterApp:
         self.check_frame = ttk.Frame(settings_frame)
         self.check_frame.grid(row=7, column=0, columnspan=2, sticky='w', pady=10)
         
-        ttk.Checkbutton(self.check_frame, text="Skip existing files",
-                       variable=self.skip_existing).pack(side='left', padx=5)
         ttk.Checkbutton(self.check_frame, text="Delete originals after conversion",
                        variable=self.delete_originals).pack(side='left', padx=5)
         self.two_pass_check = ttk.Checkbutton(self.check_frame, text="Two-pass encoding",
@@ -5400,7 +5430,6 @@ class VideoConverterApp:
         # ── Checkboxes ──
         check_frame = ttk.Frame(f)
         check_frame.grid(row=row, column=0, columnspan=2, sticky='w', **pad); row += 1
-        ttk.Checkbutton(check_frame, text="Skip existing",    variable=v_skip).pack(side='left', padx=4)
         ttk.Checkbutton(check_frame, text="Delete originals", variable=v_delete).pack(side='left', padx=4)
 
         # ── Metadata cleanup ──
@@ -5544,7 +5573,6 @@ class VideoConverterApp:
                 'transcode_mode':    v_transcode.get(),
                 'audio_codec':       self.audio_codec_map.get(v_audio_codec.get(), v_audio_codec.get()),
                 'audio_bitrate':     v_audio_br.get(),
-                'skip_existing':     v_skip.get(),
                 'delete_originals':  v_delete.get(),
                 'hw_decode':         v_hw_decode.get(),
                 'strip_chapters':      v_strip_chapters.get(),
@@ -6663,6 +6691,8 @@ class VideoConverterApp:
             vf = v_video_folder.get().strip()
             if vf and Path(vf).is_dir():
                 self.working_dir = Path(vf)
+            # Clear the reset override so save_preferences uses working_dir
+            self._default_video_folder = vf
 
             of = v_output_folder.get().strip()
             if of and Path(of).is_dir():
@@ -6722,7 +6752,7 @@ class VideoConverterApp:
             'notify_sound':         self.notify_sound.get(),
             'notify_sound_file':    self.notify_sound_file.get(),
             'default_player':        self.default_player.get(),
-            'default_video_folder':  str(self.working_dir),
+            'default_video_folder':  getattr(self, '_default_video_folder', str(self.working_dir)),
             'default_output_folder': str(self.output_dir) if self.output_dir else '',
             'recent_folders':        self.recent_folders,
             'strip_chapters':        self.strip_chapters.get(),
@@ -6845,12 +6875,11 @@ class VideoConverterApp:
         self.gpu_preset.set('p4')
         self.audio_codec.set('aac')
         self.audio_bitrate.set('128k')
-        self.skip_existing.set(True)
         self.delete_originals.set(False)
         self.hw_decode.set(self.has_gpu)
         self.two_pass.set(False)
         self.verify_output.set(True)
-        self.notify_sound.set(True)
+        self.notify_sound.set(False)
         self.notify_sound_file.set('complete')
         self.strip_chapters.set(False)
         self.strip_metadata_tags.set(False)
@@ -6862,12 +6891,20 @@ class VideoConverterApp:
         self.edition_in_filename.set(False)
         self.add_chapters.set(False)
         self.chapter_interval.set(5)
+        self.default_player.set('auto')
+        # Default Settings dialog values — clear folder defaults
+        self.working_dir = Path.home()
+        self._default_video_folder = ''   # blank = no saved default
+        self.output_dir = None
+        self.output_dir_label.configure(text="Same as source file", foreground='gray')
         self._on_metadata_toggle()
         # Refresh UI state
         self.on_encoder_change(silent=True)
         self.on_video_codec_change()
         self.on_transcode_mode_change()
         self.on_quality_mode_change()
+        # Persist reset values so Default Settings dialog picks them up
+        self.save_preferences()
         self.add_log("Settings reset to defaults.", 'INFO')
 
     # ── Help ─────────────────────────────────────────────────────────────────
@@ -8170,12 +8207,15 @@ class VideoConverterApp:
         self.preset_label.grid(row=5)
         self.preset_combo.grid(row=5)
 
-        # Audio controls are always visible but disabled when not in 'both' mode
-        self.audio_frame.grid(row=6)
-        self.check_frame.grid(row=7)
-        audio_state = 'readonly' if show_audio else 'disabled'
-        self.audio_codec_combo.configure(state=audio_state)
-        self.audio_bitrate_combo.configure(state=audio_state)
+        # Audio controls: visible and enabled in 'both' mode, hidden in 'video' mode
+        if show_audio:
+            self.audio_frame.grid(row=6)
+            self.audio_codec_combo.configure(state='readonly')
+            self.audio_bitrate_combo.configure(state='readonly')
+            self.check_frame.grid(row=7)
+        else:
+            self.audio_frame.grid_remove()
+            self.check_frame.grid(row=6)
         self._update_two_pass_state()
         self._schedule_estimate_refresh()
 

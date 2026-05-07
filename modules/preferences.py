@@ -147,12 +147,11 @@ def reset_preferences(app):
     app.gpu_preset.set('p4')
     app.audio_codec.set('aac')
     app.audio_bitrate.set('128k')
-    app.skip_existing.set(True)
     app.delete_originals.set(False)
     app.hw_decode.set(app.has_gpu)
     app.two_pass.set(False)
     app.verify_output.set(True)
-    app.notify_sound.set(True)
+    app.notify_sound.set(False)
     app.notify_sound_file.set('complete')
     app.strip_chapters.set(False)
     app.strip_metadata_tags.set(False)
@@ -160,10 +159,21 @@ def reset_preferences(app):
     app.meta_video_lang.set('und')
     app.meta_audio_lang.set('eng')
     app.meta_sub_lang.set('eng')
+    app.default_player.set('auto')
+    # Default Settings dialog values — clear folder defaults
+    app.working_dir = Path.home()
+    app._default_video_folder = ''   # blank = no saved default
+    app.output_dir = None
+    try:
+        app.output_dir_label.configure(text="Same as source file", foreground='gray')
+    except Exception:
+        pass
     app._on_metadata_toggle()
     # Refresh UI state
     app.on_encoder_change(silent=True)
     app.on_video_codec_change()
     app.on_transcode_mode_change()
     app.on_quality_mode_change()
+    # Persist reset values so Default Settings dialog picks them up
+    app.save_preferences()
     app.add_log("Settings reset to defaults.", 'INFO')

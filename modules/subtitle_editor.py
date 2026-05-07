@@ -30,6 +30,7 @@ from .constants import (
 from .utils import (
     create_tooltip, get_subtitle_streams, get_video_duration,
     scaled_geometry, scaled_minsize, ask_open_file, ask_save_file,
+    center_window_on_parent,
 )
 from .subtitle_filters import (
     parse_srt, write_srt, srt_ts_to_ms, ms_to_srt_ts,
@@ -800,18 +801,15 @@ def open_standalone_subtitle_editor(app):
                 refresh_tree(cues)
                 pw.destroy()
 
-            # Bottom buttons — pack before canvas so they anchor to bottom
-            bot_btn = ttk.Frame(pw)
-            bot_btn.pack(side='bottom', fill='x', padx=10, pady=(0, 10))
-            ttk.Button(bot_btn, text="Apply Checked", command=_apply).pack(side='left', padx=(0, 4))
-            ttk.Button(bot_btn, text="Cancel", command=pw.destroy).pack(side='left')
-
-            top_btn = ttk.Frame(pw)
-            top_btn.pack(side='bottom', fill='x', padx=10, pady=(4, 4))
-            ttk.Button(top_btn, text="Select All", command=_select_all).pack(side='left', padx=(0, 4))
-            ttk.Button(top_btn, text="Select None", command=_select_none).pack(side='left')
-            ttk.Label(top_btn, text=f"{len(fixes)} cues matched",
+            # Buttons — single row matching ALL CAPS HI layout
+            btn_frame = ttk.Frame(pw)
+            btn_frame.pack(side='bottom', fill='x', padx=10, pady=(4, 10))
+            ttk.Button(btn_frame, text="Select All", command=_select_all).pack(side='left', padx=(0, 4))
+            ttk.Button(btn_frame, text="Select None", command=_select_none).pack(side='left')
+            ttk.Label(btn_frame, text=f"{len(fixes)} cues matched",
                       foreground='gray').pack(side='left', padx=(10, 0))
+            ttk.Button(btn_frame, text="Cancel", command=pw.destroy).pack(side='right', padx=(4, 0))
+            ttk.Button(btn_frame, text="Apply", command=_apply).pack(side='right')
 
             # Scrollable checkbox list — fills remaining space
             canvas = tk.Canvas(pw)
@@ -871,10 +869,14 @@ def open_standalone_subtitle_editor(app):
                 return
 
             pw = tk.Toplevel(editor)
+            pw.withdraw()
             pw.title(f"Remove ALL CAPS HI — {len(removals)} cues matched")
-            pw.geometry(scaled_geometry(pw, 700, 500))
-            pw.transient(editor)
-            pw.grab_set()
+            pw.geometry(scaled_geometry(pw, 750, 500))
+            pw.minsize(*scaled_minsize(pw, 650, 300))
+
+            # Buttons packed first (bottom) so they are never clipped
+            btn_frame = ttk.Frame(pw)
+            btn_frame.pack(side='bottom', fill='x', padx=10, pady=(4, 10))
 
             ttk.Label(pw, text="Uncheck cues you want to keep:",
                       font=('Helvetica', 10, 'bold')).pack(anchor='w', padx=10, pady=(10, 4))
@@ -907,10 +909,7 @@ def open_standalone_subtitle_editor(app):
                 time_str = f"{cue['start']} → {cue['end']}"
                 text_preview = cue['text'].replace('\n', ' │ ')
                 ttk.Label(frame, text=f"#{idx+1}  {time_str}  —  {text_preview}",
-                          wraplength=580, justify='left').pack(side='left', padx=(4, 0))
-
-            btn_frame = ttk.Frame(pw)
-            btn_frame.pack(fill='x', padx=10, pady=(4, 10))
+                          wraplength=620, justify='left').pack(side='left', padx=(4, 0))
 
             def _select_all():
                 for _, var in check_vars:
@@ -950,7 +949,12 @@ def open_standalone_subtitle_editor(app):
             ttk.Label(btn_frame, text=f"{len(removals)} cues matched",
                       foreground='gray').pack(side='left', padx=(10, 0))
             ttk.Button(btn_frame, text="Cancel", command=pw.destroy).pack(side='right', padx=(4, 0))
-            ttk.Button(btn_frame, text="Remove Checked", command=_apply).pack(side='right')
+            ttk.Button(btn_frame, text="Apply", command=_apply).pack(side='right')
+
+            # Center on editor and show
+            pw.update_idletasks()
+            center_window_on_parent(pw, editor)
+            pw.deiconify()
 
         filter_menu.add_command(label="Remove ALL CAPS HI  (UK style)",
                                 command=_show_caps_hi_preview)
@@ -4085,18 +4089,15 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
                 refresh_tree(cues)
                 pw.destroy()
 
-            # Bottom buttons — pack before canvas so they anchor to bottom
-            bot_btn = ttk.Frame(pw)
-            bot_btn.pack(side='bottom', fill='x', padx=10, pady=(0, 10))
-            ttk.Button(bot_btn, text="Apply Checked", command=_apply).pack(side='left', padx=(0, 4))
-            ttk.Button(bot_btn, text="Cancel", command=pw.destroy).pack(side='left')
-
-            top_btn = ttk.Frame(pw)
-            top_btn.pack(side='bottom', fill='x', padx=10, pady=(4, 4))
-            ttk.Button(top_btn, text="Select All", command=_select_all).pack(side='left', padx=(0, 4))
-            ttk.Button(top_btn, text="Select None", command=_select_none).pack(side='left')
-            ttk.Label(top_btn, text=f"{len(fixes)} cues matched",
+            # Buttons — single row matching ALL CAPS HI layout
+            btn_frame = ttk.Frame(pw)
+            btn_frame.pack(side='bottom', fill='x', padx=10, pady=(4, 10))
+            ttk.Button(btn_frame, text="Select All", command=_select_all).pack(side='left', padx=(0, 4))
+            ttk.Button(btn_frame, text="Select None", command=_select_none).pack(side='left')
+            ttk.Label(btn_frame, text=f"{len(fixes)} cues matched",
                       foreground='gray').pack(side='left', padx=(10, 0))
+            ttk.Button(btn_frame, text="Cancel", command=pw.destroy).pack(side='right', padx=(4, 0))
+            ttk.Button(btn_frame, text="Apply", command=_apply).pack(side='right')
 
             # Scrollable checkbox list — fills remaining space
             canvas = tk.Canvas(pw)
@@ -4155,10 +4156,14 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
                 return
 
             pw = tk.Toplevel(editor)
+            pw.withdraw()
             pw.title(f"Remove ALL CAPS HI — {len(removals)} cues matched")
-            pw.geometry(scaled_geometry(pw, 700, 500))
-            pw.transient(editor)
-            pw.grab_set()
+            pw.geometry(scaled_geometry(pw, 750, 500))
+            pw.minsize(*scaled_minsize(pw, 650, 300))
+
+            # Buttons packed first (bottom) so they are never clipped
+            btn_frame = ttk.Frame(pw)
+            btn_frame.pack(side='bottom', fill='x', padx=10, pady=(4, 10))
 
             ttk.Label(pw, text="Uncheck cues you want to keep:",
                       font=('Helvetica', 10, 'bold')).pack(anchor='w', padx=10, pady=(10, 4))
@@ -4190,10 +4195,7 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
                 time_str = f"{cue['start']} → {cue['end']}"
                 text_preview = cue['text'].replace('\n', ' │ ')
                 ttk.Label(frame, text=f"#{idx+1}  {time_str}  —  {text_preview}",
-                          wraplength=580, justify='left').pack(side='left', padx=(4, 0))
-
-            btn_frame = ttk.Frame(pw)
-            btn_frame.pack(fill='x', padx=10, pady=(4, 10))
+                          wraplength=620, justify='left').pack(side='left', padx=(4, 0))
 
             def _select_all():
                 for _, var in check_vars:
@@ -4233,7 +4235,12 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
             ttk.Label(btn_frame, text=f"{len(removals)} cues matched",
                       foreground='gray').pack(side='left', padx=(10, 0))
             ttk.Button(btn_frame, text="Cancel", command=pw.destroy).pack(side='right', padx=(4, 0))
-            ttk.Button(btn_frame, text="Remove Checked", command=_apply).pack(side='right')
+            ttk.Button(btn_frame, text="Apply", command=_apply).pack(side='right')
+
+            # Center on editor and show
+            pw.update_idletasks()
+            center_window_on_parent(pw, editor)
+            pw.deiconify()
 
         filter_menu.add_command(label="Remove ALL CAPS HI  (UK style)",
                                 command=_show_caps_hi_preview_int)
