@@ -2727,6 +2727,23 @@ def open_tv_renamer(app):
                     grid_f = ttk.Frame(step_frame)
                     grid_f.pack(fill='x', padx=10)
 
+                    _tag_vars = [_extra_resolution, _extra_vcodec,
+                                  _extra_acodec, _extra_source, _extra_hdr]
+
+                    def _check_all_tags():
+                        for v in _tag_vars:
+                            v.set(True)
+                    def _uncheck_all_tags():
+                        for v in _tag_vars:
+                            v.set(False)
+
+                    btn_row = ttk.Frame(grid_f)
+                    btn_row.pack(fill='x', pady=(0, 6))
+                    ttk.Button(btn_row, text="Check All",
+                               command=_check_all_tags).pack(side='left', padx=(0, 4))
+                    ttk.Button(btn_row, text="Uncheck All",
+                               command=_uncheck_all_tags).pack(side='left')
+
                     tags = [
                         (_extra_resolution, 'Resolution',   '{resolution}', 'e.g. 1080p, 2160p'),
                         (_extra_vcodec,     'Video codec',  '{vcodec}',     'e.g. x265, x264, AV1'),
