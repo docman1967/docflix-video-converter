@@ -732,10 +732,61 @@ def filter_merge_short(cues, max_gap_ms=1000):
 
 
 def filter_reduce_lines(cues, max_lines=2, max_chars=42):
-    """Reflow subtitle cues to max_lines, keeping sentences together
-    where possible."""
+    """Reflow subtitle cues to max_lines, splitting at the most natural
+    break point for readable two-line subtitles.
+
+    Break-point priority (each tier prefers the split closest to the
+    midpoint for balanced line lengths):
+      1. Sentence endings  (. ! ?)
+      2. Clause boundaries (, ; :)
+      3. Before conjunctions (and, but, or, so, because, when, ...)
+      4. Before prepositions (in, on, at, to, for, with, from, ...)
+      5. Nearest midpoint space (last resort)
+    """
     if not cues:
         return cues
+
+    # Words that mark natural break points — split BEFORE these.
+    # "that" is excluded because it's often a demonstrative adjective
+    # ("in that place") rather than a clause-introducing conjunction
+    # ("I know that you...") — too ambiguous to break on reliably.
+    _CONJUNCTIONS = {
+        'and', 'but', 'or', 'nor', 'so', 'yet', 'because', 'since',
+        'when', 'while', 'if', 'though', 'although', 'unless',
+        'until', 'after', 'before', 'which', 'who', 'whom',
+        'where', 'whereas', 'whether',
+    }
+    _PREPOSITIONS = {
+        'in', 'on', 'at', 'to', 'for', 'with', 'from', 'by',
+        'of', 'about', 'into', 'through', 'during', 'without',
+        'between', 'against', 'among', 'around', 'behind',
+        'beyond', 'under', 'over', 'above', 'below', 'across',
+    }
+
+    def _best_in_tier(positions, flat):
+        """From a list of split positions, return the one that produces
+        the most balanced two lines, or None if no valid split exists."""
+        if not positions:
+            return None
+        mid = len(flat) / 2
+        best_pos = None
+        best_diff = len(flat)
+        for pos in positions:
+            line1 = flat[:pos].rstrip()
+            line2 = flat[pos:].lstrip()
+            # Skip splits that leave either line empty
+            if not line1 or not line2:
+                continue
+            diff = abs(len(line1) - len(line2))
+            # Prefer the split closest to midpoint for balance
+            if diff < best_diff:
+                best_diff = diff
+                best_pos = pos
+        return best_pos
+
+    def _split_at(flat, pos):
+        """Split flat text at the given position into two lines."""
+        return flat[:pos].rstrip() + '\n' + flat[pos:].lstrip()
 
     def _reflow(text):
         lines = text.split('\n')
@@ -743,6 +794,8 @@ def filter_reduce_lines(cues, max_lines=2, max_chars=42):
             return text
 
         flat = ' '.join(l.strip() for l in lines if l.strip())
+
+        # ── Dialog lines: split at "- " speaker markers ──
         if flat.startswith('- ') and '- ' in flat[2:]:
             parts = re.split(r'(?<=\S) (?=- )', flat)
             if len(parts) == max_lines:
@@ -752,30 +805,55 @@ def filter_reduce_lines(cues, max_lines=2, max_chars=42):
                 kept.append(' '.join(parts[max_lines - 1:]))
                 return '\n'.join(p.strip() for p in kept)
 
+        # ── Short enough for one line ──
         if len(flat) <= max_chars:
             return flat
 
-        split_points = []
+        # ── Tier 1: Sentence endings (. ! ?) ──
+        tier1 = []
         for m in re.finditer(r'[.!?]+[\'"»\)]*\s+', flat):
             pos = m.end()
-            if pos < len(flat):
-                split_points.append(pos)
+            if 0 < pos < len(flat):
+                tier1.append(pos)
+        best = _best_in_tier(tier1, flat)
+        if best is not None:
+            return _split_at(flat, best)
 
-        best_split = None
-        best_diff = len(flat)
-        for pos in split_points:
-            line1 = flat[:pos].rstrip()
-            line2 = flat[pos:].lstrip()
-            if max(len(line1), len(line2)) <= max_chars + 10:
-                diff = abs(len(line1) - len(line2))
-                if diff < best_diff:
-                    best_diff = diff
-                    best_split = pos
+        # ── Tier 2: Clause boundaries (, ; :) ──
+        tier2 = []
+        for m in re.finditer(r'[,;:]\s+', flat):
+            pos = m.end()
+            if 0 < pos < len(flat):
+                tier2.append(pos)
+        best = _best_in_tier(tier2, flat)
+        if best is not None:
+            return _split_at(flat, best)
 
-        if best_split is not None:
-            return (flat[:best_split].rstrip() + '\n'
-                    + flat[best_split:].lstrip())
+        # ── Tier 3: Before conjunctions ──
+        tier3 = []
+        for m in re.finditer(r'\s+(\w+)', flat):
+            word = m.group(1).lower()
+            if word in _CONJUNCTIONS:
+                pos = m.start() + 1  # split at the space before
+                if 0 < pos < len(flat):
+                    tier3.append(pos)
+        best = _best_in_tier(tier3, flat)
+        if best is not None:
+            return _split_at(flat, best)
 
+        # ── Tier 4: Before prepositions ──
+        tier4 = []
+        for m in re.finditer(r'\s+(\w+)', flat):
+            word = m.group(1).lower()
+            if word in _PREPOSITIONS:
+                pos = m.start() + 1
+                if 0 < pos < len(flat):
+                    tier4.append(pos)
+        best = _best_in_tier(tier4, flat)
+        if best is not None:
+            return _split_at(flat, best)
+
+        # ── Tier 5: Nearest midpoint space (last resort) ──
         mid = len(flat) // 2
         best_pos = None
         for offset in range(len(flat) // 2):

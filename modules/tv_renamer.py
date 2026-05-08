@@ -2276,17 +2276,36 @@ def open_tv_renamer(app):
         clear_btn.pack(side='left', padx=2)
         create_tooltip(clear_btn, "Remove all files from the list")
 
+        _last_browse_dir = [None]  # last directory used by Add Files/Folder
+
+        def _get_browse_dir():
+            """Return a valid initial directory for file/folder dialogs.
+            Falls back to parent or home if the last dir was renamed."""
+            d = _last_browse_dir[0]
+            if d and os.path.isdir(d):
+                return d
+            # Last dir was renamed/deleted — try its parent
+            if d:
+                parent = os.path.dirname(d)
+                if os.path.isdir(parent):
+                    return parent
+            return os.path.expanduser('~')
+
         def _browse_files():
             paths = ask_open_files(
+                initialdir=_get_browse_dir(),
                 parent=win, title="Select Video Files",
                 filetypes=[("Video files", "*.mkv *.mp4 *.avi *.mov *.ts *.m2ts"),
                            ("All files", "*.*")])
             if paths:
+                _last_browse_dir[0] = os.path.dirname(paths[0])
                 _add_paths(list(paths))
 
         def _browse_folder():
-            path = ask_directory(parent=win, title="Select Folder")
+            path = ask_directory(initialdir=_get_browse_dir(),
+                                parent=win, title="Select Folder")
             if path:
+                _last_browse_dir[0] = os.path.dirname(path)
                 _add_paths([path])
 
         # ── Row 4: Log ──
