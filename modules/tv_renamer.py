@@ -17,7 +17,7 @@ from tkinter import ttk, messagebox
 from .constants import (
     APP_NAME, APP_VERSION, VIDEO_EXTENSIONS, SUBTITLE_EXTENSIONS,
 )
-from .utils import create_tooltip, scaled_geometry, scaled_minsize, ask_open_files, ask_directory
+from .utils import create_tooltip, get_dpi_scale, scaled_geometry, scaled_minsize, ask_open_files, ask_directory
 
 try:
     from tkinterdnd2 import DND_FILES
@@ -162,6 +162,7 @@ def open_tv_renamer(app):
         _all_shows = {}      # {show_name: {(season, ep): ep_data, ...}}
         _file_items = []     # list of {'path': ..., 'season': N, 'episode': N, 'ext': ...}
         _rename_history = []  # list of [(old_path, new_path), ...] for undo
+        _query_to_show = {}  # search query → loaded show name (remembers user picks)
 
         # Load API keys and preferences
         _saved_key = getattr(app, '_tvdb_api_key', '')
@@ -495,7 +496,10 @@ def open_tv_renamer(app):
             return os.path.join(*sanitized) if sanitized else ''
 
         def _match_file_to_show(item):
-            """Match a file to one of the loaded shows by filename."""
+            """Match a file to one of the loaded shows by filename and
+            parent folder name.  The folder name is used to disambiguate
+            when multiple loaded shows match the filename (e.g. two shows
+            named "Ghosts" in folders "Ghosts (US)" and "Ghosts (2019)")."""
             if not _all_shows:
                 return None
             fname = os.path.splitext(os.path.basename(item['path']))[0]
@@ -503,38 +507,96 @@ def open_tv_renamer(app):
             if not cleaned:
                 return None
 
+            # Also extract the parent folder name for disambiguation
+            parent_dir = os.path.basename(os.path.dirname(item['path']))
+            folder_cleaned = _normalize_for_match(
+                _clean_show_name(parent_dir)) if parent_dir else ''
+
+            # Check if the user already picked a show for this folder
+            # (via the Multiple Matches dialog during auto-load)
+            if folder_cleaned and folder_cleaned in _query_to_show:
+                mapped = _query_to_show[folder_cleaned]
+                if mapped in _all_shows:
+                    return mapped
+
             best_match = None
             best_score = 0.0
+            candidates = []  # collect all matches above threshold
             for show_name in _all_shows:
                 show_norm = _normalize_for_match(show_name)
-                # Exact match
+                score = 0.0
+                # Exact match on filename
                 if show_norm == cleaned:
-                    return show_name
+                    candidates.append((show_name, 1.0))
+                    continue
                 # Show name contained in filename
                 if show_norm in cleaned:
                     score = len(show_norm) / max(len(cleaned), 1)
-                    if score > best_score:
-                        best_score = score
-                        best_match = show_name
                 # Filename contained in show name
                 elif cleaned in show_norm:
                     score = len(cleaned) / max(len(show_norm), 1) * 0.8
-                    if score > best_score:
-                        best_score = score
-                        best_match = show_name
+                if score >= 0.3:
+                    candidates.append((show_name, score))
 
-            # Word-level overlap fallback
-            if best_score < 0.4:
+            # Word-level overlap fallback (only if no good matches yet)
+            if not candidates or max(s for _, s in candidates) < 0.4:
                 cleaned_words = set(cleaned.split())
                 for show_name in _all_shows:
+                    if any(sn == show_name for sn, _ in candidates):
+                        continue
                     show_words = set(_normalize_for_match(show_name).split())
                     if show_words and cleaned_words:
-                        overlap = len(cleaned_words & show_words) / len(show_words)
-                        if overlap > best_score and overlap >= 0.5:
-                            best_score = overlap
+                        overlap = (len(cleaned_words & show_words)
+                                   / len(show_words))
+                        if overlap >= 0.5:
+                            candidates.append((show_name, overlap))
+
+            if not candidates:
+                return None
+
+            # If only one candidate, return it
+            if len(candidates) == 1:
+                return candidates[0][0]
+
+            # Multiple candidates — sort by filename score
+            candidates.sort(key=lambda x: -x[1])
+
+            # If the top candidate has a clear filename advantage over the
+            # runner-up, trust the filename match.  This prevents folder
+            # disambiguation from overriding an unambiguous filename —
+            # e.g. filename "Ghosts (US) S01E01" matches "Ghosts (US)" at
+            # 1.0 vs "Ghosts" at 0.6; the filename is definitive.
+            if candidates[0][1] - candidates[1][1] >= 0.3:
+                return candidates[0][0]
+
+            # Close filename scores — use parent folder to disambiguate
+            if folder_cleaned:
+                for show_name, score in candidates:
+                    show_norm = _normalize_for_match(show_name)
+                    # Folder matches show name exactly
+                    if show_norm == folder_cleaned:
+                        return show_name
+                    # Show name contained in folder (e.g. show "Ghosts"
+                    # folder "ghosts 2019")
+                    if show_norm in folder_cleaned:
+                        folder_score = len(show_norm) / max(
+                            len(folder_cleaned), 1)
+                        if folder_score > best_score:
+                            best_score = folder_score
+                            best_match = show_name
+                    # Folder contained in show name
+                    elif folder_cleaned in show_norm:
+                        folder_score = (len(folder_cleaned)
+                                        / max(len(show_norm), 1) * 0.8)
+                        if folder_score > best_score:
+                            best_score = folder_score
                             best_match = show_name
 
-            return best_match if best_score >= 0.3 else None
+                if best_match:
+                    return best_match
+
+            # No folder disambiguation — return the highest-scoring candidate
+            return candidates[0][0]
 
         # ISO 639-1 → ISO 639-2/B (3-letter) mapping for subtitle language codes
         _LANG_2TO3 = {
@@ -896,15 +958,21 @@ def open_tv_renamer(app):
                 _file_items[:] = [f for f in _file_items
                                   if f.get('matched_show') not in removed]
                 count = before - len(_file_items)
-                # Now remove the show data
+                # Now remove the show data and query mappings
                 for name in removed:
                     _all_shows.pop(name, None)
+                    # Remove any query→show mappings pointing to this show
+                    stale = [q for q, s in _query_to_show.items()
+                             if s == name]
+                    for q in stale:
+                        del _query_to_show[q]
                     _log(f"Removed \"{name}\" — {count} file(s) removed")
                 _refresh_preview()
 
         def _clear_all_shows():
             """Remove all loaded shows."""
             _all_shows.clear()
+            _query_to_show.clear()
             _refresh_preview()
             _log("All shows cleared")
 
@@ -914,9 +982,10 @@ def open_tv_renamer(app):
             Returns the chosen dict, or None if cancelled."""
             dlg = tk.Toplevel(win)
             dlg.title("Multiple Matches")
-            dlg.geometry("700x500")
-            dlg.minsize(500, 350)
+            dlg.geometry(scaled_geometry(dlg, 700, 500))
+            dlg.minsize(*scaled_minsize(dlg, 500, 350))
             dlg.resizable(True, True)
+            _dpi = get_dpi_scale(dlg)
 
             ttk.Label(dlg, text=f"Multiple shows found for \"{query}\":",
                       font=('Helvetica', 11, 'bold'),
@@ -1055,7 +1124,7 @@ def open_tv_renamer(app):
                 # Overview (show synopsis)
                 if overview:
                     ov_lbl = ttk.Label(row_f, text=overview,
-                                       wraplength=500,
+                                       wraplength=int(500 * _dpi),
                                        font=('Helvetica', 9),
                                        justify='left')
                     ov_lbl.grid(row=2, column=1, sticky='w', pady=(2, 0))
@@ -1094,7 +1163,11 @@ def open_tv_renamer(app):
                     import io
                     from PIL import Image, ImageTk
                     img = Image.open(io.BytesIO(img_data))
-                    img.thumbnail((60, 90), Image.LANCZOS)
+                    # Scale thumbnail pixels for high-DPI so it appears
+                    # the intended logical size (60×90) on any display
+                    tw = int(60 * _dpi)
+                    th = int(90 * _dpi)
+                    img.thumbnail((tw, th), Image.LANCZOS)
                     photo = ImageTk.PhotoImage(img)
                     _thumb_refs.append(photo)
                     rf = row_frames[idx]
@@ -1119,6 +1192,12 @@ def open_tv_renamer(app):
             ttk.Button(btn_f, text="Load", command=_ok,
                        width=10).pack(side='left', padx=4)
 
+            def _no_match():
+                chosen[0] = '__filename_fallback__'
+                dlg.destroy()
+            ttk.Button(btn_f, text="No Match Found", command=_no_match,
+                       width=16).pack(side='right', padx=4)
+
             # Unbind mousewheel on close to prevent leaking into parent
             def _on_close():
                 canvas.unbind_all('<MouseWheel>')
@@ -1130,6 +1209,60 @@ def open_tv_renamer(app):
             _center_on_parent(dlg, win)
             win.wait_window(dlg)
             return chosen[0]
+
+        def _fallback_from_filename(query):
+            """Create a show entry derived from the filename when no provider
+            match is found.  Scans _file_items to determine whether the
+            query is a movie (no episode info) or TV, and extracts the year
+            from the original filename if present."""
+            if not query or query in _all_shows:
+                return query if query in _all_shows else None
+
+            # Scan files to find year and decide movie vs TV
+            year = ''
+            is_tv = False
+            for item in _file_items:
+                if item.get('ext') in SUBTITLE_EXTENSIONS:
+                    continue
+                fname = os.path.splitext(os.path.basename(item['path']))[0]
+                cleaned = _clean_show_name(fname).strip()
+                if _normalize_for_match(cleaned) != _normalize_for_match(query):
+                    continue
+                # Check for episode markers → TV
+                s = item.get('season')
+                e = item.get('episode')
+                if s is not None and e is not None:
+                    is_tv = True
+                # Extract year from original filename (before cleaning strips it)
+                if not year:
+                    raw = re.sub(r'[._]', ' ', fname)
+                    m = re.search(r'(?:^|\s)\(?((?:19|20)\d{2})\)?(?:\s|$)', raw)
+                    if m:
+                        year = m.group(1)
+
+            show_name = query
+            if is_tv:
+                # TV show with no provider data — episodes won't have titles
+                # but the template can still fill {show}, {season}, {episode}
+                _all_shows[show_name] = {
+                    '_series_id': '',
+                    '_provider': '',
+                }
+                _log(f"  No provider match — using \"{show_name}\" from filename")
+            else:
+                # Assume movie
+                _all_shows[show_name] = {
+                    '_is_movie': True,
+                    '_year': year,
+                    '_name': show_name,
+                    '_series_id': '',
+                    '_provider': '',
+                }
+                yr_str = f" ({year})" if year else ''
+                _log(f"  No provider match — using \"{show_name}{yr_str}\" "
+                     f"from filename")
+            _query_to_show[_normalize_for_match(query)] = show_name
+            return show_name
 
         def _load_show_by_name(query):
             """Search the active provider for a show name and auto-load the
@@ -1151,7 +1284,7 @@ def open_tv_renamer(app):
                     results = _provider_search(alt)
             if not results:
                 _log(f"  No {prov} results for \"{query}\"", 'WARNING')
-                return None
+                return _fallback_from_filename(query)
 
             # Check if there are multiple results with the same/similar name
             # First collect both exact matches AND close matches (name contains
@@ -1159,13 +1292,27 @@ def open_tv_renamer(app):
             # This catches cases like "Ghosts" returning "Ghosts", "Ghosts (US)",
             # "Ghosts (2019)", "Ghosts (DE)" — all should be presented.
             # Normalize both sides so "And" matches "&" and colons are ignored.
+            #
+            # Sort results so exact name matches come first — prevents movies
+            # from being pushed past the scan limit by TV substring matches
+            # (e.g. searching "Mars" shouldn't let 15 TV shows containing
+            # "mars" push the actual movie "Mars" out of the top 15).
             query_norm = _normalize_for_match(query)
+
+            def _match_rank(r):
+                rn = _normalize_for_match(
+                    r.get('name', r.get('objectName', '')))
+                if rn == query_norm:
+                    return 0  # exact match first
+                return 1     # substring match second
+            ranked = sorted(results, key=_match_rank)
+
             close_matches = []
             seen_ids = set()
-            for r in results[:15]:  # limit to top 15
+            for r in ranked[:15]:  # limit to top 15
                 rname = r.get('name', r.get('objectName', ''))
                 rname_norm = _normalize_for_match(rname)
-                rid = r.get('tvdb_id', r.get('id', ''))
+                rid = (r.get('_media_type', ''), r.get('id', ''))
                 if rid in seen_ids:
                     continue
                 if (rname_norm == query_norm
@@ -1174,11 +1321,65 @@ def open_tv_renamer(app):
                     close_matches.append(r)
                     seen_ids.add(rid)
 
+            # If only 0–1 close matches and the query has multiple words,
+            # the trailing word may be a qualifier the provider doesn't use
+            # (e.g. user folder "Ghosts UK" but TVDB calls it just "Ghosts").
+            # Retry with the qualifier stripped so the broader search can
+            # trigger the Multiple Matches dialog.
+            if len(close_matches) <= 1 and ' ' in query:
+                base_query = query.rsplit(' ', 1)[0].strip()
+                if base_query:
+                    _log(f"  Retrying search as \"{base_query}\"...")
+                    retry_results = _provider_search(base_query)
+                    if retry_results:
+                        base_norm = _normalize_for_match(base_query)
+
+                        def _retry_rank(r):
+                            rn = _normalize_for_match(
+                                r.get('name', r.get('objectName', '')))
+                            return 0 if rn == base_norm else 1
+
+                        retry_close = []
+                        retry_seen = set(seen_ids)
+                        for r in sorted(retry_results,
+                                        key=_retry_rank)[:15]:
+                            rname = r.get('name', r.get('objectName', ''))
+                            rn = _normalize_for_match(rname)
+                            rid = (r.get('_media_type', ''),
+                                   r.get('id', ''))
+                            if rid in retry_seen:
+                                continue
+                            if (rn == base_norm
+                                    or base_norm in rn
+                                    or rn in base_norm):
+                                retry_close.append(r)
+                                retry_seen.add(rid)
+                        # Merge: combine original close matches with retry
+                        if retry_close:
+                            # Deduplicate by id — keep originals first
+                            merged = list(close_matches)
+                            merged_ids = {
+                                (r.get('_media_type', ''), r.get('id', ''))
+                                for r in merged}
+                            for r in retry_close:
+                                rid = (r.get('_media_type', ''),
+                                       r.get('id', ''))
+                                if rid not in merged_ids:
+                                    merged.append(r)
+                                    merged_ids.add(rid)
+                            if len(merged) > len(close_matches):
+                                close_matches = merged
+                                _log(f"  {prov} retry returned "
+                                     f"{len(retry_results)} results, "
+                                     f"{len(close_matches)} close matches")
+
             if len(close_matches) > 1:
                 # Multiple shows match — ask the user to pick
                 _log(f"  Found {len(close_matches)} matches for \"{query}\" — asking...")
                 win.update_idletasks()
                 best = _ask_user_pick_show(query, close_matches)
+                if best == '__filename_fallback__':
+                    return _fallback_from_filename(query)
                 if not best:
                     _log(f"  Skipped \"{query}\"")
                     return None
@@ -1188,6 +1389,9 @@ def open_tv_renamer(app):
                 best = results[0]
 
             show_name = best.get('name', best.get('objectName', ''))
+            # Remember this query → show association so folder-based
+            # matching and the already-loaded filter can use it later
+            _query_to_show[_normalize_for_match(query)] = show_name
             if show_name in _all_shows:
                 _log(f"  \"{show_name}\" already loaded")
                 return show_name
@@ -1245,29 +1449,78 @@ def open_tv_renamer(app):
 
             # Extract unique show names from video filenames only —
             # subtitle files contain language/forced/sdh tags that pollute
-            # the show name and cause failed API searches
+            # the show name and cause failed API searches.
+            # Also check parent folder names to disambiguate shows with the
+            # same filename-derived name (e.g. two "Ghosts" shows in
+            # folders "Ghosts (US)" and "Ghosts (2019)").
             show_names = set()
+            fname_to_folders = {}  # track which folders share a filename name
             for item in _file_items:
                 if item.get('ext') in SUBTITLE_EXTENSIONS:
                     continue
                 fname = os.path.splitext(os.path.basename(item['path']))[0]
                 cleaned = _clean_show_name(fname).strip()
-                if cleaned:
-                    show_names.add(cleaned)
+                if not cleaned:
+                    continue
+                # Track parent folder for this filename-derived name
+                parent = os.path.basename(os.path.dirname(item['path']))
+                folder_name = _clean_show_name(parent).strip() if parent else ''
+                fname_to_folders.setdefault(cleaned, set())
+                if folder_name:
+                    fname_to_folders[cleaned].add(folder_name)
+
+            # For each filename-derived name, check if files come from
+            # multiple distinct folders — if so, use folder names instead
+            # to produce separate search queries
+            for fname_name, folders in fname_to_folders.items():
+                if len(folders) > 1:
+                    # Multiple folders share the same filename name —
+                    # use folder names for disambiguation
+                    for folder_name in folders:
+                        show_names.add(folder_name)
+                elif len(folders) == 1:
+                    # Single folder — prefer the folder name when it's
+                    # related to the filename (either contains it or is
+                    # contained by it).  The folder is the user's chosen
+                    # label: a broader folder like "Ghosts" produces a
+                    # wider TMDB search than a filename like "Ghosts (US)",
+                    # and a more specific folder like "Ghosts (2019)"
+                    # carries extra context the filename may lack.
+                    folder_name = next(iter(folders))
+                    folder_norm = _normalize_for_match(folder_name)
+                    fname_norm = _normalize_for_match(fname_name)
+                    if folder_norm and (fname_norm in folder_norm
+                                        or folder_norm in fname_norm):
+                        show_names.add(folder_name)
+                    else:
+                        # Folder unrelated (e.g. "Downloads") — use filename
+                        show_names.add(fname_name)
+                else:
+                    # No folder info available
+                    show_names.add(fname_name)
 
             if not show_names:
                 _log("Could not detect any show names from filenames", 'WARNING')
                 return
 
             # Filter out names that are already matched by a loaded show
+            # or previously searched (user already picked a show for this query)
             to_search = set()
             for name in show_names:
                 already = False
-                name_lower = name.lower()
-                for loaded in _all_shows:
-                    if loaded.lower() in name_lower or name_lower in loaded.lower():
+                name_norm = _normalize_for_match(name)
+                # Check if this query was already searched and resolved
+                if name_norm in _query_to_show:
+                    mapped = _query_to_show[name_norm]
+                    if mapped in _all_shows:
                         already = True
-                        break
+                if not already:
+                    name_lower = name.lower()
+                    for loaded in _all_shows:
+                        if (loaded.lower() in name_lower
+                                or name_lower in loaded.lower()):
+                            already = True
+                            break
                 if not already:
                     to_search.add(name)
 
@@ -2013,6 +2266,7 @@ def open_tv_renamer(app):
         def _clear_files():
             _file_items.clear()
             _all_shows.clear()
+            _query_to_show.clear()
             _rename_history.clear()
             tree.delete(*tree.get_children())
             _log("File list cleared")
@@ -2149,21 +2403,32 @@ def open_tv_renamer(app):
                        width=16).pack(side='left')
 
             # Scrollable content area
-            _canvas = tk.Canvas(dlg, highlightthickness=0)
-            _vscroll = ttk.Scrollbar(dlg, orient='vertical', command=_canvas.yview)
-            _canvas.configure(yscrollcommand=_vscroll.set)
-            _vscroll.pack(side='right', fill='y')
+            _vscroll = ttk.Scrollbar(dlg, orient='vertical')
+            _canvas = tk.Canvas(dlg, highlightthickness=0,
+                                yscrollcommand=_vscroll.set)
+            _vscroll.configure(command=_canvas.yview)
+            # Pack canvas first — scrollbar visibility managed by _update_scrollbar
             _canvas.pack(side='left', fill='both', expand=True)
 
             f = ttk.Frame(_canvas, padding=(20, 20, 20, 0))
             _canvas_win = _canvas.create_window((0, 0), window=f, anchor='nw')
 
-            def _on_frame_configure(event):
+            def _update_scrollbar():
+                """Show scrollbar only when content exceeds viewport."""
+                _canvas.update_idletasks()
                 _canvas.configure(scrollregion=_canvas.bbox('all'))
+                if f.winfo_reqheight() > _canvas.winfo_height():
+                    _vscroll.pack(side='right', fill='y')
+                else:
+                    _vscroll.pack_forget()
+
+            def _on_frame_configure(event):
+                _update_scrollbar()
             f.bind('<Configure>', _on_frame_configure)
 
             def _on_canvas_configure(event):
                 _canvas.itemconfig(_canvas_win, width=event.width)
+                _update_scrollbar()
             _canvas.bind('<Configure>', _on_canvas_configure)
 
             def _on_mousewheel(event):
@@ -2388,7 +2653,9 @@ def open_tv_renamer(app):
                 movie_template_var, _custom_mv)
             mv_col.grid(row=0, column=1, sticky='nsew', padx=(4, 0))
 
+            # Force initial layout and scrollbar state after content is built
             dlg.update_idletasks()
+            _update_scrollbar()
             dlg.wait_window()
 
         settings_menu.add_command(label="Filename Template...",
