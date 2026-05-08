@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "2.9.0"
+APP_VERSION = "2.9.1"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -6769,8 +6769,6 @@ class VideoConverterApp:
             'custom_cap_words':      self.custom_cap_words,
             'custom_replacements':   self.custom_replacements,
             'custom_spell_words':    self.custom_spell_words,
-            'tvdb_api_key':          getattr(self, '_tvdb_api_key', ''),
-            'tmdb_api_key':          getattr(self, '_tmdb_api_key', ''),
             'tv_rename_provider':    getattr(self, '_tv_rename_provider', 'TVDB'),
             'tv_rename_template':    getattr(self, '_tv_rename_template', '{show} S{season}E{episode} {title}'),
             'movie_rename_template': getattr(self, '_movie_rename_template', '{show} ({year})'),
@@ -6834,8 +6832,6 @@ class VideoConverterApp:
             self.custom_cap_words = prefs.get('custom_cap_words', [])
             self.custom_spell_words = prefs.get('custom_spell_words', [])
             self.custom_replacements = prefs.get('custom_replacements', [])
-            self._tvdb_api_key = prefs.get('tvdb_api_key', '')
-            self._tmdb_api_key = prefs.get('tmdb_api_key', '')
             self._tv_rename_provider = prefs.get('tv_rename_provider', 'TVDB')
             self._tv_rename_template = prefs.get('tv_rename_template',
                                                   '{show} S{season}E{episode} {title}')

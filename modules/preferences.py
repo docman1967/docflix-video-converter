@@ -49,8 +49,6 @@ def save_preferences(app):
         'custom_cap_words':      app.custom_cap_words,
         'custom_replacements':   app.custom_replacements,
         'custom_spell_words':    app.custom_spell_words,
-        'tvdb_api_key':          getattr(self, '_tvdb_api_key', ''),
-        'tmdb_api_key':          getattr(self, '_tmdb_api_key', ''),
         'tv_rename_provider':    getattr(self, '_tv_rename_provider', 'TVDB'),
         'tv_rename_template':    getattr(self, '_tv_rename_template', '{show} S{season}E{episode} {title}'),
         'media_processor':       getattr(app, '_media_proc_prefs', {}),
@@ -110,8 +108,6 @@ def load_preferences(app):
         app.custom_cap_words = prefs.get('custom_cap_words', [])
         app.custom_spell_words = prefs.get('custom_spell_words', [])
         app.custom_replacements = prefs.get('custom_replacements', [])
-        app._tvdb_api_key = prefs.get('tvdb_api_key', '')
-        app._tmdb_api_key = prefs.get('tmdb_api_key', '')
         app._tv_rename_provider = prefs.get('tv_rename_provider', 'TVDB')
         app._tv_rename_template = prefs.get('tv_rename_template',
                                               '{show} S{season}E{episode} {title}')

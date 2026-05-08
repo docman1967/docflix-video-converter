@@ -164,9 +164,7 @@ def open_tv_renamer(app):
         _rename_history = []  # list of [(old_path, new_path), ...] for undo
         _query_to_show = {}  # search query → loaded show name (remembers user picks)
 
-        # Load API keys and preferences
-        _saved_key = getattr(app, '_tvdb_api_key', '')
-        _saved_tmdb_key = getattr(app, '_tmdb_api_key', '')
+        # Load preferences
         _saved_provider = getattr(app, '_tv_rename_provider', 'TVDB')
         _saved_template = getattr(app, '_tv_rename_template',
                                   '{show} S{season}E{episode} {title}')
@@ -198,17 +196,12 @@ def open_tv_renamer(app):
         def _tvdb_login():
             """Authenticate with TVDB and store token."""
             key = api_key_var.get().strip()
-            if not key:
-                _log("Enter your TVDB API key", 'WARNING')
-                return False
             _log(f"Logging in to TVDB (key: {key[:8]}...)")
             result = _tvdb_request('POST', '/login', {'apikey': key})
             _log(f"Login response: {result.get('status') if result else 'None'}")
             if result and result.get('status') == 'success':
                 _tvdb_token[0] = result['data']['token']
                 _log("TVDB login successful")
-                app._tvdb_api_key = key
-                app.save_preferences()
                 return True
             else:
                 msg = result.get('message', 'Login failed') if result else 'No response'
@@ -495,6 +488,27 @@ def open_tv_renamer(app):
                     sanitized.append(part)
             return os.path.join(*sanitized) if sanitized else ''
 
+        # Regex to detect Season-style folder names that should be skipped
+        # when looking for the show folder (e.g. "Season 1", "Season 02",
+        # "Series 3", "S01", "S1")
+        _SEASON_FOLDER_RE = re.compile(
+            r'^(?:Season|Series|S)\s*\d+$', re.IGNORECASE)
+
+        def _get_show_folder(filepath):
+            """Return the show-level parent folder name for a file path,
+            skipping past Season subfolders.  For a file at
+            .../Ghosts UK/Season 1/episode.mkv, returns "Ghosts UK"
+            instead of "Season 1"."""
+            parent = os.path.dirname(filepath)
+            parent_name = os.path.basename(parent)
+            if parent_name and _SEASON_FOLDER_RE.match(parent_name):
+                # Parent is a Season folder — use grandparent instead
+                grandparent = os.path.dirname(parent)
+                grandparent_name = os.path.basename(grandparent)
+                if grandparent_name:
+                    return grandparent_name
+            return parent_name
+
         def _match_file_to_show(item):
             """Match a file to one of the loaded shows by filename and
             parent folder name.  The folder name is used to disambiguate
@@ -507,8 +521,9 @@ def open_tv_renamer(app):
             if not cleaned:
                 return None
 
-            # Also extract the parent folder name for disambiguation
-            parent_dir = os.path.basename(os.path.dirname(item['path']))
+            # Also extract the show folder name for disambiguation,
+            # skipping past Season subfolders
+            parent_dir = _get_show_folder(item['path'])
             folder_cleaned = _normalize_for_match(
                 _clean_show_name(parent_dir)) if parent_dir else ''
 
@@ -901,17 +916,17 @@ def open_tv_renamer(app):
 
         provider_var.trace_add('write', _on_provider_change)
 
-        # Save TMDB key on change
-        def _save_tmdb_key(*_args):
-            app._tmdb_api_key = tmdb_key_var.get().strip()
-            app.save_preferences()
-
         # ── Row 0: Loaded Shows ──
 
         def _normalize_for_match(text):
-            """Normalize a show name for comparison: lowercase, collapse
-            '&' / 'and' / ':' differences, and squash extra whitespace."""
+            """Normalize a show name for comparison: lowercase, strip
+            apostrophes, collapse '&' / 'and' / ':' differences, and
+            squash extra whitespace.  Apostrophe removal ensures
+            "Greys Anatomy" matches "Grey's Anatomy", etc."""
             t = text.lower()
+            t = t.replace("'", '')
+            t = t.replace('\u2019', '')   # right single quote (curly)
+            t = t.replace('\u2018', '')   # left single quote (curly)
             t = t.replace('&', ' and ')
             t = t.replace(':', ' ')
             t = re.sub(r'\s+', ' ', t).strip()
@@ -1098,8 +1113,14 @@ def open_tv_renamer(app):
                 row_f.bind('<Button-1>', _click)
                 row_f.bind('<Double-1>', _dblclick)
 
-                # Thumbnail placeholder (load async later)
-                thumb_label = ttk.Label(row_f, text='', width=10)
+                # Thumbnail placeholder (load async later).
+                # Use tk.Label (not ttk.Label) — ttk has known issues
+                # rendering images on high-DPI displays.
+                _tw = int(60 * _dpi)
+                _th = int(90 * _dpi)
+                thumb_label = tk.Label(row_f, text='', width=_tw,
+                                       height=_th, bg='#2b2b2b',
+                                       relief='flat', bd=0)
                 thumb_label.grid(row=0, column=0, rowspan=3, sticky='n',
                                  padx=(0, 10), pady=2)
                 thumb_label.bind('<Button-1>', _click)
@@ -1172,16 +1193,18 @@ def open_tv_renamer(app):
                     _thumb_refs.append(photo)
                     rf = row_frames[idx]
                     for child in rf.grid_slaves(row=0, column=0):
-                        child.configure(image=photo, width=0)
-                        child._photo = photo  # prevent GC on resize
+                        child.configure(image=photo,
+                                        width=photo.width(),
+                                        height=photo.height())
+                        child._photo = photo  # prevent GC
                         # Re-bind click events after image loads
                         child.bind('<Button-1>',
                                    lambda e, i=idx: _select_row(i))
                         child.bind('<Double-1>',
                                    lambda e, i=idx: (_select_row(i), _ok()))
                         break
-                except Exception:
-                    pass
+                except Exception as ex:
+                    _log(f"  Thumbnail error: {ex}", 'WARNING')
 
             thumb_thread = threading.Thread(target=_load_thumbs, daemon=True)
             thumb_thread.start()
@@ -1189,14 +1212,14 @@ def open_tv_renamer(app):
             # ── Buttons ──
             btn_f = ttk.Frame(dlg, padding=(10, 6))
             btn_f.pack(fill='x')
-            ttk.Button(btn_f, text="Load", command=_ok,
-                       width=10).pack(side='left', padx=4)
 
             def _no_match():
                 chosen[0] = '__filename_fallback__'
                 dlg.destroy()
             ttk.Button(btn_f, text="No Match Found", command=_no_match,
-                       width=16).pack(side='right', padx=4)
+                       width=16).pack(side='left', padx=4)
+            ttk.Button(btn_f, text="Load", command=_ok,
+                       width=10).pack(side='right', padx=4)
 
             # Unbind mousewheel on close to prevent leaking into parent
             def _on_close():
@@ -1462,8 +1485,9 @@ def open_tv_renamer(app):
                 cleaned = _clean_show_name(fname).strip()
                 if not cleaned:
                     continue
-                # Track parent folder for this filename-derived name
-                parent = os.path.basename(os.path.dirname(item['path']))
+                # Track show folder for this filename-derived name,
+                # skipping past Season subfolders
+                parent = _get_show_folder(item['path'])
                 folder_name = _clean_show_name(parent).strip() if parent else ''
                 fname_to_folders.setdefault(cleaned, set())
                 if folder_name:
@@ -1864,15 +1888,8 @@ def open_tv_renamer(app):
             _s = sum(1 for i in _file_items if i['ext'] in SUBTITLE_EXTENSIONS)
             _log(f"Added {added} files ({_v} video, {_s} subtitle)")
             # Auto-load any new shows detected from the added files
-            has_key = (api_key_var.get().strip()
-                       if provider_var.get() == 'TVDB'
-                       else tmdb_key_var.get().strip())
-            if added > 0 and has_key:
+            if added > 0:
                 _auto_load_shows()
-            elif added > 0 and provider_var.get() == 'TMDB' and not tmdb_key_var.get().strip():
-                _log("TMDB selected but no API key entered. "
-                     "Get a free key at themoviedb.org", 'WARNING')
-                _refresh_preview()
             else:
                 _refresh_preview()
 
@@ -1961,41 +1978,65 @@ def open_tv_renamer(app):
                         continue
                     old_path = item['path']
 
-                    # If parent was already renamed by a previous file, update path
-                    orig_parent = os.path.dirname(old_path)
-                    if orig_parent in _renamed_parents:
-                        old_path = os.path.join(
-                            _renamed_parents[orig_parent],
-                            os.path.basename(old_path))
-
                     if '/' in new_name:
-                        # Folder template: first component renames the parent dir,
-                        # remaining components are subfolders within it
+                        # Folder template: first component renames the show dir,
+                        # remaining components are subfolders/filename within it
                         parts = new_name.split('/')
                         show_folder = parts[0]
                         remaining = os.path.join(*parts[1:]) if len(parts) > 1 else parts[0]
 
-                        current_parent = os.path.dirname(old_path)
+                        file_parent = os.path.dirname(old_path)
+                        file_parent_name = os.path.basename(file_parent)
+
+                        # Determine the show-level folder. If the file is
+                        # inside a Season subfolder, go up one level so we
+                        # rename the show folder, not the season folder.
+                        in_season = _SEASON_FOLDER_RE.match(file_parent_name)
+                        if in_season:
+                            current_parent = os.path.dirname(file_parent)
+                        else:
+                            current_parent = file_parent
                         current_parent_name = os.path.basename(current_parent)
                         grandparent = os.path.dirname(current_parent)
 
-                        # Rename parent folder if needed (only once per folder)
+                        # Track by show folder path (not season folder) so
+                        # files from Season 1/ and Season 2/ share the same
+                        # rename record
+                        orig_show_parent = current_parent
+
+                        # If this show folder was already renamed, update
+                        if orig_show_parent in _renamed_parents:
+                            current_parent = _renamed_parents[orig_show_parent]
+
+                        # Rename show folder if needed (only once per folder)
                         if current_parent_name != show_folder:
                             new_parent = os.path.join(grandparent, show_folder)
-                            if orig_parent not in _renamed_parents:
+                            if orig_show_parent not in _renamed_parents:
                                 if not os.path.exists(new_parent):
                                     os.rename(current_parent, new_parent)
-                                    _renamed_parents[orig_parent] = new_parent
+                                    _renamed_parents[orig_show_parent] = new_parent
                                     batch_history.append((current_parent, new_parent))
                                     _log(f"  Renamed folder: {current_parent_name} → {show_folder}")
                                 elif new_parent == current_parent:
                                     pass  # same folder, no rename needed
                                 else:
                                     _log(f"  Folder already exists: {show_folder}", 'WARNING')
-                            current_parent = _renamed_parents.get(orig_parent, current_parent)
-                            old_path = os.path.join(current_parent, os.path.basename(old_path))
+                            current_parent = _renamed_parents.get(
+                                orig_show_parent, current_parent)
 
-                        # Build new path within the (renamed) parent
+                        # Update old_path to reflect the renamed show folder.
+                        # For season subfolder files the actual file is now at
+                        # renamed_show/Season X/filename.ext
+                        if in_season:
+                            old_path = os.path.join(
+                                current_parent, file_parent_name,
+                                os.path.basename(old_path))
+                        else:
+                            old_path = os.path.join(
+                                current_parent,
+                                os.path.basename(old_path))
+
+                        # Build new path within the (renamed) show folder
                         new_path = os.path.join(current_parent, remaining)
                     else:
                         # Flat template: rename within the same directory
@@ -2022,6 +2063,21 @@ def open_tv_renamer(app):
                 except Exception as e:
                     _log(f"Error renaming: {e}", 'ERROR')
                     errors += 1
+            # Clean up empty Season subdirectories left behind after
+            # files were moved out of them into the new structure
+            _removed_season_dirs = []
+            for new_show_dir in _renamed_parents.values():
+                if not os.path.isdir(new_show_dir):
+                    continue
+                for entry in sorted(os.listdir(new_show_dir)):
+                    sub = os.path.join(new_show_dir, entry)
+                    if (os.path.isdir(sub)
+                            and _SEASON_FOLDER_RE.match(entry)
+                            and not os.listdir(sub)):
+                        os.rmdir(sub)
+                        _removed_season_dirs.append(sub)
+                        _log(f"  Removed empty folder: {entry}")
+
             # Save undo history (include created dirs and removed items for restore)
             renamed_items = [i.copy() for i in _file_items if i.get('_renamed')]
             if batch_history:
@@ -3132,77 +3188,6 @@ def open_tv_renamer(app):
 
         settings_menu.add_command(label="Template Wizard...",
                                   command=_open_template_wizard)
-
-        # TMDB Key dialog
-        def _open_api_key_settings():
-            dlg = tk.Toplevel(win)
-            dlg.title("API Keys")
-            dlg.geometry("520x320")
-            dlg.minsize(450, 280)
-            dlg.resizable(True, True)
-            dlg.transient(win)
-            dlg.grab_set()
-            _center_on_parent(dlg, win)
-
-            f = ttk.Frame(dlg, padding=20)
-            f.pack(fill='both', expand=True)
-            f.columnconfigure(1, weight=1)
-
-            # ── TVDB ──
-            ttk.Label(f, text="TVDB API Key:",
-                      font=('Helvetica', 10, 'bold')).grid(
-                          row=0, column=0, columnspan=2, sticky='w',
-                          pady=(0, 4))
-            tvdb_entry = ttk.Entry(f, textvariable=api_key_var, width=45)
-            tvdb_entry.grid(row=1, column=0, columnspan=2, sticky='ew',
-                            pady=(0, 2))
-
-            tvdb_link = ttk.Label(
-                f, text="Get a free key at thetvdb.com/dashboard/account/apikey",
-                foreground='#3a6ea5', font=('Helvetica', 9, 'underline'),
-                cursor='hand2')
-            tvdb_link.grid(row=2, column=0, columnspan=2, sticky='w',
-                           pady=(0, 16))
-            tvdb_link.bind('<Button-1>', lambda e: subprocess.Popen(
-                ['xdg-open', 'https://thetvdb.com/dashboard/account/apikey']))
-
-            # ── TMDB ──
-            ttk.Label(f, text="TMDB API Key (v3):",
-                      font=('Helvetica', 10, 'bold')).grid(
-                          row=3, column=0, columnspan=2, sticky='w',
-                          pady=(0, 4))
-            tmdb_entry = ttk.Entry(f, textvariable=tmdb_key_var, width=45)
-            tmdb_entry.grid(row=4, column=0, columnspan=2, sticky='ew',
-                            pady=(0, 2))
-
-            tmdb_link = ttk.Label(
-                f, text="Get a free key at themoviedb.org/settings/api",
-                foreground='#3a6ea5', font=('Helvetica', 9, 'underline'),
-                cursor='hand2')
-            tmdb_link.grid(row=5, column=0, columnspan=2, sticky='w',
-                           pady=(0, 16))
-            tmdb_link.bind('<Button-1>', lambda e: subprocess.Popen(
-                ['xdg-open', 'https://www.themoviedb.org/settings/api']))
-
-            def _save_and_close():
-                app._tvdb_api_key = api_key_var.get().strip()
-                app._tmdb_api_key = tmdb_key_var.get().strip()
-                app.save_preferences()
-                _log("API keys saved")
-                dlg.destroy()
-
-            btn_f = ttk.Frame(f)
-            btn_f.grid(row=6, column=0, columnspan=2, sticky='e',
-                       pady=(8, 0))
-            ttk.Button(btn_f, text="Save", command=_save_and_close,
-                       width=8).pack(side='right', padx=(4, 0))
-            ttk.Button(btn_f, text="Cancel", command=dlg.destroy,
-                       width=8).pack(side='right')
-
-            dlg.wait_window()
-
-        settings_menu.add_command(label="API Keys...",
-                                  command=_open_api_key_settings)
 
         # ── Help menu ──
         help_menu = tk.Menu(menubar, tearoff=0)
