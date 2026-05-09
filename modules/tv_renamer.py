@@ -613,6 +613,154 @@ def open_tv_renamer(app):
             # No folder disambiguation — return the highest-scoring candidate
             return candidates[0][0]
 
+        def _match_episode_by_title(item, show_name):
+            """When a file has no SxxExx info, try to identify the episode
+            by matching the part of the filename after the show name against
+            all episode titles in the loaded show data.
+            Returns (season, episode) if a match is found, or (None, None)."""
+            show_data = _all_shows.get(show_name)
+            if not show_data or not isinstance(show_data, dict):
+                return None, None
+            if show_data.get('_is_movie'):
+                return None, None
+
+            # Roman numeral → digit mapping for title normalization
+            _ROMAN_MAP = {
+                'i': '1', 'ii': '2', 'iii': '3', 'iv': '4',
+                'v': '5', 'vi': '6', 'vii': '7', 'viii': '8',
+                'ix': '9', 'x': '10', 'xi': '11', 'xii': '12',
+                'xiii': '13', 'xiv': '14', 'xv': '15',
+                'xvi': '16', 'xvii': '17', 'xviii': '18',
+                'xix': '19', 'xx': '20',
+            }
+
+            def _norm_title(text):
+                """Extra normalization for title matching — strips periods
+                and commas that differ between filenames and API names
+                (e.g. 'vs.' in API vs 'vs' in filename), and converts
+                Roman numerals to digits (e.g. 'II' → '2') so
+                'World War II' matches 'World War 2'."""
+                n = _normalize_for_match(text)
+                n = re.sub(r'[.,!?]', '', n)
+                n = re.sub(r'\s+', ' ', n).strip()
+                # Replace Roman numerals with digits — only when they
+                # appear as whole words (not part of a longer word)
+                words = n.split()
+                words = [_ROMAN_MAP.get(w, w) for w in words]
+                return ' '.join(words)
+
+            # Build cleaned filename without extension
+            fname = os.path.splitext(os.path.basename(item['path']))[0]
+            # Strip subtitle language/tag suffixes that splitext leaves
+            # behind (e.g. "Movie.eng" from "Movie.eng.srt",
+            # "Movie.eng.forced" from "Movie.eng.forced.srt")
+            if item.get('ext') in SUBTITLE_EXTENSIONS:
+                fname = re.sub(
+                    r'[\.\s](?:forced|sdh|hi|cc|'
+                    r'[a-z]{2,3})$', '', fname, flags=re.IGNORECASE)
+                fname = re.sub(
+                    r'[\.\s](?:forced|sdh|hi|cc|'
+                    r'[a-z]{2,3})$', '', fname, flags=re.IGNORECASE)
+            fname_clean = re.sub(r'[._]', ' ', fname).strip()
+            # Strip quality/release tags to get just the meaningful part
+            fname_clean = re.sub(
+                r'\s*(?:720|1080|2160|480)[pPiI].*', '', fname_clean)
+            fname_clean = re.sub(
+                r'\s*(?:WEB|HDTV|BluRay|BDRip|DVDRip|REMUX|PROPER).*',
+                '', fname_clean, flags=re.IGNORECASE)
+            fname_norm = _norm_title(fname_clean)
+            show_norm = _norm_title(show_name)
+
+            # Extract the part of the filename after the show name
+            # e.g. "america facts vs fiction world war ii" minus
+            #      "america facts vs fiction" = "world war ii"
+            remainder = ''
+            if show_norm and show_norm in fname_norm:
+                idx = fname_norm.index(show_norm) + len(show_norm)
+                remainder = fname_norm[idx:].strip(' -')
+            if not remainder:
+                # Try word-by-word prefix removal
+                show_words = show_norm.split()
+                fname_words = fname_norm.split()
+                if show_words and fname_words:
+                    # Find the longest prefix of fname_words that matches
+                    # show_words (allowing for partial coverage)
+                    best_end = 0
+                    for i in range(min(len(show_words), len(fname_words))):
+                        if fname_words[i] == show_words[i]:
+                            best_end = i + 1
+                        else:
+                            break
+                    if best_end > 0 and best_end < len(fname_words):
+                        remainder = ' '.join(fname_words[best_end:])
+
+            if not remainder:
+                return None, None
+
+            # Score each episode title against the remainder
+            best_s, best_e, best_score = None, None, 0.0
+            for key, ep_data in show_data.items():
+                if not isinstance(key, tuple) or len(key) != 2:
+                    continue
+                sk, ek = key
+                if sk == 'date':
+                    continue
+                if not isinstance(ep_data, dict):
+                    continue
+                ep_title = ep_data.get('name', '')
+                if not ep_title:
+                    continue
+                title_norm = _norm_title(ep_title)
+                if not title_norm:
+                    continue
+
+                # Exact match
+                if title_norm == remainder:
+                    return sk, ek
+
+                # Title contained in remainder or remainder in title
+                score = 0.0
+                if title_norm in remainder:
+                    score = len(title_norm) / max(len(remainder), 1)
+                elif remainder in title_norm:
+                    score = len(remainder) / max(len(title_norm), 1) * 0.9
+
+                # Word-overlap fallback — handles typos in filenames
+                # (e.g. "villians" vs "villains") by checking how many
+                # words match between the remainder and the title.
+                # Uses starts-with matching so truncated words still
+                # count (e.g. "villia" matches "villain").
+                if score < 0.6:
+                    r_words = remainder.split()
+                    t_words = title_norm.split()
+                    if r_words and t_words:
+                        matched = 0
+                        for rw in r_words:
+                            for tw in t_words:
+                                # Exact word match or one starts with
+                                # the other (handles typos/truncation
+                                # where most of the word matches)
+                                if (rw == tw
+                                        or (len(rw) >= 4
+                                            and len(tw) >= 4
+                                            and (rw[:4] == tw[:4]))):
+                                    matched += 1
+                                    break
+                        denom = max(len(r_words), len(t_words))
+                        word_score = matched / denom if denom else 0
+                        # Require high overlap — at least 80% of words
+                        # must match to avoid false positives
+                        if word_score >= 0.8 and word_score > score:
+                            score = word_score
+
+                if score > best_score and score >= 0.6:
+                    best_score = score
+                    best_s, best_e = sk, ek
+
+            if best_s is not None:
+                return best_s, best_e
+            return None, None
+
         # ISO 639-1 → ISO 639-2/B (3-letter) mapping for subtitle language codes
         _LANG_2TO3 = {
             'en': 'eng', 'es': 'spa', 'fr': 'fre', 'de': 'ger', 'it': 'ita',
@@ -920,15 +1068,19 @@ def open_tv_renamer(app):
 
         def _normalize_for_match(text):
             """Normalize a show name for comparison: lowercase, strip
-            apostrophes, collapse '&' / 'and' / ':' differences, and
-            squash extra whitespace.  Apostrophe removal ensures
-            "Greys Anatomy" matches "Grey's Anatomy", etc."""
+            apostrophes and periods, collapse '&' / 'and' / ':'
+            differences, and squash extra whitespace.  Apostrophe
+            removal ensures "Greys Anatomy" matches "Grey's Anatomy".
+            Period removal ensures "vs." matches "vs", "Dr." matches
+            "Dr", etc. — filenames never have periods (dots are
+            separators converted to spaces by _clean_show_name)."""
             t = text.lower()
             t = t.replace("'", '')
             t = t.replace('\u2019', '')   # right single quote (curly)
             t = t.replace('\u2018', '')   # left single quote (curly)
             t = t.replace('&', ' and ')
             t = t.replace(':', ' ')
+            t = t.replace('.', ' ')
             t = re.sub(r'\s+', ' ', t).strip()
             return t
 
@@ -1305,6 +1457,25 @@ def open_tv_renamer(app):
                 if alt:
                     _log(f"  Retrying search as \"{alt}\"...")
                     results = _provider_search(alt)
+            # If still no results and the query has many words (likely
+            # contains an episode title baked into the filename because
+            # there was no SxxExx separator), progressively strip trailing
+            # words until we get results.  e.g. "America Facts vs Fiction
+            # World War II" → try without "II", then without "War II", etc.
+            if not results:
+                words = query.split()
+                if len(words) > 2:
+                    for trim in range(1, len(words) - 1):
+                        shorter = ' '.join(words[:-trim])
+                        if len(shorter.split()) < 2:
+                            break
+                        _log(f"  Retrying search as \"{shorter}\"...")
+                        results = _provider_search(shorter)
+                        if results:
+                            # Use the shorter query for subsequent matching
+                            query = shorter
+                            break
+
             if not results:
                 _log(f"  No {prov} results for \"{query}\"", 'WARNING')
                 return _fallback_from_filename(query)
@@ -1713,6 +1884,21 @@ def open_tv_renamer(app):
                             and _all_shows.get(matched, {}).get('_is_movie'))
                 has_ep = (s is not None and e is not None)
                 has_date = item.get('air_date') is not None
+
+                # If matched to a TV show but no episode info parsed from
+                # the filename, try to identify the episode by matching
+                # the filename against episode titles from the API
+                if (matched and not is_movie and not has_ep
+                        and not has_date):
+                    ts, te = _match_episode_by_title(item, matched)
+                    if ts is not None and te is not None:
+                        item['season'] = ts
+                        item['episode'] = te
+                        s, e = ts, te
+                        has_ep = True
+                        _log(f"Title match: \"{cur_name}\" → "
+                             f"S{str(ts).zfill(2)}E{str(te).zfill(2)}")
+
                 type_label = '—'
                 if matched and (is_movie or has_ep or has_date):
                     type_label = 'Movie' if is_movie else 'TV'
