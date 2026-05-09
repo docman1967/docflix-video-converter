@@ -1909,14 +1909,24 @@ def open_tv_renamer(app):
                         _log(f"Title match: \"{cur_name}\" → "
                              f"S{str(ts).zfill(2)}E{str(te).zfill(2)}")
 
-                type_label = '—'
-                if matched and (is_movie or has_ep or has_date):
-                    type_label = 'Movie' if is_movie else 'TV'
-                    try:
-                        new_name = _build_new_name(item, template, matched,
-                                                   movie_template=m_template) or ''
-                    except (KeyError, ValueError):
-                        new_name = '(template error)'
+                # Custom name override — user manually edited the name
+                if item.get('custom_name'):
+                    ext = item['ext']
+                    sub_tags = ''
+                    if ext in SUBTITLE_EXTENSIONS:
+                        sub_tags = _detect_sub_tags(item['path'])
+                    new_name = item['custom_name'] + sub_tags + ext
+                    type_label = 'Edit'
+                else:
+                    type_label = '—'
+                    if matched and (is_movie or has_ep or has_date):
+                        type_label = 'Movie' if is_movie else 'TV'
+                        try:
+                            new_name = _build_new_name(
+                                item, template, matched,
+                                movie_template=m_template) or ''
+                        except (KeyError, ValueError):
+                            new_name = '(template error)'
 
                 iid = tree.insert('', 'end',
                                   values=(cur_name, type_label, new_name))
@@ -1971,6 +1981,9 @@ def open_tv_renamer(app):
                 _tree_ctx.add_command(
                     label="Set Episode...",
                     command=_set_episode_for_selected)
+                _tree_ctx.add_command(
+                    label="Edit Name...",
+                    command=_edit_name_for_selected)
                 # Copy new name
                 vals = tree.item(sel[0], 'values')
                 if vals and len(vals) > 2 and vals[2]:
@@ -2164,11 +2177,19 @@ def open_tv_renamer(app):
             for item in _file_items:
                 try:
                     matched = item.get('matched_show')
-                    if not matched:
+                    # Custom name override from Edit Name dialog
+                    if item.get('custom_name'):
+                        ext = item['ext']
+                        sub_tags = ''
+                        if ext in SUBTITLE_EXTENSIONS:
+                            sub_tags = _detect_sub_tags(item['path'])
+                        new_name = item['custom_name'] + sub_tags + ext
+                    elif not matched:
                         skipped += 1
                         continue
-                    new_name = _build_new_name(item, template, matched,
-                                              movie_template=m_template)
+                    else:
+                        new_name = _build_new_name(item, template, matched,
+                                                   movie_template=m_template)
                     if not new_name:
                         skipped += 1
                         continue
@@ -2488,6 +2509,73 @@ def open_tv_renamer(app):
             s_entry.select_range(0, 'end')
             dlg.wait_window()
 
+        def _edit_name_for_selected():
+            """Open a dialog to manually edit the output filename."""
+            sel = tree.selection()
+            if not sel:
+                return
+            idx = tree.index(sel[0])
+            if idx >= len(_file_items):
+                return
+            item = _file_items[idx]
+
+            dlg = tk.Toplevel(win)
+            dlg.title("Edit Name")
+            dlg.geometry("500x150")
+            dlg.resizable(True, False)
+            dlg.transient(win)
+            dlg.grab_set()
+            _center_on_parent(dlg, win)
+
+            f = ttk.Frame(dlg, padding=16)
+            f.pack(fill='both', expand=True)
+            f.columnconfigure(1, weight=1)
+
+            ttk.Label(f, text=os.path.basename(item['path']),
+                      font=('Helvetica', 9), wraplength=460).grid(
+                          row=0, column=0, columnspan=2, sticky='w',
+                          pady=(0, 10))
+
+            ttk.Label(f, text="New name:").grid(
+                row=1, column=0, sticky='w', pady=4)
+            # Pre-fill with the current new name (without extension),
+            # or the template-generated name if available
+            cur_vals = tree.item(sel[0], 'values')
+            cur_new = ''
+            if cur_vals and len(cur_vals) > 2 and cur_vals[2]:
+                # Strip extension from the displayed new name
+                cur_new = os.path.splitext(cur_vals[2])[0]
+            elif item.get('custom_name'):
+                cur_new = item['custom_name']
+            name_var = tk.StringVar(value=cur_new)
+            name_entry = ttk.Entry(f, textvariable=name_var)
+            name_entry.grid(row=1, column=1, sticky='ew',
+                            padx=(8, 0), pady=4)
+
+            def _apply():
+                new_name = name_var.get().strip()
+                if not new_name:
+                    # Clear custom name — revert to template
+                    item.pop('custom_name', None)
+                else:
+                    item['custom_name'] = new_name
+                dlg.destroy()
+                _refresh_preview()
+
+            btn_f2 = ttk.Frame(f)
+            btn_f2.grid(row=2, column=0, columnspan=2, sticky='e',
+                        pady=(12, 0))
+            ttk.Button(btn_f2, text="Apply", command=_apply,
+                       width=8).pack(side='right', padx=(4, 0))
+            ttk.Button(btn_f2, text="Cancel", command=dlg.destroy,
+                       width=8).pack(side='right')
+
+            name_entry.focus_set()
+            name_entry.select_range(0, 'end')
+            # Enter key applies
+            dlg.bind('<Return>', lambda e: _apply())
+            dlg.wait_window()
+
         rename_btn = ttk.Button(btn_f, text="✏ Rename All", command=_do_rename,
                                 width=12)
         rename_btn.pack(side='left', padx=2)
@@ -2612,6 +2700,8 @@ def open_tv_renamer(app):
         edit_menu.add_separator()
         edit_menu.add_command(label="Set Episode...",
                               command=_set_episode_for_selected)
+        edit_menu.add_command(label="Edit Name...",
+                              command=_edit_name_for_selected)
         edit_menu.add_separator()
         edit_menu.add_command(label="Select All",
                               command=lambda: tree.selection_set(
