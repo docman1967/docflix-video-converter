@@ -1317,6 +1317,12 @@ def open_tv_renamer(app):
             def _load_thumbs():
                 import io
                 for i, r in enumerate(candidates):
+                    # Stop downloading if the dialog was closed
+                    try:
+                        if not dlg.winfo_exists():
+                            return
+                    except Exception:
+                        return
                     thumb_url = r.get('thumbnail', '')
                     if not thumb_url:
                         continue
@@ -1333,6 +1339,10 @@ def open_tv_renamer(app):
             def _apply_thumb(idx, img_data):
                 """Create PhotoImage and apply to widget (must run on main thread)."""
                 try:
+                    # Dialog may have been closed while thumbnails were
+                    # downloading — skip if the window no longer exists
+                    if not dlg.winfo_exists():
+                        return
                     import io
                     from PIL import Image, ImageTk
                     img = Image.open(io.BytesIO(img_data))
