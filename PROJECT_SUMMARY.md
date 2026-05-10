@@ -1,7 +1,7 @@
 # Docflix Media Suite — Project Summary
 
-**Last Updated:** 2026-05-09 (rev 61)  
-**Version:** 2.9.3  
+**Last Updated:** 2026-05-10 (rev 62)  
+**Version:** 2.9.4  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/`  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -590,6 +590,9 @@ git push
 ---
 
 ## Change Log
+
+### 2026-05-10 (Bug Fix)
+269. **File Renamer Multiple Matches dialog blank on high-DPI** — Fixed the Multiple Matches disambiguation dialog rendering as a completely empty dark window on high-resolution displays (200% scaling). Root cause: `tk.Label` placeholder thumbnails were created with `width=int(60*dpi)` and `height=int(90*dpi)` but **without an image**, so Tk interpreted those values as *character units* (characters wide × lines tall) instead of pixels. At 200% scaling, each placeholder became 120 characters wide × 180 lines tall = ~964×3424 pixels — each card consumed the entire dialog, pushing all show titles, metadata, and synopses out of view. Also caused cascading "Thumbnail error" log messages because the broken layout corrupted grid operations when async thumbnails tried to apply. Fixed by creating a blank `tk.PhotoImage` of the desired pixel dimensions and assigning it to each placeholder label — `tk.Label` with an image treats `width`/`height` as pixels. The blank image is stored on the widget (`._blank`) to prevent garbage collection. Standard DPI (100%) was unaffected because 60×90 character units happened to be large enough to still show content.
 
 ### 2026-05-09 (Enhancement)
 266. **File Renamer episode title matching for files without SxxExx** — Files without season/episode markers in the filename (e.g. `America.Facts.vs.Fiction.World.War.II.720p.WEB.x264-DHD-Obfuscated`) now get their episode identified via three changes: (1) **Period stripping in `_normalize_for_match()`** — added `.replace('.', ' ')` so abbreviations like `vs.` in API names match `vs` in filenames (dots in filenames are separators, never punctuation). This was causing substring match failures everywhere: `"america facts vs fiction"` was not found in `"america facts vs. fiction"`. Also fixes `Dr.`, `Mr.`, `St.`, etc. (2) **Progressive query shortening** in `_load_show_by_name()` — when the initial API search returns 0 results and the query has many words (because the filename has no SxxExx separator and `_clean_show_name` can't tell where the show name ends and the episode title begins), the search progressively strips trailing words (e.g. `"America Facts vs Fiction World War II"` → `"America Facts vs Fiction World War"` → `"America Facts vs Fiction"`) until the API returns results. (3) **Episode title matching** via new `_match_episode_by_title()` function in `_refresh_preview()` — once the show is loaded with episode data, extracts the portion of the filename after the show name, strips quality/release tags, and compares it against all episode titles. Includes Roman numeral ↔ digit normalization (`II` → `2`, `III` → `3`, etc.) so `"World War II"` in the filename matches `"World War 2"` from the API. Also includes word-overlap fallback with prefix matching (first 4 chars) to handle typos in scene release filenames (e.g. `"Villians"` matches `"Villains"` via shared prefix `"vill"`); requires ≥80% word overlap to avoid false positives. For subtitle files, strips trailing language/tag suffixes (`.eng`, `.eng.forced`, `.sdh`, `.hi`, `.cc`) from the stem before matching, since `os.path.splitext` only removes the final `.srt` extension. When a match is found (exact or ≥60% overlap), the item's `season` and `episode` are populated automatically, producing a complete renamed filename (e.g. `America Facts vs. Fiction - S05E02 - World War 2.mkv`). Title matches logged for visibility.

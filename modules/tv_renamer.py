@@ -1268,11 +1268,17 @@ def open_tv_renamer(app):
                 # Thumbnail placeholder (load async later).
                 # Use tk.Label (not ttk.Label) — ttk has known issues
                 # rendering images on high-DPI displays.
+                # IMPORTANT: tk.Label width/height are in CHARACTER units
+                # unless an image is set — use a blank PhotoImage so
+                # dimensions are treated as pixels.
                 _tw = int(60 * _dpi)
                 _th = int(90 * _dpi)
-                thumb_label = tk.Label(row_f, text='', width=_tw,
-                                       height=_th, bg='#2b2b2b',
+                _blank_img = tk.PhotoImage(width=_tw, height=_th)
+                thumb_label = tk.Label(row_f, image=_blank_img,
+                                       width=_tw, height=_th,
+                                       bg='#2b2b2b',
                                        relief='flat', bd=0)
+                thumb_label._blank = _blank_img  # prevent GC
                 thumb_label.grid(row=0, column=0, rowspan=3, sticky='n',
                                  padx=(0, 10), pady=2)
                 thumb_label.bind('<Button-1>', _click)
