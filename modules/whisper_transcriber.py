@@ -937,7 +937,8 @@ def open_whisper_transcriber(app):
 
     _preview_title = tk.StringVar(value="Subtitle Preview")
 
-    preview_lf = ttk.LabelFrame(right, textvariable=_preview_title)
+    preview_lf = tk.LabelFrame(right, textvariable=_preview_title,
+                               padx=4, pady=4)
     preview_lf.grid(row=2, column=0, sticky='nsew', pady=(8, 0), rowspan=2)
     preview_lf.columnconfigure(0, weight=1)
     preview_lf.rowconfigure(0, weight=1)
@@ -1118,15 +1119,11 @@ def open_whisper_transcriber(app):
     # ── start / cancel ──
 
     def _start():
-        import sys as _sys
-        print("DEBUG: _start() called", file=_sys.__stderr__, flush=True)
         try:
             _start_inner()
-            print("DEBUG: _start_inner() completed OK", file=_sys.__stderr__, flush=True)
         except Exception as exc:
             import traceback
             tb = traceback.format_exc()
-            print(f"DEBUG: _start() exception: {tb}", file=_sys.__stderr__, flush=True)
             _log_write(f"Error starting transcription:\n{tb}", "error")
             messagebox.showerror("Error", f"Failed to start:\n{exc}",
                                  parent=win)
