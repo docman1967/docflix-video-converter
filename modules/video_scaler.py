@@ -53,15 +53,16 @@ RESOLUTION_MAP = {
 # ═══════════════════════════════════════════════════════════════════
 
 def _probe_video_info(filepath):
-    """Probe a video file and return (width, height, duration_secs, codec_name) or Nones.
+    """Probe a video file and return (width, height, duration_secs, codec_name, hdr_format) or Nones.
 
     Uses a 1-frame decode to get the actual content dimensions (which may
     differ from container dimensions for letterboxed/cropped content).
     Falls back to ffprobe stream metadata if decode probe fails.
+    hdr_format is a string like 'HDR10', 'HLG', 'DoVi', or '' for SDR.
     """
-    width, height, duration, codec = None, None, None, None
+    width, height, duration, codec, hdr_format = None, None, None, None, ''
 
-    # Get duration and codec from ffprobe (fast metadata read)
+    # Get duration, codec, and HDR info from ffprobe (fast metadata read)
     try:
         cmd = [
             'ffprobe', '-v', 'quiet', '-print_format', 'json',
@@ -78,10 +79,41 @@ def _probe_video_info(filepath):
                 width = s.get('width')
                 height = s.get('height')
                 codec = s.get('codec_name', '?')
+                # Detect HDR from color transfer characteristics
+                transfer = s.get('color_transfer', '')
+                primaries = s.get('color_primaries', '')
+                pix_fmt = s.get('pix_fmt', '')
+                if transfer == 'smpte2084':
+                    hdr_format = 'HDR10'
+                elif transfer == 'arib-std-b67':
+                    hdr_format = 'HLG'
+                elif 'bt2020' in primaries and '10' in pix_fmt:
+                    hdr_format = 'HDR'
             dur = fmt.get('duration')
             duration = float(dur) if dur else None
     except Exception:
         pass
+
+    # Check for Dolby Vision via side data (overrides HDR10 label)
+    if hdr_format:
+        try:
+            cmd_sd = [
+                'ffprobe', '-v', 'quiet', '-print_format', 'json',
+                '-select_streams', 'v:0', '-read_intervals', '%+#1',
+                '-show_frames', '-show_entries',
+                'frame=side_data_list', filepath
+            ]
+            r2 = subprocess.run(cmd_sd, capture_output=True, text=True, timeout=15)
+            if r2.returncode == 0:
+                sd_data = json.loads(r2.stdout)
+                for frame in sd_data.get('frames', []):
+                    for sd in frame.get('side_data_list', []):
+                        sd_type = sd.get('side_data_type', '')
+                        if 'Dolby Vision' in sd_type or 'DOVI' in sd_type:
+                            hdr_format = 'DoVi'
+                            break
+        except Exception:
+            pass
 
     # Decode 1 frame from mid-file to get actual content dimensions.
     # Some files have variable resolution (e.g. 1080p intro, 960p main content)
@@ -115,7 +147,7 @@ def _probe_video_info(filepath):
     except Exception:
         pass  # fall back to ffprobe dimensions
 
-    return width, height, duration, codec
+    return width, height, duration, codec, hdr_format
 
 
 def _detect_gpu_backends_quick():
@@ -228,6 +260,7 @@ def open_video_scaler(app):
     opt_container    = tk.StringVar(value=_sp.get('container', '.mkv'))
     opt_output_mode  = tk.StringVar(value=_sp.get('output_mode', 'folder'))
     opt_output_folder = tk.StringVar(value=_sp.get('output_folder', ''))
+    opt_hdr_to_sdr   = tk.BooleanVar(value=_sp.get('hdr_to_sdr', False))
 
     # Detect GPU backends
     gpu_backends = _detect_gpu_backends_quick()
@@ -332,7 +365,7 @@ def open_video_scaler(app):
     tree.heading('size', text='Size',          command=lambda: _sort_by_column('size'))
     tree.heading('status', text='Status',      command=lambda: _sort_by_column('status'))
 
-    tree.column('source_res', width=100, minwidth=80)
+    tree.column('source_res', width=130, minwidth=100)
     tree.column('target_res', width=100, minwidth=80)
     tree.column('size', width=80, minwidth=60)
     tree.column('status', width=100, minwidth=80)
@@ -450,6 +483,10 @@ def open_video_scaler(app):
     ttk.Combobox(row2, textvariable=opt_container,
                  values=['.mkv', '.mp4'], width=5, state='readonly').pack(side='left', padx=(0, 6))
 
+    ttk.Separator(row2, orient='vertical').pack(side='left', fill='y', padx=8)
+    ttk.Checkbutton(row2, text="Convert HDR → SDR",
+                    variable=opt_hdr_to_sdr).pack(side='left', padx=(0, 6))
+
     # Row 3: Output
     row3 = ttk.Frame(settings_frame)
     row3.pack(fill='x', pady=2)
@@ -519,6 +556,7 @@ def open_video_scaler(app):
             'container':     opt_container.get(),
             'output_mode':   opt_output_mode.get(),
             'output_folder': opt_output_folder.get(),
+            'hdr_to_sdr':    opt_hdr_to_sdr.get(),
         }
         app._scaler_prefs = sp
         try:
@@ -572,7 +610,7 @@ def open_video_scaler(app):
         if Path(filepath).suffix.lower() not in VIDEO_EXTENSIONS:
             return False
 
-        w, h, dur, codec = _probe_video_info(filepath)
+        w, h, dur, codec, hdr_fmt = _probe_video_info(filepath)
         size_bytes = os.path.getsize(filepath) if os.path.isfile(filepath) else 0
         if size_bytes >= 1_073_741_824:
             size_str = f"{size_bytes / 1_073_741_824:.1f} GB"
@@ -586,6 +624,7 @@ def open_video_scaler(app):
             'height': h,
             'duration': dur,
             'codec': codec,
+            'hdr': hdr_fmt,
             'size_str': size_str,
             'status': '',
         })
@@ -675,6 +714,8 @@ def open_video_scaler(app):
         tree.delete(*tree.get_children())
         for i, f in enumerate(files):
             src = f"{f['width']}x{f['height']}" if f['width'] else '?'
+            if f.get('hdr'):
+                src += f" {f['hdr']}"
             tgt = _target_str(f)
             warn = ' (upscale)' if _is_upscale(f) else ''
             iid = tree.insert('', 'end', text=f['name'],
@@ -785,11 +826,15 @@ def open_video_scaler(app):
         else:
             target_w = int(round(target_h * 16 / 9))
 
+        # HDR → SDR tone mapping requested and file is actually HDR?
+        do_tonemap = opt_hdr_to_sdr.get() and bool(f.get('hdr'))
+
         # Build command
         cmd = ['ffmpeg', '-y']
 
-        # HW accel for GPU decode
-        if bid != 'cpu' and bid in GPU_BACKENDS:
+        # HW accel for GPU decode — disabled when tone mapping because
+        # the zscale/tonemap filters require CPU (system memory) frames
+        if bid != 'cpu' and bid in GPU_BACKENDS and not do_tonemap:
             backend_info = GPU_BACKENDS[bid]
             cmd.extend(backend_info['hwaccel'])
 
@@ -798,8 +843,26 @@ def open_video_scaler(app):
         # Scale filter — uses explicit dimensions calculated from actual
         # decoded content size, so it works correctly with CUDA hwaccel
         # (which may deliver padded frames for cropped H.264 content)
-        scale_vf = _build_scale_filter(target_w, target_h, bid if bid != 'cpu' else None)
-        if scale_vf:
+        scale_vf = _build_scale_filter(target_w, target_h, bid if bid != 'cpu' and not do_tonemap else None)
+
+        if do_tonemap:
+            # HDR → SDR tone mapping filter chain (CPU filters):
+            #   zscale  — convert to linear light in BT.2020
+            #   tonemap — compress HDR luminance to SDR range
+            #   zscale  — convert to BT.709 (standard HD color space)
+            #   format  — convert to 8-bit YUV for SDR output
+            tonemap_chain = (
+                'zscale=t=linear:npl=100,'
+                'format=gbrpf32le,'
+                'tonemap=hable:desat=0,'
+                'zscale=p=bt709:t=bt709:m=bt709:r=tv,'
+                'format=yuv420p'
+            )
+            if scale_vf:
+                cmd.extend(['-vf', f'{scale_vf},{tonemap_chain},setsar=1:1'])
+            else:
+                cmd.extend(['-vf', f'{tonemap_chain},setsar=1:1'])
+        elif scale_vf:
             if bid != 'cpu' and bid in GPU_BACKENDS:
                 # GPU path: keep frames in GPU memory for the encoder.
                 # Use scale_cuda only; SAR is set via encoder option below.
@@ -812,9 +875,16 @@ def open_video_scaler(app):
         cmd.extend(['-c:v', video_enc])
 
         # Force square pixels (SAR 1:1) for GPU path — can't use setsar
-        # filter on hardware frames, so set it as an encoder/muxer option
-        if bid != 'cpu' and bid in GPU_BACKENDS:
+        # filter on hardware frames, so set it as an encoder/muxer option.
+        # When tone mapping, filters run on CPU so setsar is already applied.
+        if bid != 'cpu' and bid in GPU_BACKENDS and not do_tonemap:
             cmd.extend(['-sar', '1:1'])
+
+        # When tone mapping HDR → SDR, explicitly tag the output as BT.709
+        # so players don't misinterpret the color space
+        if do_tonemap:
+            cmd.extend(['-colorspace', 'bt709', '-color_primaries', 'bt709',
+                        '-color_trc', 'bt709'])
 
         # Preset
         preset = opt_preset.get()
@@ -869,7 +939,8 @@ def open_video_scaler(app):
             _log(f"  Warning: upscaling {f['name']} ({f['height']}p -> {target[1]}p)", 'WARNING')
 
         win.after(0, lambda: _update_status(i, 'Processing...'))
-        _log(f"  Scaling: {f['name']} -> {_target_str(f)}", 'INFO')
+        hdr_note = f" (HDR → SDR)" if opt_hdr_to_sdr.get() and f.get('hdr') else ''
+        _log(f"  Scaling: {f['name']} -> {_target_str(f)}{hdr_note}", 'INFO')
         _update_progress(0.0, f"File {i + 1}/{len(files)}: {f['name']}")
 
         try:

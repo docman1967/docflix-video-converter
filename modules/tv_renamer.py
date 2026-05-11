@@ -1154,9 +1154,44 @@ def open_tv_renamer(app):
             dlg.resizable(True, True)
             _dpi = get_dpi_scale(dlg)
 
+            # Find the source folder path for this query so the user knows
+            # which directory is being matched (helpful when two shows have
+            # similar names, e.g. "Ghosts (US)" vs "Ghosts (2019)").
+            query_norm = _normalize_for_match(query)
+            source_folder = ''
+            _has_video = any(i.get('ext') in VIDEO_EXTENSIONS
+                            for i in _file_items)
+            for item in _file_items:
+                if item.get('ext') in SUBTITLE_EXTENSIONS and _has_video:
+                    continue
+                folder = _get_show_folder(item['path'])
+                if folder:
+                    folder_cleaned = _normalize_for_match(
+                        _clean_show_name(folder))
+                    fname = os.path.splitext(
+                        os.path.basename(item['path']))[0]
+                    fname_cleaned = _normalize_for_match(
+                        _clean_show_name(fname))
+                    if folder_cleaned == query_norm or fname_cleaned == query_norm:
+                        # Show the full parent directory path (up to the
+                        # show folder level) for clarity
+                        parent = os.path.dirname(item['path'])
+                        parent_name = os.path.basename(parent)
+                        if parent_name and _SEASON_FOLDER_RE.match(parent_name):
+                            source_folder = os.path.dirname(parent)
+                        else:
+                            source_folder = parent
+                        break
+
+            if source_folder:
+                ttk.Label(dlg, text=source_folder,
+                          font=('Helvetica', 9),
+                          foreground='gray',
+                          padding=(10, 8, 10, 0)).pack(anchor='w')
+
             ttk.Label(dlg, text=f"Multiple shows found for \"{query}\":",
                       font=('Helvetica', 11, 'bold'),
-                      padding=(10, 10, 10, 4)).pack(anchor='w')
+                      padding=(10, 4 if source_folder else 10, 10, 4)).pack(anchor='w')
 
             # ── Scrollable list area ──
             outer_f = ttk.Frame(dlg)
@@ -1657,18 +1692,43 @@ def open_tv_renamer(app):
                 _log("No files loaded — add files first", 'WARNING')
                 return
 
-            # Extract unique show names from video filenames only —
+            # Extract unique show names from video filenames first —
             # subtitle files contain language/forced/sdh tags that pollute
             # the show name and cause failed API searches.
+            # When ONLY subtitle files are loaded (no video files), fall
+            # back to subtitle filenames after stripping known sub tags.
             # Also check parent folder names to disambiguate shows with the
             # same filename-derived name (e.g. two "Ghosts" shows in
             # folders "Ghosts (US)" and "Ghosts (2019)").
+            _SUB_TAG_TOKENS = {
+                'en', 'eng', 'es', 'spa', 'fr', 'fra', 'fre', 'de', 'deu',
+                'ger', 'it', 'ita', 'pt', 'por', 'ja', 'jpn', 'ko', 'kor',
+                'zh', 'zho', 'chi', 'ru', 'rus', 'ar', 'ara', 'hi', 'hin',
+                'nl', 'nld', 'dut', 'sv', 'swe', 'da', 'dan', 'no', 'nor',
+                'fi', 'fin', 'pl', 'pol', 'cs', 'ces', 'cze', 'el', 'ell',
+                'gre', 'he', 'heb', 'tr', 'tur', 'th', 'tha', 'vi', 'vie',
+                'uk', 'ukr', 'ro', 'ron', 'rum', 'hu', 'hun', 'bg', 'bul',
+                'hr', 'hrv', 'sk', 'slk', 'slo', 'sl', 'slv', 'ms', 'msa',
+                'may', 'id', 'ind', 'tl', 'fil', 'und',
+                'forced', 'sdh', 'cc', 'hi',
+            }
+            has_video = any(i.get('ext') in VIDEO_EXTENSIONS
+                           for i in _file_items)
             show_names = set()
             fname_to_folders = {}  # track which folders share a filename name
             for item in _file_items:
-                if item.get('ext') in SUBTITLE_EXTENSIONS:
-                    continue
+                is_sub = item.get('ext') in SUBTITLE_EXTENSIONS
+                if is_sub and has_video:
+                    continue  # prefer video filenames when available
                 fname = os.path.splitext(os.path.basename(item['path']))[0]
+                if is_sub:
+                    # Strip trailing subtitle tags (lang codes, forced, sdh)
+                    # e.g. "Show.Name.S01E01.eng.forced" → "Show.Name.S01E01"
+                    parts = re.split(r'[\.]', fname)
+                    while (parts
+                           and parts[-1].lower() in _SUB_TAG_TOKENS):
+                        parts.pop()
+                    fname = '.'.join(parts) if parts else fname
                 cleaned = _clean_show_name(fname).strip()
                 if not cleaned:
                     continue
