@@ -62,6 +62,7 @@ class StandaloneContext:
 
         # Subtitle editor
         self.custom_cap_words = prefs.get('custom_cap_words', [])
+        self.use_names_db = prefs.get('use_names_db', False)
         self.custom_spell_words = prefs.get('custom_spell_words', [])
         self.custom_ad_patterns = prefs.get('custom_ad_patterns', [])
         self.search_replace_pairs = prefs.get('search_replace_pairs', [])
@@ -71,6 +72,12 @@ class StandaloneContext:
 
         # Video scaler
         self._scaler_prefs = prefs.get('video_scaler', {})
+
+        # Auto-load names database if preference is enabled
+        if self.use_names_db:
+            from .subtitle_filters import is_names_db_available, load_names_db
+            if is_names_db_available():
+                load_names_db()
 
         # Store full prefs for pass-through
         self._prefs = prefs
@@ -97,6 +104,7 @@ class StandaloneContext:
         prefs['custom_movie_templates'] = getattr(
             self, '_custom_movie_templates', [])
         prefs['custom_cap_words'] = getattr(self, 'custom_cap_words', [])
+        prefs['use_names_db'] = getattr(self, 'use_names_db', False)
         prefs['custom_spell_words'] = getattr(
             self, 'custom_spell_words', [])
         prefs['custom_ad_patterns'] = getattr(

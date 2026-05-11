@@ -47,6 +47,7 @@ def save_preferences(app):
         'meta_sub_lang':         app.meta_sub_lang.get(),
         'custom_ad_patterns':    app.custom_ad_patterns,
         'custom_cap_words':      app.custom_cap_words,
+        'use_names_db':          getattr(app, 'use_names_db', False),
         'custom_replacements':   app.custom_replacements,
         'custom_spell_words':    app.custom_spell_words,
         'tv_rename_provider':    getattr(self, '_tv_rename_provider', 'TVDB'),
@@ -106,6 +107,7 @@ def load_preferences(app):
         app.recent_folders = prefs.get('recent_folders', [])
         app.custom_ad_patterns = prefs.get('custom_ad_patterns', [])
         app.custom_cap_words = prefs.get('custom_cap_words', [])
+        app.use_names_db = prefs.get('use_names_db', False)
         app.custom_spell_words = prefs.get('custom_spell_words', [])
         app.custom_replacements = prefs.get('custom_replacements', [])
         app._tv_rename_provider = prefs.get('tv_rename_provider', 'TVDB')
@@ -122,6 +124,14 @@ def load_preferences(app):
         if dof and Path(dof).is_dir():
             app.output_dir = Path(dof)
             app.output_dir_label.configure(text=dof, foreground='black')
+        # Auto-load names database if preference is enabled
+        if getattr(app, 'use_names_db', False):
+            from .subtitle_filters import is_names_db_available, load_names_db
+            if is_names_db_available():
+                count = load_names_db()
+                app.add_log(f"Names database loaded ({count:,} names)",
+                            'INFO')
+
         app.add_log("Preferences loaded.", 'INFO')
     except Exception as e:
         app.add_log(f"Failed to load preferences: {e}", 'WARNING')

@@ -1,7 +1,7 @@
 # Docflix Media Suite — Project Summary
 
 **Last Updated:** 2026-05-11 (rev 63)  
-**Version:** 2.9.5  
+**Version:** 2.9.6  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/`  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -43,7 +43,7 @@
 | `gpu.py` | 474 | GPU detection (NVENC/QSV/VAAPI), test encode verification, ffmpeg check, CC detection, video analysis |
 | `converter.py` | 856 | VideoConverter engine class — ffmpeg command building, pause/resume/stop, two-pass, subtitle/metadata/chapter handling |
 | `preferences.py` | 169 | Preferences save/load/reset as standalone functions |
-| `subtitle_filters.py` | 894 | SRT parsing/writing, all filter functions (Remove HI, Fix CAPS, etc.), timestamp manipulation, retime |
+| `subtitle_filters.py` | 1,050+ | SRT parsing/writing, all filter functions (Remove HI, Fix CAPS, etc.), timestamp manipulation, retime; optional names database (Aptivi/NamesList) for Fix CAPS with system dictionary false-positive filtering |
 | `subtitle_editor.py` | 6,034 | Both editor variants (standalone + internal), inline editing, filters, timing, search/replace, waveform timeline with embedded video, video preview, "Open with" file argument support; withdraw/deiconify window positioning |
 | `smart_sync.py` | 735 | Whisper-based auto-sync (faster-whisper + WhisperX), Quick/Full Scan, Direct Align, VAD snapping |
 | `spell_checker.py` | 319 | Unified incremental spell check dialog with custom dictionary and character name support |
@@ -591,7 +591,8 @@ git push
 
 ## Change Log
 
-### 2026-05-11 (Bug Fix)
+### 2026-05-11 (Enhancement + Bug Fix)
+271. **Fix ALL CAPS — optional names database** — Added an optional downloadable names database (1.1M+ first and last names from Aptivi/NamesList) to the Fix ALL CAPS filter for improved proper name capitalization, especially in documentary subtitles. Changes across 5 files: (1) **`subtitle_filters.py`** — new module-level names DB infrastructure: `NAMES_DB_DIR`, `NAMES_DB_URLS`, `load_names_db()`, `unload_names_db()`, `is_names_db_available()`, `is_names_db_loaded()`, `get_names_db_count()`. The loader reads `FirstNames.txt` + `Surnames.txt` from `~/.local/share/docflix/names/` and filters out common English words using the system dictionary (`/usr/share/dict/words`) — only lowercase dictionary entries are used as exclusions, so proper nouns (Eisenhower, Kennedy, Roosevelt, Lincoln, Washington, etc.) are preserved while common words (the, and, nation, fight, will, grace, stone, etc.) are excluded. Falls back to a comprehensive hardcoded `_NAMES_AMBIGUOUS` set (~500 words) when no system dictionary is available. Added `use_names_db` parameter to `filter_fix_caps()` and `_cap_word()` closure. (2) **`subtitle_editor.py`** — added "Names Database (optional)" LabelFrame to both copies of `show_fix_caps_dialog()` with: status label, "Use Names Database" checkbox (loads/unloads DB on toggle), "Download Names Database" button (threaded download from GitHub raw URLs, auto-loads and enables on completion), description text. Updated all `filter_fix_caps()` call sites (Apply buttons + auto-caps in Remove HI) to pass `use_names_db`. (3) **`preferences.py`** — save/load `use_names_db` preference; auto-load names DB on startup when preference is enabled. (4) **`standalone.py`** — same preference save/load/auto-load for standalone editor launches. (5) **`batch_filter.py`** — pass `use_names_db` to Fix ALL CAPS lambda.
 270. **File Renamer subtitle-only files fail show detection** — Fixed "Could not detect any show names from filenames" when loading only subtitle files (.srt, .ass, etc.) without any video files. Root cause: `_auto_load_shows()` unconditionally skipped all files with subtitle extensions to avoid language/tag tokens (`.eng`, `.forced`, `.sdh`) polluting show name extraction. When no video files were present, `show_names` was always empty. Fixed by checking `has_video` first — subtitle files are still skipped when video files are present (preferred), but when only subtitle files are loaded, they are processed with trailing subtitle tag tokens stripped before `_clean_show_name()` runs. The stripping walks backward through dot-separated filename parts removing known language codes and tag words (forced, sdh, cc, hi). Same fallback applied to the source folder detection in `_ask_user_pick_show()`.
 
 ### 2026-05-10 (Bug Fix)

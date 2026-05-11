@@ -425,7 +425,9 @@ def open_batch_filter(app):
             ('merge_short',    "Merge Short Cues",                filter_merge_short),
             ('reduce_lines',   "Reduce to 2 Lines",               filter_reduce_lines),
             ('fix_caps',       "Fix ALL CAPS",
-             lambda c: filter_fix_caps(c, app.custom_cap_words)),
+             lambda c: filter_fix_caps(c, app.custom_cap_words,
+                                       use_names_db=getattr(
+                                           app, 'use_names_db', False))),
         ]
 
         filter_vars = {}

@@ -43,6 +43,10 @@ from .subtitle_filters import (
     filter_reduce_lines,
     shift_timestamps, stretch_timestamps, two_point_sync,
     BUILTIN_AD_PATTERNS,
+    # Names database (optional)
+    load_names_db, unload_names_db, is_names_db_loaded,
+    is_names_db_available, get_names_db_count,
+    NAMES_DB_DIR, NAMES_DB_URLS,
 )
 from .smart_sync import smart_sync
 from .waveform_timeline import WaveformTimeline
@@ -723,7 +727,9 @@ def open_standalone_subtitle_editor(app):
                 app.add_log("Text is mostly ALL CAPS — running Fix ALL CAPS first "
                              "to avoid false HI detection", 'INFO')
                 push_undo()
-                cues = filter_fix_caps(cues, app.custom_cap_words)
+                cues = filter_fix_caps(cues, app.custom_cap_words,
+                                      use_names_db=getattr(
+                                          app, 'use_names_db', False))
                 refresh_tree(cues)
             apply_filter(filter_remove_hi, "Remove HI")
 
@@ -976,7 +982,7 @@ def open_standalone_subtitle_editor(app):
         def show_fix_caps_dialog():
             cd = tk.Toplevel(editor)
             cd.title("Fix ALL CAPS")
-            cd.geometry("420x400")
+            cd.geometry("420x560")
             app._center_on_main(cd)
             cd.resizable(True, True)
             # Keep on top but don't grab — allows scrolling the subtitle list
@@ -1035,12 +1041,104 @@ def open_standalone_subtitle_editor(app):
             ttk.Label(lf, text="Names are saved automatically and persist between sessions.",
                       font=('Helvetica', 8), foreground='gray').pack(anchor='w')
 
+            # ── Names Database section ──
+            nf = ttk.LabelFrame(cd, text="Names Database (optional)",
+                                padding=8)
+            nf.pack(fill='x', padx=10, pady=5)
+
+            db_available = is_names_db_available()
+            if db_available and is_names_db_loaded():
+                status_text = f"Installed ({get_names_db_count():,} names loaded)"
+            elif db_available:
+                status_text = "Installed (not active)"
+            else:
+                status_text = "Not installed"
+            status_var = tk.StringVar(value=status_text)
+            ttk.Label(nf, textvariable=status_var,
+                      font=('Helvetica', 9)).pack(anchor='w')
+
+            use_db_var = tk.BooleanVar(
+                value=getattr(app, 'use_names_db', False))
+
+            def on_use_db_toggle():
+                if use_db_var.get():
+                    if not is_names_db_available():
+                        messagebox.showinfo(
+                            "Names Database",
+                            "Names database not downloaded yet.\n"
+                            "Click 'Download Names Database' first.",
+                            parent=cd)
+                        use_db_var.set(False)
+                        return
+                    if not is_names_db_loaded():
+                        count = load_names_db()
+                        status_var.set(
+                            f"Installed ({count:,} names loaded)")
+                else:
+                    unload_names_db()
+                    if is_names_db_available():
+                        status_var.set("Installed (not active)")
+                app.use_names_db = use_db_var.get()
+                app.save_preferences()
+
+            ttk.Checkbutton(nf, text="Use Names Database",
+                            variable=use_db_var,
+                            command=on_use_db_toggle).pack(anchor='w',
+                                                           pady=(4, 0))
+
+            def download_names_db():
+                import urllib.request
+                dl_btn.configure(state='disabled')
+                status_var.set("Downloading...")
+                cd.update_idletasks()
+
+                def do_download():
+                    try:
+                        NAMES_DB_DIR.mkdir(parents=True, exist_ok=True)
+                        for fname, url in NAMES_DB_URLS.items():
+                            req = urllib.request.Request(url, headers={
+                                'User-Agent': 'Docflix-Media-Suite/1.0'})
+                            with urllib.request.urlopen(
+                                    req, timeout=60) as resp:
+                                data = resp.read()
+                            (NAMES_DB_DIR / fname).write_bytes(data)
+                        # Auto-load
+                        count = load_names_db()
+                        def on_done():
+                            status_var.set(
+                                f"Installed ({count:,} names loaded)")
+                            use_db_var.set(True)
+                            app.use_names_db = True
+                            app.save_preferences()
+                            dl_btn.configure(state='normal')
+                        cd.after(0, on_done)
+                    except Exception as e:
+                        def on_err():
+                            status_var.set(f"Download failed: {e}")
+                            dl_btn.configure(state='normal')
+                        cd.after(0, on_err)
+
+                threading.Thread(target=do_download,
+                                 daemon=True).start()
+
+            dl_btn = ttk.Button(nf, text="Download Names Database",
+                                command=download_names_db)
+            dl_btn.pack(anchor='w', pady=(4, 0))
+            ttk.Label(nf,
+                      text="Downloads ~14 MB of first + last names "
+                           "from GitHub\n(Aptivi/NamesList — open-source).",
+                      font=('Helvetica', 8),
+                      foreground='gray').pack(anchor='w')
+
             btn_frame = ttk.Frame(cd, padding=(10, 8, 10, 10))
             btn_frame.pack(fill='x')
             ttk.Button(btn_frame, text="Remove Selected", command=remove_word).pack(side='left')
             ttk.Button(btn_frame, text="Apply",
                        command=lambda: (cd.destroy(), apply_filter(
-                           lambda c: filter_fix_caps(c, app.custom_cap_words),
+                           lambda c: filter_fix_caps(
+                               c, app.custom_cap_words,
+                               use_names_db=getattr(
+                                   app, 'use_names_db', False)),
                            "Fix ALL CAPS"))).pack(side='right')
             ttk.Button(btn_frame, text="Close", command=cd.destroy).pack(side='right', padx=4)
 
@@ -3753,7 +3851,9 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
                 app.add_log("Text is mostly ALL CAPS — running Fix ALL CAPS first "
                              "to avoid false HI detection", 'INFO')
                 push_undo()
-                cues = filter_fix_caps(cues, app.custom_cap_words)
+                cues = filter_fix_caps(cues, app.custom_cap_words,
+                                      use_names_db=getattr(
+                                          app, 'use_names_db', False))
                 refresh_tree(cues)
             apply_filter(filter_remove_hi, "Remove HI")
 
@@ -4264,7 +4364,7 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
             """Show Fix ALL CAPS dialog with custom names management."""
             cd = tk.Toplevel(editor)
             cd.title("Fix ALL CAPS")
-            cd.geometry("420x400")
+            cd.geometry("420x560")
             app._center_on_main(cd)
             cd.resizable(True, True)
             # Keep on top but don't grab — allows scrolling the subtitle list
@@ -4323,12 +4423,104 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
             ttk.Label(lf, text="Names are saved automatically and persist between sessions.",
                       font=('Helvetica', 8), foreground='gray').pack(anchor='w')
 
+            # ── Names Database section ──
+            nf = ttk.LabelFrame(cd, text="Names Database (optional)",
+                                padding=8)
+            nf.pack(fill='x', padx=10, pady=5)
+
+            db_available = is_names_db_available()
+            if db_available and is_names_db_loaded():
+                status_text = f"Installed ({get_names_db_count():,} names loaded)"
+            elif db_available:
+                status_text = "Installed (not active)"
+            else:
+                status_text = "Not installed"
+            status_var = tk.StringVar(value=status_text)
+            ttk.Label(nf, textvariable=status_var,
+                      font=('Helvetica', 9)).pack(anchor='w')
+
+            use_db_var = tk.BooleanVar(
+                value=getattr(app, 'use_names_db', False))
+
+            def on_use_db_toggle():
+                if use_db_var.get():
+                    if not is_names_db_available():
+                        messagebox.showinfo(
+                            "Names Database",
+                            "Names database not downloaded yet.\n"
+                            "Click 'Download Names Database' first.",
+                            parent=cd)
+                        use_db_var.set(False)
+                        return
+                    if not is_names_db_loaded():
+                        count = load_names_db()
+                        status_var.set(
+                            f"Installed ({count:,} names loaded)")
+                else:
+                    unload_names_db()
+                    if is_names_db_available():
+                        status_var.set("Installed (not active)")
+                app.use_names_db = use_db_var.get()
+                app.save_preferences()
+
+            ttk.Checkbutton(nf, text="Use Names Database",
+                            variable=use_db_var,
+                            command=on_use_db_toggle).pack(anchor='w',
+                                                           pady=(4, 0))
+
+            def download_names_db():
+                import urllib.request
+                dl_btn.configure(state='disabled')
+                status_var.set("Downloading...")
+                cd.update_idletasks()
+
+                def do_download():
+                    try:
+                        NAMES_DB_DIR.mkdir(parents=True, exist_ok=True)
+                        for fname, url in NAMES_DB_URLS.items():
+                            req = urllib.request.Request(url, headers={
+                                'User-Agent': 'Docflix-Media-Suite/1.0'})
+                            with urllib.request.urlopen(
+                                    req, timeout=60) as resp:
+                                data = resp.read()
+                            (NAMES_DB_DIR / fname).write_bytes(data)
+                        # Auto-load
+                        count = load_names_db()
+                        def on_done():
+                            status_var.set(
+                                f"Installed ({count:,} names loaded)")
+                            use_db_var.set(True)
+                            app.use_names_db = True
+                            app.save_preferences()
+                            dl_btn.configure(state='normal')
+                        cd.after(0, on_done)
+                    except Exception as e:
+                        def on_err():
+                            status_var.set(f"Download failed: {e}")
+                            dl_btn.configure(state='normal')
+                        cd.after(0, on_err)
+
+                threading.Thread(target=do_download,
+                                 daemon=True).start()
+
+            dl_btn = ttk.Button(nf, text="Download Names Database",
+                                command=download_names_db)
+            dl_btn.pack(anchor='w', pady=(4, 0))
+            ttk.Label(nf,
+                      text="Downloads ~14 MB of first + last names "
+                           "from GitHub\n(Aptivi/NamesList — open-source).",
+                      font=('Helvetica', 8),
+                      foreground='gray').pack(anchor='w')
+
             btn_frame = ttk.Frame(cd, padding=(10, 8, 10, 10))
             btn_frame.pack(fill='x')
             ttk.Button(btn_frame, text="Remove Selected", command=remove_word).pack(side='left')
             ttk.Button(btn_frame, text="Apply",
                        command=lambda: (cd.destroy(), apply_filter(
-                           lambda c: filter_fix_caps(c, app.custom_cap_words),
+                           lambda c: filter_fix_caps(
+                               c, app.custom_cap_words,
+                               use_names_db=getattr(
+                                   app, 'use_names_db', False)),
                            "Fix ALL CAPS"))).pack(side='right')
             ttk.Button(btn_frame, text="Close", command=cd.destroy).pack(side='right', padx=4)
 

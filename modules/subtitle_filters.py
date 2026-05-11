@@ -8,7 +8,239 @@ All filter functions accept a list of cue dicts and return a new list.
 Each cue dict: {'index': int, 'start': str, 'end': str, 'text': str}
 """
 
+import os
 import re
+from pathlib import Path
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Names Database (optional — downloaded on demand from Aptivi/NamesList)
+# ═══════════════════════════════════════════════════════════════════
+
+_names_db = set()           # loaded names (capitalized form, e.g. "Johnson")
+_names_db_loaded = False
+
+NAMES_DB_DIR = Path.home() / '.local' / 'share' / 'docflix' / 'names'
+NAMES_DB_FILES = ('FirstNames.txt', 'Surnames.txt')
+NAMES_DB_URLS = {
+    'FirstNames.txt':
+        'https://raw.githubusercontent.com/Aptivi-Analytics/NamesList'
+        '/main/Processed/FirstNames.txt',
+    'Surnames.txt':
+        'https://raw.githubusercontent.com/Aptivi-Analytics/NamesList'
+        '/main/Processed/Surnames.txt',
+}
+
+_NAMES_MIN_LENGTH = 3  # skip names with 2 or fewer characters
+
+# System dictionary paths (Linux) — lowercase entries are common
+# English words, uppercase entries are proper nouns.  Only the
+# lowercase entries are used to filter out false positives from
+# the names database (e.g. "the", "nation", "fight").
+_DICT_PATHS = (
+    '/usr/share/dict/words',
+    '/usr/share/dict/american-english',
+    '/usr/share/dict/british-english',
+)
+
+# Fallback exclusion list when no system dictionary is available.
+# These are common English words that are also names — they must NOT
+# be auto-capitalized to avoid errors like "she has the Will to fight".
+_NAMES_AMBIGUOUS = {
+    # Ultra-common words (articles, pronouns, prepositions, etc.)
+    'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can',
+    'had', 'her', 'was', 'one', 'our', 'out', 'has', 'his', 'how',
+    'its', 'let', 'may', 'new', 'now', 'old', 'see', 'way', 'who',
+    'did', 'get', 'got', 'him', 'say', 'she', 'too', 'use',
+    'an', 'as', 'be', 'by', 'do', 'go', 'ha', 'he', 'hi',
+    'if', 'in', 'is', 'it', 'me', 'my', 'no', 'of', 'oh',
+    'on', 'or', 'so', 'to', 'up', 'us', 'we',
+    # Common verbs / nouns / adjectives that are also names
+    'will', 'grace', 'art', 'mark', 'bill', 'rose', 'dawn',
+    'joy', 'faith', 'hope', 'charity', 'patience', 'chance',
+    'grant', 'chase', 'hunter', 'lance', 'wade', 'august',
+    'duke', 'earl', 'gene', 'guy', 'frank', 'ray', 'may', 'june',
+    'bob', 'rob', 'sue', 'pat', 'mat', 'nick', 'rod', 'van',
+    'iris', 'ivy', 'lily', 'ruby', 'amber', 'olive', 'pearl',
+    'sage', 'fern', 'brook', 'cliff', 'dale', 'glen', 'heath',
+    'ford', 'reed', 'rusty', 'dusty', 'misty', 'sunny',
+    'spring', 'summer', 'winter', 'stormy',
+    # Surnames that are common English words
+    'banks', 'bell', 'berry', 'bird', 'black', 'blue', 'bond',
+    'born', 'brand', 'brown', 'burns', 'bush', 'butler',
+    'camp', 'cannon', 'carpenter', 'carter', 'cash', 'church',
+    'clay', 'cloud', 'cook', 'cotton', 'cross', 'crow',
+    'day', 'diamond', 'field', 'fish', 'fisher',
+    'flower', 'forest', 'foster', 'fox', 'french',
+    'frost', 'garden', 'glass', 'gold', 'golden', 'good',
+    'green', 'grey', 'gray', 'hall', 'hand', 'hard', 'hart',
+    'hawk', 'hill', 'hood', 'horn', 'house', 'hunt',
+    'king', 'knight', 'lake', 'land', 'lane', 'law', 'leaf',
+    'lee', 'light', 'long', 'love', 'luck', 'march', 'mason',
+    'master', 'miller', 'mills', 'moon', 'more', 'moss',
+    'nail', 'noble', 'north', 'page', 'park', 'penny',
+    'pierce', 'pike', 'pine', 'plant', 'pool', 'pope', 'post',
+    'power', 'price', 'prime', 'prince', 'queen', 'rain',
+    'rich', 'ring', 'rock', 'rush', 'salt', 'shore',
+    'silver', 'small', 'snow', 'south', 'star',
+    'steel', 'stone', 'storm', 'strong', 'swift',
+    'temple', 'tower', 'wall', 'ward', 'waters', 'west',
+    'white', 'wild', 'wise', 'wolf', 'wood', 'young',
+    # Common longer words that are also names in the DB
+    'nation', 'fight', 'met', 'win', 'won', 'run', 'set',
+    'war', 'man', 'men', 'big', 'end', 'far', 'few', 'hot',
+    'off', 'put', 'red', 'sit', 'top', 'try', 'ask', 'bit',
+    'cut', 'eat', 'eye', 'fit', 'fly', 'gun', 'hit', 'job',
+    'lay', 'led', 'lot', 'low', 'own', 'pay', 'ran', 'son',
+    'ten', 'air', 'age', 'ago', 'arm', 'bad', 'bar', 'bed',
+    'boy', 'car', 'cup', 'die', 'dog', 'dry', 'due', 'ear',
+    'fat', 'hat', 'key', 'leg', 'lie', 'mix', 'nor', 'oil',
+    'pan', 'pop', 'raw', 'row', 'sea', 'sir', 'six', 'sky',
+    'sun', 'tax', 'tea', 'tie', 'wet', 'yes', 'yet', 'add',
+    'bag', 'bid', 'box', 'bus', 'cap', 'dad', 'dig', 'fan',
+    'fee', 'gap', 'gas', 'ice', 'kid', 'lip', 'mad', 'net',
+    'odd', 'owe', 'pet', 'pie', 'pin', 'pit', 'pot',
+    'also', 'back', 'been', 'both', 'call', 'came', 'come',
+    'done', 'down', 'each', 'even', 'fact', 'feel', 'find',
+    'from', 'full', 'gave', 'give', 'gone', 'half', 'head',
+    'hear', 'help', 'here', 'high', 'hold', 'home', 'into',
+    'just', 'keep', 'kind', 'knew', 'know', 'last', 'late',
+    'lead', 'left', 'less', 'life', 'like', 'line', 'list',
+    'live', 'look', 'lose', 'lost', 'made', 'main', 'make',
+    'many', 'mass', 'mean', 'meet', 'mind', 'miss', 'most',
+    'move', 'much', 'must', 'name', 'near', 'need', 'next',
+    'none', 'note', 'once', 'only', 'open', 'over', 'part',
+    'pass', 'past', 'pick', 'plan', 'play', 'pull', 'push',
+    'race', 'read', 'real', 'rest', 'rise', 'road', 'role',
+    'room', 'rule', 'safe', 'said', 'same', 'save', 'seem',
+    'seen', 'self', 'send', 'sent', 'show', 'shut', 'side',
+    'sign', 'size', 'slow', 'sold', 'some', 'soon', 'sort',
+    'stay', 'step', 'stop', 'such', 'sure', 'take', 'talk',
+    'tall', 'tell', 'term', 'test', 'text', 'than', 'that',
+    'them', 'then', 'they', 'this', 'thus', 'till', 'time',
+    'tiny', 'told', 'took', 'tops', 'town', 'tree', 'true',
+    'turn', 'type', 'unit', 'upon', 'used', 'very', 'vote',
+    'wait', 'walk', 'want', 'warm', 'wave', 'week', 'well',
+    'went', 'were', 'what', 'when', 'wide', 'wind', 'wine',
+    'wish', 'with', 'word', 'work', 'year', 'zero',
+    'about', 'after', 'again', 'being', 'below', 'board',
+    'bring', 'build', 'carry', 'catch', 'cause', 'cheap',
+    'check', 'chief', 'child', 'claim', 'class', 'clean',
+    'clear', 'climb', 'close', 'could', 'count', 'cover',
+    'crash', 'crowd', 'daily', 'dance', 'death', 'drink',
+    'drive', 'earth', 'empty', 'enemy', 'enjoy', 'enter',
+    'equal', 'error', 'every', 'exist', 'extra', 'false',
+    'final', 'first', 'fixed', 'flesh', 'float', 'flood',
+    'floor', 'force', 'found', 'fresh', 'front', 'fruit',
+    'given', 'going', 'grand', 'grass', 'great', 'gross',
+    'group', 'grown', 'guard', 'guess', 'guide', 'happy',
+    'heart', 'heavy', 'horse', 'hotel', 'human', 'hurry',
+    'image', 'index', 'inner', 'input', 'issue', 'joint',
+    'judge', 'knife', 'knock', 'known', 'large', 'later',
+    'laugh', 'layer', 'learn', 'leave', 'legal', 'level',
+    'limit', 'local', 'loose', 'lover', 'lower', 'lucky',
+    'lunch', 'magic', 'major', 'match', 'mayor', 'meant',
+    'media', 'metal', 'might', 'minor', 'mixed', 'model',
+    'money', 'moral', 'motor', 'mount', 'mouth', 'music',
+    'naked', 'nerve', 'never', 'night', 'noise', 'novel',
+    'nurse', 'occur', 'ocean', 'offer', 'order', 'other',
+    'ought', 'outer', 'owner', 'paint', 'panel', 'paper',
+    'patch', 'pause', 'peace', 'phase', 'phone', 'photo',
+    'piano', 'piece', 'pilot', 'pitch', 'place', 'plain',
+    'plate', 'point', 'pound', 'press', 'print', 'prior',
+    'proof', 'proud', 'prove', 'queen', 'quick', 'quiet',
+    'quote', 'radio', 'raise', 'range', 'rapid', 'reach',
+    'ready', 'reign', 'relax', 'reply', 'rider', 'right',
+    'river', 'rough', 'round', 'route', 'royal', 'rural',
+    'scale', 'scene', 'score', 'sense', 'serve', 'seven',
+    'shake', 'shall', 'shame', 'shape', 'share', 'sharp',
+    'sheer', 'sheet', 'shelf', 'shell', 'shift', 'shine',
+    'shirt', 'shock', 'shoot', 'shore', 'short', 'shout',
+    'sight', 'since', 'sixty', 'skill', 'sleep', 'slide',
+    'smart', 'smell', 'smile', 'smoke', 'solid', 'solve',
+    'sorry', 'sound', 'space', 'spare', 'speak', 'speed',
+    'spend', 'split', 'sport', 'spray', 'squad', 'stack',
+    'staff', 'stage', 'stand', 'start', 'state', 'steal',
+    'steam', 'steep', 'stick', 'still', 'stock', 'stood',
+    'store', 'story', 'strip', 'stuck', 'study', 'stuff',
+    'style', 'sugar', 'suite', 'super', 'sweet', 'swing',
+    'table', 'teeth', 'thank', 'theme', 'there', 'thick',
+    'thing', 'think', 'third', 'those', 'three', 'throw',
+    'tight', 'tired', 'title', 'today', 'total', 'touch',
+    'tough', 'trace', 'track', 'trade', 'train', 'treat',
+    'trend', 'trial', 'trick', 'troop', 'truck', 'truly',
+    'trust', 'truth', 'twice', 'under', 'union', 'unity',
+    'until', 'upper', 'upset', 'urban', 'usual', 'valid',
+    'value', 'video', 'virus', 'visit', 'vital', 'vocal',
+    'voice', 'waste', 'watch', 'water', 'wheel', 'where',
+    'which', 'while', 'whole', 'whose', 'woman', 'world',
+    'worry', 'worse', 'worst', 'worth', 'would', 'wound',
+    'write', 'wrong', 'youth',
+}
+
+
+def is_names_db_available():
+    """Check if names database files exist on disk."""
+    return all((NAMES_DB_DIR / f).is_file() for f in NAMES_DB_FILES)
+
+
+def is_names_db_loaded():
+    """Check if names database is currently loaded in memory."""
+    return _names_db_loaded
+
+
+def load_names_db():
+    """Load names from disk into the _names_db set. Returns count loaded.
+
+    Filters out common English words using the system dictionary
+    (/usr/share/dict/words) when available — only lowercase entries
+    are used (proper nouns in the dict start uppercase and are
+    skipped).  Falls back to the hardcoded _NAMES_AMBIGUOUS set
+    when no system dictionary is found.
+    """
+    global _names_db, _names_db_loaded
+    # Build the exclusion set — system dictionary + hardcoded fallback
+    common_words = set(_NAMES_AMBIGUOUS)
+    for dict_path in _DICT_PATHS:
+        if os.path.isfile(dict_path):
+            with open(dict_path, 'r', encoding='utf-8',
+                      errors='ignore') as f:
+                for line in f:
+                    word = line.strip()
+                    # Only lowercase entries = common dictionary words
+                    # (proper nouns start uppercase and are skipped)
+                    if word and word[0].islower() and word.isalpha():
+                        common_words.add(word.lower())
+            break  # use first available dictionary
+    names = set()
+    for fname in NAMES_DB_FILES:
+        fpath = NAMES_DB_DIR / fname
+        if fpath.is_file():
+            with open(fpath, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    name = line.strip()
+                    # Skip short names, ambiguous/dictionary words,
+                    # and multi-word entries
+                    if (len(name) >= _NAMES_MIN_LENGTH
+                            and ' ' not in name
+                            and name.lower() not in common_words
+                            and name.isalpha()):
+                        names.add(name.capitalize())
+    _names_db = names
+    _names_db_loaded = bool(names)
+    return len(names)
+
+
+def unload_names_db():
+    """Clear the names database from memory."""
+    global _names_db, _names_db_loaded
+    _names_db = set()
+    _names_db_loaded = False
+
+
+def get_names_db_count():
+    """Return the number of names currently loaded."""
+    return len(_names_db)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -395,7 +627,7 @@ PROPER_NOUNS = {
 }
 
 
-def filter_fix_caps(cues, custom_names=None):
+def filter_fix_caps(cues, custom_names=None, use_names_db=False):
     """Convert ALL CAPS subtitles to proper sentence case.
 
     - Lowercases everything first
@@ -403,10 +635,12 @@ def filter_fix_caps(cues, custom_names=None):
     - Capitalizes standalone "I" and contractions (I'm, I'll, etc.)
     - Capitalizes known proper nouns
     - Capitalizes custom names if provided
+    - Optionally capitalizes names from the downloaded names database
     """
     all_proper = set(PROPER_NOUNS)
     if custom_names:
         all_proper.update(w.lower() for w in custom_names)
+    use_names = use_names_db and _names_db_loaded
 
     sorted_nouns = sorted(all_proper, key=len, reverse=True)
     phrases = [n for n in sorted_nouns if ' ' in n]
@@ -472,6 +706,8 @@ def filter_fix_caps(cues, custom_names=None):
             if lower in _ALLCAPS_ABBREVS:
                 return lower.upper()
             if lower in all_proper:
+                return word.capitalize()
+            if use_names and word.capitalize() in _names_db:
                 return word.capitalize()
             return word
 
