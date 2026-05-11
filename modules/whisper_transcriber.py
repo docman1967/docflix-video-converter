@@ -935,10 +935,9 @@ def open_whisper_transcriber(app):
     # Preview panel
     # ══════════════════════════════════════════════════════════════════
 
-    _preview_title = tk.StringVar(value="Subtitle Preview")
+    _preview_title_text = "Subtitle Preview"
 
-    preview_lf = tk.LabelFrame(right, textvariable=_preview_title,
-                               padx=4, pady=4)
+    preview_lf = ttk.LabelFrame(right, text=_preview_title_text)
     preview_lf.grid(row=2, column=0, sticky='nsew', pady=(8, 0), rowspan=2)
     preview_lf.columnconfigure(0, weight=1)
     preview_lf.rowconfigure(0, weight=1)
@@ -992,7 +991,7 @@ def open_whisper_transcriber(app):
             return
         _preview_idx[0] = idx
         name = _file_paths[idx].name
-        _preview_title.set(f"Preview -- {name}")
+        preview_lf.config(text=f"Preview -- {name}")
 
         vtt_style = _vtt_style_var.get().strip() or None
         if _fmt_srt.get():
@@ -1006,7 +1005,7 @@ def open_whisper_transcriber(app):
         preview_text.config(state="disabled")
 
     def _clear_preview():
-        _preview_title.set("Subtitle Preview")
+        preview_lf.config(text="Subtitle Preview")
         preview_text.config(state="normal")
         preview_text.delete("1.0", "end")
         preview_text.config(state="disabled")
