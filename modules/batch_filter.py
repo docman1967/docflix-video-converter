@@ -8,6 +8,7 @@ Supports all filter types plus search/replace pairs.
 import os
 from pathlib import Path
 import re
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -21,6 +22,10 @@ from .subtitle_filters import (
     filter_remove_offscreen_quotes,
     filter_remove_leading_dashes,
     filter_remove_duplicates, filter_merge_short,
+    # Names database (optional)
+    load_names_db, unload_names_db, is_names_db_loaded,
+    is_names_db_available, get_names_db_count,
+    NAMES_DB_DIR, NAMES_DB_URLS,
     filter_reduce_lines,
 )
 
@@ -197,7 +202,7 @@ def open_batch_filter(app):
             """Open the custom names editor from the batch filter window."""
             nd = tk.Toplevel(win)
             nd.title("Custom Names — Fix ALL CAPS")
-            nd.geometry("400x350")
+            nd.geometry("400x510")
             app._center_on_main(nd)
             nd.resizable(True, True)
             nd.attributes('-topmost', True)
@@ -253,6 +258,94 @@ def open_batch_filter(app):
 
             ttk.Label(lf, text="Names are saved automatically and persist between sessions.",
                       font=('Helvetica', 8), foreground='gray').pack(anchor='w')
+
+            # ── Names Database section ──
+            nf = ttk.LabelFrame(nd, text="Names Database (optional)",
+                                padding=8)
+            nf.pack(fill='x', padx=10, pady=5)
+
+            db_available = is_names_db_available()
+            if db_available and is_names_db_loaded():
+                status_text = f"Installed ({get_names_db_count():,} names loaded)"
+            elif db_available:
+                status_text = "Installed (not active)"
+            else:
+                status_text = "Not installed"
+            status_var = tk.StringVar(value=status_text)
+            ttk.Label(nf, textvariable=status_var,
+                      font=('Helvetica', 9)).pack(anchor='w')
+
+            use_db_var = tk.BooleanVar(
+                value=getattr(app, 'use_names_db', False))
+
+            def on_use_db_toggle():
+                if use_db_var.get():
+                    if not is_names_db_available():
+                        messagebox.showinfo(
+                            "Names Database",
+                            "Names database not downloaded yet.\n"
+                            "Click 'Download Names Database' first.",
+                            parent=nd)
+                        use_db_var.set(False)
+                        return
+                    if not is_names_db_loaded():
+                        count = load_names_db()
+                        status_var.set(
+                            f"Installed ({count:,} names loaded)")
+                else:
+                    unload_names_db()
+                    if is_names_db_available():
+                        status_var.set("Installed (not active)")
+                app.use_names_db = use_db_var.get()
+                app.save_preferences()
+
+            ttk.Checkbutton(nf, text="Use Names Database",
+                            variable=use_db_var,
+                            command=on_use_db_toggle).pack(anchor='w',
+                                                           pady=(4, 0))
+
+            def download_names_db():
+                import urllib.request
+                dl_btn.configure(state='disabled')
+                status_var.set("Downloading...")
+                nd.update_idletasks()
+
+                def do_download():
+                    try:
+                        NAMES_DB_DIR.mkdir(parents=True, exist_ok=True)
+                        for fname, url in NAMES_DB_URLS.items():
+                            req = urllib.request.Request(url, headers={
+                                'User-Agent': 'Docflix-Media-Suite/1.0'})
+                            with urllib.request.urlopen(
+                                    req, timeout=60) as resp:
+                                data = resp.read()
+                            (NAMES_DB_DIR / fname).write_bytes(data)
+                        count = load_names_db()
+                        def on_done():
+                            status_var.set(
+                                f"Installed ({count:,} names loaded)")
+                            use_db_var.set(True)
+                            app.use_names_db = True
+                            app.save_preferences()
+                            dl_btn.configure(state='normal')
+                        nd.after(0, on_done)
+                    except Exception as e:
+                        def on_err():
+                            status_var.set(f"Download failed: {e}")
+                            dl_btn.configure(state='normal')
+                        nd.after(0, on_err)
+
+                threading.Thread(target=do_download,
+                                 daemon=True).start()
+
+            dl_btn = ttk.Button(nf, text="Download Names Database",
+                                command=download_names_db)
+            dl_btn.pack(anchor='w', pady=(4, 0))
+            ttk.Label(nf,
+                      text="Downloads ~14 MB of first + last names "
+                           "from GitHub\n(Aptivi/NamesList — open-source).",
+                      font=('Helvetica', 8),
+                      foreground='gray').pack(anchor='w')
 
             btn_frame = ttk.Frame(nd, padding=(10, 8, 10, 10))
             btn_frame.pack(fill='x')
