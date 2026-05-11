@@ -1122,6 +1122,28 @@ def open_whisper_transcriber(app):
                                    parent=win)
             return
 
+        # Check that at least one backend is available
+        backend = _backend_var.get()
+        if not is_backend_available(backend):
+            other = "whisperx" if backend == "faster-whisper" else "faster-whisper"
+            if is_backend_available(other):
+                messagebox.showwarning(
+                    "Backend Not Found",
+                    f"'{backend}' is not installed.\n\n"
+                    f"Switching to '{other}'.",
+                    parent=win)
+                _backend_var.set(other)
+                backend = other
+            else:
+                messagebox.showerror(
+                    "No Backend",
+                    "No transcription backend installed.\n\n"
+                    "Install one:\n"
+                    "  pip install faster-whisper\n"
+                    "  pip install whisperx",
+                    parent=win)
+                return
+
         _results.clear()
         _preview_idx[0] = None
         _clear_preview()
