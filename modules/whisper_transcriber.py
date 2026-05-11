@@ -1118,6 +1118,20 @@ def open_whisper_transcriber(app):
     # ── start / cancel ──
 
     def _start():
+        try:
+            _start_inner()
+        except Exception as exc:
+            import traceback
+            tb = traceback.format_exc()
+            _log_write(f"Error starting transcription:\n{tb}", "error")
+            messagebox.showerror("Error", f"Failed to start:\n{exc}",
+                                 parent=win)
+            _processing[0] = False
+            start_btn.config(state="normal")
+            cancel_btn.config(state="disabled")
+            _set_file_buttons_state("normal")
+
+    def _start_inner():
         if not _file_paths:
             messagebox.showwarning("No files", "Add at least one file to the list.",
                                    parent=win)
@@ -1314,6 +1328,7 @@ def open_whisper_transcriber(app):
                 elif event == "file_error":
                     idx, path, exc = data
                     _safe_itemconfig(idx, fg=COLOR_ERROR)
+                    _log_write(f"Error: {path.name}: {exc}", "error")
 
                 elif event == "batch_done":
                     _on_batch_done()
