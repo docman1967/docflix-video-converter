@@ -590,6 +590,48 @@ git push
 - [x] ~~**Progress indication during API calls** — Run TVDB/TMDB API calls in a background thread with a progress bar, per-show status, and cancel button~~ *(completed 2026-04-27)*
 - [ ] **Import templates from Filebot** — Add an "Import from Filebot" option in the File Renamer's Templates dialog that converts Filebot Groovy template syntax to Docflix format. Variable mapping: `{n}`→`{show}`, `{s00e00}`→`S{season}E{episode}`, `{t}`→`{title}`, `{y}`→`{year}`, `{s}`/`{s00}`→`{season}`, `{e}`/`{e00}`→`{episode}`. Warn on unsupported Groovy expressions (method calls, conditionals). Accept paste, file import (`.groovy`), or `presets.json` import.
 
+### Feature Gap Analysis (vs Competitors — May 2026)
+
+**No single competitor combines all of Docflix's capabilities.** The closest equivalent requires 4-5 separate apps: StaxRip (encoding, Windows only) + Subtitle Edit (subs, Windows only) + FileBot (renaming, $6/yr) + MKVToolNix (muxing). Docflix is the only Linux-native GUI that unifies all of these.
+
+**Where competitors are individually stronger (potential improvements):**
+
+#### Subtitle Formats (vs Subtitle Edit — supports ~300 formats)
+- [ ] **ASS/SSA full import/export** — Read and write Advanced SubStation Alpha files with styling preservation. The editor already handles SRT/VTT; ASS is the main gap for anime/styled subtitle users.
+- [ ] **SUB/IDX (MicroDVD) import** — Common legacy format, straightforward frame-rate-based timing conversion.
+- [ ] **TTML/DFXP import** — Used by Netflix/Amazon streaming downloads. XML-based, maps cleanly to SRT.
+
+#### Subtitle Downloading (vs Bazarr — automated subtitle acquisition)
+- [ ] **OpenSubtitles API integration** — Search and download subtitles by movie hash (most accurate) or title/year query. OpenSubtitles REST API v2 (free tier: 20 downloads/day). Add to Subtitle Editor as "Download Subtitles..." menu option.
+- [ ] **Subtitle language preference** — User-configurable preferred languages list for download searches.
+
+#### Encoding (vs StaxRip — deeper filter chains, Dolby Vision)
+- [ ] **Dolby Vision encoding** — Pass through DV metadata during H.265 encoding when ffmpeg support matures. Requires `dovi_tool` for RPU extraction and injection. Complex but high-value for 4K HDR users.
+- [ ] **AV1 encoding support** — Add SVT-AV1 and AOM-AV1 encoder options alongside H.265/H.264. Growing format adoption (YouTube, Netflix).
+- [ ] **VapourSynth/AviSynth filter chains** — Advanced video filtering (deinterlacing, denoising, grain). Very complex to integrate; consider as a long-term stretch goal.
+- [ ] **Two-pass ABR encoding** — Target a specific file size via average bitrate with two-pass analysis. HandBrake and StaxRip both support this.
+
+#### OCR (vs Subtitle Edit — multiple OCR engines)
+- [ ] **nOCR engine option** — Subtitle Edit's custom neural OCR engine trained specifically on subtitle fonts. Better accuracy than Tesseract for clean bitmap subtitles. Would require implementing or porting the nOCR algorithm.
+- [ ] **Binary image comparison OCR** — Character-by-character image matching with a user-built dictionary. Very accurate for consistent fonts. Simpler to implement than nOCR.
+
+#### Renaming (vs FileBot — broader database support)
+- [ ] **AcoustID music file matching** — Fingerprint-based music identification for renaming audio files. Requires `chromaprint`/`fpcalc` and the MusicBrainz API. Niche but unique.
+- [ ] **Subtitle download integration in Renamer** — After renaming, offer to search and download matching subtitles from OpenSubtitles for each file.
+
+#### Muxing (vs MKVToolNix — more precise control)
+- [ ] **Track reordering** — Drag-and-drop track order in Media Processor/Media Details. MKVToolNix excels at this.
+- [ ] **Nanosecond chapter precision** — Match MKVToolNix's chapter timestamp precision (currently millisecond).
+- [ ] **Split/append MKV files** — Split a file at chapter points or append multiple files. MKVToolNix core feature.
+
+#### Automation (vs Tdarr — distributed processing)
+- [ ] **Watch folder mode** — Monitor a directory for new files and auto-process them (encode, rename, subtitle). Simpler than Tdarr's full distributed system but covers the most common use case.
+- [ ] **Processing profiles/presets** — Save complete workflow configurations (encoder settings + subtitle filters + renaming template) as named presets that can be applied in one click.
+
+#### General
+- [ ] **Subtitle Edit format compatibility** — Import/export Subtitle Edit project files (.sup, .sub) for users migrating from SE.
+- [ ] **Batch job queue** — Queue multiple different operations (encode file A, rename folder B, filter subtitles in C) and process them sequentially or in parallel.
+
 ---
 
 ## Change Log
