@@ -6,7 +6,7 @@ All shared constants, codec maps, extension sets, and GPU backend definitions.
 
 # ── App identity ──
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "2.9.6"
+APP_VERSION = "2.9.7"
 
 # ── Defaults ──
 DEFAULT_BITRATE = "2M"

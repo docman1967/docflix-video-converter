@@ -311,6 +311,7 @@ def open_tv_renamer(app):
                     poster = r.get('poster_path', '')
                     normalized.append({
                         'name': r.get('name', ''),
+                        'original_name': r.get('original_name', ''),
                         'year': year,
                         'country': country,
                         'network': 'TV Series',
@@ -340,6 +341,7 @@ def open_tv_renamer(app):
                     poster = r.get('poster_path', '')
                     normalized.append({
                         'name': r.get('title', ''),
+                        'original_name': r.get('original_title', ''),
                         'year': year,
                         'country': '',
                         'network': 'Movie',
@@ -373,7 +375,12 @@ def open_tv_renamer(app):
                 return []
             num_seasons = details['number_of_seasons']
             all_eps = []
-            for sn in range(1, num_seasons + 1):
+            # Check if the show has a Specials season (Season 0)
+            has_specials = any(
+                s.get('season_number') == 0
+                for s in details.get('seasons', []))
+            start_season = 0 if has_specials else 1
+            for sn in range(start_season, num_seasons + 1):
                 season_data = _tmdb_request(f'/tv/{series_id}/season/{sn}')
                 if not season_data or 'episodes' not in season_data:
                     _log(f"  Season {sn}: no data")
@@ -449,15 +456,27 @@ def open_tv_renamer(app):
             m = re.search(r'[Ss]eason\s*(\d+).*?[Ee]pisode\s*(\d+)', name)
             if m:
                 return int(m.group(1)), int(m.group(2))
-            # Date-based: 2026.04.22, 2026-04-22, 2026 04 22
-            m = re.search(r'((?:19|20)\d{2})[.\-\s](0[1-9]|1[0-2])[.\-\s](0[1-9]|[12]\d|3[01])', name)
+            # Date-based: 2026.04.22, 2026-04-22, 2026_04_22, 2026 04 22
+            m = re.search(r'((?:19|20)\d{2})[.\-_\s](0[1-9]|1[0-2])[.\-_\s](0[1-9]|[12]\d|3[01])', name)
             if m:
                 # Return a special marker — date stored in item dict later
                 return 'date', f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+            # SP01, SP 01 — special episode (Season 0)
+            m = re.search(r'\bSP\s*(\d{1,3})\b', name, re.IGNORECASE)
+            if m:
+                return 0, int(m.group(1))
             # E01 or Ep01 (season assumed from folder or default 1)
             m = re.search(r'[Ee](?:p|pisode)?\s*(\d{1,3})', name)
             if m:
                 return None, int(m.group(1))
+            # Keyword-based specials: "Special", "Bonus", "Extra"
+            m = re.search(
+                r'\b(?:Special|Bonus|Extra|Behind[.\s]+the[.\s]+Scenes)\b',
+                name, re.IGNORECASE)
+            if m:
+                after = name[m.end():]
+                num_m = re.search(r'\s*(\d{1,3})', after)
+                return 0, int(num_m.group(1)) if num_m else 1
             return None, None
 
         def _sanitize_filename(name):
@@ -518,14 +537,19 @@ def open_tv_renamer(app):
                 return None
             fname = os.path.splitext(os.path.basename(item['path']))[0]
             cleaned = _normalize_for_match(_clean_show_name(fname))
-            if not cleaned:
-                return None
 
             # Also extract the show folder name for disambiguation,
             # skipping past Season subfolders
             parent_dir = _get_show_folder(item['path'])
             folder_cleaned = _normalize_for_match(
                 _clean_show_name(parent_dir)) if parent_dir else ''
+
+            # When filename has no show name (e.g. "S01E03.mkv"),
+            # use the parent folder name as the search key instead
+            if not cleaned:
+                if not folder_cleaned:
+                    return None
+                cleaned = folder_cleaned
 
             # Check if the user already picked a show for this folder
             # (via the Multiple Matches dialog during auto-load)
@@ -662,12 +686,20 @@ def open_tv_renamer(app):
                     r'[\.\s](?:forced|sdh|hi|cc|'
                     r'[a-z]{2,3})$', '', fname, flags=re.IGNORECASE)
             fname_clean = re.sub(r'[._]', ' ', fname).strip()
-            # Strip quality/release tags to get just the meaningful part
+            fname_clean = re.sub(r'\[[^\]]*\]', '', fname_clean)
+            # Strip quality/release/codec tags to get just the
+            # meaningful part
             fname_clean = re.sub(
                 r'\s*(?:720|1080|2160|480)[pPiI].*', '', fname_clean)
             fname_clean = re.sub(
                 r'\s*(?:WEB|HDTV|BluRay|BDRip|DVDRip|REMUX|PROPER).*',
                 '', fname_clean, flags=re.IGNORECASE)
+            fname_clean = re.sub(
+                r'\s*(?:x264|x265|h264|h265|HEVC|AVC|AAC|DDP|'
+                r'FLAC|10bit|ATMOS|TrueHD|DTS)\b.*',
+                '', fname_clean, flags=re.IGNORECASE)
+            fname_clean = re.sub(
+                r'\s*-\s*[A-Za-z][A-Za-z0-9]*\s*$', '', fname_clean)
             fname_norm = _norm_title(fname_clean)
             show_norm = _norm_title(show_name)
 
@@ -1085,10 +1117,13 @@ def open_tv_renamer(app):
             return t
 
         def _clean_show_name(raw):
-            """Strip episode info, quality tags, and release group from a show name."""
+            """Strip episode info, quality tags, release groups, codec tags,
+            streaming service tags, and special markers from a show name."""
             # Replace dots and underscores with spaces, but preserve hyphens
             # that are part of the show name (e.g. 9-1-1, S.W.A.T., X-Men)
             name = re.sub(r'[._]', ' ', raw).strip()
+            # Strip bracketed tags early: [YTS], [RARBG], [YTS.MX], etc.
+            name = re.sub(r'\[[^\]]*\]', '', name)
             # Replace hyphens that act as word separators (surrounded by spaces
             # or at the boundary of a release group like "h264-GRACE") but keep
             # hyphens between non-space characters (e.g. "9-1-1", "X-Men")
@@ -1098,11 +1133,39 @@ def open_tv_renamer(app):
             name = re.sub(r'\s*\d{1,2}[xX]\d.*', '', name)
             # Truncate at date-based episode markers (2026 04 22)
             name = re.sub(r'\s*(?:19|20)\d{2}\s+(?:0[1-9]|1[0-2])\s+(?:0[1-9]|[12]\d|3[01]).*', '', name)
+            # Truncate at special episode markers (SP01, OVA, Special, etc.)
+            name = re.sub(r'\s+SP\s*\d+\b.*', '', name, flags=re.IGNORECASE)
+            name = re.sub(r'\s+OVA\s*\d*\b.*', '', name, flags=re.IGNORECASE)
+            # "Special"/"Bonus"/"Extra" — only truncate if preceded by at
+            # least 2 words (avoids stripping from show names like
+            # "Special Agent Oso").  Uses a non-capturing check instead
+            # of a variable-width lookbehind.
+            name = re.sub(
+                r'(\S+\s+\S+\s+)(?:Special|Bonus|Extra|'
+                r'Behind the Scenes)\b.*',
+                r'\1', name, flags=re.IGNORECASE)
             # Truncate at quality/resolution tags
             name = re.sub(r'\s*(?:720|1080|2160|480)[pPiI].*', '', name)
-            # Truncate at common release tags
+            # Truncate at common source/release tags
             name = re.sub(r'\s*(?:WEB|HDTV|BluRay|BDRip|DVDRip|REMUX|PROPER).*',
                           '', name, flags=re.IGNORECASE)
+            # Truncate at codec tags
+            name = re.sub(
+                r'\s*(?:x264|x265|h264|h265|HEVC|AVC|AAC|'
+                r'DDP\s*5\s*1|DDP|FLAC|10bit|ATMOS|TrueHD|'
+                r'DTS(?:\s*-?\s*HD)?)\b.*',
+                '', name, flags=re.IGNORECASE)
+            # Truncate at streaming service tags (appear after show name
+            # in scene releases, e.g. "Show Name AMZN WEB-DL")
+            name = re.sub(
+                r'\s+(?:AMZN|NF|HULU|DSNP|ATVP|PCOK|PMTP|STAN|'
+                r'CRAV|MAX|HBO|APTV)\s.*',
+                '', name, flags=re.IGNORECASE)
+            # Strip trailing release group: "-GRACE", "-DHD", "-FLUX"
+            # (only after all other tags have been stripped).
+            # Require at least one letter to avoid stripping numeric
+            # suffixes from show names like "9-1-1".
+            name = re.sub(r'\s*-\s*[A-Za-z][A-Za-z0-9]*\s*$', '', name)
             # Strip trailing year (e.g. "Rise Of The Conqueror 2026" or "Movie (2026)")
             name = re.sub(r'\s+\(?(?:19|20)\d{2}\)?\s*$', '', name)
             return name.strip()
@@ -1527,6 +1590,17 @@ def open_tv_renamer(app):
                             query = shorter
                             break
 
+            # Retry with transliteration (strip diacritics/accents) for
+            # foreign titles like "Château" → "Chateau", "Señor" → "Senor"
+            if not results:
+                import unicodedata
+                nfkd = unicodedata.normalize('NFKD', query)
+                ascii_q = ''.join(
+                    c for c in nfkd if not unicodedata.combining(c))
+                if ascii_q != query:
+                    _log(f"  Retrying search as \"{ascii_q}\"...")
+                    results = _provider_search(ascii_q)
+
             if not results:
                 _log(f"  No {prov} results for \"{query}\"", 'WARNING')
                 return _fallback_from_filename(query)
@@ -1560,11 +1634,31 @@ def open_tv_renamer(app):
                 rid = (r.get('_media_type', ''), r.get('id', ''))
                 if rid in seen_ids:
                     continue
+                # Check primary name
                 if (rname_norm == query_norm
                         or query_norm in rname_norm
                         or rname_norm in query_norm):
                     close_matches.append(r)
                     seen_ids.add(rid)
+                    continue
+                # Check original/foreign title and aliases
+                for alt_field in ('original_name', 'aliases'):
+                    val = r.get(alt_field, '')
+                    names_to_check = (
+                        val if isinstance(val, list)
+                        else [val] if val else [])
+                    for alt_name in names_to_check:
+                        alt_norm = _normalize_for_match(alt_name)
+                        if alt_norm and (
+                                alt_norm == query_norm
+                                or query_norm in alt_norm
+                                or alt_norm in query_norm):
+                            close_matches.append(r)
+                            seen_ids.add(rid)
+                            break
+                    else:
+                        continue
+                    break
 
             # If only 0–1 close matches and the query has multiple words,
             # the trailing word may be a qualifier the provider doesn't use
@@ -1619,15 +1713,54 @@ def open_tv_renamer(app):
                                      f"{len(close_matches)} close matches")
 
             if len(close_matches) > 1:
-                # Multiple shows match — ask the user to pick
-                _log(f"  Found {len(close_matches)} matches for \"{query}\" — asking...")
-                win.update_idletasks()
-                best = _ask_user_pick_show(query, close_matches)
-                if best == '__filename_fallback__':
-                    return _fallback_from_filename(query)
-                if not best:
-                    _log(f"  Skipped \"{query}\"")
-                    return None
+                # Try year-based auto-disambiguation before prompting
+                # the user — extract the year from the original filename
+                # or folder (e.g. "Ghosts (2019)" or "Battlestar
+                # Galactica 2003") and match against the show's premiere
+                best = None
+                context_year = ''
+                for item in _file_items:
+                    raw_fname = os.path.splitext(
+                        os.path.basename(item['path']))[0]
+                    raw_fname = re.sub(r'[._]', ' ', raw_fname)
+                    folder = _get_show_folder(item['path']) or ''
+                    for source in (raw_fname, folder):
+                        m_yr = re.search(
+                            r'\(?((?:19|20)\d{2})\)?', source)
+                        if m_yr:
+                            yr = m_yr.group(1)
+                            # Verify this year is near the query text
+                            stripped = re.sub(
+                                r'\s*\(?' + yr + r'\)?\s*', ' ',
+                                source).strip()
+                            stripped_n = _normalize_for_match(
+                                _clean_show_name(stripped))
+                            if (stripped_n == query_norm
+                                    or query_norm in stripped_n
+                                    or stripped_n in query_norm):
+                                context_year = yr
+                                break
+                    if context_year:
+                        break
+                if context_year:
+                    year_matches = [
+                        r for r in close_matches
+                        if r.get('year', '') == context_year]
+                    if len(year_matches) == 1:
+                        best = year_matches[0]
+                        _log(f"  Auto-selected \"{best.get('name', '')}\" "
+                             f"by year ({context_year})")
+                if best is None:
+                    # No year match — ask the user to pick
+                    _log(f"  Found {len(close_matches)} matches for "
+                         f"\"{query}\" — asking...")
+                    win.update_idletasks()
+                    best = _ask_user_pick_show(query, close_matches)
+                    if best == '__filename_fallback__':
+                        return _fallback_from_filename(query)
+                    if not best:
+                        _log(f"  Skipped \"{query}\"")
+                        return None
             elif len(close_matches) == 1:
                 best = close_matches[0]
             else:
@@ -1730,12 +1863,16 @@ def open_tv_renamer(app):
                         parts.pop()
                     fname = '.'.join(parts) if parts else fname
                 cleaned = _clean_show_name(fname).strip()
-                if not cleaned:
-                    continue
                 # Track show folder for this filename-derived name,
                 # skipping past Season subfolders
                 parent = _get_show_folder(item['path'])
                 folder_name = _clean_show_name(parent).strip() if parent else ''
+                # When filename has no show name (e.g. "S01E03.mkv"),
+                # use the parent folder name as the show name source
+                if not cleaned:
+                    if folder_name:
+                        show_names.add(folder_name)
+                    continue
                 fname_to_folders.setdefault(cleaned, set())
                 if folder_name:
                     fname_to_folders[cleaned].add(folder_name)
