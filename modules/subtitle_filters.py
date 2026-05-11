@@ -774,6 +774,7 @@ BUILTIN_AD_PATTERNS = [
     r'subtitl(es|ed)\s+by\b.*',
     r'synced?\s*((&|and)\s*corrected)?\s+by\b.*',
     r'caption(s|ed|ing)?\s+by\b.*',
+    r'caption(s|ed|ing)?\s+paid\s+for\s+by\b.*',
     r'translated\s+by\b.*',
     r'corrections?\s+by\b.*',
     r'encoded\s+by\b.*',
@@ -797,8 +798,11 @@ def filter_remove_ads(cues, custom_patterns=None):
     ad_patterns = []
     for p in all_pattern_strs:
         try:
+            # Allow optional leading dialogue dashes/bullets before
+            # ad text (e.g. "-Captions by VITAC", "- Subtitled by")
             ad_patterns.append(
-                re.compile(r'(?i)^\s*' + p + r'\s*$', re.MULTILINE))
+                re.compile(r'(?i)^\s*[-–—•]?\s*' + p + r'\s*$',
+                           re.MULTILINE))
         except re.error:
             pass
 
@@ -806,7 +810,7 @@ def filter_remove_ads(cues, custom_patterns=None):
         r'(?i)^\s*(?:https?://|www\.)\S+\s*$', re.MULTILINE)
     ad_check_parts = [
         r'(subtitl(es|ed)|synced?|caption(s|ed|ing)?|translated'
-        r'|corrections?|encoded|ripped)\s+by\b',
+        r'|corrections?|encoded|ripped)\s+(paid\s+for\s+)?by\b',
         r'opensubtitles', r'addic7ed', r'subscene',
     ]
     if custom_patterns:
@@ -822,6 +826,7 @@ def filter_remove_ads(cues, custom_patterns=None):
     result = []
     for cue in cues:
         text = cue['text']
+        original = text
         has_ad = bool(ad_check.search(text))
         for pat in ad_patterns:
             text = pat.sub('', text)
@@ -829,6 +834,12 @@ def filter_remove_ads(cues, custom_patterns=None):
                 r'(?i)(?:https?://|www\.)\S+', '', text).strip():
             text = url_pattern.sub('', text)
         text = re.sub(r'\n{2,}', '\n', text).strip()
+        # If ad text was detected AND lines were removed, the
+        # remaining text is likely part of the credit (e.g. a company
+        # name on the next line like "discovery communications").
+        # Remove the entire cue rather than leaving orphaned fragments.
+        if has_ad and text != original.strip() and text:
+            continue
         if text:
             result.append({**cue, 'text': text})
     return result
