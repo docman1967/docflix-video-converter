@@ -42,6 +42,7 @@ TOOL_CMDS=(
     "docflix-rename:tv_renamer"
     "docflix-media:media_processor"
     "docflix-scale:video_scaler"
+    "docflix-whisper:whisper_transcriber"
 )
 
 #───────────────────────────────────────────────────────────────────────────────
@@ -417,6 +418,7 @@ echo "    • docflix-subs     Docflix Subtitle Editor"
 echo "    • docflix-rename   Docflix Media Renamer"
 echo "    • docflix-media    Docflix Media Processor"
 echo "    • docflix-scale    Docflix Media Rescale"
+echo "    • docflix-whisper  Docflix Whisper Transcriber"
 echo ""
 echo "  To uninstall:"
 echo "    $SCRIPT_DIR/install.sh --uninstall"

@@ -4249,6 +4249,8 @@ class VideoConverterApp:
         tools_menu.add_command(label="Docflix Media Rescale...",
                                accelerator="Ctrl+Shift+R",
                                command=self.open_video_scaler)
+        tools_menu.add_command(label="Docflix Whisper Transcriber...",
+                               command=self.open_whisper_transcriber)
         # Help menu
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
@@ -5976,6 +5978,24 @@ class VideoConverterApp:
                 mod.open_video_scaler(self)
             else:
                 messagebox.showerror("Docflix Media Rescale", "modules/video_scaler.py not found.")
+
+    def open_whisper_transcriber(self):
+        """Open the Whisper Subtitle Transcriber tool."""
+        try:
+            from modules.whisper_transcriber import open_whisper_transcriber
+            open_whisper_transcriber(self)
+        except ImportError:
+            import importlib.util
+            _wt_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     'modules', 'whisper_transcriber.py')
+            if os.path.exists(_wt_path):
+                spec = importlib.util.spec_from_file_location('whisper_transcriber', _wt_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                mod.open_whisper_transcriber(self)
+            else:
+                messagebox.showerror("Whisper Transcriber",
+                                     "modules/whisper_transcriber.py not found.")
 
     def open_tv_renamer(self):
         """Open the File Renamer tool."""

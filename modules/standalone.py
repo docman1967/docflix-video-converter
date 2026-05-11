@@ -73,6 +73,9 @@ class StandaloneContext:
         # Video scaler
         self._scaler_prefs = prefs.get('video_scaler', {})
 
+        # Whisper transcriber
+        self._whisper_prefs = prefs.get('whisper_transcriber', {})
+
         # Auto-load names database if preference is enabled
         if self.use_names_db:
             from .subtitle_filters import is_names_db_available, load_names_db

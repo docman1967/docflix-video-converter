@@ -1,7 +1,7 @@
 # Docflix Media Suite — Project Summary
 
-**Last Updated:** 2026-05-11 (rev 65)  
-**Version:** 2.9.9  
+**Last Updated:** 2026-05-11 (rev 66)  
+**Version:** 3.0.0  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/`  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -56,7 +56,9 @@
 | `manual_viewer.py` | 737 | Built-in user manual viewer with sidebar navigation |
 | `waveform_timeline.py` | 1,498 | Waveform Timeline widget — audio extraction, waveform rendering, cue block overlay, drag-to-move/resize, embedded mpv video playback, live subtitle preview, step navigation |
 | `video_scaler.py` | 1,088 | Video Scaler — batch resize with GPU-accelerated scaling, threaded file scanning with progress/ETA, preferences; withdraw/deiconify window positioning |
-| **Total** | **23,859** | **21 modules** |
+| `whisper_subtitles.py` | — | Whisper Subtitles Backend — transcription engine for faster-whisper/WhisperX |
+| `whisper_transcriber.py` | 850+ | Whisper Transcriber GUI — batch subtitle extraction from video/audio, drag-and-drop, translation, word-level timestamps, preview panel, Docflix prefs integration |
+| **Total** | **~24,700** | **23 modules** |
 
 ### Standalone Tool Commands
 
@@ -67,6 +69,7 @@
 | `docflix-rename` | `tv_renamer.py` | TV Show Renamer (standalone) |
 | `docflix-media` | `media_processor.py` | Media Processor (standalone) |
 | `docflix-scale` | `video_scaler.py` | Video Scaler (standalone) |
+| `docflix-whisper` | `whisper_transcriber.py` | Whisper Subtitle Transcriber (standalone) |
 
 ---
 
@@ -592,6 +595,7 @@ git push
 ## Change Log
 
 ### 2026-05-11 (Enhancement + Bug Fix)
+282. **Whisper Subtitle Transcriber integrated** — Added full Whisper speech-to-text subtitle extraction as a new Docflix tool. Two new modules: `whisper_subtitles.py` (backend library — faster-whisper/WhisperX transcription engine, audio extraction, SRT/VTT formatting, post-processing) and `whisper_transcriber.py` (Docflix GUI — batch transcription with file list, settings panel, log panel, subtitle preview, drag-and-drop, progress tracking, queue-based threading). Features: 99 languages with auto-detection, translate-to-English mode, word-level timestamps, lead-time trimming, line wrapping, timestamp offset, VAD silence filtering, GPU/CUDA acceleration, skip-existing option, desktop notifications on completion. GUI adapted from standalone whisper-subtitles project to Docflix patterns: ttk widgets (no hardcoded theme), `open_whisper_transcriber(app)` entry point, Docflix preferences integration, `ask_open_files`/`ask_directory` for file dialogs. Registered in main app Tools menu, standalone `docflix-whisper` command added to `install.sh`, preferences slot added to `standalone.py`.
 281. **Remove Ads filter — missed caption/credit patterns** — Fixed the Remove Ads/Credits filter missing credit cues with leading dialogue dashes and multi-line credit spans. Three fixes: (1) **Leading dashes** — ad pattern regex now allows optional leading `-`, `–`, `—`, `•` before ad text (e.g. `-Captions by VITAC...`, `- Subtitled by John`). Changed the compiled prefix from `^\s*` to `^\s*[-–—•]?\s*`. (2) **"Paid for by" pattern** — added `caption(s|ed|ing)?\s+paid\s+for\s+by\b.*` to `BUILTIN_AD_PATTERNS` for credits like "Captions paid for by\ndiscovery communications". Updated `ad_check_parts` to include the optional "paid for by" phrase. (3) **Multi-line credit orphans** — when an ad cue is detected (`has_ad=True`) and ad lines are removed but non-ad text remains (e.g. a company name on line 2 like "discovery communications"), the entire cue is now removed instead of leaving orphaned fragments.
 280. **Batch Filter names database in Custom Names dialog** — Added the Names Database section (download, toggle, status) to the Batch Filter's Custom Names dialog, matching the same UI already present in the Subtitle Editor's Fix ALL CAPS dialog. Users can now download and enable/disable the 1.1M names database from the batch filter tool as well. Added `threading` import and names DB imports to `batch_filter.py`.
 279. **File Renamer Multiple Matches thumbnails black on high-DPI (take 3)** — Fixed thumbnails rendering as solid black tiles on high-resolution displays (200% scaling). Root cause: double DPI scaling — the code manually multiplied dimensions by `_dpi` (e.g. 60×90 → 120×180), but Tk's own DPI scaling then stretched the label further (to ~240×360 device pixels), creating a mismatch between the image content size and the label display size. The transparent `tk.PhotoImage` placeholder made this worse — transparent pixels render as black on dark themes. Three changes: (1) Replaced `tk.PhotoImage` placeholder with a PIL-created opaque image (`Image.new('RGB', (60, 90), '#3b3b3b')` + `ImageTk.PhotoImage`) — no transparency, no black fill. (2) Removed manual DPI multiplication from `_apply_thumb()` — `img.thumbnail((60, 90))` instead of `(60*_dpi, 90*_dpi)`. Tk handles the DPI scaling automatically. (3) Removed explicit `width`/`height` from label `.configure()` — let the label auto-size from the image content, avoiding any DPI mismatch. Also fixed overview `wraplength` which was similarly double-scaled.
