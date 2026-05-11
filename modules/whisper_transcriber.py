@@ -1118,11 +1118,15 @@ def open_whisper_transcriber(app):
     # ── start / cancel ──
 
     def _start():
+        import sys as _sys
+        print("DEBUG: _start() called", file=_sys.__stderr__, flush=True)
         try:
             _start_inner()
+            print("DEBUG: _start_inner() completed OK", file=_sys.__stderr__, flush=True)
         except Exception as exc:
             import traceback
             tb = traceback.format_exc()
+            print(f"DEBUG: _start() exception: {tb}", file=_sys.__stderr__, flush=True)
             _log_write(f"Error starting transcription:\n{tb}", "error")
             messagebox.showerror("Error", f"Failed to start:\n{exc}",
                                  parent=win)
