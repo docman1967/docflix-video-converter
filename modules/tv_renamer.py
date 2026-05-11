@@ -1364,17 +1364,16 @@ def open_tv_renamer(app):
                 row_f.bind('<Double-1>', _dblclick)
 
                 # Thumbnail placeholder (load async later).
-                # Use tk.Label (not ttk.Label) — ttk has known issues
-                # rendering images on high-DPI displays.
-                # IMPORTANT: tk.Label width/height are in CHARACTER units
-                # unless an image is set — use a blank PhotoImage so
-                # dimensions are treated as pixels.
-                _tw = int(60 * _dpi)
-                _th = int(90 * _dpi)
-                _blank_img = tk.PhotoImage(width=_tw, height=_th)
+                # Use tk.Label with a PIL-created opaque placeholder —
+                # avoids tk.PhotoImage transparency (renders as black on
+                # dark themes) and avoids DPI double-scaling issues where
+                # Tk's own scaling conflicts with manual pixel scaling.
+                # Do NOT set explicit width/height — let the label
+                # auto-size from the image content.
+                from PIL import Image as _PILImage, ImageTk as _PILImageTk
+                _blank_pil = _PILImage.new('RGB', (60, 90), '#3b3b3b')
+                _blank_img = _PILImageTk.PhotoImage(_blank_pil)
                 thumb_label = tk.Label(row_f, image=_blank_img,
-                                       width=_tw, height=_th,
-                                       bg='#2b2b2b',
                                        relief='flat', bd=0)
                 thumb_label._blank = _blank_img  # prevent GC
                 thumb_label.grid(row=0, column=0, rowspan=3, sticky='n',
@@ -1401,7 +1400,7 @@ def open_tv_renamer(app):
                 # Overview (show synopsis)
                 if overview:
                     ov_lbl = ttk.Label(row_f, text=overview,
-                                       wraplength=int(500 * _dpi),
+                                       wraplength=500,
                                        font=('Helvetica', 9),
                                        justify='left')
                     ov_lbl.grid(row=2, column=1, sticky='w', pady=(2, 0))
@@ -1450,18 +1449,19 @@ def open_tv_renamer(app):
                     import io
                     from PIL import Image, ImageTk
                     img = Image.open(io.BytesIO(img_data))
-                    # Scale thumbnail pixels for high-DPI so it appears
-                    # the intended logical size (60×90) on any display
-                    tw = int(60 * _dpi)
-                    th = int(90 * _dpi)
-                    img.thumbnail((tw, th), Image.LANCZOS)
+                    # Scale to logical pixel size — Tk handles DPI
+                    # scaling automatically.  Do NOT multiply by _dpi
+                    # here (that causes double-scaling on high-DPI
+                    # displays where Tk already scales the widget).
+                    img.thumbnail((60, 90), Image.LANCZOS)
                     photo = ImageTk.PhotoImage(img)
                     _thumb_refs.append(photo)
                     rf = row_frames[idx]
                     for child in rf.grid_slaves(row=0, column=0):
-                        child.configure(image=photo,
-                                        width=photo.width(),
-                                        height=photo.height())
+                        # Let the label auto-size from the image —
+                        # do NOT set explicit width/height (avoids
+                        # DPI mismatch between image and label size)
+                        child.configure(image=photo)
                         child._photo = photo  # prevent GC
                         # Re-bind click events after image loads
                         child.bind('<Button-1>',
@@ -2845,11 +2845,13 @@ def open_tv_renamer(app):
                 _add_paths(list(paths))
 
         def _browse_folder():
-            path = ask_directory(initialdir=_get_browse_dir(),
-                                parent=win, title="Select Folder")
-            if path:
-                _last_browse_dir[0] = os.path.dirname(path)
-                _add_paths([path])
+            paths = ask_directory(initialdir=_get_browse_dir(),
+                                 parent=win,
+                                 title="Select Folder(s)",
+                                 multiple=True)
+            if paths:
+                _last_browse_dir[0] = os.path.dirname(paths[-1])
+                _add_paths(paths)
 
         # ── Row 4: Log ──
         log_f = ttk.LabelFrame(main_f, text="Log", padding=4)

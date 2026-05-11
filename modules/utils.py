@@ -251,11 +251,16 @@ def _run_zenity(cmd, timeout=120):
         return 1, ''
 
 
-def ask_directory(initialdir=None, title="Select Folder", parent=None):
+def ask_directory(initialdir=None, title="Select Folder", parent=None,
+                  multiple=False):
     """Open a folder-selection dialog.
 
     Tries zenity first (GTK dialog with proper single-click + Open
     button behaviour), then falls back to tkinter's askdirectory.
+
+    When *multiple* is True, returns a list of selected folder paths
+    (empty list on cancel).  When False, returns a single path string
+    (empty string on cancel).
     """
     if initialdir:
         initialdir = str(initialdir)
@@ -264,15 +269,33 @@ def ask_directory(initialdir=None, title="Select Folder", parent=None):
             'zenity', '--file-selection', '--directory',
             '--title', title,
         ]
+        if multiple:
+            cmd += ['--multiple', '--separator', '\n']
         if initialdir:
             cmd += ['--filename', initialdir + '/']
         rc, stdout = _run_zenity(cmd)
         if rc == 0 and stdout.strip():
+            if multiple:
+                return [p for p in stdout.strip().split('\n') if p]
             return stdout.strip()
-        return ''
+        return [] if multiple else ''
     kwargs = {'initialdir': initialdir, 'title': title}
     if parent:
         kwargs['parent'] = parent
+    if multiple:
+        # tkinter's askdirectory doesn't support multi-select —
+        # open the dialog in a loop until the user cancels
+        folders = []
+        while True:
+            path = filedialog.askdirectory(**kwargs)
+            if not path:
+                break
+            folders.append(path)
+            kwargs['initialdir'] = os.path.dirname(path)
+            kwargs['title'] = (f"Select another folder "
+                               f"({len(folders)} selected) — "
+                               f"Cancel to finish")
+        return folders
     return filedialog.askdirectory(**kwargs)
 
 
