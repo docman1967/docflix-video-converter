@@ -825,7 +825,12 @@ def open_whisper_transcriber(app):
     adv1.pack(fill='x', padx=4, pady=2)
 
     ttk.Label(adv1, text="Device:").pack(side='left', padx=(0, 4))
-    _device_var = tk.StringVar(value=_wp.get('device', 'auto'))
+    # Default device: auto-detect GPU on startup so the user sees
+    # "cuda" or "cpu" instead of a vague "auto"
+    _default_device = _wp.get('device', '')
+    if not _default_device or _default_device == 'auto':
+        _default_device = detect_device()
+    _device_var = tk.StringVar(value=_default_device)
     dev_cb = ttk.Combobox(adv1, textvariable=_device_var,
                            values=DEVICES, state='readonly', width=7)
     dev_cb.pack(side='left', padx=(0, 10))
@@ -1164,8 +1169,9 @@ def open_whisper_transcriber(app):
         lang_code = LANGUAGES[_lang_var.get()]
         task_code = TASKS[_task_var.get()]
         device = _device_var.get()
-        if device == "auto":
+        if not device or device == "auto":
             device = detect_device()
+            _device_var.set(device)
 
         output_dir = _get_output_dir()
         fmt_list = _get_fmt_list()
