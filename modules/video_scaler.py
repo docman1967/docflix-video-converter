@@ -270,6 +270,11 @@ def open_video_scaler(app):
         encoder_labels.append(label)
         encoder_ids[label] = bid
 
+    # Default to first available GPU if no saved preference
+    if not _sp.get('encoder') and gpu_backends:
+        first_gpu_label = next(iter(gpu_backends.values()))
+        opt_encoder.set(first_gpu_label)
+
     # ── Main layout ──
     main_frame = ttk.Frame(win, padding=8)
     main_frame.pack(fill='both', expand=True)
@@ -435,10 +440,11 @@ def open_video_scaler(app):
     ttk.Label(row1, text="Encoder:").pack(side='left', padx=(0, 2))
     enc_combo = ttk.Combobox(row1, textvariable=opt_encoder,
                               values=encoder_labels, width=16, state='readonly')
-    enc_combo.set('CPU')
+    # Don't override — opt_encoder already has the right default (GPU if available, CPU otherwise)
     enc_combo.pack(side='left', padx=(0, 6))
 
-    ttk.Label(row1, text="Preset:").pack(side='left', padx=(0, 2))
+    preset_label = ttk.Label(row1, text="Preset:")
+    preset_label.pack(side='left', padx=(0, 2))
     preset_combo = ttk.Combobox(row1, textvariable=opt_preset, width=10, state='readonly')
     preset_combo.pack(side='left')
 
@@ -448,15 +454,37 @@ def open_video_scaler(app):
         codec_name = opt_codec.get()
         if bid == 'cpu':
             info = VIDEO_CODEC_MAP.get(codec_name, VIDEO_CODEC_MAP['H.265 / HEVC'])
+            # Presets — show and populate for CPU
+            preset_label.pack(side='left', padx=(0, 2))
+            preset_combo.pack(side='left')
             preset_combo['values'] = info['cpu_presets']
             if opt_preset.get() not in info['cpu_presets']:
                 opt_preset.set(info.get('cpu_preset_default', 'medium'))
+            # Quality label
+            crf_label.configure(text="CRF:")
         else:
             backend = GPU_BACKENDS.get(bid, {})
             presets = backend.get('presets', ())
-            preset_combo['values'] = presets
-            if opt_preset.get() not in presets:
-                opt_preset.set(backend.get('preset_default', presets[0] if presets else ''))
+            # Presets — hide if backend has none (e.g. VAAPI)
+            if presets:
+                preset_label.pack(side='left', padx=(0, 2))
+                preset_combo.pack(side='left')
+                preset_combo['values'] = presets
+                if opt_preset.get() not in presets:
+                    opt_preset.set(backend.get('preset_default', presets[0] if presets else ''))
+            else:
+                preset_label.pack_forget()
+                preset_combo.pack_forget()
+            # Quality label — use backend-appropriate name
+            cq_flag = backend.get('cq_flag', '')
+            if cq_flag == '-cq':
+                crf_label.configure(text="CQ:")
+            elif cq_flag == '-qp':
+                crf_label.configure(text="QP:")
+            elif cq_flag == '-global_quality':
+                crf_label.configure(text="Quality:")
+            else:
+                crf_label.configure(text="CQ:")
     enc_combo.bind('<<ComboboxSelected>>', _on_encoder_change)
 
     # Row 2: Codec, CRF, Audio, Container, Output
@@ -470,7 +498,8 @@ def open_video_scaler(app):
     codec_combo.pack(side='left', padx=(0, 6))
     codec_combo.bind('<<ComboboxSelected>>', _on_encoder_change)
 
-    ttk.Label(row2, text="CRF:").pack(side='left', padx=(0, 2))
+    crf_label = ttk.Label(row2, text="CRF:")
+    crf_label.pack(side='left', padx=(0, 2))
     crf_entry = ttk.Entry(row2, textvariable=opt_crf, width=4)
     crf_entry.pack(side='left', padx=(0, 6))
 

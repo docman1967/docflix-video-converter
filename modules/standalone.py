@@ -67,6 +67,26 @@ class StandaloneContext:
         self.custom_ad_patterns = prefs.get('custom_ad_patterns', [])
         self.search_replace_pairs = prefs.get('search_replace_pairs', [])
 
+        # Merge subtitle editor settings from main app prefs file
+        # so patterns added via the main app are available in standalone
+        try:
+            _main_path = Path.home() / '.config' / 'docflix_video_converter' / 'prefs.json'
+            if _main_path.exists():
+                _main = json.loads(_main_path.read_text())
+                for key, attr in (
+                    ('custom_ad_patterns', 'custom_ad_patterns'),
+                    ('custom_cap_words', 'custom_cap_words'),
+                    ('custom_spell_words', 'custom_spell_words'),
+                    ('custom_replacements', 'search_replace_pairs'),
+                ):
+                    main_list = _main.get(key, [])
+                    cur_list = getattr(self, attr)
+                    for item in main_list:
+                        if item not in cur_list:
+                            cur_list.append(item)
+        except Exception:
+            pass
+
         # Media processor
         self._media_proc_prefs = prefs.get('media_processor', {})
 
@@ -122,6 +142,24 @@ class StandaloneContext:
         try:
             with open(self._prefs_path, 'w') as f:
                 json.dump(prefs, f, indent=2)
+        except Exception:
+            pass
+
+        # Sync subtitle editor settings to main app prefs file
+        # so patterns are available when using the main app
+        try:
+            _main_path = Path.home() / '.config' / 'docflix_video_converter' / 'prefs.json'
+            _main = json.loads(_main_path.read_text()) if _main_path.exists() else {}
+            _main['custom_ad_patterns'] = getattr(
+                self, 'custom_ad_patterns', [])
+            _main['custom_cap_words'] = getattr(
+                self, 'custom_cap_words', [])
+            _main['custom_spell_words'] = getattr(
+                self, 'custom_spell_words', [])
+            _main['custom_replacements'] = getattr(
+                self, 'search_replace_pairs', [])
+            _main_path.parent.mkdir(parents=True, exist_ok=True)
+            _main_path.write_text(json.dumps(_main, indent=2))
         except Exception:
             pass
 

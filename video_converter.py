@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.0.1"
+APP_VERSION = "3.0.2"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -1594,7 +1594,8 @@ def filter_remove_tags(cues):
 BUILTIN_AD_PATTERNS = [
     r'subtitl(es|ed)\s+by\b.*',
     r'synced?\s*((&|and)\s*corrected)?\s+by\b.*',
-    r'caption(s|ed|ing)?\s+by\b.*',
+    r'caption(s|ed|ing)?\s+(provided|sponsored|delivered|produced)?\s*by\b.*',
+    r'caption(s|ed|ing)?\s+paid\s+for\s+by\b.*',
     r'translated\s+by\b.*',
     r'corrections?\s+by\b.*',
     r'encoded\s+by\b.*',
@@ -1609,25 +1610,46 @@ def filter_remove_ads(cues, custom_patterns=None):
     """Remove common ad/credit lines from subtitles.
 
     custom_patterns: optional list of additional pattern strings (case-insensitive).
+    Plain-word custom patterns (e.g. "toyota") are treated as substring
+    matches — they remove any line containing that word.  Patterns with
+    regex metacharacters are compiled as-is for advanced users.
     URL lines (www.*) are only removed if the cue also contains another
     ad indicator — this avoids stripping real dialogue that mentions websites.
     """
     all_pattern_strs = list(BUILTIN_AD_PATTERNS)
+
+    # Custom patterns: plain words/phrases become substring matches;
+    # patterns with regex metacharacters are kept as-is.
+    _custom_compiled = []
     if custom_patterns:
-        all_pattern_strs.extend(custom_patterns)
+        for p in custom_patterns:
+            try:
+                re.compile(p)
+                if not re.search(r'[\\^$.+*?\[\]{}()|]', p):
+                    _custom_compiled.append(
+                        re.compile(r'(?i)^.*' + re.escape(p) + r'.*$',
+                                   re.MULTILINE))
+                else:
+                    all_pattern_strs.append(p)
+            except re.error:
+                pass
 
     ad_patterns = []
     for p in all_pattern_strs:
         try:
-            ad_patterns.append(re.compile(r'(?i)^\s*' + p + r'\s*$', re.MULTILINE))
+            ad_patterns.append(
+                re.compile(r'(?i)^\s*[-–—•]?\s*' + p + r'\s*$',
+                           re.MULTILINE))
         except re.error:
             pass  # skip invalid patterns
+    ad_patterns.extend(_custom_compiled)
 
     # URL pattern — only applied when cue is already flagged as an ad
     url_pattern = re.compile(r'(?i)^\s*(?:https?://|www\.)\S+\s*$', re.MULTILINE)
     # Quick check to detect if a cue has any ad content
     ad_check_parts = [
-        r'(subtitl(es|ed)|synced?|caption(s|ed|ing)?|translated|corrections?|encoded|ripped)\s+by\b',
+        r'(subtitl(es|ed)|synced?|caption(s|ed|ing)?|translated'
+        r'|corrections?|encoded|ripped)\s+(\w+\s+)*?by\b',
         r'opensubtitles', r'addic7ed', r'subscene',
     ]
     if custom_patterns:
@@ -1642,6 +1664,7 @@ def filter_remove_ads(cues, custom_patterns=None):
     result = []
     for cue in cues:
         text = cue['text']
+        original = text
         has_ad = bool(ad_check.search(text))
         for pat in ad_patterns:
             text = pat.sub('', text)
@@ -1650,6 +1673,12 @@ def filter_remove_ads(cues, custom_patterns=None):
         if has_ad or not re.sub(r'(?i)(?:https?://|www\.)\S+', '', text).strip():
             text = url_pattern.sub('', text)
         text = re.sub(r'\n{2,}', '\n', text).strip()
+        # If ad text was detected AND lines were removed, the
+        # remaining text is likely part of the credit (e.g. a company
+        # name on the next line like "discovery communications").
+        # Remove the entire cue rather than leaving orphaned fragments.
+        if has_ad and text != original.strip() and text:
+            continue
         if text:
             result.append({**cue, 'text': text})
     return result
@@ -6957,6 +6986,12 @@ class VideoConverterApp:
 
     def save_preferences(self):
         """Save current settings to a JSON preferences file."""
+        # Read existing prefs first to preserve sub-tool settings
+        # (media_processor, video_scaler, whisper_transcriber, etc.)
+        try:
+            existing = json.loads(self._prefs_path().read_text()) if self._prefs_path().exists() else {}
+        except Exception:
+            existing = {}
         prefs = {
             'encoder':              self.encoder_mode.get(),
             'video_codec':          self.video_codec.get(),
@@ -7000,6 +7035,15 @@ class VideoConverterApp:
             'movie_rename_template': getattr(self, '_movie_rename_template', '{show} ({year})'),
             'custom_rename_templates': getattr(self, '_custom_rename_templates', []),
         }
+        # Preserve sub-tool preferences that are saved independently
+        for key in ('media_processor', 'video_scaler', 'whisper_transcriber'):
+            value = existing.get(key) or getattr(self, {
+                'media_processor': '_media_proc_prefs',
+                'video_scaler': '_scaler_prefs',
+                'whisper_transcriber': '_whisper_prefs',
+            }[key], None)
+            if value:
+                prefs[key] = value
         try:
             self._prefs_path().parent.mkdir(parents=True, exist_ok=True)
             self._prefs_path().write_text(json.dumps(prefs, indent=2))
@@ -7007,6 +7051,22 @@ class VideoConverterApp:
         except Exception as e:
             self.add_log(f"Failed to save preferences: {e}", 'ERROR')
             messagebox.showerror("Error", f"Failed to save preferences:\n{e}")
+
+        # Sync subtitle editor settings to standalone prefs file
+        # so patterns are available when opening files via "Open with"
+        try:
+            from modules.constants import PREFS_DIR, PREFS_FILENAME
+            _alt_path = Path(os.path.expanduser(PREFS_DIR)) / PREFS_FILENAME
+            _alt = json.loads(_alt_path.read_text()) if _alt_path.exists() else {}
+            _alt['custom_ad_patterns'] = self.custom_ad_patterns
+            _alt['custom_cap_words'] = self.custom_cap_words
+            _alt['custom_spell_words'] = self.custom_spell_words
+            _alt['search_replace_pairs'] = getattr(
+                self, 'custom_replacements', [])
+            _alt_path.parent.mkdir(parents=True, exist_ok=True)
+            _alt_path.write_text(json.dumps(_alt, indent=2))
+        except Exception:
+            pass
 
     def load_preferences(self):
         """Load preferences from JSON file if it exists."""
@@ -7059,6 +7119,27 @@ class VideoConverterApp:
             self.custom_cap_words = prefs.get('custom_cap_words', [])
             self.custom_spell_words = prefs.get('custom_spell_words', [])
             self.custom_replacements = prefs.get('custom_replacements', [])
+
+            # Merge subtitle editor settings from standalone prefs file
+            # so patterns added via "Open with" are available in the main app
+            try:
+                from modules.constants import PREFS_DIR, PREFS_FILENAME
+                _alt_path = Path(os.path.expanduser(PREFS_DIR)) / PREFS_FILENAME
+                if _alt_path.exists():
+                    _alt = json.loads(_alt_path.read_text())
+                    for key, attr in (
+                        ('custom_ad_patterns', 'custom_ad_patterns'),
+                        ('custom_cap_words', 'custom_cap_words'),
+                        ('custom_spell_words', 'custom_spell_words'),
+                        ('search_replace_pairs', 'custom_replacements'),
+                    ):
+                        alt_list = _alt.get(key, [])
+                        cur_list = getattr(self, attr)
+                        for item in alt_list:
+                            if item not in cur_list:
+                                cur_list.append(item)
+            except Exception:
+                pass
             self._tv_rename_provider = prefs.get('tv_rename_provider', 'TVDB')
             self._tv_rename_template = prefs.get('tv_rename_template',
                                                   '{show} S{season}E{episode} {title}')

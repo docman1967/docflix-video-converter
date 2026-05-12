@@ -27,6 +27,8 @@ from .subtitle_filters import (
     is_names_db_available, get_names_db_count,
     NAMES_DB_DIR, NAMES_DB_URLS,
     filter_reduce_lines,
+    filter_fix_ocr,
+    BUILTIN_AD_PATTERNS,
 )
 
 try:
@@ -77,10 +79,101 @@ def open_batch_filter(app):
         # ── Settings menu ──
         settings_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Settings", menu=settings_menu)
+        settings_menu.add_command(label="Ad / Credit Patterns...",
+                                  command=lambda: _open_ad_patterns_dialog())
         settings_menu.add_command(label="Search && Replace Pairs...",
                                   command=lambda: _open_sr_dialog())
         settings_menu.add_command(label="Custom Names (Fix ALL CAPS)...",
                                   command=lambda: _open_names_dialog())
+
+        # ── Ad / Credit Patterns dialog ─────────────────────────────────────
+        def _open_ad_patterns_dialog():
+            """Open a dialog to manage custom ad/credit patterns."""
+            pd = tk.Toplevel(win)
+            pd.title("Ad / Credit Patterns")
+            pd.geometry("500x420")
+            pd.transient(win)
+            pd.grab_set()
+            try:
+                app._center_on_main(pd)
+            except Exception:
+                pass
+            pd.resizable(True, True)
+
+            bf = ttk.LabelFrame(pd, text="Built-in Patterns (always active)",
+                                padding=8)
+            bf.pack(fill='x', padx=10, pady=(10, 5))
+            builtin_list = tk.Listbox(bf, height=6, font=('Courier', 9))
+            builtin_list.pack(fill='x')
+            for p in BUILTIN_AD_PATTERNS:
+                builtin_list.insert('end', p)
+
+            cf = ttk.LabelFrame(pd,
+                                text="Custom Patterns (saved to preferences)",
+                                padding=8)
+            cf.pack(fill='both', expand=True, padx=10, pady=5)
+
+            custom_list = tk.Listbox(cf, height=8, font=('Courier', 9))
+            custom_list.pack(fill='both', expand=True)
+            for p in app.custom_ad_patterns:
+                custom_list.insert('end', p)
+
+            add_frame = ttk.Frame(cf)
+            add_frame.pack(fill='x', pady=(4, 0))
+            new_pattern_var = tk.StringVar()
+            pattern_entry = ttk.Entry(add_frame,
+                                      textvariable=new_pattern_var)
+            pattern_entry.pack(side='left', fill='x', expand=True,
+                               padx=(0, 4))
+
+            def _add_pattern():
+                pat = new_pattern_var.get().strip()
+                if not pat:
+                    return
+                try:
+                    re.compile(pat)
+                except re.error as e:
+                    messagebox.showwarning("Invalid Pattern",
+                                           f"Not a valid regex:\n{e}",
+                                           parent=pd)
+                    return
+                if pat not in app.custom_ad_patterns:
+                    app.custom_ad_patterns.append(pat)
+                    custom_list.insert('end', pat)
+                    new_pattern_var.set('')
+                    app.add_log(f"Added custom ad pattern: {pat}", 'INFO')
+
+            def _remove_selected():
+                sel = custom_list.curselection()
+                if not sel:
+                    return
+                idx = sel[0]
+                removed = app.custom_ad_patterns.pop(idx)
+                custom_list.delete(idx)
+                app.add_log(f"Removed custom ad pattern: {removed}", 'INFO')
+
+            ttk.Button(add_frame, text="Add",
+                       command=_add_pattern).pack(side='right')
+            pattern_entry.bind('<Return>', lambda e: _add_pattern())
+
+            ttk.Label(cf, text="Plain words match anywhere in a line. "
+                      "Regex patterns are also supported.",
+                      font=('Helvetica', 8),
+                      foreground='gray').pack(anchor='w')
+
+            btn_frame = ttk.Frame(pd, padding=(10, 6, 10, 10))
+            btn_frame.pack(fill='x')
+            ttk.Button(btn_frame, text="Remove Selected",
+                       command=_remove_selected).pack(side='left')
+
+            def _save_and_close():
+                app.save_preferences()
+                pd.destroy()
+
+            ttk.Button(btn_frame, text="Save && Close",
+                       command=_save_and_close).pack(side='right')
+            ttk.Button(btn_frame, text="Cancel",
+                       command=pd.destroy).pack(side='right', padx=4)
 
         # ── Search & Replace dialog ──────────────────────────────────────────
         def _open_sr_dialog():
@@ -511,6 +604,7 @@ def open_batch_filter(app):
              lambda c: filter_remove_ads(c, app.custom_ad_patterns)),
             ('remove_music',   "Remove Stray Notes  ♪ ♫",        filter_remove_music_notes),
             ('fix_music',      "Fix Music Notes  ♪ (OCR)",        filter_fix_music_notes),
+            ('fix_ocr',        "Fix OCR Errors  '' | 0 (OCR)",    filter_fix_ocr),
             ('remove_dashes',  "Remove Leading Dashes  -",        filter_remove_leading_dashes),
             ('remove_caps_hi', "Remove ALL CAPS HI (UK style)",   filter_remove_caps_hi),
             ('remove_quotes',  "Remove Off-Screen Quotes ' ' (UK style)", filter_remove_offscreen_quotes),

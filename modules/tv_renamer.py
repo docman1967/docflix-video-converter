@@ -1212,6 +1212,21 @@ def open_tv_renamer(app):
             Returns the chosen dict, or None if cancelled."""
             dlg = tk.Toplevel(win)
             dlg.title("Multiple Matches")
+            try:
+                return _build_pick_show_dialog(dlg, query, candidates)
+            except Exception as e:
+                # Ensure dialog is destroyed if setup fails — prevents
+                # orphaned windows when PIL/ImageTk is missing, etc.
+                try:
+                    dlg.destroy()
+                except Exception:
+                    pass
+                raise
+
+        def _build_pick_show_dialog(dlg, query, candidates):
+            """Build and display the Multiple Matches picker dialog.
+            Separated from _ask_user_pick_show so that exceptions during
+            dialog setup are caught and the dialog is cleaned up."""
             dlg.geometry(scaled_geometry(dlg, 700, 500))
             dlg.minsize(*scaled_minsize(dlg, 500, 350))
             dlg.resizable(True, True)
@@ -1370,12 +1385,16 @@ def open_tv_renamer(app):
                 # Tk's own scaling conflicts with manual pixel scaling.
                 # Do NOT set explicit width/height — let the label
                 # auto-size from the image content.
-                from PIL import Image as _PILImage, ImageTk as _PILImageTk
-                _blank_pil = _PILImage.new('RGB', (60, 90), '#3b3b3b')
-                _blank_img = _PILImageTk.PhotoImage(_blank_pil)
-                thumb_label = tk.Label(row_f, image=_blank_img,
-                                       relief='flat', bd=0)
-                thumb_label._blank = _blank_img  # prevent GC
+                try:
+                    from PIL import Image as _PILImage, ImageTk as _PILImageTk
+                    _blank_pil = _PILImage.new('RGB', (60, 90), '#3b3b3b')
+                    _blank_img = _PILImageTk.PhotoImage(_blank_pil)
+                    thumb_label = tk.Label(row_f, image=_blank_img,
+                                           relief='flat', bd=0)
+                    thumb_label._blank = _blank_img  # prevent GC
+                except Exception:
+                    # PIL/ImageTk not available — use a plain empty label
+                    thumb_label = tk.Label(row_f, width=8, height=4)
                 thumb_label.grid(row=0, column=0, rowspan=3, sticky='n',
                                  padx=(0, 10), pady=2)
                 thumb_label.bind('<Button-1>', _click)
@@ -2257,9 +2276,21 @@ def open_tv_renamer(app):
         # ── Drag and drop ──
         _RENAME_EXTENSIONS = VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS
 
+        _scanning_files = [False]  # guard against overlapping scans
+
         def _add_paths(paths):
-            """Add files/folders to the file list. Recursively scans folders."""
-            added = 0
+            """Add files/folders to the file list in a background thread.
+
+            Phase 1 (instant): collect file paths via os.walk.
+            Phase 2 (threaded): probe each video file for media tags
+            with a progress bar, then auto-load shows.
+            """
+            if _scanning_files[0]:
+                _log("File scan already in progress — please wait", 'WARNING')
+                return
+
+            # Phase 1: collect all candidate file paths (fast, main thread)
+            collected = []  # list of (filepath, ext)
             for p in paths:
                 if os.path.isdir(p):
                     for root_dir, _dirs, files in os.walk(p):
@@ -2267,43 +2298,127 @@ def open_tv_renamer(app):
                         for f in sorted(files):
                             if f.startswith('.'):
                                 continue
-                            fp = os.path.join(root_dir, f)
                             ext = os.path.splitext(f)[1].lower()
                             if ext in _RENAME_EXTENSIONS:
-                                s, e = _parse_episode_info(f)
-                                item = {'path': fp, 'season': s,
-                                        'episode': e, 'ext': ext}
-                                if s == 'date':
-                                    item['air_date'] = e
-                                    item['season'] = None
-                                    item['episode'] = None
-                                # Probe video files for media tags
-                                if ext in VIDEO_EXTENSIONS:
-                                    item['media_tags'] = _probe_media_tags(fp)
-                                _file_items.append(item)
-                                added += 1
+                                collected.append((os.path.join(root_dir, f), ext))
                 elif os.path.isfile(p):
                     ext = os.path.splitext(p)[1].lower()
                     if ext in _RENAME_EXTENSIONS:
-                        s, e = _parse_episode_info(p)
-                        item = {'path': p, 'season': s,
-                                'episode': e, 'ext': ext}
-                        if s == 'date':
-                            item['air_date'] = e
-                            item['season'] = None
-                            item['episode'] = None
-                        if ext in VIDEO_EXTENSIONS:
-                            item['media_tags'] = _probe_media_tags(p)
-                        _file_items.append(item)
-                        added += 1
-            _v = sum(1 for i in _file_items if i['ext'] in VIDEO_EXTENSIONS)
-            _s = sum(1 for i in _file_items if i['ext'] in SUBTITLE_EXTENSIONS)
-            _log(f"Added {added} files ({_v} video, {_s} subtitle)")
-            # Auto-load any new shows detected from the added files
-            if added > 0:
-                _auto_load_shows()
-            else:
-                _refresh_preview()
+                        collected.append((p, ext))
+
+            if not collected:
+                _log("No supported files found")
+                return
+
+            total = len(collected)
+            video_count = sum(1 for _, ext in collected if ext in VIDEO_EXTENSIONS)
+
+            # For small batches with few videos, run synchronously (fast enough)
+            if video_count <= 3:
+                added = 0
+                for fp, ext in collected:
+                    s, e = _parse_episode_info(fp)
+                    item = {'path': fp, 'season': s,
+                            'episode': e, 'ext': ext}
+                    if s == 'date':
+                        item['air_date'] = e
+                        item['season'] = None
+                        item['episode'] = None
+                    if ext in VIDEO_EXTENSIONS:
+                        item['media_tags'] = _probe_media_tags(fp)
+                    _file_items.append(item)
+                    added += 1
+                _v = sum(1 for i in _file_items if i['ext'] in VIDEO_EXTENSIONS)
+                _s = sum(1 for i in _file_items if i['ext'] in SUBTITLE_EXTENSIONS)
+                _log(f"Added {added} files ({_v} video, {_s} subtitle)")
+                if added > 0:
+                    _auto_load_shows()
+                else:
+                    _refresh_preview()
+                return
+
+            # Phase 2: probe in background with progress bar
+            _scanning_files[0] = True
+
+            scan_prog_f = ttk.Frame(main_f)
+            scan_prog_f.grid(row=6, column=0, columnspan=3, sticky='ew',
+                             padx=4, pady=(2, 0))
+            scan_prog_lbl = ttk.Label(scan_prog_f,
+                                      text=f"Scanning 0/{total} files...",
+                                      font=('Helvetica', 9))
+            scan_prog_lbl.pack(side='left', padx=(0, 8))
+            scan_prog_bar = ttk.Progressbar(scan_prog_f, maximum=total,
+                                            mode='determinate')
+            scan_prog_bar.pack(side='left', fill='x', expand=True)
+
+            _scan_cancel = [False]
+
+            def _cancel_scan():
+                _scan_cancel[0] = True
+                scan_cancel_btn.configure(state='disabled')
+
+            scan_cancel_btn = ttk.Button(scan_prog_f, text="Cancel",
+                                         command=_cancel_scan, width=7)
+            scan_cancel_btn.pack(side='right', padx=(4, 0))
+
+            def _scan_worker():
+                import time as _time
+                t0 = _time.monotonic()
+                added = 0
+                for i, (fp, ext) in enumerate(collected):
+                    if _scan_cancel[0]:
+                        break
+
+                    s, e = _parse_episode_info(fp)
+                    item = {'path': fp, 'season': s,
+                            'episode': e, 'ext': ext}
+                    if s == 'date':
+                        item['air_date'] = e
+                        item['season'] = None
+                        item['episode'] = None
+                    if ext in VIDEO_EXTENSIONS:
+                        item['media_tags'] = _probe_media_tags(fp)
+                    _file_items.append(item)
+                    added += 1
+
+                    # Update progress bar (throttled)
+                    elapsed = _time.monotonic() - t0
+                    if i > 0:
+                        per_file = elapsed / (i + 1)
+                        eta = per_file * (total - i - 1)
+                        if eta >= 60:
+                            eta_str = f" — {int(eta // 60)}m {int(eta % 60)}s left"
+                        else:
+                            eta_str = f" — {int(eta)}s left"
+                    else:
+                        eta_str = ""
+                    win.after(0, lambda idx=i, es=eta_str: (
+                        scan_prog_bar.configure(value=idx + 1),
+                        scan_prog_lbl.configure(
+                            text=f"Scanning {idx + 1}/{total} files{es}")))
+
+                def _finish(cnt=added):
+                    scan_prog_f.destroy()
+                    _scanning_files[0] = False
+                    if _scan_cancel[0]:
+                        _log(f"Scan cancelled — added {cnt} of {total} files",
+                             'WARNING')
+                    else:
+                        _v = sum(1 for i in _file_items
+                                 if i['ext'] in VIDEO_EXTENSIONS)
+                        _s = sum(1 for i in _file_items
+                                 if i['ext'] in SUBTITLE_EXTENSIONS)
+                        elapsed = _time.monotonic() - t0
+                        _log(f"Added {cnt} files ({_v} video, {_s} subtitle)"
+                             f" in {elapsed:.1f}s")
+                    if cnt > 0:
+                        _auto_load_shows()
+                    else:
+                        _refresh_preview()
+                win.after(0, _finish)
+
+            t = threading.Thread(target=_scan_worker, daemon=True)
+            t.start()
 
         def _on_drop(event):
             raw = event.data

@@ -37,6 +37,7 @@ from .subtitle_filters import (
     filter_remove_hi, filter_remove_caps_hi,
     filter_remove_music_notes, filter_fix_caps,
     filter_remove_tags, filter_remove_ads,
+    filter_fix_ocr,
     filter_remove_offscreen_quotes,
     filter_remove_leading_dashes,
     filter_remove_duplicates, filter_merge_short,
@@ -853,6 +854,8 @@ def open_standalone_subtitle_editor(app):
 
         filter_menu.add_command(label="Fix Music Notes  ♪ (OCR)",
                                 command=_show_fix_music_notes_preview)
+        filter_menu.add_command(label="Fix OCR Errors  '' | 0",
+                                command=lambda: apply_filter(filter_fix_ocr, "Fix OCR Errors"))
         filter_menu.add_command(label="Remove Leading Dashes  -",
                                 command=lambda: apply_filter(filter_remove_leading_dashes, "Remove Leading Dashes"))
 
@@ -4235,6 +4238,8 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
 
         filter_menu.add_command(label="Fix Music Notes  ♪ (OCR)",
                                 command=_show_fix_music_notes_preview_int)
+        filter_menu.add_command(label="Fix OCR Errors  '' | 0",
+                                command=lambda: apply_filter(filter_fix_ocr, "Fix OCR Errors"))
         filter_menu.add_command(label="Remove Leading Dashes  -",
                                 command=lambda: apply_filter(filter_remove_leading_dashes, "Remove Leading Dashes"))
 

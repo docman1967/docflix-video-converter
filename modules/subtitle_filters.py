@@ -570,6 +570,68 @@ def filter_fix_music_notes(cues):
     return result
 
 
+# ═══════════════════════════════════════════════════════════════════
+# OCR Error Corrections
+# ═══════════════════════════════════════════════════════════════════
+
+# Each entry: (compiled_regex, replacement, description)
+# Patterns are applied in order. Add new OCR fixes here.
+_RSQUOTE = '\u2019'   # ' right single quote (apostrophe)
+_LSQUOTE = '\u2018'   # ' left single quote
+_LDQUOTE = '\u201c'   # " left double quote
+_RDQUOTE = '\u201d'   # " right double quote
+
+OCR_FIXES = [
+    # '' (two left single quotes) → ' (apostrophe)
+    (re.compile(_LSQUOTE + _LSQUOTE), _RSQUOTE,
+     '\u2018\u2018 → \u2019'),
+    # '' (left + right single quote) used as apostrophe
+    (re.compile(_LSQUOTE + _RSQUOTE), _RSQUOTE,
+     '\u2018\u2019 → \u2019'),
+    # `` (two backticks) → " (left double quote)
+    (re.compile(r'``'), _LDQUOTE, '`` → \u201c'),
+    # '' (two straight single quotes) → " (right double quote)
+    (re.compile(r"''"), _RDQUOTE, "'' → \u201d"),
+    # Stray left single quote as apostrophe mid-word: word'word → word'word
+    (re.compile(r'(\w)' + _LSQUOTE + r'(\w)'),
+     r'\1' + _RSQUOTE + r'\2', 'mid-word \u2018 → \u2019'),
+    # |  (pipe) used as I or l
+    (re.compile(r'\|(?=[a-z])'), 'l', '| → l (before lowercase)'),
+    (re.compile(r'(?<=[a-zA-Z])\|'), 'l', '| → l (after letter)'),
+    (re.compile(r'\|(?=[A-Z\s\'' + _RSQUOTE + r',.!?])'), 'I',
+     '| → I (before uppercase/punctuation)'),
+    (re.compile(r'(?<=\s)\|(?=\s)'), 'I', '| → I (standalone)'),
+    (re.compile(r'^\|', re.MULTILINE), 'I', '| → I (start of line)'),
+    # 0 (zero) misread as O in all-caps words: W0RLD → WORLD
+    (re.compile(r'(?<=[A-Z])0(?=[A-Z])'), 'O',
+     '0 → O (between capitals)'),
+]
+
+
+def fix_ocr_text(text):
+    """Fix common OCR character misreads in subtitle text.
+
+    Returns the corrected text. See OCR_FIXES for the list of
+    corrections applied.
+    """
+    for pattern, replacement, _desc in OCR_FIXES:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def filter_fix_ocr(cues):
+    """Apply common OCR error corrections to all cues.
+
+    Fixes character-level misreads like '' → ', | → I/l, etc.
+    Returns a new list of cues. Does not remove cues.
+    """
+    result = []
+    for cue in cues:
+        fixed = fix_ocr_text(cue['text'])
+        result.append({**cue, 'text': fixed})
+    return result
+
+
 # ── Proper nouns for case conversion ──
 PROPER_NOUNS = {
     # Days
@@ -773,7 +835,7 @@ def filter_remove_tags(cues):
 BUILTIN_AD_PATTERNS = [
     r'subtitl(es|ed)\s+by\b.*',
     r'synced?\s*((&|and)\s*corrected)?\s+by\b.*',
-    r'caption(s|ed|ing)?\s+by\b.*',
+    r'caption(s|ed|ing)?\s+(provided|sponsored|delivered|produced)?\s*by\b.*',
     r'caption(s|ed|ing)?\s+paid\s+for\s+by\b.*',
     r'translated\s+by\b.*',
     r'corrections?\s+by\b.*',
@@ -792,8 +854,28 @@ def filter_remove_ads(cues, custom_patterns=None):
     indicator.
     """
     all_pattern_strs = list(BUILTIN_AD_PATTERNS)
+
+    # Custom patterns are treated as substring matches: if the user
+    # enters "toyota", it should match any line containing "toyota"
+    # (e.g. "Brought to you by Toyota").  Only wrap with .* if the
+    # pattern looks like a plain word/phrase (no regex anchors or
+    # wildcards already present).
+    _custom_compiled = []   # separate list for custom substring patterns
     if custom_patterns:
-        all_pattern_strs.extend(custom_patterns)
+        for p in custom_patterns:
+            try:
+                re.compile(p)
+                # If the pattern has no regex metacharacters that suggest
+                # the user intended anchored/advanced matching, wrap it
+                # as a substring match for the whole line
+                if not re.search(r'[\\^$.+*?\[\]{}()|]', p):
+                    _custom_compiled.append(
+                        re.compile(r'(?i)^.*' + re.escape(p) + r'.*$',
+                                   re.MULTILINE))
+                else:
+                    all_pattern_strs.append(p)
+            except re.error:
+                pass
 
     ad_patterns = []
     for p in all_pattern_strs:
@@ -805,12 +887,13 @@ def filter_remove_ads(cues, custom_patterns=None):
                            re.MULTILINE))
         except re.error:
             pass
+    ad_patterns.extend(_custom_compiled)
 
     url_pattern = re.compile(
         r'(?i)^\s*(?:https?://|www\.)\S+\s*$', re.MULTILINE)
     ad_check_parts = [
         r'(subtitl(es|ed)|synced?|caption(s|ed|ing)?|translated'
-        r'|corrections?|encoded|ripped)\s+(paid\s+for\s+)?by\b',
+        r'|corrections?|encoded|ripped)\s+(\w+\s+)*?by\b',
         r'opensubtitles', r'addic7ed', r'subscene',
     ]
     if custom_patterns:
