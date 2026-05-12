@@ -45,24 +45,49 @@ def detect_closed_captions(filepath):
 
 
 def extract_closed_captions_to_srt(filepath, output_srt_path, timeout=None):
-    """Extract ATSC A53 closed captions to SRT using ccextractor (if available).
-    Returns True on success (and output file has content), False otherwise.
-    timeout is calculated from video duration if not provided."""
-    import shutil
-    if not shutil.which('ccextractor'):
-        return False
+    """Extract ATSC A53 closed captions (EIA-608/CEA-708) to SRT.
+    Uses ffmpeg lavfi movie[subcc] filter which works with all codecs
+    (H.264, HEVC, MPEG-2). Returns True on success, False otherwise."""
     try:
         if timeout is None:
             dur = get_video_duration(filepath)
-            # Allow roughly 1/4 of real-time plus a generous base
-            timeout = max(120, int(dur * 0.25) + 60) if dur else 600
-        cmd = ['ccextractor', filepath, '-o', output_srt_path, '--no_progress_bar', '-utf8']
+            timeout = max(120, int(dur * 0.5) + 60) if dur else 600
+        # Escape single quotes in filepath for lavfi movie filter
+        escaped = filepath.replace("'", "'\\''")
+        cmd = [
+            'ffmpeg', '-y', '-v', 'error',
+            '-f', 'lavfi',
+            '-i', f"movie='{escaped}'[out0+subcc]",
+            '-map', '0:1',
+            '-f', 'srt',
+            output_srt_path
+        ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 10:
+        if (os.path.exists(output_srt_path)
+                and os.path.getsize(output_srt_path) > 10):
+            _clean_cc_srt(output_srt_path)
             return True
         return False
     except Exception:
         return False
+
+
+def _clean_cc_srt(srt_path):
+    """Strip CC formatting artifacts from an SRT extracted via ffmpeg subcc."""
+    import re
+    try:
+        with open(srt_path, 'r', encoding='utf-8') as f:
+            text = f.read()
+        text = re.sub(r'</?font[^>]*>', '', text)       # <font ...>...</font>
+        text = re.sub(r'\{\\an\d+\}', '', text)         # {\an7} positioning
+        text = re.sub(r'\\h', ' ', text)                 # \h hard spaces
+        text = re.sub(r'  +', ' ', text)                 # collapse spaces
+        lines = [line.strip() for line in text.splitlines()]
+        text = '\n'.join(lines)
+        with open(srt_path, 'w', encoding='utf-8') as f:
+            f.write(text)
+    except Exception:
+        pass
 
 
 # Encoder flags to enable A53 CC passthrough (embedded in video bitstream)
@@ -75,6 +100,32 @@ _A53CC_ENCODER_FLAGS = {
     'h264_qsv':    [],
     'hevc_vaapi':  [],            # uses -sei a53_cc which is on by default
     'h264_vaapi':  [],
+}
+
+
+def get_video_codec(filepath):
+    """Return the codec name of the first video stream (e.g. 'hevc', 'h264', 'mpeg2video')."""
+    try:
+        cmd = [
+            'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=codec_name',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            filepath
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+# Bitstream filter maps for stripping closed captions (SEI NAL units) per codec.
+# These remove SEI messages that carry A53/EIA-608/CEA-708 CC data.
+CC_STRIP_BSF = {
+    'hevc':       'filter_units=remove_types=39|40',    # PREFIX_SEI + SUFFIX_SEI
+    'h264':       'filter_units=remove_types=6',        # SEI NAL unit type
+    'mpeg2video': 'filter_units=remove_types=178',      # user data start code
 }
 
 

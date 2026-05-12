@@ -18,6 +18,7 @@ from tkinter import ttk, messagebox
 from .constants import SUBTITLE_LANGUAGES, LANG_CODE_TO_NAME
 from .chapters import generate_auto_chapters, chapters_to_ffmetadata, format_chapter_time, parse_chapter_time
 from .utils import scaled_geometry, scaled_minsize
+from .gpu import detect_closed_captions
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -661,8 +662,21 @@ def build_full_report(filepath, data):
                 sub_lines.append('')
             sub_lines.extend(_build_subtitle_section(s))
             sub_count += 1
+    # Detect EIA-608 closed captions embedded in video stream
+    has_cc = detect_closed_captions(filepath)
+    if has_cc:
+        if sub_lines:
+            sub_lines.append('')
+        sub_lines.append(f'  CLOSED CAPTIONS — EIA-608')
+        sub_lines.append(f'  {"─" * 52}')
+        sub_lines.append(f'    Type:             EIA-608 / CEA-708')
+        sub_lines.append(f'    Source:           Embedded in video stream (SEI)')
+        sub_lines.append(f'    Language:         English (assumed)')
+        sub_lines.append(f'    Note:             Not a separate stream — encoded')
+        sub_lines.append(f'                      in video bitstream NAL units')
+        sub_count += 1
     if sub_lines:
-        header = [f'{"═" * 56}', f'  SUBTITLES ({sub_count} stream{"s" if sub_count != 1 else ""})',
+        header = [f'{"═" * 56}', f'  SUBTITLES ({sub_count} track{"s" if sub_count != 1 else ""})',
                   f'{"═" * 56}']
         sections['Subtitles'] = '\n'.join(header + sub_lines)
 
@@ -1143,7 +1157,8 @@ def show_enhanced_media_info(app, filepath, parent=None):
     # TAB: Subtitles (editable per stream)
     # ══════════════════════════════════════════════════════════════
     sub_streams = [s for s in data['streams'] if s.get('codec_type') == 'subtitle']
-    if sub_streams:
+    has_cc = detect_closed_captions(filepath)
+    if sub_streams or has_cc:
         sub_frame = ttk.Frame(notebook, padding=4)
         notebook.add(sub_frame, text=' Subtitles ')
         sub_canvas, sub_inner = _create_scrollable_frame(sub_frame)
@@ -1186,6 +1201,24 @@ def show_enhanced_media_info(app, filepath, parent=None):
                 row=r, column=0, columnspan=2, sticky='ew', pady=4); r += 1
 
             r = _build_stream_editor(lf, stream, _DISP_FLAGS_SUBTITLE, r)
+
+        # ── Closed Captions (EIA-608) virtual entry ──
+        if has_cc:
+            lf = ttk.LabelFrame(sub_inner,
+                                text='CLOSED CAPTIONS — EIA-608  [ENG]',
+                                padding=6)
+            lf.grid(row=srow, column=0, columnspan=2, sticky='ew',
+                    padx=4, pady=(4, 2))
+            lf.columnconfigure(1, weight=1)
+            srow += 1
+
+            r = 0
+            _add_readonly_row(lf, r, 'Type:', 'EIA-608 / CEA-708'); r += 1
+            _add_readonly_row(lf, r, 'Source:',
+                              'Embedded in video stream (SEI NAL units)'); r += 1
+            _add_readonly_row(lf, r, 'Language:', 'English (assumed)'); r += 1
+            _add_readonly_row(lf, r, 'Note:',
+                              'Not a separate stream — use Strip CC to remove'); r += 1
 
         tab_widgets['Subtitles'] = None
 
@@ -1766,3 +1799,64 @@ def show_enhanced_media_info(app, filepath, parent=None):
 
     _on_close_fn[0] = _on_close  # register with the WM_DELETE_WINDOW handler
     ttk.Button(btn_frame, text='Close', command=_on_close).pack(side='right')
+
+
+def main():
+    """Launch Media Details as a standalone application.
+    Accepts a file path as a command-line argument."""
+    import sys
+    from .standalone import create_standalone_root
+
+    root, app = create_standalone_root(
+        title="Docflix Media Details",
+        geometry="800x680",
+        minsize=(640, 450),
+    )
+
+    # Collect file paths from command-line arguments
+    filepaths = [os.path.abspath(a) for a in sys.argv[1:] if os.path.isfile(a)]
+
+    if not filepaths:
+        # No file arguments — show a file picker (multi-select)
+        from .utils import ask_open_files
+        paths = ask_open_files(
+            parent=root,
+            title="Select video file(s)",
+            filetypes=[("Video files",
+                        "*.mkv *.mp4 *.avi *.mov *.wmv *.flv *.webm *.ts *.m2ts *.mts"),
+                       ("All files", "*.*")],
+        )
+        if paths:
+            filepaths = list(paths)
+
+    if filepaths:
+        root.withdraw()
+        for i, fp in enumerate(filepaths):
+            show_enhanced_media_info(app, fp)
+        # Cascade windows so they don't stack on top of each other
+        root.update_idletasks()
+        for i, w in enumerate(w for w in root.winfo_children()
+                              if isinstance(w, tk.Toplevel) and w.winfo_exists()):
+            if i > 0:
+                try:
+                    x = w.winfo_x() + (i * 30)
+                    y = w.winfo_y() + (i * 30)
+                    w.geometry(f'+{x}+{y}')
+                except Exception:
+                    pass
+        # Non-modal Toplevels — when all close, quit the app
+        def _watch_for_close():
+            toplevels = [w for w in root.winfo_children()
+                         if isinstance(w, tk.Toplevel) and w.winfo_exists()]
+            if toplevels:
+                root.after(200, _watch_for_close)
+            else:
+                root.destroy()
+        root.after(200, _watch_for_close)
+        root.mainloop()
+    else:
+        root.destroy()
+
+
+if __name__ == '__main__':
+    main()

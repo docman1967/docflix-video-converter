@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.0.1"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -1020,24 +1020,50 @@ def detect_closed_captions(filepath):
 
 
 def extract_closed_captions_to_srt(filepath, output_srt_path, timeout=None):
-    """Extract ATSC A53 closed captions to SRT using ccextractor (if available).
-    Returns True on success (and output file has content), False otherwise.
-    timeout is calculated from video duration if not provided."""
-    import shutil
-    if not shutil.which('ccextractor'):
-        return False
+    """Extract ATSC A53 closed captions (EIA-608/CEA-708) to SRT.
+    Uses ffmpeg lavfi movie[subcc] filter which works with all codecs
+    (H.264, HEVC, MPEG-2). Returns True on success, False otherwise."""
     try:
         if timeout is None:
             dur = get_video_duration(filepath)
-            # Allow roughly 1/4 of real-time plus a generous base
-            timeout = max(120, int(dur * 0.25) + 60) if dur else 600
-        cmd = ['ccextractor', filepath, '-o', output_srt_path, '--no_progress_bar', '-utf8']
+            timeout = max(120, int(dur * 0.5) + 60) if dur else 600
+        # Escape single quotes in filepath for lavfi movie filter
+        escaped = filepath.replace("'", "'\\''")
+        cmd = [
+            'ffmpeg', '-y', '-v', 'error',
+            '-f', 'lavfi',
+            '-i', f"movie='{escaped}'[out0+subcc]",
+            '-map', '0:1',
+            '-f', 'srt',
+            output_srt_path
+        ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 10:
+        if (os.path.exists(output_srt_path)
+                and os.path.getsize(output_srt_path) > 10):
+            # Clean up CC artifacts: font tags, ASS positioning, hard spaces
+            _clean_cc_srt(output_srt_path)
             return True
         return False
     except Exception:
         return False
+
+
+def _clean_cc_srt(srt_path):
+    """Strip CC formatting artifacts from an SRT extracted via ffmpeg subcc."""
+    import re
+    try:
+        with open(srt_path, 'r', encoding='utf-8') as f:
+            text = f.read()
+        text = re.sub(r'</?font[^>]*>', '', text)       # <font ...>...</font>
+        text = re.sub(r'\{\\an\d+\}', '', text)         # {\an7} positioning
+        text = re.sub(r'\\h', ' ', text)                 # \h hard spaces
+        text = re.sub(r'  +', ' ', text)                 # collapse spaces
+        lines = [line.strip() for line in text.splitlines()]
+        text = '\n'.join(lines)
+        with open(srt_path, 'w', encoding='utf-8') as f:
+            f.write(text)
+    except Exception:
+        pass
 
 
 # Encoder flags to enable A53 CC passthrough (embedded in video bitstream)
@@ -3298,33 +3324,56 @@ class VideoConverter:
             # ── Closed caption handling (ATSC A53 / EIA-608 / CEA-708) ──
             cc_srt_path = None
             has_cc = settings.get('has_closed_captions', False)
-            if has_cc and settings.get('extract_cc', True):
+            strip_cc = settings.get('strip_cc', False)
+
+            if has_cc and strip_cc:
+                self.log("Stripping closed captions (CC data will not be preserved)", 'INFO')
+            elif has_cc and settings.get('extract_cc', True):
                 import tempfile
-                import shutil as _shutil
-                if _shutil.which('ccextractor'):
-                    cc_tmp = tempfile.NamedTemporaryFile(suffix='_cc.srt', delete=False, dir=os.path.dirname(output_path))
-                    cc_tmp.close()
-                    self.log("Extracting ATSC A53 closed captions with ccextractor…", 'INFO')
-                    if extract_closed_captions_to_srt(input_path, cc_tmp.name):
-                        cc_srt_path = cc_tmp.name
-                        self.log("Closed captions extracted to SRT successfully", 'SUCCESS')
-                    else:
-                        self.log("ccextractor could not extract caption data", 'WARNING')
-                        try:
-                            os.remove(cc_tmp.name)
-                        except OSError:
-                            pass
+                cc_tmp = tempfile.NamedTemporaryFile(suffix='_cc.srt', delete=False, dir=os.path.dirname(output_path))
+                cc_tmp.close()
+                self.log("Extracting closed captions via ffmpeg…", 'INFO')
+                if extract_closed_captions_to_srt(input_path, cc_tmp.name):
+                    cc_srt_path = cc_tmp.name
+                    self.log("Closed captions extracted to SRT successfully", 'SUCCESS')
                 else:
-                    self.log("ccextractor not found — CC will be preserved via A53 passthrough only", 'INFO')
+                    self.log("Could not extract closed caption data", 'WARNING')
+                    try:
+                        os.remove(cc_tmp.name)
+                    except OSError:
+                        pass
 
             # A53 CC passthrough: embed CC data in the output video bitstream
             # This preserves CC for players that support it (VLC, mpv, etc.)
             cc_passthrough_flags = []
-            if has_cc and video_enc_name and video_enc_name != 'copy':
+            cc_strip_bsf = None
+            if has_cc and not strip_cc and video_enc_name and video_enc_name != 'copy':
                 flags = _A53CC_ENCODER_FLAGS.get(video_enc_name)
                 if flags is not None:
                     cc_passthrough_flags = flags
                     self.log(f"A53 CC passthrough enabled for {video_enc_name}", 'INFO')
+            elif has_cc and strip_cc and video_enc_name == 'copy':
+                # Stream copy — need bitstream filter to strip CC from NAL units
+                _CC_STRIP_BSF = {
+                    'hevc':       'filter_units=remove_types=39|40',
+                    'h264':       'filter_units=remove_types=6',
+                    'mpeg2video': 'filter_units=remove_types=178',
+                }
+                try:
+                    _probe_cmd = [
+                        'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                        '-show_entries', 'stream=codec_name',
+                        '-of', 'default=noprint_wrappers=1:nokey=1',
+                        input_path
+                    ]
+                    _probe_result = subprocess.run(_probe_cmd, capture_output=True, text=True, timeout=10)
+                    src_codec = _probe_result.stdout.strip() if _probe_result.returncode == 0 else ''
+                except Exception:
+                    src_codec = ''
+                bsf = _CC_STRIP_BSF.get(src_codec)
+                if bsf:
+                    cc_strip_bsf = bsf
+                    self.log(f"CC strip bitstream filter applied for {src_codec}", 'INFO')
 
             # ── Chapter injection ──
             chapters_metadata_path = None
@@ -3405,6 +3454,12 @@ class VideoConverter:
                     # A53 CC passthrough flags
                     if cc_passthrough_flags:
                         c.extend(cc_passthrough_flags)
+                    # Strip CC: suppress A53 CC output during encode
+                    elif strip_cc and video_enc_name != 'copy':
+                        c.extend(['-write_a53_cc', '0'])
+                    # Strip CC: bitstream filter for stream copy
+                    if cc_strip_bsf:
+                        c.extend(['-bsf:v', cc_strip_bsf])
 
                     if video_enc_name != 'copy':
                         preset = settings.get('preset', '')
@@ -4065,6 +4120,7 @@ class VideoConverterApp:
         self.skip_existing = tk.BooleanVar(value=True)
         self.delete_originals = tk.BooleanVar(value=False)
         self.strip_internal_subs = tk.BooleanVar(value=False)
+        self.strip_cc = tk.BooleanVar(value=False)
         self.two_pass = tk.BooleanVar(value=False)
         self.verify_output = tk.BooleanVar(value=True)
         self.notify_sound = tk.BooleanVar(value=True)
@@ -4671,6 +4727,8 @@ class VideoConverterApp:
                        variable=self.verify_output).pack(side='left', padx=5)
         ttk.Checkbutton(self.check_frame, text="Remove existing subtitles",
                        variable=self.strip_internal_subs).pack(side='left', padx=5)
+        ttk.Checkbutton(self.check_frame, text="Strip closed captions",
+                       variable=self.strip_cc).pack(side='left', padx=5)
 
         # Metadata cleanup options - Row 8
         self.metadata_frame = ttk.Frame(settings_frame)
@@ -4871,7 +4929,7 @@ class VideoConverterApp:
         self.tree_context_menu = tk.Menu(self.root, tearoff=0)
         self.tree_context_menu.add_command(label="▶ Play Source File",  command=self.play_source_file)
         self.tree_context_menu.add_command(label="▶ Play Output File",  command=self.play_output_file)
-        self.tree_context_menu.add_command(label="ℹ️ Enhanced Media Details...", command=self.show_enhanced_media_info)
+        self.tree_context_menu.add_command(label="ℹ️ Media Details...", command=self.show_enhanced_media_info)
         self.tree_context_menu.add_separator()
         self.tree_context_menu.add_command(label="⚙️ Override Settings...", command=self.show_override_dialog)
         self.tree_context_menu.add_command(label="✖ Clear Override", command=self.clear_override)
@@ -5610,6 +5668,129 @@ class VideoConverterApp:
         # Probe subtitle streams
         streams = get_subtitle_streams(filepath)
 
+        # ── Add CC as a virtual subtitle track if detected ──
+        cc_temp_srt = [None]  # mutable container for on-demand extraction
+        has_cc = file_info.get('has_closed_captions', False)
+        if has_cc:
+            # Add virtual stream entry — extraction is deferred until needed
+            cc_stream = {
+                'index':      'cc',         # special marker
+                'codec_name': 'eia_608',
+                'language':   'eng',
+                'title':      'Closed Captions (CC)',
+                'forced':     False,
+                'sdh':        False,
+                'default':    False,
+                'empty':      False,
+                'num_frames': -1,
+                '_cc_srt':    None,          # populated on-demand
+            }
+            streams.append(cc_stream)
+
+        def _ensure_cc_extracted():
+            """Extract CC to temp SRT on first use with progress dialog.
+            Returns path or None."""
+            if cc_temp_srt[0]:
+                return cc_temp_srt[0]
+            import tempfile, threading, re as _re
+            try:
+                cc_tmp = tempfile.NamedTemporaryFile(
+                    suffix='_cc.srt', delete=False,
+                    dir=os.path.dirname(filepath))
+                cc_tmp.close()
+            except Exception as e:
+                self.add_log(f"CC extraction error: {e}", 'ERROR')
+                return None
+
+            # Get duration for progress calculation
+            dur_secs = get_video_duration(filepath) or 0
+
+            # Build ffmpeg command
+            escaped = filepath.replace("'", "'\\''")
+            cmd = [
+                'ffmpeg', '-y',
+                '-f', 'lavfi',
+                '-i', f"movie='{escaped}'[out0+subcc]",
+                '-map', '0:1',
+                '-f', 'srt',
+                cc_tmp.name
+            ]
+
+            # Progress dialog
+            prog_dlg = tk.Toplevel(dlg)
+            prog_dlg.title("Extracting Closed Captions")
+            prog_dlg.geometry("400x100")
+            prog_dlg.transient(dlg)
+            prog_dlg.resizable(False, False)
+            self._center_on_main(prog_dlg)
+            prog_var = tk.DoubleVar(value=0)
+            prog_label = ttk.Label(prog_dlg, text="Extracting closed captions…",
+                                   padding=(12, 8))
+            prog_label.pack(fill='x')
+            prog_bar = ttk.Progressbar(prog_dlg, variable=prog_var,
+                                       maximum=100, mode='determinate')
+            prog_bar.pack(fill='x', padx=12, pady=(0, 8))
+            cancel_flag = [False]
+            proc_ref = [None]
+
+            def _on_cancel():
+                cancel_flag[0] = True
+                if proc_ref[0]:
+                    try:
+                        proc_ref[0].kill()
+                    except Exception:
+                        pass
+            cancel_btn = ttk.Button(prog_dlg, text="Cancel", command=_on_cancel)
+            cancel_btn.pack(pady=(0, 8))
+            prog_dlg.protocol('WM_DELETE_WINDOW', _on_cancel)
+
+            result = [False]
+
+            def _extract_thread():
+                try:
+                    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.PIPE, text=True)
+                    proc_ref[0] = proc
+                    for line in proc.stderr:
+                        if cancel_flag[0]:
+                            proc.kill()
+                            break
+                        m = _re.search(r'time=(\d+):(\d+):(\d+)\.(\d+)', line)
+                        if m and dur_secs > 0:
+                            t = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+                            pct = min(99, (t / dur_secs) * 100)
+                            prog_dlg.after(0, lambda p=pct: prog_var.set(p))
+                            prog_dlg.after(0, lambda p=int(pct):
+                                prog_label.configure(text=f"Extracting closed captions… {p}%"))
+                    proc.wait()
+                    if (not cancel_flag[0]
+                            and os.path.exists(cc_tmp.name)
+                            and os.path.getsize(cc_tmp.name) > 10):
+                        _clean_cc_srt(cc_tmp.name)
+                        result[0] = True
+                except Exception:
+                    pass
+                prog_dlg.after(0, prog_dlg.destroy)
+
+            threading.Thread(target=_extract_thread, daemon=True).start()
+            prog_dlg.grab_set()
+            prog_dlg.wait_window()
+
+            if result[0]:
+                cc_temp_srt[0] = cc_tmp.name
+                for s in streams:
+                    if s.get('index') == 'cc':
+                        s['_cc_srt'] = cc_tmp.name
+                self.add_log("Closed captions extracted successfully", 'SUCCESS')
+                return cc_tmp.name
+            else:
+                self.add_log("CC extraction failed or cancelled", 'WARNING')
+                try:
+                    os.remove(cc_tmp.name)
+                except OSError:
+                    pass
+                return None
+
         dlg = tk.Toplevel(self.root)
         dlg.title(f"Internal Subtitles — {os.path.basename(filepath)}")
         dlg.geometry("700x420")
@@ -5619,38 +5800,8 @@ class VideoConverterApp:
 
         # ── Header info ──
         if not streams:
-            has_cc = file_info.get('has_closed_captions', False)
-            if has_cc:
-                import shutil as _shutil
-                has_ccextractor = bool(_shutil.which('ccextractor'))
-
-                cc_frame = ttk.Frame(dlg, padding=20)
-                cc_frame.pack(fill='x')
-                ttk.Label(cc_frame,
-                          text="No subtitle streams found, but ATSC A53 closed captions detected.",
-                          font=('Helvetica', 11)).pack(anchor='w')
-
-                # CC passthrough is always enabled (embedded in video bitstream)
-                ttk.Label(cc_frame,
-                          text="✔ CC data will be preserved in the video stream (A53 passthrough).",
-                          font=('Helvetica', 10)).pack(anchor='w', pady=(4, 0))
-
-                if has_ccextractor:
-                    ttk.Label(cc_frame,
-                              text="✔ ccextractor found — CC can also be extracted as a separate SRT subtitle track.",
-                              font=('Helvetica', 10)).pack(anchor='w', pady=(2, 8))
-                    cc_var = tk.BooleanVar(value=file_info.get('extract_cc', True))
-                    def on_cc_toggle():
-                        file_info['extract_cc'] = cc_var.get()
-                    tk.Checkbutton(cc_frame, text="Extract CC to SRT subtitle track during conversion",
-                                   variable=cc_var, command=on_cc_toggle).pack(anchor='w')
-                else:
-                    ttk.Label(cc_frame,
-                              text="ℹ Install ccextractor to also extract CC as a separate SRT subtitle track.",
-                              font=('Helvetica', 10)).pack(anchor='w', pady=(2, 8))
-            else:
-                ttk.Label(dlg, text="No subtitle tracks found in this file.",
-                          font=('Helvetica', 11), padding=20).pack()
+            ttk.Label(dlg, text="No subtitle tracks found in this file.",
+                      font=('Helvetica', 11), padding=20).pack()
             ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=10)
             dlg.grab_set()
             dlg.wait_window()
@@ -5752,7 +5903,8 @@ class VideoConverterApp:
             ttk.Checkbutton(list_frame, variable=keep_var).grid(row=r, column=0, padx=4)
 
             # Stream index
-            ttk.Label(list_frame, text=f"#{s['index']}").grid(row=r, column=1, sticky='w', padx=4)
+            idx_text = 'CC' if s['index'] == 'cc' else f"#{s['index']}"
+            ttk.Label(list_frame, text=idx_text).grid(row=r, column=1, sticky='w', padx=4)
 
             # Language
             ttk.Label(list_frame, text=s['language'].upper()).grid(row=r, column=2, sticky='w', padx=4)
@@ -5783,14 +5935,33 @@ class VideoConverterApp:
 
             # Edit button (only for text-based, non-empty subtitles)
             if s['codec_name'] not in BITMAP_SUB_CODECS and not is_empty:
-                edit_btn = ttk.Button(list_frame, text="✏️", width=3,
-                    command=lambda si=s['index'], fi=file_info, fp=filepath: (
-                        self.show_subtitle_editor(fp, si, fi)
-                    ))
+                if s['index'] == 'cc':
+                    # CC track: extract on-demand, then open editor
+                    def _edit_cc(fi=file_info, fp=filepath):
+                        srt = _ensure_cc_extracted()
+                        if srt:
+                            self.show_subtitle_editor(fp, 'cc', fi,
+                                                      external_sub_path=srt)
+                        else:
+                            messagebox.showwarning("CC Extraction",
+                                "Could not extract closed captions from this file.")
+                    edit_btn = ttk.Button(list_frame, text="✏️", width=3,
+                        command=_edit_cc)
+                else:
+                    edit_btn = ttk.Button(list_frame, text="✏️", width=3,
+                        command=lambda si=s['index'], fi=file_info, fp=filepath: (
+                            self.show_subtitle_editor(fp, si, fi)
+                        ))
                 edit_btn.grid(row=r, column=6, padx=2, pady=2)
 
         # Unbind mousewheel when dialog closes
         def on_close():
+            # Clean up temp CC SRT if it was extracted
+            if cc_temp_srt[0] and os.path.exists(cc_temp_srt[0]):
+                try:
+                    os.remove(cc_temp_srt[0])
+                except OSError:
+                    pass
             dlg.destroy()
         dlg.protocol('WM_DELETE_WINDOW', on_close)
 
@@ -5861,6 +6032,30 @@ class VideoConverterApp:
                 out_name += out_ext
                 out_path = str(out_dir / out_name)
 
+                # ── CC track: extract on-demand, then copy/convert ──
+                if s.get('index') == 'cc':
+                    cc_srt_src = _ensure_cc_extracted()
+                    if not cc_srt_src:
+                        self.add_log("Could not extract closed captions — skipping", 'ERROR')
+                        continue
+                    self.add_log(f"Saving closed captions (CC) → {out_name}", 'INFO')
+                    try:
+                        if out_ext == '.srt' or fmt == 'extract only':
+                            shutil.copy2(cc_srt_src, out_path)
+                        else:
+                            # Convert SRT to target format via ffmpeg
+                            cmd = ['ffmpeg', '-y', '-i', cc_srt_src,
+                                   '-c:s', out_codec, out_path]
+                            subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                            self.add_log(f"Extracted: {out_name}", 'SUCCESS')
+                            extracted += 1
+                        else:
+                            self.add_log(f"CC extraction produced empty output", 'ERROR')
+                    except Exception as e:
+                        self.add_log(f"CC extract error: {e}", 'ERROR')
+                    continue
+
                 # ── Bitmap subtitle → text format requires OCR ──
                 is_bitmap = s['codec_name'] in BITMAP_SUB_CODECS
                 is_text_target = fmt in ('srt', 'ass', 'webvtt', 'ttml', 'extract only')
@@ -5906,6 +6101,18 @@ class VideoConverterApp:
         def do_save():
             sub_settings = {}
             for s, (keep_var, fmt_var) in zip(streams, track_vars):
+                if s['index'] == 'cc':
+                    # CC virtual track: translate format choice to CC settings
+                    fmt = fmt_var.get()
+                    if fmt == 'drop':
+                        file_info['strip_cc'] = True
+                        file_info['extract_cc'] = False
+                    elif keep_var.get():
+                        file_info['strip_cc'] = False
+                        file_info['extract_cc'] = True
+                    else:
+                        file_info['extract_cc'] = False
+                    continue  # don't add to sub_settings
                 sub_settings[s['index']] = {
                     'keep':   keep_var.get(),
                     'format': fmt_var.get(),
@@ -6379,10 +6586,8 @@ class VideoConverterApp:
         est = estimate_output_size(str(filepath), self._current_settings())
         dur_secs = get_video_duration(str(filepath))
         dur_str = format_duration(dur_secs)
-        # Detect ATSC A53 closed captions (common in MPEG-2 .ts files)
-        has_cc = False
-        if filepath.suffix.lower() in ('.ts', '.m2ts', '.mts'):
-            has_cc = detect_closed_captions(str(filepath))
+        # Detect ATSC A53 closed captions (EIA-608/CEA-708 embedded in video stream)
+        has_cc = detect_closed_captions(str(filepath))
 
         file_info = {
             'name': f,
@@ -6767,6 +6972,7 @@ class VideoConverterApp:
             'delete_originals':     self.delete_originals.get(),
             'hw_decode':            self.hw_decode.get(),
             'strip_internal_subs':  self.strip_internal_subs.get(),
+            'strip_cc':             self.strip_cc.get(),
             'two_pass':             self.two_pass.get(),
             'verify_output':        self.verify_output.get(),
             'notify_sound':         self.notify_sound.get(),
@@ -6832,6 +7038,7 @@ class VideoConverterApp:
             self.delete_originals.set(prefs.get('delete_originals', self.delete_originals.get()))
             self.hw_decode.set(prefs.get('hw_decode',           self.hw_decode.get()))
             self.strip_internal_subs.set(prefs.get('strip_internal_subs', self.strip_internal_subs.get()))
+            self.strip_cc.set(prefs.get('strip_cc', self.strip_cc.get()))
             self.two_pass.set(prefs.get('two_pass',             self.two_pass.get()))
             self.strip_chapters.set(prefs.get('strip_chapters', self.strip_chapters.get()))
             self.strip_metadata_tags.set(prefs.get('strip_metadata_tags', self.strip_metadata_tags.get()))
@@ -7564,7 +7771,7 @@ class VideoConverterApp:
         """Show the enhanced media info dialog for the selected file."""
         item, index = self._get_selected_file_index()
         if index is None:
-            messagebox.showinfo("Enhanced Media Details",
+            messagebox.showinfo("Media Details",
                                 "Please select a file from the list first.")
             return
         filepath = self.files[index]['path']
@@ -7582,7 +7789,7 @@ class VideoConverterApp:
                 spec.loader.exec_module(mod)
                 mod.show_enhanced_media_info(self, filepath)
             else:
-                messagebox.showerror("Enhanced Media Details",
+                messagebox.showerror("Media Details",
                                      "modules/media_info.py not found.")
 
     def test_encode(self):
@@ -8431,6 +8638,7 @@ class VideoConverterApp:
                 'container':         ov.get('container', self.container_format.get()),
                 'has_closed_captions': file_info.get('has_closed_captions', False),
                 'extract_cc':          file_info.get('extract_cc', False),
+                'strip_cc':            file_info.get('strip_cc', self.strip_cc.get()),
                 'strip_chapters':      ov.get('strip_chapters',      settings['strip_chapters']),
                 'strip_metadata_tags': ov.get('strip_metadata_tags', settings['strip_metadata_tags']),
                 'set_track_metadata':  ov.get('set_track_metadata',  settings['set_track_metadata']),

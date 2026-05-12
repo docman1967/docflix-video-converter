@@ -1,7 +1,7 @@
 # Docflix Media Suite — Project Summary
 
-**Last Updated:** 2026-05-11 (rev 66)  
-**Version:** 3.0.0  
+**Last Updated:** 2026-05-12 (rev 68)  
+**Version:** 3.0.1  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/`  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -70,6 +70,7 @@
 | `docflix-media` | `media_processor.py` | Media Processor (standalone) |
 | `docflix-scale` | `video_scaler.py` | Video Scaler (standalone) |
 | `docflix-whisper` | `whisper_transcriber.py` | Whisper Subtitle Transcriber (standalone) |
+| `docflix-info` | `media_info.py` | Media Details (standalone, "Open with" for video files, multi-file) |
 
 ---
 
@@ -635,6 +636,18 @@ git push
 ---
 
 ## Change Log
+
+### 2026-05-12 (Enhancement — Closed Caption Stripping)
+284. **CC detection extended to all video formats** — Removed the file extension gate that limited ATSC A53 closed caption detection to `.ts`/`.m2ts`/`.mts` files only. EIA-608/CEA-708 CC data can be embedded in any container (MKV, MP4, etc.) via video stream SEI NAL units, so detection now runs on all video files during scanning.
+285. **Strip closed captions — Main Converter** — Added "Strip closed captions" checkbox to the converter settings row. When enabled, CC data is suppressed during re-encoding (`-write_a53_cc 0`) and stripped via bitstream filter during stream copy (`-bsf:v filter_units=...`). Mutually exclusive with CC extraction/passthrough. New `strip_cc` setting flows through file_info → converter settings → engine, saved/loaded in preferences.
+286. **Strip closed captions — Media Processor** — Added full CC awareness to the remux-only Media Processor: CC detection and video codec probing during file scan, "CC" prefix in file tree for files with detected closed captions, "Strip closed captions" checkbox in Cleanup section and per-file override dialog. Uses codec-specific bitstream filters (`CC_STRIP_BSF` map) to strip SEI NAL units carrying CC data: HEVC (types 39|40), H.264 (type 6), MPEG-2 (type 178). Settings saved/loaded in Media Processor preferences.
+287. **New helpers in gpu.py** — Added `get_video_codec()` (ffprobe wrapper returning codec name of first video stream) and `CC_STRIP_BSF` dict (maps video codecs to their SEI-stripping bitstream filter strings). Both exported and used by converter.py and media_processor.py.
+288. **CC as virtual subtitle track in Internal Subtitles dialog** — When a file has detected closed captions, a virtual CC track appears in the track list (stream "CC", codec "eia_608", title "Closed Captions (CC)") alongside any real subtitle streams. Extraction is deferred — CC is only extracted via ffmpeg when the user clicks Edit or Extract. Users can: view/edit via the subtitle editor (✏️ button), extract to SRT/ASS/VTT/TTML, set format to "drop" to strip CC during conversion, or keep checked to preserve/extract CC. Save translates CC track choices into `strip_cc`/`extract_cc` file_info flags. Temp SRT is cleaned up on dialog close.
+289. **Replaced ccextractor with ffmpeg for CC extraction** — `extract_closed_captions_to_srt()` now uses ffmpeg's `lavfi movie[out0+subcc]` filter instead of ccextractor. This works with all video codecs (HEVC, H.264, MPEG-2) — ccextractor only supported H.264. Added `_clean_cc_srt()` post-processor that strips font tags, ASS positioning codes (`{\an7}`), hard spaces (`\h`), and collapses whitespace. Updated in both `gpu.py` and monolith. Added `-y` flag to overwrite temp files. Removed all ccextractor dependency checks from dialog and converter code paths.
+290. **CC extraction progress dialog** — On-demand CC extraction in the Internal Subtitles dialog now shows a progress window with a determinate progress bar, percentage label, and Cancel button. Runs ffmpeg in a background thread, parses `time=HH:MM:SS` from stderr against the file duration for progress percentage. Cancelling kills the ffmpeg process. Progress dialog blocks interaction with the parent dialog via `grab_set`/`wait_window`.
+291. **CC track in Media Details** — The Media Details app (`media_info.py`) now detects EIA-608 closed captions and displays them in both the text report and the GUI Subtitles tab. Text report shows a "CLOSED CAPTIONS — EIA-608" section with type, source, language, and note. GUI shows a read-only LabelFrame alongside regular subtitle streams with the same info fields. The Subtitles tab now appears even if the file has no subtitle streams but does have CC. Uses `detect_closed_captions()` from `gpu.py`.
+292. **Media Details standalone launch + "Open with"** — Added `main()` function to `media_info.py` for standalone use. Accepts a file path argument (for "Open with") or shows a file picker if launched without arguments. New `docflix-info` terminal command and `docflix-info.desktop` entry registered for video MIME types (MKV, MP4, AVI, MOV, WMV, FLV, WebM, TS, MPEG). `NoDisplay=true` so it appears only in "Open with" menus, not the app launcher. Installer creates command + desktop file; uninstaller removes both.
+293. **Renamed "Enhanced Media Details" to "Media Details"** — Updated context menu label and messagebox titles in the main converter app.
 
 ### 2026-05-11 (Version Bump)
 283. **Version bump to 3.0.0 in monolith** — Updated `APP_VERSION` in `video_converter.py` from `2.9.4` to `3.0.0` to match `modules/constants.py`. The version was missed in the last release.

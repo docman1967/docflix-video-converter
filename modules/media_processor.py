@@ -21,6 +21,7 @@ from .constants import (VIDEO_EXTENSIONS, SUBTITLE_EXTENSIONS, EDITION_PRESETS,
                         LANG_CODE_TO_NAME, SUBTITLE_LANGUAGES)
 from .chapters import generate_auto_chapters, chapters_to_ffmetadata
 from .utils import get_audio_info, get_subtitle_streams, ask_directory, ask_open_files, scaled_geometry, scaled_minsize
+from .gpu import detect_closed_captions, get_video_codec, CC_STRIP_BSF
 
 try:
     from tkinterdnd2 import DND_FILES
@@ -103,6 +104,7 @@ def open_media_processor(app):
         opt_strip_chapters = tk.BooleanVar(value=_mp.get('strip_chapters', False))
         opt_strip_tags     = tk.BooleanVar(value=_mp.get('strip_tags', False))
         opt_strip_subs     = tk.BooleanVar(value=_mp.get('strip_subs', False))
+        opt_strip_cc       = tk.BooleanVar(value=_mp.get('strip_cc', False))
         opt_set_metadata   = tk.BooleanVar(value=_mp.get('set_metadata', False))
         opt_meta_video     = tk.StringVar(value=_mp.get('meta_video', 'und'))
         opt_meta_audio     = tk.StringVar(value=_mp.get('meta_audio', 'eng'))
@@ -236,6 +238,8 @@ def open_media_processor(app):
                             variable=opt_strip_tags).pack(side='left', padx=4)
             ttk.Checkbutton(cr, text="Strip existing subtitles",
                             variable=opt_strip_subs).pack(side='left', padx=4)
+            ttk.Checkbutton(cr, text="Strip closed captions",
+                            variable=opt_strip_cc).pack(side='left', padx=4)
 
             # ── Subtitles ──
             sub_fr = ttk.LabelFrame(fr, text="Subtitles", padding=6)
@@ -600,6 +604,10 @@ def open_media_processor(app):
                     acodec += ' ✓'
             else:
                 acodec = '—'
+            # Detect video codec and closed captions
+            vcodec = get_video_codec(filepath) or ''
+            has_cc = detect_closed_captions(filepath)
+
             mp_files.append({
                 'path': filepath,
                 'name': name,
@@ -609,6 +617,8 @@ def open_media_processor(app):
                 'sub_info': subs,
                 'sub_count': len(subs),
                 'ext_subs': ext_subs_found,
+                'video_codec': vcodec,
+                'has_cc': has_cc,
                 'status': 'Ready',
                 'overrides': {},  # per-file operation overrides
             })
@@ -717,6 +727,8 @@ def open_media_processor(app):
                 size_mb = f'{f["size"] / (1024*1024):.1f} MB'
                 ext_str = ', '.join(_ext_sub_label(s) for s in f['ext_subs']) if f['ext_subs'] else '—'
                 name_display = f['name']
+                if f.get('has_cc'):
+                    name_display = 'CC ' + name_display
                 if f.get('overrides'):
                     name_display = '⚙️ ' + name_display
                 tree.insert('', 'end', values=(
@@ -738,6 +750,8 @@ def open_media_processor(app):
                 size_mb = f'{f["size"] / (1024*1024):.1f} MB'
                 ext_str = ', '.join(_ext_sub_label(s) for s in f['ext_subs']) if f['ext_subs'] else '—'
                 name_display = f['name']
+                if f.get('has_cc'):
+                    name_display = 'CC ' + name_display
                 if f.get('overrides'):
                     name_display = '⚙️ ' + name_display
                 tree.set(items[index], 'name', name_display)
@@ -849,6 +863,8 @@ def open_media_processor(app):
             f['sub_count'] = len(subs)
             f['size'] = os.path.getsize(f['path']) if os.path.exists(f['path']) else 0
             f['ext_subs'] = _detect_ext_subs(f['path'])
+            f['video_codec'] = get_video_codec(f['path']) or ''
+            f['has_cc'] = detect_closed_captions(f['path'])
             if audio:
                 acodec = audio[0]['codec_name'].upper()
                 if acodec in ('AC3', 'EAC3'):
@@ -898,11 +914,13 @@ def open_media_processor(app):
             v_strip_ch = tk.BooleanVar(value=ov.get('strip_chapters', opt_strip_chapters.get()))
             v_strip_tg = tk.BooleanVar(value=ov.get('strip_tags', opt_strip_tags.get()))
             v_strip_sb = tk.BooleanVar(value=ov.get('strip_subs', opt_strip_subs.get()))
+            v_strip_cc = tk.BooleanVar(value=ov.get('strip_cc', opt_strip_cc.get()))
             cf = ttk.Frame(fr)
             cf.grid(row=row, column=0, columnspan=2, sticky='w', **pad); row += 1
             ttk.Checkbutton(cf, text="Strip chapters", variable=v_strip_ch).pack(side='left', padx=4)
             ttk.Checkbutton(cf, text="Strip tags", variable=v_strip_tg).pack(side='left', padx=4)
             ttk.Checkbutton(cf, text="Strip subs", variable=v_strip_sb).pack(side='left', padx=4)
+            ttk.Checkbutton(cf, text="Strip CC", variable=v_strip_cc).pack(side='left', padx=4)
 
             # ── Mux subs ──
             v_mux = tk.BooleanVar(value=ov.get('mux_subs', opt_mux_subs.get()))
@@ -945,6 +963,7 @@ def open_media_processor(app):
                     'strip_chapters': v_strip_ch.get(),
                     'strip_tags': v_strip_tg.get(),
                     'strip_subs': v_strip_sb.get(),
+                    'strip_cc': v_strip_cc.get(),
                     'mux_subs': v_mux.get(),
                     'set_metadata': v_meta.get(),
                     'meta_video': v_mv.get(),
@@ -1377,6 +1396,15 @@ def open_media_processor(app):
 
             # ── Video: always copy (remux only) ──
             cmd.extend(['-c:v', 'copy'])
+
+            # ── Strip closed captions (EIA-608/CEA-708 in video SEI) ──
+            do_strip_cc = _ov(f, 'strip_cc', opt_strip_cc)
+            if do_strip_cc and f.get('has_cc'):
+                vcodec = f.get('video_codec', '')
+                bsf = CC_STRIP_BSF.get(vcodec)
+                if bsf:
+                    cmd.extend(['-bsf:v', bsf])
+                    _log(f"  Stripping closed captions ({vcodec})", 'INFO')
 
             # ── Audio ──
             do_convert_audio = _ov(f, 'convert_audio', opt_convert_audio)
@@ -1906,6 +1934,7 @@ def open_media_processor(app):
                 'strip_chapters': opt_strip_chapters.get(),
                 'strip_tags':     opt_strip_tags.get(),
                 'strip_subs':     opt_strip_subs.get(),
+                'strip_cc':       opt_strip_cc.get(),
                 'set_metadata':   opt_set_metadata.get(),
                 'meta_video':     opt_meta_video.get(),
                 'meta_audio':     opt_meta_audio.get(),

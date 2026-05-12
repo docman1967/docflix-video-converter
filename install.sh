@@ -43,6 +43,7 @@ TOOL_CMDS=(
     "docflix-media:media_processor"
     "docflix-scale:video_scaler"
     "docflix-whisper:whisper_transcriber"
+    "docflix-info:media_info"
 )
 
 #───────────────────────────────────────────────────────────────────────────────
@@ -89,6 +90,13 @@ uninstall() {
     if [[ -f "$subs_desktop" ]]; then
         rm -f "$subs_desktop"
         success "Removed desktop entry: $subs_desktop"
+    fi
+
+    # Remove media details desktop entry
+    local info_desktop="$DESKTOP_DIR/docflix-info.desktop"
+    if [[ -f "$info_desktop" ]]; then
+        rm -f "$info_desktop"
+        success "Removed desktop entry: $info_desktop"
     fi
 
     if [[ -f "$ICON_FILE" ]]; then
@@ -371,6 +379,27 @@ EOF
 chmod +x "$SUBS_DESKTOP"
 success "Desktop entry created: $SUBS_DESKTOP"
 
+# Media Details .desktop file (for "Open with" on video files)
+INFO_DESKTOP="$DESKTOP_DIR/docflix-info.desktop"
+cat > "$INFO_DESKTOP" <<EOF
+[Desktop Entry]
+Name=Docflix Media Details
+Comment=View and edit media file details (tracks, metadata, chapters)
+Exec=$BIN_DIR/docflix-info %F
+Terminal=false
+Type=Application
+Icon=$ICON_FILE
+Categories=AudioVideo;Video;
+Keywords=media;info;details;metadata;tracks;ffprobe;
+MimeType=video/x-matroska;video/mp4;video/x-msvideo;video/quicktime;video/x-ms-wmv;video/x-flv;video/webm;video/mp2t;video/mpeg;
+StartupNotify=false
+StartupWMClass=docflix
+NoDisplay=true
+EOF
+
+chmod +x "$INFO_DESKTOP"
+success "Desktop entry created: $INFO_DESKTOP"
+
 # Refresh the desktop database so the app appears in the launcher
 if command -v update-desktop-database &>/dev/null; then
     update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
@@ -419,6 +448,7 @@ echo "    • docflix-rename   Docflix Media Renamer"
 echo "    • docflix-media    Docflix Media Processor"
 echo "    • docflix-scale    Docflix Media Rescale"
 echo "    • docflix-whisper  Docflix Whisper Transcriber"
+echo "    • docflix-info    Docflix Media Details"
 echo ""
 echo "  To uninstall:"
 echo "    $SCRIPT_DIR/install.sh --uninstall"

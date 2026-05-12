@@ -25,6 +25,7 @@ from .utils import (
 from .gpu import (
     get_video_pix_fmt, detect_closed_captions,
     extract_closed_captions_to_srt, _A53CC_ENCODER_FLAGS,
+    get_video_codec, CC_STRIP_BSF,
 )
 
 
@@ -141,33 +142,44 @@ class VideoConverter:
             # ── Closed caption handling (ATSC A53 / EIA-608 / CEA-708) ──
             cc_srt_path = None
             has_cc = settings.get('has_closed_captions', False)
-            if has_cc and settings.get('extract_cc', True):
+            strip_cc = settings.get('strip_cc', False)
+
+            if has_cc and strip_cc:
+                self.log("Stripping closed captions (CC data will not be preserved)", 'INFO')
+            elif has_cc and settings.get('extract_cc', True):
                 import tempfile
-                import shutil as _shutil
-                if _shutil.which('ccextractor'):
-                    cc_tmp = tempfile.NamedTemporaryFile(suffix='_cc.srt', delete=False, dir=os.path.dirname(output_path))
-                    cc_tmp.close()
-                    self.log("Extracting ATSC A53 closed captions with ccextractor…", 'INFO')
-                    if extract_closed_captions_to_srt(input_path, cc_tmp.name):
-                        cc_srt_path = cc_tmp.name
-                        self.log("Closed captions extracted to SRT successfully", 'SUCCESS')
-                    else:
-                        self.log("ccextractor could not extract caption data", 'WARNING')
-                        try:
-                            os.remove(cc_tmp.name)
-                        except OSError:
-                            pass
+                cc_tmp = tempfile.NamedTemporaryFile(suffix='_cc.srt', delete=False, dir=os.path.dirname(output_path))
+                cc_tmp.close()
+                self.log("Extracting closed captions via ffmpeg…", 'INFO')
+                if extract_closed_captions_to_srt(input_path, cc_tmp.name):
+                    cc_srt_path = cc_tmp.name
+                    self.log("Closed captions extracted to SRT successfully", 'SUCCESS')
                 else:
-                    self.log("ccextractor not found — CC will be preserved via A53 passthrough only", 'INFO')
+                    self.log("Could not extract closed caption data", 'WARNING')
+                    try:
+                        os.remove(cc_tmp.name)
+                    except OSError:
+                        pass
 
             # A53 CC passthrough: embed CC data in the output video bitstream
             # This preserves CC for players that support it (VLC, mpv, etc.)
             cc_passthrough_flags = []
-            if has_cc and video_enc_name and video_enc_name != 'copy':
+            # CC strip bitstream filter (for stream-copy mode)
+            cc_strip_bsf = None
+            if has_cc and not strip_cc and video_enc_name and video_enc_name != 'copy':
                 flags = _A53CC_ENCODER_FLAGS.get(video_enc_name)
                 if flags is not None:
                     cc_passthrough_flags = flags
                     self.log(f"A53 CC passthrough enabled for {video_enc_name}", 'INFO')
+            elif has_cc and strip_cc and video_enc_name == 'copy':
+                # Stream copy — need bitstream filter to strip CC from NAL units
+                src_codec = get_video_codec(input_path) or ''
+                bsf = CC_STRIP_BSF.get(src_codec)
+                if bsf:
+                    cc_strip_bsf = bsf
+                    self.log(f"CC strip bitstream filter applied for {src_codec}", 'INFO')
+                else:
+                    self.log(f"No CC strip filter available for codec: {src_codec}", 'WARNING')
 
             # ── Chapter injection ──
             chapters_metadata_path = None
@@ -239,6 +251,12 @@ class VideoConverter:
                     # A53 CC passthrough flags
                     if cc_passthrough_flags:
                         c.extend(cc_passthrough_flags)
+                    # Strip CC: suppress A53 CC output during encode
+                    elif strip_cc and video_enc_name != 'copy':
+                        c.extend(['-write_a53_cc', '0'])
+                    # Strip CC: bitstream filter for stream copy
+                    if cc_strip_bsf:
+                        c.extend(['-bsf:v', cc_strip_bsf])
 
                     if video_enc_name != 'copy':
                         preset = settings.get('preset', '')
