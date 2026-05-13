@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.1.5"
+APP_VERSION = "3.1.6"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -7373,6 +7373,11 @@ class VideoConverterApp:
             if dof and Path(dof).is_dir():
                 self.output_dir = Path(dof)
                 self.output_dir_label.configure(text=dof, foreground='black')
+            # Sync UI controls to loaded preference values
+            self.on_encoder_change(silent=True)
+            self.on_video_codec_change()
+            self.on_transcode_mode_change()
+            self.on_quality_mode_change()
             self.add_log("Preferences loaded.", 'INFO')
         except Exception as e:
             self.add_log(f"Failed to load preferences: {e}", 'WARNING')
