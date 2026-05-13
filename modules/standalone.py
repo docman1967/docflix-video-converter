@@ -96,6 +96,9 @@ class StandaloneContext:
         # Whisper transcriber
         self._whisper_prefs = prefs.get('whisper_transcriber', {})
 
+        # Sub Ripper
+        self._sub_ripper_prefs = prefs.get('sub_ripper', {})
+
         # Auto-load names database if preference is enabled
         if self.use_names_db:
             from .subtitle_filters import is_names_db_available, load_names_db

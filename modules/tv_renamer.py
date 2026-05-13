@@ -387,6 +387,7 @@ def open_tv_renamer(app):
                     continue
                 for ep in season_data['episodes']:
                     all_eps.append({
+                        'id': ep.get('id', ''),
                         'seasonNumber': ep.get('season_number', sn),
                         'number': ep.get('episode_number'),
                         'name': ep.get('name', ''),
@@ -922,6 +923,9 @@ def open_tv_renamer(app):
             provider_id = f'{prov}-{sid}' if prov and sid else ''
             tvdb_id = provider_id
             tmdb_id = provider_id
+            # Episode ID — resolved later per-episode; default empty
+            tvdb_ep_id = ''
+            tmdb_ep_id = ''
 
             # Media tags — from probed video or matched video for subtitles
             mt = item.get('media_tags', {})
@@ -954,6 +958,7 @@ def open_tv_renamer(app):
                         year=year,
                         tvdb=tvdb_id,
                         tmdb=tmdb_id,
+                        tvdb_ep='', tmdb_ep='',
                         # Provide TV vars as empty so shared templates don't crash
                         season='', episode='', title='',
                         **media_vars,
@@ -978,6 +983,8 @@ def open_tv_renamer(app):
                     title = ep_data.get('name', '')
                     s = ep_data.get('seasonNumber', 1)
                     e = ep_data.get('number', 0)
+                    ep_id = str(ep_data.get('id', ''))
+                    ep_id_tag = f'{prov}-{ep_id}' if prov and ep_id else ''
                     name = template.format(
                         show=show_name,
                         season=str(s).zfill(2),
@@ -986,6 +993,8 @@ def open_tv_renamer(app):
                         year=ep_data.get('year', air_date[:4]),
                         tvdb=tvdb_id,
                         tmdb=tmdb_id,
+                        tvdb_ep=ep_id_tag,
+                        tmdb_ep=ep_id_tag,
                         **media_vars,
                     )
                 else:
@@ -1014,6 +1023,7 @@ def open_tv_renamer(app):
                 # Collect titles from each episode
                 titles = []
                 year = ''
+                first_ep_id = ''
                 for ep_num in e:
                     ep_data = show_data.get((s, ep_num))
                     if ep_data:
@@ -1022,7 +1032,10 @@ def open_tv_renamer(app):
                             titles.append(t)
                         if not year:
                             year = ep_data.get('year', '')
+                        if not first_ep_id:
+                            first_ep_id = str(ep_data.get('id', ''))
                 title = ' & '.join(titles) if titles else ''
+                ep_id_tag = f'{prov}-{first_ep_id}' if prov and first_ep_id else ''
                 name = template.format(
                     show=show_name,
                     season=str(s).zfill(2),
@@ -1031,6 +1044,8 @@ def open_tv_renamer(app):
                     year=year,
                     tvdb=tvdb_id,
                     tmdb=tmdb_id,
+                    tvdb_ep=ep_id_tag,
+                    tmdb_ep=ep_id_tag,
                     **media_vars,
                 )
             else:
@@ -1038,6 +1053,8 @@ def open_tv_renamer(app):
                 ep_num = e[0] if isinstance(e, list) else e
                 ep_data = show_data.get((s, ep_num))
                 title = ep_data.get('name', '') if ep_data else ''
+                ep_id = str(ep_data.get('id', '')) if ep_data else ''
+                ep_id_tag = f'{prov}-{ep_id}' if prov and ep_id else ''
                 name = template.format(
                     show=show_name,
                     season=str(s).zfill(2),
@@ -1046,6 +1063,8 @@ def open_tv_renamer(app):
                     year=ep_data.get('year', '') if ep_data else '',
                     tvdb=tvdb_id,
                     tmdb=tmdb_id,
+                    tvdb_ep=ep_id_tag,
+                    tmdb_ep=ep_id_tag,
                     **media_vars,
                 )
             ext = item['ext']
@@ -1169,6 +1188,70 @@ def open_tv_renamer(app):
             # Strip trailing year (e.g. "Rise Of The Conqueror 2026" or "Movie (2026)")
             name = re.sub(r'\s+\(?(?:19|20)\d{2}\)?\s*$', '', name)
             return name.strip()
+
+        def _rematch_selected():
+            """Re-search TVDB/TMDB for the shows matched to the selected files.
+            Clears the old show data and triggers a fresh API search with the
+            disambiguation dialog so the user can pick the correct show."""
+            sel = tree.selection()
+            if not sel:
+                return
+            # Collect unique show names (and their search queries) from
+            # the selected files
+            shows_to_rematch = {}  # show_name → search_query
+            for iid in sel:
+                idx = tree.index(iid)
+                if idx < len(_file_items):
+                    item = _file_items[idx]
+                    show = item.get('matched_show')
+                    if show and show not in shows_to_rematch:
+                        # Derive the search query: prefer folder name,
+                        # fall back to cleaned filename
+                        folder = _get_show_folder(item['path'])
+                        stem = os.path.splitext(os.path.basename(item['path']))[0]
+                        cleaned_stem = _clean_show_name(stem)
+                        # Use folder name if it looks related to the show
+                        if folder and _normalize_for_match(folder) != _normalize_for_match(cleaned_stem):
+                            # Folder might be a better query if it's a
+                            # dedicated show folder
+                            query = folder
+                        else:
+                            query = cleaned_stem or folder or show
+                        shows_to_rematch[show] = query
+
+            if not shows_to_rematch:
+                return
+
+            count = len(shows_to_rematch)
+            _log(f"Re-matching {count} show{'s' if count > 1 else ''}...")
+
+            for old_name, query in shows_to_rematch.items():
+                # 1. Remove old show data
+                _all_shows.pop(old_name, None)
+
+                # 2. Clear query→show mappings for this show
+                stale = [q for q, s in _query_to_show.items()
+                         if s == old_name]
+                for q in stale:
+                    del _query_to_show[q]
+
+                # 3. Clear matched_show on ALL files that had this show
+                #    (not just selected ones — other files from the same
+                #    show need re-matching too)
+                for item in _file_items:
+                    if item.get('matched_show') == old_name:
+                        item['matched_show'] = None
+
+                # 4. Re-search via API — shows disambiguation dialog
+                #    if multiple matches found
+                new_name = _load_show_by_name(query)
+                if new_name:
+                    _log(f"  Re-matched \"{old_name}\" → \"{new_name}\"")
+                else:
+                    _log(f"  No match found for \"{query}\"", 'WARNING')
+
+            # 5. Refresh all filenames
+            _refresh_preview()
 
         def _remove_show_for_selected():
             """Remove the loaded show and all its matched files from the queue."""
@@ -2219,12 +2302,31 @@ def open_tv_renamer(app):
                 _tree_ctx.add_command(
                     label=f"Remove Selected ({len(sel)} file{'s' if len(sel) > 1 else ''})",
                     command=_remove_selected_files)
-                # "Remove show" — unload the matched show for the selected file
-                if idx < len(_file_items):
-                    show = _file_items[idx].get('matched_show')
-                    if show:
+                # Collect unique shows from all selected files
+                sel_shows = set()
+                for iid in sel:
+                    si = tree.index(iid)
+                    if si < len(_file_items):
+                        s = _file_items[si].get('matched_show')
+                        if s:
+                            sel_shows.add(s)
+                if sel_shows:
+                    # "Re-match" — re-search API for selected shows
+                    if len(sel_shows) == 1:
+                        re_label = f"Re-match \"{list(sel_shows)[0]}\""
+                    else:
+                        re_label = f"Re-match {len(sel_shows)} shows"
+                    _tree_ctx.add_command(
+                        label=re_label,
+                        command=_rematch_selected)
+                    # "Remove show"
+                    if len(sel_shows) == 1:
                         _tree_ctx.add_command(
-                            label=f"Remove show \"{show}\"",
+                            label=f"Remove show \"{list(sel_shows)[0]}\"",
+                            command=_remove_show_for_selected)
+                    else:
+                        _tree_ctx.add_command(
+                            label=f"Remove {len(sel_shows)} shows",
                             command=_remove_show_for_selected)
                 _tree_ctx.add_separator()
             _tree_ctx.add_command(label="Clear all files",
@@ -2514,7 +2616,7 @@ def open_tv_renamer(app):
                     old_path = item['path']
 
                     if '/' in new_name:
-                        # Folder template: first component renames the show dir,
+                        # Folder template: first component is the show dir name,
                         # remaining components are subfolders/filename within it
                         parts = new_name.split('/')
                         show_folder = parts[0]
@@ -2534,45 +2636,84 @@ def open_tv_renamer(app):
                         current_parent_name = os.path.basename(current_parent)
                         grandparent = os.path.dirname(current_parent)
 
-                        # Track by show folder path (not season folder) so
-                        # files from Season 1/ and Season 2/ share the same
-                        # rename record
-                        orig_show_parent = current_parent
+                        # Detect "loose" files — files whose parent folder
+                        # contains files from multiple different shows.
+                        # A loose file's parent is a shared root (like "TV/"),
+                        # not a dedicated show folder.  For loose files we
+                        # CREATE a new show folder instead of RENAMING the
+                        # parent (which would rename the entire root dir).
+                        is_loose = False
+                        if not in_season:
+                            # Check if other files in the batch come from
+                            # the same parent but match different shows
+                            this_show = item.get('matched_show', '')
+                            for other in _file_items:
+                                if other is item:
+                                    continue
+                                other_parent = os.path.dirname(other['path'])
+                                if other_parent == file_parent:
+                                    other_show = other.get('matched_show', '')
+                                    if other_show and other_show != this_show:
+                                        is_loose = True
+                                        break
+                                # Also loose if siblings are in subfolders
+                                # of the same parent (e.g. TV/Show1/ and
+                                # loose file TV/Show4.S01E01.mkv)
+                                if os.path.dirname(other_parent) == file_parent:
+                                    is_loose = True
+                                    break
 
-                        # If this show folder was already renamed, update
-                        if orig_show_parent in _renamed_parents:
-                            current_parent = _renamed_parents[orig_show_parent]
-
-                        # Rename show folder if needed (only once per folder)
-                        if current_parent_name != show_folder:
-                            new_parent = os.path.join(grandparent, show_folder)
-                            if orig_show_parent not in _renamed_parents:
-                                if not os.path.exists(new_parent):
-                                    os.rename(current_parent, new_parent)
-                                    _renamed_parents[orig_show_parent] = new_parent
-                                    batch_history.append((current_parent, new_parent))
-                                    _log(f"  Renamed folder: {current_parent_name} → {show_folder}")
-                                elif new_parent == current_parent:
-                                    pass  # same folder, no rename needed
-                                else:
-                                    _log(f"  Folder already exists: {show_folder}", 'WARNING')
-                            current_parent = _renamed_parents.get(
-                                orig_show_parent, current_parent)
-
-                        # Update old_path to reflect the renamed show folder.
-                        # For season subfolder files the actual file is now at
-                        # renamed_show/Season X/filename.ext
-                        if in_season:
-                            old_path = os.path.join(
-                                current_parent, file_parent_name,
-                                os.path.basename(old_path))
+                        if is_loose:
+                            # Loose file: create a new show folder under
+                            # the file's parent directory
+                            new_parent = os.path.join(file_parent, show_folder)
+                            if not os.path.exists(new_parent):
+                                os.makedirs(new_parent, exist_ok=True)
+                                created_dirs.append(new_parent)
+                                _log(f"  Created folder: {show_folder}")
+                            new_path = os.path.join(new_parent, remaining)
                         else:
-                            old_path = os.path.join(
-                                current_parent,
-                                os.path.basename(old_path))
+                            # File is in a dedicated show folder — rename it
 
-                        # Build new path within the (renamed) show folder
-                        new_path = os.path.join(current_parent, remaining)
+                            # Track by show folder path (not season folder) so
+                            # files from Season 1/ and Season 2/ share the same
+                            # rename record
+                            orig_show_parent = current_parent
+
+                            # If this show folder was already renamed, update
+                            if orig_show_parent in _renamed_parents:
+                                current_parent = _renamed_parents[orig_show_parent]
+
+                            # Rename show folder if needed (only once per folder)
+                            if current_parent_name != show_folder:
+                                new_parent = os.path.join(grandparent, show_folder)
+                                if orig_show_parent not in _renamed_parents:
+                                    if not os.path.exists(new_parent):
+                                        os.rename(current_parent, new_parent)
+                                        _renamed_parents[orig_show_parent] = new_parent
+                                        batch_history.append((current_parent, new_parent))
+                                        _log(f"  Renamed folder: {current_parent_name} → {show_folder}")
+                                    elif new_parent == current_parent:
+                                        pass  # same folder, no rename needed
+                                    else:
+                                        _log(f"  Folder already exists: {show_folder}", 'WARNING')
+                                current_parent = _renamed_parents.get(
+                                    orig_show_parent, current_parent)
+
+                            # Update old_path to reflect the renamed show folder.
+                            # For season subfolder files the actual file is now at
+                            # renamed_show/Season X/filename.ext
+                            if in_season:
+                                old_path = os.path.join(
+                                    current_parent, file_parent_name,
+                                    os.path.basename(old_path))
+                            else:
+                                old_path = os.path.join(
+                                    current_parent,
+                                    os.path.basename(old_path))
+
+                            # Build new path within the (renamed) show folder
+                            new_path = os.path.join(current_parent, remaining)
                     else:
                         # Flat template: rename within the same directory
                         new_path = os.path.join(os.path.dirname(old_path), new_name)
@@ -3148,47 +3289,69 @@ def open_tv_renamer(app):
                       font=('Helvetica', 10, 'bold')).grid(
                           row=2, column=0, columnspan=2, sticky='w',
                           pady=(6, 4))
-            vars_text = (
+            vars_col1 = (
                 "{show}       — Show / movie name\n"
                 "{season}     — Season number (zero-padded)\n"
                 "{episode}    — Episode number (zero-padded)\n"
                 "{title}      — Episode title\n"
                 "{year}       — Air / release year\n"
                 "{tvdb}       — TVDB ID (e.g. tvdb-475560)\n"
-                "{tmdb}       — TMDB ID (e.g. tmdb-12345)\n"
+                "{tmdb}       — TMDB ID (e.g. tmdb-12345)"
+            )
+            vars_col2 = (
+                "{tvdb_ep}    — Episode ID (e.g. tvdb-127396)\n"
+                "{tmdb_ep}    — Episode ID (e.g. tmdb-62085)\n"
                 "{resolution} — Auto-detected (e.g. 1080p)\n"
                 "{vcodec}     — Auto-detected (e.g. x265)\n"
                 "{acodec}     — Auto-detected (e.g. AAC)\n"
                 "{source}     — From filename (e.g. BluRay)\n"
-                "{hdr}        — Auto-detected (e.g. HDR10)\n"
-                "\n"
-                "Use / to create folders automatically."
+                "{hdr}        — Auto-detected (e.g. HDR10)"
             )
-            vars_box = tk.Text(f, font=('Courier', 10), height=14, width=50,
-                               wrap='none', relief='flat',
-                               bg=f.winfo_toplevel().cget('bg'),
-                               cursor='arrow')
-            vars_box.insert('1.0', vars_text)
-            vars_box.configure(state='disabled')
-            vars_box.grid(row=3, column=0, columnspan=2, sticky='w',
-                          padx=(15, 0))
+            vars_frame = ttk.Frame(f)
+            vars_frame.grid(row=3, column=0, columnspan=2, sticky='ew',
+                            padx=(15, 0))
+            _dlg_bg = f.winfo_toplevel().cget('bg')
+            vars_box_l = tk.Text(vars_frame, font=('Courier', 10), height=7,
+                                  width=42, wrap='none', relief='flat',
+                                  bg=_dlg_bg, cursor='arrow')
+            vars_box_l.insert('1.0', vars_col1)
+            vars_box_l.configure(state='disabled')
+            vars_box_l.pack(side='left', anchor='nw', padx=(0, 12))
+            vars_box_r = tk.Text(vars_frame, font=('Courier', 10), height=7,
+                                  width=42, wrap='none', relief='flat',
+                                  bg=_dlg_bg, cursor='arrow')
+            vars_box_r.insert('1.0', vars_col2)
+            vars_box_r.configure(state='disabled')
+            vars_box_r.pack(side='left', anchor='nw')
+
+            ttk.Label(f, text="Use / to create folders automatically.",
+                      foreground='gray',
+                      font=('Helvetica', 9)).grid(
+                          row=4, column=0, columnspan=2, sticky='w',
+                          padx=(15, 0), pady=(2, 0))
+
             def _vars_copy(event=None):
-                try:
-                    sel = vars_box.get('sel.first', 'sel.last')
-                    vars_box.clipboard_clear()
-                    vars_box.clipboard_append(sel)
-                except tk.TclError:
-                    pass
-            vars_ctx = tk.Menu(vars_box, tearoff=0)
+                widget = event.widget if event else None
+                for vb in (vars_box_l, vars_box_r):
+                    try:
+                        sel = vb.get('sel.first', 'sel.last')
+                        if sel:
+                            vb.clipboard_clear()
+                            vb.clipboard_append(sel)
+                            return
+                    except tk.TclError:
+                        pass
+            vars_ctx = tk.Menu(vars_frame, tearoff=0)
             vars_ctx.add_command(label="Copy", command=_vars_copy)
-            vars_box.bind('<Button-1>', lambda e: vars_box.focus_set())
-            vars_box.bind('<ButtonPress-3>',
-                          lambda e: vars_ctx.tk_popup(e.x_root, e.y_root))
-            vars_box.bind('<Control-c>', _vars_copy)
+            for vars_box in (vars_box_l, vars_box_r):
+                vars_box.bind('<Button-1>', lambda e: e.widget.focus_set())
+                vars_box.bind('<ButtonPress-3>',
+                              lambda e: vars_ctx.tk_popup(e.x_root, e.y_root))
+                vars_box.bind('<Control-c>', _vars_copy)
 
             # ── Presets: TV (left) and Movie (right) side by side ──
             presets_frame = ttk.Frame(f)
-            presets_frame.grid(row=4, column=0, columnspan=2, sticky='ew',
+            presets_frame.grid(row=5, column=0, columnspan=2, sticky='ew',
                                pady=(12, 0))
             presets_frame.columnconfigure(0, weight=1)
             presets_frame.columnconfigure(1, weight=1)
@@ -3347,8 +3510,13 @@ def open_tv_renamer(app):
             wiz = tk.Toplevel(win)
             wiz.withdraw()
             wiz.title("Template Wizard")
-            wiz.geometry(scaled_geometry(wiz, 560, 420))
-            wiz.minsize(*scaled_minsize(wiz, 480, 380))
+            # Restore saved size if available, otherwise use default
+            saved_geo = getattr(app, '_wizard_geometry', None)
+            if saved_geo:
+                wiz.geometry(saved_geo)
+            else:
+                wiz.geometry(scaled_geometry(wiz, 620, 540))
+            wiz.minsize(*scaled_minsize(wiz, 540, 480))
             wiz.resizable(True, True)
 
             # Wizard state
@@ -3366,6 +3534,9 @@ def open_tv_renamer(app):
             _extra_source = tk.BooleanVar(value=False)
             _extra_hdr = tk.BooleanVar(value=False)
             _extra_custom = tk.StringVar(value='')
+            _tv_year = tk.StringVar(value='none')        # none, filename, folder, both
+            _tv_year_style = tk.StringVar(value='paren') # paren=(2008), bare=2008
+            _episode_id = tk.BooleanVar(value=False)     # include episode ID in filename
 
             # Navigation buttons — packed at bottom first
             nav_frame = ttk.Frame(wiz, padding=(16, 8, 16, 12))
@@ -3374,7 +3545,7 @@ def open_tv_renamer(app):
             back_btn = ttk.Button(nav_frame, text="< Back", width=8)
             back_btn.pack(side='left')
             cancel_btn = ttk.Button(nav_frame, text="Cancel", width=8,
-                                     command=wiz.destroy)
+                                     command=_close_wizard)
             cancel_btn.pack(side='right', padx=(4, 0))
             apply_btn = ttk.Button(nav_frame, text="Apply", width=8)
             apply_btn.pack(side='right', padx=(4, 0))
@@ -3430,14 +3601,21 @@ def open_tv_renamer(app):
                         name_part = '{show} {year}'
                 else:
                     style = _style.get()
+                    tv_yr = _tv_year.get()
+                    yr_in_name = tv_yr in ('filename', 'both')
+                    if _tv_year_style.get() == 'paren':
+                        yr_tag = ' ({year})'
+                    else:
+                        yr_tag = ' {year}'
+                    show_with_yr = '{show}' + yr_tag if yr_in_name else '{show}'
                     if style == 'compact':
-                        name_part = '{show} S{season}E{episode} {title}'
+                        name_part = f'{show_with_yr} S{{season}}E{{episode}} {{title}}'
                     elif style == 'dashes':
-                        name_part = '{show} - S{season}E{episode} - {title}'
+                        name_part = f'{show_with_yr} - S{{season}}E{{episode}} - {{title}}'
                     elif style == 'classic':
-                        name_part = '{show} {season}x{episode} {title}'
+                        name_part = f'{show_with_yr} {{season}}x{{episode}} {{title}}'
                     else:  # classic_dashes
-                        name_part = '{show} - {season}x{episode} - {title}'
+                        name_part = f'{show_with_yr} - {{season}}x{{episode}} - {{title}}'
 
                 # Append auto-probed media tag variables to filename
                 extras = []
@@ -3462,6 +3640,11 @@ def open_tv_renamer(app):
                     id_tag = '{{{tvdb}}}' if prov == 'tvdb' else '{{{tmdb}}}'
                     name_part = f'{name_part} {id_tag}'
 
+                # Append episode ID to filename if requested (TV only)
+                if prov != 'none' and _episode_id.get() and not is_movie:
+                    ep_id_tag = '{{{tvdb_ep}}}' if prov == 'tvdb' else '{{{tmdb_ep}}}'
+                    name_part = f'{name_part} {ep_id_tag}'
+
                 folder = _folders.get()
                 if folder == 'none':
                     return name_part
@@ -3479,11 +3662,21 @@ def open_tv_renamer(app):
                         folder_name = base_folder
                     return f'{folder_name}/{name_part}'
                 else:
+                    tv_yr = _tv_year.get()
+                    yr_in_folder = tv_yr in ('folder', 'both')
+                    if yr_in_folder:
+                        if _tv_year_style.get() == 'paren':
+                            show_base = '{show} ({year})'
+                        else:
+                            show_base = '{show} {year}'
+                    else:
+                        show_base = '{show}'
+
                     if prov != 'none' and prov_loc in ('folder', 'both'):
                         id_tag = '{{{tvdb}}}' if prov == 'tvdb' else '{{{tmdb}}}'
-                        show_dir = '{show} ' + id_tag
+                        show_dir = show_base + ' ' + id_tag
                     else:
-                        show_dir = '{show}'
+                        show_dir = show_base
 
                     if folder == 'season':
                         return f'{show_dir}/Season {{season}}/{name_part}'
@@ -3497,6 +3690,7 @@ def open_tv_renamer(app):
                         show='Breaking Bad', season='01', episode='01',
                         title='Pilot', year='2008',
                         tvdb='tvdb-81189', tmdb='tmdb-1396',
+                        tvdb_ep='tvdb-349232', tmdb_ep='tmdb-62085',
                         resolution='1080p', vcodec='x265', acodec='AAC',
                         source='BluRay', hdr='HDR10')
                 except (KeyError, IndexError):
@@ -3509,12 +3703,14 @@ def open_tv_renamer(app):
 
             # Attach trace to all vars for live preview
             for var in (_type, _style, _mv_style, _folders, _provider,
-                        _prov_location, _extra_resolution, _extra_vcodec,
-                        _extra_acodec, _extra_source, _extra_hdr, _extra_custom):
+                        _prov_location, _episode_id,
+                        _extra_resolution, _extra_vcodec,
+                        _extra_acodec, _extra_source, _extra_hdr, _extra_custom,
+                        _tv_year, _tv_year_style):
                 var.trace_add('write', _update_preview)
 
             # ── Step definitions ──
-            steps_tv = ['type', 'style', 'folders', 'provider', 'extras', 'confirm']
+            steps_tv = ['type', 'style', 'year', 'folders', 'provider', 'extras', 'confirm']
             steps_movie = ['type', 'mv_style', 'folders', 'provider', 'extras', 'confirm']
 
             def _get_steps():
@@ -3564,6 +3760,49 @@ def open_tv_renamer(app):
                         ttk.Radiobutton(step_frame, text=desc,
                                          variable=_style, value=val).pack(
                                              anchor='w', pady=4, padx=10)
+
+                elif step_name == 'year':
+                    title_label.configure(text="Include the year?")
+                    ttk.Label(step_frame,
+                               text="Add the show's premiere year to filenames\n"
+                               "and/or folder names (e.g. 2008 from TVDB/TMDB).",
+                               foreground='gray',
+                               font=('Helvetica', 9)).pack(anchor='w', padx=10, pady=(0, 8))
+
+                    ttk.Radiobutton(step_frame, text="No year",
+                                     variable=_tv_year, value='none').pack(
+                                         anchor='w', pady=4, padx=10)
+                    ttk.Radiobutton(step_frame,
+                                     text="In the filename only  (e.g. Show (2008) S01E01 Title)",
+                                     variable=_tv_year, value='filename').pack(
+                                         anchor='w', pady=4, padx=10)
+                    ttk.Radiobutton(step_frame,
+                                     text="In the folder name only  (e.g. Show (2008)/Season 01/...)",
+                                     variable=_tv_year, value='folder').pack(
+                                         anchor='w', pady=4, padx=10)
+                    ttk.Radiobutton(step_frame,
+                                     text="Both  (folder and filename)",
+                                     variable=_tv_year, value='both').pack(
+                                         anchor='w', pady=4, padx=10)
+
+                    # Year format sub-option
+                    fmt_frame = ttk.LabelFrame(step_frame, text="Year format",
+                                                padding=6)
+                    fmt_frame.pack(anchor='w', fill='x', padx=10, pady=(10, 4))
+                    ttk.Radiobutton(fmt_frame, text="Parenthesized — Show (2008)",
+                                     variable=_tv_year_style, value='paren').pack(
+                                         anchor='w', pady=2)
+                    ttk.Radiobutton(fmt_frame, text="Plain — Show 2008",
+                                     variable=_tv_year_style, value='bare').pack(
+                                         anchor='w', pady=2)
+
+                    def _toggle_year_fmt(*_):
+                        state = 'disabled' if _tv_year.get() == 'none' else 'normal'
+                        for child in fmt_frame.winfo_children():
+                            if isinstance(child, ttk.Radiobutton):
+                                child.configure(state=state)
+                    _tv_year.trace_add('write', _toggle_year_fmt)
+                    _toggle_year_fmt()
 
                 elif step_name == 'mv_style':
                     title_label.configure(text="How should the filename look?")
@@ -3649,11 +3888,27 @@ def open_tv_renamer(app):
                                    foreground='gray',
                                    font=('Helvetica', 8)).pack(anchor='w', padx=20)
 
+                    # Episode ID checkbox (TV shows only)
+                    is_tv = _type.get() != 'movie'
+                    ep_id_cb = ttk.Checkbutton(
+                        step_frame,
+                        text="Also include episode ID in filename",
+                        variable=_episode_id)
+                    if is_tv:
+                        ep_id_cb.pack(anchor='w', padx=10, pady=(10, 0))
+                        ttk.Label(step_frame,
+                                   text="e.g. ...Pilot {tvdb-349232}.mkv  — unique per episode",
+                                   foreground='gray',
+                                   font=('Helvetica', 8)).pack(
+                                       anchor='w', padx=30, pady=(0, 4))
+
                     def _toggle_loc_frame(*_):
-                        if _provider.get() == 'none':
+                        no_prov = _provider.get() == 'none'
+                        if no_prov:
                             for child in loc_frame.winfo_children():
                                 if isinstance(child, ttk.Radiobutton):
                                     child.configure(state='disabled')
+                            ep_id_cb.configure(state='disabled')
                         else:
                             for child in loc_frame.winfo_children():
                                 if isinstance(child, ttk.Radiobutton):
@@ -3661,6 +3916,7 @@ def open_tv_renamer(app):
                                         child.configure(state='disabled')
                                     else:
                                         child.configure(state='normal')
+                            ep_id_cb.configure(state='normal')
                     _provider.trace_add('write', _toggle_loc_frame)
                     _toggle_loc_frame()
 
@@ -3746,6 +4002,17 @@ def open_tv_renamer(app):
                     provider_var.set(target)
                     _log(f"Wizard: switched provider to {target}")
 
+            def _close_wizard():
+                """Save wizard window geometry and destroy."""
+                try:
+                    geo = wiz.geometry()
+                    if geo != getattr(app, '_wizard_geometry', ''):
+                        app._wizard_geometry = geo
+                        app.save_preferences()
+                except Exception:
+                    pass
+                wiz.destroy()
+
             def _apply():
                 tmpl = _build_template()
                 _switch_provider_if_needed()
@@ -3755,7 +4022,7 @@ def open_tv_renamer(app):
                     template_var.set(tmpl)
                 _log(f"Wizard: applied {'movie' if _type.get() == 'movie' else 'TV'} "
                      f"template: {tmpl}")
-                wiz.destroy()
+                _close_wizard()
 
             def _save_and_apply():
                 tmpl = _build_template()
@@ -3777,19 +4044,21 @@ def open_tv_renamer(app):
                         app.save_preferences()
                 _log(f"Wizard: saved and applied {'movie' if is_movie else 'TV'} "
                      f"template: {tmpl}")
-                wiz.destroy()
+                _close_wizard()
 
             next_btn.configure(command=_next)
             back_btn.configure(command=_back)
             apply_btn.configure(command=_apply)
             save_btn.configure(command=_save_and_apply)
+            wiz.protocol('WM_DELETE_WINDOW', _close_wizard)
 
             # Show first step
             _show_step()
 
-            # Center and show
+            # Center and show — skip centering if restoring saved geometry
             wiz.update_idletasks()
-            _center_on_parent(wiz, win)
+            if not saved_geo:
+                _center_on_parent(wiz, win)
             wiz.deiconify()
 
         settings_menu.add_command(label="Template Wizard...",

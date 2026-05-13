@@ -662,8 +662,8 @@ def build_full_report(filepath, data):
                 sub_lines.append('')
             sub_lines.extend(_build_subtitle_section(s))
             sub_count += 1
-    # Detect EIA-608 closed captions embedded in video stream
-    has_cc = detect_closed_captions(filepath)
+    # Use cached CC result if available, otherwise detect
+    has_cc = data.get('_has_cc') if data.get('_has_cc') is not None else detect_closed_captions(filepath)
     if has_cc:
         if sub_lines:
             sub_lines.append('')
@@ -771,6 +771,21 @@ def _create_scrollable_frame(parent):
         widget.bind('<Button-4>', _on_button4)
         widget.bind('<Button-5>', _on_button5)
 
+    def _bind_children_recursive(parent_widget):
+        """Bind mousewheel events to all descendant widgets so scrolling
+        works even when the mouse is over Labels, Entries, Comboboxes, etc."""
+        for child in parent_widget.winfo_children():
+            child.bind('<MouseWheel>', _on_mousewheel)
+            child.bind('<Button-4>', _on_button4)
+            child.bind('<Button-5>', _on_button5)
+            _bind_children_recursive(child)
+
+    # Defer the recursive bind until after all content has been added
+    # to the inner frame (idle callback runs after the current event loop)
+    def _deferred_bind():
+        _bind_children_recursive(inner)
+    canvas.after_idle(_deferred_bind)
+
     return canvas, inner
 
 
@@ -796,31 +811,22 @@ def show_enhanced_media_info(app, filepath, parent=None):
     modifying track names, language codes, and disposition flags.
     Changes are saved via ffmpeg remux.
 
+    The dialog window opens immediately with a "Loading..." label,
+    then all ffprobe work and widget construction happen in place.
+
     Args:
         app: The VideoConverterApp or StandaloneContext instance.
         filepath: Path to the video file.
         parent: Optional parent window to center on (defaults to app.root).
     """
-    # Probe in foreground (fast — typically <1s)
-    data = probe_file(filepath)
-    if not data['format']:
-        messagebox.showerror('Media Details', f'ffprobe failed to read:\n{filepath}')
-        return
-
-    sections = build_full_report(filepath, data)
-
-    # ── Change tracking ──
-    # Stores original values and current widget variables for diffing
-    originals = {}       # (stream_index, field) → original value
-    edit_vars = {}       # (stream_index, field) → tk.StringVar or tk.BooleanVar
-    container_title_var = tk.StringVar()
-
-    # ── Window ──
-    parent_win = parent or app.root
-    dlg = tk.Toplevel(parent_win)
-    dlg.withdraw()  # hide until positioned
-    dlg.title(f'Media Details — {os.path.basename(filepath)}')
     import re as _re
+
+    parent_win = parent or app.root
+
+    # ── Create the dialog window immediately with "Loading..." ──
+    dlg = tk.Toplevel(parent_win)
+    dlg.withdraw()
+    dlg.title(f'Media Details — {os.path.basename(filepath)}')
     geom_str = scaled_geometry(dlg, 800, 680)
     dlg.geometry(geom_str)
     dlg.minsize(*scaled_minsize(dlg, 640, 450))
@@ -839,7 +845,26 @@ def show_enhanced_media_info(app, filepath, parent=None):
         dlg.geometry(f'{dw}x{dh}+{max(0, x)}+{max(0, y)}')
     except Exception:
         pass
-    dlg.deiconify()  # show after positioning
+
+    dlg.deiconify()
+
+    # ── Probe (all ffprobe calls happen here) ──
+    data = probe_file(filepath)
+    if not data['format']:
+        messagebox.showerror('Media Details',
+                             f'ffprobe failed to read:\n{filepath}',
+                             parent=dlg)
+        dlg.destroy()
+        return
+    data['_has_cc'] = detect_closed_captions(filepath)
+
+    # ── Build the full dialog content ──
+    sections = build_full_report(filepath, data)
+
+    # ── Change tracking ──
+    originals = {}       # (stream_index, field) → original value
+    edit_vars = {}       # (stream_index, field) → tk.StringVar or tk.BooleanVar
+    container_title_var = tk.StringVar()
 
     # Intercept window close immediately — _on_close defined later via wrapper
     def _close_handler():
@@ -970,6 +995,7 @@ def show_enhanced_media_info(app, filepath, parent=None):
 
     tab_widgets['General'] = None  # editable tab — no Text widget for copy
 
+
     # ══════════════════════════════════════════════════════════════
     # TAB: Video (editable per stream)
     # ══════════════════════════════════════════════════════════════
@@ -1090,137 +1116,163 @@ def show_enhanced_media_info(app, filepath, parent=None):
 
         tab_widgets['Video'] = None
 
+
     # ══════════════════════════════════════════════════════════════
-    # TAB: Audio (editable per stream)
+    # TAB: Audio (lazy-loaded — built on first click)
     # ══════════════════════════════════════════════════════════════
     audio_streams = [s for s in data['streams'] if s.get('codec_type') == 'audio']
+    _aud_tab_built = [False]
     if audio_streams:
         aud_frame = ttk.Frame(notebook, padding=4)
         notebook.add(aud_frame, text=' Audio ')
-        aud_canvas, aud_inner = _create_scrollable_frame(aud_frame)
-        aud_inner.columnconfigure(1, weight=1)
+        _aud_placeholder = ttk.Label(aud_frame, text="Loading audio...",
+                                      font=('', 11), anchor='center')
+        _aud_placeholder.place(relx=0.5, rely=0.5, anchor='center')
 
-        arow = 0
-        for stream in audio_streams:
-            tags = stream.get('tags', {})
-            lang = tags.get('language', '')
+        def _build_aud_tab():
+            if _aud_tab_built[0]:
+                return
+            _aud_tab_built[0] = True
+            _aud_placeholder.destroy()
 
-            header = f'Stream #{stream.get("index", "?")} — AUDIO'
-            if lang and lang != 'und':
-                header += f'  [{lang.upper()}]'
-            lf = ttk.LabelFrame(aud_inner, text=header, padding=6)
-            lf.grid(row=arow, column=0, columnspan=2, sticky='ew', padx=4, pady=(4, 2))
-            lf.columnconfigure(1, weight=1)
-            arow += 1
+            aud_canvas, aud_inner = _create_scrollable_frame(aud_frame)
+            aud_inner.columnconfigure(1, weight=1)
 
-            r = 0
-            codec_name = stream.get('codec_long_name', stream.get('codec_name', '?'))
-            _add_readonly_row(lf, r, 'Codec:', codec_name); r += 1
-            _add_readonly_row(lf, r, 'Codec Tag:', _safe(stream.get('codec_tag_string'))); r += 1
-            a_profile = stream.get('profile')
-            if a_profile and a_profile != 'unknown':
-                _add_readonly_row(lf, r, 'Profile:', a_profile); r += 1
-            _add_readonly_row(lf, r, 'Sample Rate:',
-                              _safe(stream.get('sample_rate'), ' Hz')); r += 1
-            _add_readonly_row(lf, r, 'Channels:', _safe(stream.get('channels'))); r += 1
-            a_layout = stream.get('channel_layout')
-            if a_layout:
-                _add_readonly_row(lf, r, 'Channel Layout:', a_layout); r += 1
-            sample_fmt = stream.get('sample_fmt')
-            if sample_fmt:
-                _add_readonly_row(lf, r, 'Sample Format:', sample_fmt); r += 1
-            bps = stream.get('bits_per_raw_sample') or stream.get('bits_per_sample')
-            if bps and str(bps) != '0':
-                _add_readonly_row(lf, r, 'Bits/Sample:', bps); r += 1
-            a_sbr = stream.get('bit_rate')
-            if a_sbr:
-                _add_readonly_row(lf, r, 'Bitrate:', _fmt_bitrate(a_sbr)); r += 1
-            a_max_br = stream.get('max_bit_rate')
-            if a_max_br:
-                _add_readonly_row(lf, r, 'Max Bitrate:', _fmt_bitrate(a_max_br)); r += 1
-            a_sdur = stream.get('duration') or tags.get('DURATION')
-            if a_sdur:
-                try:
-                    _add_readonly_row(lf, r, 'Duration:', _fmt_duration(float(a_sdur))); r += 1
-                except (ValueError, TypeError):
-                    if ':' in str(a_sdur):
-                        _add_readonly_row(lf, r, 'Duration:', a_sdur); r += 1
+            arow = 0
+            for stream in audio_streams:
+                tags = stream.get('tags', {})
+                lang = tags.get('language', '')
 
-            ttk.Separator(lf, orient='horizontal').grid(
-                row=r, column=0, columnspan=2, sticky='ew', pady=4); r += 1
+                header = f'Stream #{stream.get("index", "?")} — AUDIO'
+                if lang and lang != 'und':
+                    header += f'  [{lang.upper()}]'
+                lf = ttk.LabelFrame(aud_inner, text=header, padding=6)
+                lf.grid(row=arow, column=0, columnspan=2, sticky='ew', padx=4, pady=(4, 2))
+                lf.columnconfigure(1, weight=1)
+                arow += 1
 
-            r = _build_stream_editor(lf, stream, _DISP_FLAGS_AUDIO, r)
+                r = 0
+                codec_name = stream.get('codec_long_name', stream.get('codec_name', '?'))
+                _add_readonly_row(lf, r, 'Codec:', codec_name); r += 1
+                _add_readonly_row(lf, r, 'Codec Tag:', _safe(stream.get('codec_tag_string'))); r += 1
+                a_profile = stream.get('profile')
+                if a_profile and a_profile != 'unknown':
+                    _add_readonly_row(lf, r, 'Profile:', a_profile); r += 1
+                _add_readonly_row(lf, r, 'Sample Rate:',
+                                  _safe(stream.get('sample_rate'), ' Hz')); r += 1
+                _add_readonly_row(lf, r, 'Channels:', _safe(stream.get('channels'))); r += 1
+                a_layout = stream.get('channel_layout')
+                if a_layout:
+                    _add_readonly_row(lf, r, 'Channel Layout:', a_layout); r += 1
+                sample_fmt = stream.get('sample_fmt')
+                if sample_fmt:
+                    _add_readonly_row(lf, r, 'Sample Format:', sample_fmt); r += 1
+                bps = stream.get('bits_per_raw_sample') or stream.get('bits_per_sample')
+                if bps and str(bps) != '0':
+                    _add_readonly_row(lf, r, 'Bits/Sample:', bps); r += 1
+                a_sbr = stream.get('bit_rate')
+                if a_sbr:
+                    _add_readonly_row(lf, r, 'Bitrate:', _fmt_bitrate(a_sbr)); r += 1
+                a_max_br = stream.get('max_bit_rate')
+                if a_max_br:
+                    _add_readonly_row(lf, r, 'Max Bitrate:', _fmt_bitrate(a_max_br)); r += 1
+                a_sdur = stream.get('duration') or tags.get('DURATION')
+                if a_sdur:
+                    try:
+                        _add_readonly_row(lf, r, 'Duration:', _fmt_duration(float(a_sdur))); r += 1
+                    except (ValueError, TypeError):
+                        if ':' in str(a_sdur):
+                            _add_readonly_row(lf, r, 'Duration:', a_sdur); r += 1
+
+                ttk.Separator(lf, orient='horizontal').grid(
+                    row=r, column=0, columnspan=2, sticky='ew', pady=4); r += 1
+
+                r = _build_stream_editor(lf, stream, _DISP_FLAGS_AUDIO, r)
 
         tab_widgets['Audio'] = None
 
+
     # ══════════════════════════════════════════════════════════════
-    # TAB: Subtitles (editable per stream)
+    # TAB: Subtitles (lazy-loaded — built on first click)
     # ══════════════════════════════════════════════════════════════
     sub_streams = [s for s in data['streams'] if s.get('codec_type') == 'subtitle']
-    has_cc = detect_closed_captions(filepath)
+    has_cc = data.get('_has_cc', False)
+    _sub_tab_built = [False]
     if sub_streams or has_cc:
         sub_frame = ttk.Frame(notebook, padding=4)
         notebook.add(sub_frame, text=' Subtitles ')
-        sub_canvas, sub_inner = _create_scrollable_frame(sub_frame)
-        sub_inner.columnconfigure(1, weight=1)
+        # Placeholder — replaced when tab is first selected
+        _sub_placeholder = ttk.Label(sub_frame, text="Loading subtitles...",
+                                      font=('', 11), anchor='center')
+        _sub_placeholder.place(relx=0.5, rely=0.5, anchor='center')
 
-        srow = 0
-        for stream in sub_streams:
-            tags = stream.get('tags', {})
-            lang = tags.get('language', '')
+        def _build_sub_tab():
+            if _sub_tab_built[0]:
+                return
+            _sub_tab_built[0] = True
+            _sub_placeholder.destroy()
 
-            header = f'Stream #{stream.get("index", "?")} — SUBTITLE'
-            if lang and lang != 'und':
-                header += f'  [{lang.upper()}]'
-            lf = ttk.LabelFrame(sub_inner, text=header, padding=6)
-            lf.grid(row=srow, column=0, columnspan=2, sticky='ew', padx=4, pady=(4, 2))
-            lf.columnconfigure(1, weight=1)
-            srow += 1
+            sub_canvas, sub_inner = _create_scrollable_frame(sub_frame)
+            sub_inner.columnconfigure(1, weight=1)
 
-            r = 0
-            _add_readonly_row(lf, r, 'Codec:', stream.get('codec_name', '?')); r += 1
-            s_codec_long = stream.get('codec_long_name')
-            if s_codec_long and s_codec_long != stream.get('codec_name'):
-                _add_readonly_row(lf, r, 'Codec Name:', s_codec_long); r += 1
-            s_nb = tags.get('NUMBER_OF_FRAMES') or stream.get('nb_frames')
-            if s_nb and s_nb != 'N/A' and s_nb != '0':
-                _add_readonly_row(lf, r, 'Events:', s_nb); r += 1
-            s_w = stream.get('width')
-            s_h = stream.get('height')
-            if s_w and s_h and int(s_w) > 0:
-                _add_readonly_row(lf, r, 'Resolution:', f'{s_w}x{s_h}'); r += 1
-            s_sdur = stream.get('duration') or tags.get('DURATION')
-            if s_sdur:
-                try:
-                    _add_readonly_row(lf, r, 'Duration:', _fmt_duration(float(s_sdur))); r += 1
-                except (ValueError, TypeError):
-                    if ':' in str(s_sdur):
-                        _add_readonly_row(lf, r, 'Duration:', s_sdur); r += 1
+            srow = 0
+            for stream in sub_streams:
+                tags = stream.get('tags', {})
+                lang = tags.get('language', '')
 
-            ttk.Separator(lf, orient='horizontal').grid(
-                row=r, column=0, columnspan=2, sticky='ew', pady=4); r += 1
+                header = f'Stream #{stream.get("index", "?")} — SUBTITLE'
+                if lang and lang != 'und':
+                    header += f'  [{lang.upper()}]'
+                lf = ttk.LabelFrame(sub_inner, text=header, padding=6)
+                lf.grid(row=srow, column=0, columnspan=2, sticky='ew', padx=4, pady=(4, 2))
+                lf.columnconfigure(1, weight=1)
+                srow += 1
 
-            r = _build_stream_editor(lf, stream, _DISP_FLAGS_SUBTITLE, r)
+                r = 0
+                _add_readonly_row(lf, r, 'Codec:', stream.get('codec_name', '?')); r += 1
+                s_codec_long = stream.get('codec_long_name')
+                if s_codec_long and s_codec_long != stream.get('codec_name'):
+                    _add_readonly_row(lf, r, 'Codec Name:', s_codec_long); r += 1
+                s_nb = tags.get('NUMBER_OF_FRAMES') or stream.get('nb_frames')
+                if s_nb and s_nb != 'N/A' and s_nb != '0':
+                    _add_readonly_row(lf, r, 'Events:', s_nb); r += 1
+                s_w = stream.get('width')
+                s_h = stream.get('height')
+                if s_w and s_h and int(s_w) > 0:
+                    _add_readonly_row(lf, r, 'Resolution:', f'{s_w}x{s_h}'); r += 1
+                s_sdur = stream.get('duration') or tags.get('DURATION')
+                if s_sdur:
+                    try:
+                        _add_readonly_row(lf, r, 'Duration:', _fmt_duration(float(s_sdur))); r += 1
+                    except (ValueError, TypeError):
+                        if ':' in str(s_sdur):
+                            _add_readonly_row(lf, r, 'Duration:', s_sdur); r += 1
 
-        # ── Closed Captions (EIA-608) virtual entry ──
-        if has_cc:
-            lf = ttk.LabelFrame(sub_inner,
-                                text='CLOSED CAPTIONS — EIA-608  [ENG]',
-                                padding=6)
-            lf.grid(row=srow, column=0, columnspan=2, sticky='ew',
-                    padx=4, pady=(4, 2))
-            lf.columnconfigure(1, weight=1)
-            srow += 1
+                ttk.Separator(lf, orient='horizontal').grid(
+                    row=r, column=0, columnspan=2, sticky='ew', pady=4); r += 1
 
-            r = 0
-            _add_readonly_row(lf, r, 'Type:', 'EIA-608 / CEA-708'); r += 1
-            _add_readonly_row(lf, r, 'Source:',
-                              'Embedded in video stream (SEI NAL units)'); r += 1
-            _add_readonly_row(lf, r, 'Language:', 'English (assumed)'); r += 1
-            _add_readonly_row(lf, r, 'Note:',
-                              'Not a separate stream — use Strip CC to remove'); r += 1
+                r = _build_stream_editor(lf, stream, _DISP_FLAGS_SUBTITLE, r)
+
+            # ── Closed Captions (EIA-608) virtual entry ──
+            if has_cc:
+                lf = ttk.LabelFrame(sub_inner,
+                                    text='CLOSED CAPTIONS — EIA-608  [ENG]',
+                                    padding=6)
+                lf.grid(row=srow, column=0, columnspan=2, sticky='ew',
+                        padx=4, pady=(4, 2))
+                lf.columnconfigure(1, weight=1)
+                srow += 1
+
+                r = 0
+                _add_readonly_row(lf, r, 'Type:', 'EIA-608 / CEA-708'); r += 1
+                _add_readonly_row(lf, r, 'Source:',
+                                  'Embedded in video stream (SEI NAL units)'); r += 1
+                _add_readonly_row(lf, r, 'Language:', 'English (assumed)'); r += 1
+                _add_readonly_row(lf, r, 'Note:',
+                                  'Not a separate stream — use Strip CC to remove'); r += 1
 
         tab_widgets['Subtitles'] = None
+
 
     # ══════════════════════════════════════════════════════════════
     # TAB: Chapters (view mode if chapters exist, edit mode if none)
@@ -1462,12 +1514,27 @@ def show_enhanced_media_info(app, filepath, parent=None):
 
     tab_widgets['Chapters'] = None  # editable tab
 
+
     # ══════════════════════════════════════════════════════════════
     # Read-only tabs: Attachments, Metadata, Full Report
     # ══════════════════════════════════════════════════════════════
     if 'Attachments' in sections:
         _add_text_tab('Attachments', sections['Attachments'])
     _add_text_tab('Full Report', sections.get('full', ''))
+
+    # ── Lazy tab loading — build Audio/Subtitles on first click ──
+    def _on_tab_changed(event):
+        try:
+            tab_id = notebook.select()
+            tab_text = notebook.tab(tab_id, 'text').strip()
+        except Exception:
+            return
+        if tab_text == 'Audio' and not _aud_tab_built[0]:
+            _build_aud_tab()
+        elif tab_text == 'Subtitles' and not _sub_tab_built[0]:
+            _build_sub_tab()
+
+    notebook.bind('<<NotebookTabChanged>>', _on_tab_changed)
 
     # ══════════════════════════════════════════════════════════════
     # Change detection

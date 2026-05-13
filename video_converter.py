@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.0.2"
+APP_VERSION = "3.1.0"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -4128,6 +4128,7 @@ class VideoConverterApp:
             progress_callback=self.update_progress
         )
         self.is_converting = False
+        self._scanning_files = False
         self.current_file_index = 0
         self.conversion_thread = None
         self.start_time = None
@@ -4336,6 +4337,8 @@ class VideoConverterApp:
                                command=self.open_video_scaler)
         tools_menu.add_command(label="Docflix Whisper Transcriber...",
                                command=self.open_whisper_transcriber)
+        tools_menu.add_command(label="Docflix Sub Ripper...",
+                               command=self.open_sub_ripper)
         # Help menu
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
@@ -4366,6 +4369,9 @@ class VideoConverterApp:
 
     def open_files(self):
         """Open a file picker and add selected video files to the queue."""
+        if self._scanning_files:
+            self.add_log("File scan already in progress — please wait.", 'WARNING')
+            return
         filetypes = [
             ("Video files", " ".join(f"*{e}" for e in sorted(VIDEO_EXTENSIONS))),
             ("All files", "*.*")
@@ -4377,13 +4383,9 @@ class VideoConverterApp:
         )
         if not paths:
             return
-        added = 0
-        for path in paths:
-            added += self._add_file_to_list(Path(path))
-        if added:
-            self.add_log(f"Added {added} file(s) via File menu.", 'INFO')
-        else:
-            self.add_log("No new files added (already in list or unsupported format).", 'WARNING')
+        video_paths = [Path(p) for p in paths if Path(p).suffix.lower() in VIDEO_EXTENSIONS]
+        sub_paths = [Path(p) for p in paths if Path(p).suffix.lower() in SUBTITLE_EXTENSIONS]
+        self._add_files_threaded(video_paths, sub_paths, source_label="file(s) via File menu")
 
     def setup_header(self, parent):
         """Setup header section"""
@@ -6233,6 +6235,24 @@ class VideoConverterApp:
                 messagebox.showerror("Whisper Transcriber",
                                      "modules/whisper_transcriber.py not found.")
 
+    def open_sub_ripper(self):
+        """Open the Docflix Sub Ripper tool."""
+        try:
+            from modules.sub_ripper import open_sub_ripper
+            open_sub_ripper(self)
+        except ImportError:
+            import importlib.util
+            _sr_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     'modules', 'sub_ripper.py')
+            if os.path.exists(_sr_path):
+                spec = importlib.util.spec_from_file_location('sub_ripper', _sr_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                mod.open_sub_ripper(self)
+            else:
+                messagebox.showerror("Sub Ripper",
+                                     "modules/sub_ripper.py not found.")
+
     def open_tv_renamer(self):
         """Open the File Renamer tool."""
         try:
@@ -6546,6 +6566,10 @@ class VideoConverterApp:
                         paths.append(raw[i:end])
                         i = end + 1
 
+        if self._scanning_files:
+            self.add_log("File scan already in progress — please wait.", 'WARNING')
+            return
+
         # Separate dropped paths into video files and subtitle files
         video_paths = []
         sub_paths = []
@@ -6566,39 +6590,35 @@ class VideoConverterApp:
                 elif path.suffix.lower() in SUBTITLE_EXTENSIONS:
                     sub_paths.append(path)
 
-        # Add video files first
-        added = 0
-        for filepath in video_paths:
-            added += self._add_file_to_list(filepath)
-
-        # Associate subtitle files with video files
-        attached = 0
-        unmatched = []
-        for sub_path in sub_paths:
-            if self._associate_external_sub(sub_path):
-                attached += 1
-            else:
-                unmatched.append(sub_path)
-
-        # Unmatched subs: try to attach to currently selected file
-        if unmatched:
-            item, index = self._get_selected_file_index()
-            if index is not None and len(unmatched) > 0:
-                for sub_path in unmatched:
-                    self._attach_external_sub(self.files[index], sub_path)
-                    attached += 1
-                self._refresh_tree_row(item, self.files[index])
-                unmatched = []
-
-        if added:
-            self.add_log(f"Added {added} file(s) via drag & drop.", 'INFO')
-        if attached:
-            self.add_log(f"Attached {attached} external subtitle(s).", 'INFO')
-        if unmatched:
-            names = ', '.join(p.name for p in unmatched)
-            self.add_log(f"Could not match subtitle(s): {names} — select a video file first.", 'WARNING')
-        if not added and not attached and not unmatched:
+        if not video_paths and not sub_paths:
             self.add_log("No supported video or subtitle files found in dropped items.", 'WARNING')
+            return
+
+        # If only subtitle files dropped (no videos), attach to existing queue
+        if not video_paths and sub_paths:
+            attached = 0
+            unmatched = []
+            for sub_path in sub_paths:
+                if self._associate_external_sub(sub_path):
+                    attached += 1
+                else:
+                    unmatched.append(sub_path)
+            if unmatched:
+                item, index = self._get_selected_file_index()
+                if index is not None:
+                    for sub_path in unmatched:
+                        self._attach_external_sub(self.files[index], sub_path)
+                        attached += 1
+                    self._refresh_tree_row(item, self.files[index])
+                    unmatched = []
+            if attached:
+                self.add_log(f"Attached {attached} external subtitle(s).", 'INFO')
+            if unmatched:
+                names = ', '.join(p.name for p in unmatched)
+                self.add_log(f"Could not match subtitle(s): {names} — select a video file first.", 'WARNING')
+            return
+
+        self._add_files_threaded(video_paths, sub_paths, source_label="file(s) via drag & drop")
 
     def _add_file_to_list(self, filepath):
         """Add a single file to the list if not already present. Returns 1 if added, 0 if skipped."""
@@ -6636,6 +6656,168 @@ class VideoConverterApp:
             prefix = 'CC '
         self.file_tree.insert('', 'end', values=(prefix + f, size, dur_str, est, 'Pending'))
         return 1
+
+    def _add_file_placeholder(self, filepath):
+        """Add a file to the list with placeholder metadata (fast, no ffprobe).
+        Returns the file_info dict if added, None if skipped."""
+        filepath = Path(filepath)
+        f = filepath.name
+        # Skip already-converted files
+        if re.search(r'-(\d+(\.\d+)?M|CRF\d+)-(NVENC_|)(H265|H264|AV1|VP9|MPEG4|ProRes)_|-video-copy|-audio-copy|-[A-Z0-9]+_\d+k', f):
+            return None
+        # Skip duplicates already in the list
+        existing_paths = {fi['path'] for fi in self.files}
+        if str(filepath) in existing_paths:
+            return None
+        try:
+            size = format_size(filepath.stat().st_size)
+        except OSError:
+            return None
+        file_info = {
+            'name': f,
+            'path': str(filepath),
+            'size': size,
+            'duration_str': '…',
+            'duration_secs': None,
+            'est_size': '…',
+            'status': 'Pending',
+            'external_subs': [],
+            'has_closed_captions': False,
+            'extract_cc': False,
+        }
+        self.files.append(file_info)
+        self.file_tree.insert('', 'end', values=(f, size, '…', '…', 'Pending'))
+        return file_info
+
+    def _add_files_threaded(self, video_paths, sub_paths=None, source_label="files"):
+        """Add video files with placeholder rows immediately, then probe metadata
+        in a background thread with progress bar feedback.
+
+        For small batches (≤3 files), probes synchronously for snappiness.
+        For larger batches, shows scanning progress in the progress bar.
+        """
+        if self._scanning_files:
+            return
+        if not video_paths:
+            return
+
+        # Phase 1 (instant): add placeholder rows for all video files
+        added_infos = []
+        for filepath in video_paths:
+            info = self._add_file_placeholder(filepath)
+            if info is not None:
+                added_infos.append(info)
+
+        if not added_infos:
+            if not sub_paths:
+                self.add_log("No new files added (already in list or unsupported format).", 'WARNING')
+            return
+
+        added_count = len(added_infos)
+        self.add_log(f"Added {added_count} {source_label} — loading metadata...", 'INFO')
+
+        # Associate subtitle files (fast, no probing)
+        attached = 0
+        unmatched_subs = []
+        if sub_paths:
+            for sub_path in sub_paths:
+                if self._associate_external_sub(sub_path):
+                    attached += 1
+                else:
+                    unmatched_subs.append(sub_path)
+            # Unmatched subs: try to attach to currently selected file
+            if unmatched_subs:
+                item, index = self._get_selected_file_index()
+                if index is not None:
+                    for sub_path in unmatched_subs:
+                        self._attach_external_sub(self.files[index], sub_path)
+                        attached += 1
+                    self._refresh_tree_row(item, self.files[index])
+                    unmatched_subs = []
+            if attached:
+                self.add_log(f"Attached {attached} external subtitle(s).", 'INFO')
+            if unmatched_subs:
+                names = ', '.join(p.name for p in unmatched_subs[:5])
+                extra = f" (and {len(unmatched_subs) - 5} more)" if len(unmatched_subs) > 5 else ""
+                self.add_log(f"Could not match subtitle(s): {names}{extra}", 'WARNING')
+
+        # Small batches: probe synchronously for snappiness
+        if added_count <= 3:
+            settings = self._current_settings()
+            for file_info in added_infos:
+                dur_secs = get_video_duration(file_info['path'])
+                file_info['duration_str'] = format_duration(dur_secs)
+                file_info['duration_secs'] = dur_secs
+                file_info['est_size'] = estimate_output_size(file_info['path'], settings)
+                has_cc = detect_closed_captions(file_info['path'])
+                file_info['has_closed_captions'] = has_cc
+                file_info['extract_cc'] = has_cc
+                # Update tree row
+                try:
+                    idx = self.files.index(file_info)
+                    items = self.file_tree.get_children()
+                    if idx < len(items):
+                        self._refresh_tree_row(items[idx], file_info)
+                except (ValueError, Exception):
+                    pass
+            self.add_log(f"Metadata loaded for {added_count} file(s).", 'INFO')
+            return
+
+        # Phase 2 (background): probe metadata with progress feedback
+        self._scanning_files = True
+        settings = self._current_settings()
+
+        def _probe_worker():
+            import time as _time
+            start = _time.monotonic()
+            for i, file_info in enumerate(added_infos):
+                if not self._scanning_files:
+                    break  # cancelled
+                if self.is_converting:
+                    break  # don't hog CPU during active conversion
+
+                # Probe metadata
+                dur_secs = get_video_duration(file_info['path'])
+                file_info['duration_str'] = format_duration(dur_secs)
+                file_info['duration_secs'] = dur_secs
+                file_info['est_size'] = estimate_output_size(file_info['path'], settings)
+                has_cc = detect_closed_captions(file_info['path'])
+                file_info['has_closed_captions'] = has_cc
+                file_info['extract_cc'] = has_cc
+
+                # Progress update
+                elapsed = _time.monotonic() - start
+                rate = (i + 1) / elapsed if elapsed > 0.1 else 0
+                eta_str = f" — ETA {int((added_count - i - 1) / rate)}s" if rate > 0 else ""
+                pct = ((i + 1) / added_count) * 100
+
+                def _update_progress(p=pct, n=i+1, t=added_count, e=eta_str, fi=file_info):
+                    try:
+                        self.progress_var.set(p)
+                        self.progress_label.configure(
+                            text=f"Scanning {n}/{t}{e}")
+                        self.status_label.configure(
+                            text=f"Loading metadata {n}/{t}...")
+                        # Update tree row
+                        idx = self.files.index(fi)
+                        items = self.file_tree.get_children()
+                        if idx < len(items):
+                            self._refresh_tree_row(items[idx], fi)
+                    except Exception:
+                        pass
+                self.root.after(0, _update_progress)
+
+            # Done
+            elapsed = _time.monotonic() - start
+            def _done():
+                self.progress_var.set(0)
+                self.progress_label.configure(text=f"0 / 0 files (0%)")
+                self.status_label.configure(text="Ready")
+                self.add_log(f"Metadata loaded for {added_count} file(s) ({elapsed:.1f}s).", 'INFO')
+                self._scanning_files = False
+            self.root.after(0, _done)
+
+        threading.Thread(target=_probe_worker, daemon=True).start()
 
     def _associate_external_sub(self, sub_path):
         """Try to auto-associate an external subtitle file with a video in the queue.
@@ -7034,14 +7216,20 @@ class VideoConverterApp:
             'tv_rename_template':    getattr(self, '_tv_rename_template', '{show} S{season}E{episode} {title}'),
             'movie_rename_template': getattr(self, '_movie_rename_template', '{show} ({year})'),
             'custom_rename_templates': getattr(self, '_custom_rename_templates', []),
+            'custom_tv_templates':    getattr(self, '_custom_tv_templates', []),
+            'custom_movie_templates': getattr(self, '_custom_movie_templates', []),
+            'wizard_geometry':        getattr(self, '_wizard_geometry', ''),
+            'app_geometry':           getattr(self, '_app_geometry', ''),
         }
         # Preserve sub-tool preferences that are saved independently
-        for key in ('media_processor', 'video_scaler', 'whisper_transcriber'):
+        for key in ('media_processor', 'video_scaler', 'whisper_transcriber',
+                    'sub_ripper'):
             value = existing.get(key) or getattr(self, {
                 'media_processor': '_media_proc_prefs',
                 'video_scaler': '_scaler_prefs',
                 'whisper_transcriber': '_whisper_prefs',
-            }[key], None)
+                'sub_ripper': '_sub_ripper_prefs',
+            }.get(key, ''), None)
             if value:
                 prefs[key] = value
         try:
@@ -7147,9 +7335,16 @@ class VideoConverterApp:
                                                      '{show} ({year})')
             self._custom_rename_templates = prefs.get(
                 'custom_rename_templates', [])
-            # Media Processor
+            self._custom_tv_templates = prefs.get(
+                'custom_tv_templates', [])
+            self._custom_movie_templates = prefs.get(
+                'custom_movie_templates', [])
+            self._wizard_geometry = prefs.get('wizard_geometry', '')
+            self._app_geometry = prefs.get('app_geometry', '')
+            # Sub-tool preferences
             self._media_proc_prefs = prefs.get('media_processor', {})
             self._scaler_prefs = prefs.get('video_scaler', {})
+            self._sub_ripper_prefs = prefs.get('sub_ripper', {})
             self._rebuild_recent_menu()
             self.default_player.set(prefs.get('default_player', 'auto'))
             dvf = prefs.get('default_video_folder', '')
@@ -7719,35 +7914,53 @@ class VideoConverterApp:
             self._offer_subtitle_association()
 
         # ── Phase 2: background ffprobe pass ──
+        self._scanning_files = True
+
         def _load_metadata():
+            import time as _time
+            start = _time.monotonic()
             for idx, file_info in enumerate(self.files):
                 if self.is_converting:
                     break  # don't probe during active conversion
+                if not self._scanning_files:
+                    break  # cancelled
                 dur_secs = get_video_duration(file_info['path'])
                 dur_str = format_duration(dur_secs)
                 est = estimate_output_size(file_info['path'], settings)
                 file_info['duration_str'] = dur_str
                 file_info['duration_secs'] = dur_secs
                 file_info['est_size'] = est
+                # Detect closed captions
+                has_cc = detect_closed_captions(file_info['path'])
+                file_info['has_closed_captions'] = has_cc
+                file_info['extract_cc'] = has_cc
 
-                # Update the tree row on the main thread
-                def _update_row(i=idx, ds=dur_str, es=est):
+                # Progress + tree row update on the main thread
+                elapsed = _time.monotonic() - start
+                rate = (idx + 1) / elapsed if elapsed > 0.1 else 0
+                eta_str = f" — ETA {int((count - idx - 1) / rate)}s" if rate > 0 else ""
+                pct = ((idx + 1) / count) * 100
+
+                def _update_row(i=idx, fi=file_info, p=pct, n=idx+1, t=count, e=eta_str):
                     try:
                         items = self.file_tree.get_children()
                         if i < len(items):
-                            item = items[i]
-                            vals = list(self.file_tree.item(item, 'values'))
-                            vals[2] = ds  # duration
-                            vals[3] = es  # est size
-                            self.file_tree.item(item, values=vals)
+                            self._refresh_tree_row(items[i], fi)
+                        self.progress_var.set(p)
+                        self.progress_label.configure(
+                            text=f"Scanning {n}/{t}{e}")
                     except Exception:
                         pass
                 self.root.after(0, _update_row)
 
             # Done
+            elapsed = _time.monotonic() - start
             def _done():
+                self.progress_var.set(0)
+                self.progress_label.configure(text=f"0 / 0 files (0%)")
                 self.status_label.configure(text="Ready")
-                self.add_log(f"Metadata loaded for {count} file(s).", 'INFO')
+                self.add_log(f"Metadata loaded for {count} file(s) ({elapsed:.1f}s).", 'INFO')
+                self._scanning_files = False
             self.root.after(0, _done)
 
         threading.Thread(target=_load_metadata, daemon=True).start()
@@ -9178,39 +9391,54 @@ def main():
     # Create application
     app = VideoConverterApp(root)
 
-    # Center on the monitor that contains the mouse pointer, fitting to screen
-    root.update_idletasks()
-    ptr_x = root.winfo_pointerx()
-    ptr_y = root.winfo_pointery()
+    # Restore saved window geometry, or center on the current monitor
+    saved_app_geo = getattr(app, '_app_geometry', '')
+    if saved_app_geo:
+        root.geometry(saved_app_geo)
+        root.update_idletasks()
+    else:
+        root.update_idletasks()
+        ptr_x = root.winfo_pointerx()
+        ptr_y = root.winfo_pointery()
 
-    # Detect the actual monitor the mouse is on (xrandr gives per-monitor geometry)
-    mon_x, mon_y, mon_w, mon_h = 0, 0, root.winfo_screenwidth(), root.winfo_screenheight()
-    try:
-        import subprocess as _sp, re as _re
-        _xr = _sp.run(['xrandr', '--query'], capture_output=True, text=True, timeout=3)
-        for _m in _re.finditer(r'\bconnected\s+(?:primary\s+)?(\d+)x(\d+)\+(\d+)\+(\d+)', _xr.stdout):
-            mw, mh, mx, my = int(_m.group(1)), int(_m.group(2)), int(_m.group(3)), int(_m.group(4))
-            if mx <= ptr_x < mx + mw and my <= ptr_y < my + mh:
-                mon_x, mon_y, mon_w, mon_h = mx, my, mw, mh
-                break
-    except Exception:
-        pass
+        # Detect the actual monitor the mouse is on (xrandr gives per-monitor geometry)
+        mon_x, mon_y, mon_w, mon_h = 0, 0, root.winfo_screenwidth(), root.winfo_screenheight()
+        try:
+            import subprocess as _sp, re as _re
+            _xr = _sp.run(['xrandr', '--query'], capture_output=True, text=True, timeout=3)
+            for _m in _re.finditer(r'\bconnected\s+(?:primary\s+)?(\d+)x(\d+)\+(\d+)\+(\d+)', _xr.stdout):
+                mw, mh, mx, my = int(_m.group(1)), int(_m.group(2)), int(_m.group(3)), int(_m.group(4))
+                if mx <= ptr_x < mx + mw and my <= ptr_y < my + mh:
+                    mon_x, mon_y, mon_w, mon_h = mx, my, mw, mh
+                    break
+        except Exception:
+            pass
 
-    # Reserve space for taskbar/panel and margin
-    avail_w = mon_w - 40
-    avail_h = mon_h - 80
-    # Desired size — shrink to fit if monitor is smaller
-    width = min(1200, avail_w)
-    height = min(800, avail_h)
-    root.geometry(f'{width}x{height}')
-    root.update_idletasks()
-    # Center on the detected monitor
-    x = mon_x + (mon_w - width) // 2
-    y = mon_y + (mon_h - height) // 2
-    # Clamp so the window stays within the monitor bounds
-    x = max(mon_x, min(x, mon_x + mon_w - width))
-    y = max(mon_y, min(y, mon_y + mon_h - height - 60))
-    root.geometry(f'{width}x{height}+{x}+{y}')
+        # Reserve space for taskbar/panel and margin
+        avail_w = mon_w - 40
+        avail_h = mon_h - 80
+        # Desired size — shrink to fit if monitor is smaller
+        width = min(1200, avail_w)
+        height = min(800, avail_h)
+        root.geometry(f'{width}x{height}')
+        root.update_idletasks()
+        # Center on the detected monitor
+        x = mon_x + (mon_w - width) // 2
+        y = mon_y + (mon_h - height) // 2
+        # Clamp so the window stays within the monitor bounds
+        x = max(mon_x, min(x, mon_x + mon_w - width))
+        y = max(mon_y, min(y, mon_y + mon_h - height - 60))
+        root.geometry(f'{width}x{height}+{x}+{y}')
+
+    # Save window geometry on close so it can be restored next launch
+    def _on_app_close():
+        try:
+            app._app_geometry = root.geometry()
+            app.save_preferences()
+        except Exception:
+            pass
+        root.destroy()
+    root.protocol('WM_DELETE_WINDOW', _on_app_close)
 
     # Now show it — single, clean appearance on the right monitor
     root.deiconify()
