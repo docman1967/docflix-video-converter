@@ -51,7 +51,8 @@ from .subtitle_filters import (
 )
 from .smart_sync import smart_sync
 from .waveform_timeline import WaveformTimeline
-from .gpu import detect_closed_captions, extract_closed_captions_to_srt
+from .gpu import (detect_closed_captions, detect_cc_types,
+                   extract_closed_captions_to_srt)
 
 try:
     from tkinterdnd2 import DND_FILES
@@ -247,44 +248,53 @@ def open_standalone_subtitle_editor(app):
                              'dvb_teletext', 'xsub'}
 
             streams = get_subtitle_streams(video_path)
-            has_cc = detect_closed_captions(video_path)
+            cc_types = detect_cc_types(video_path)
 
             # Filter out bitmap subtitles
             text_streams = [s for s in streams
                             if s['codec_name'] not in BITMAP_CODECS]
 
-            if not text_streams and not has_cc:
+            # Build virtual CC entries for each detected type
+            cc_entries = []
+            if cc_types.get('eia_608'):
+                cc_entries.append({
+                    'index': -1,        # sentinel — not a real stream
+                    'codec_name': 'eia_608',
+                    'language': 'eng',
+                    'title': 'Closed Captions (EIA-608)',
+                    'default': False,
+                    'forced': False,
+                    'sdh': False,
+                    '_is_cc': True,
+                    '_cc_type': 'eia_608',
+                })
+            if cc_types.get('eia_708'):
+                cc_entries.append({
+                    'index': -2,        # sentinel — not a real stream
+                    'codec_name': 'eia_708',
+                    'language': 'eng',
+                    'title': 'Closed Captions (CEA-708)',
+                    'default': False,
+                    'forced': False,
+                    'sdh': False,
+                    '_is_cc': True,
+                    '_cc_type': 'eia_708',
+                })
+
+            if not text_streams and not cc_entries:
                 messagebox.showinfo("No Subtitles",
                     f"No editable subtitle streams found in:\n"
                     f"{os.path.basename(video_path)}",
                     parent=editor)
                 return
 
-            # Build a virtual CC entry so it appears alongside real streams
-            cc_entry = None
-            if has_cc:
-                cc_entry = {
-                    'index': -1,        # sentinel — not a real stream
-                    'codec_name': 'eia_608',
-                    'language': 'eng',
-                    'title': 'Closed Captions (EIA-608/708)',
-                    'default': False,
-                    'forced': False,
-                    'sdh': False,
-                    '_is_cc': True,
-                }
-
-            # If CC is the only option, use it directly
-            if not text_streams and cc_entry:
-                chosen = cc_entry
-            # If one text stream and no CC, use it directly
-            elif len(text_streams) == 1 and not cc_entry:
-                chosen = text_streams[0]
+            # If exactly one option total, use it directly
+            all_options = text_streams + cc_entries
+            if len(all_options) == 1:
+                chosen = all_options[0]
             else:
-                # Build combined list for picker: text streams + CC
-                picker_streams = list(text_streams)
-                if cc_entry:
-                    picker_streams.append(cc_entry)
+                # Build combined list for picker: text streams + CC entries
+                picker_streams = all_options
                 chosen = [None]  # mutable ref for dialog result
 
                 picker = tk.Toplevel(editor)
@@ -381,9 +391,12 @@ def open_standalone_subtitle_editor(app):
                                                    mode='w', encoding='utf-8')
             tmp_srt.close()
 
+            cc_type = chosen.get('_cc_type', 'eia_608') if is_cc else None
+
             if is_cc:
-                # CC extraction uses the lavfi movie[subcc] filter
-                extract_label = "Extracting closed captions"
+                # CC extraction — label with specific type
+                type_label = 'EIA-608' if cc_type == 'eia_608' else 'CEA-708'
+                extract_label = f"Extracting {type_label} closed captions"
             else:
                 extract_label = f"Importing subtitle stream #{stream_index}"
 
@@ -414,7 +427,7 @@ def open_standalone_subtitle_editor(app):
                 try:
                     if is_cc:
                         ok = extract_closed_captions_to_srt(
-                            video_path, tmp_srt.name)
+                            video_path, tmp_srt.name, cc_type=cc_type)
                         if ok:
                             extract_result[0] = ('ok', 0, '')
                         else:

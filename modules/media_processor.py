@@ -883,9 +883,9 @@ def open_media_processor(app):
             dlg = tk.Toplevel(win)
             dlg.title(f"Override — {f['name']}")
             dlg.geometry("480x400")
-            dlg.transient(win)
+            dlg.minsize(420, 340)
             dlg.grab_set()
-            dlg.resizable(False, False)
+            dlg.resizable(True, True)
             app._center_on_main(dlg)
 
             fr = ttk.Frame(dlg, padding=12)

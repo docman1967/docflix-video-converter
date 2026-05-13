@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.1.2"
+APP_VERSION = "3.1.3"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -1019,25 +1019,44 @@ def detect_closed_captions(filepath):
         return False
 
 
-def extract_closed_captions_to_srt(filepath, output_srt_path, timeout=None):
-    """Extract ATSC A53 closed captions (EIA-608/CEA-708) to SRT.
-    Uses ffmpeg lavfi movie[subcc] filter which works with all codecs
-    (H.264, HEVC, MPEG-2). Returns True on success, False otherwise."""
+def extract_closed_captions_to_srt(filepath, output_srt_path,
+                                   cc_type='eia_608', timeout=None):
+    """Extract closed captions to SRT.
+
+    cc_type: 'eia_608' uses ffmpeg lavfi movie[subcc] filter (fast, reliable).
+             'eia_708' uses ccextractor --svc 1 (CEA-708 service 1).
+
+    Returns True on success, False otherwise.
+    """
     try:
         if timeout is None:
             dur = get_video_duration(filepath)
             timeout = max(120, int(dur * 0.5) + 60) if dur else 600
-        # Escape single quotes in filepath for lavfi movie filter
-        escaped = filepath.replace("'", "'\\''")
-        cmd = [
-            'ffmpeg', '-y', '-v', 'error',
-            '-f', 'lavfi',
-            '-i', f"movie='{escaped}'[out0+subcc]",
-            '-map', '0:1',
-            '-f', 'srt',
-            output_srt_path
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+        if cc_type == 'eia_708' and shutil.which('ccextractor'):
+            # CEA-708 — use ccextractor service extraction
+            cmd = [
+                'ccextractor', filepath,
+                '-o', output_srt_path,
+                '--svc', '1',
+                '--no_progress_bar',
+            ]
+            subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=timeout)
+        else:
+            # EIA-608 — use ffmpeg lavfi movie[subcc] filter
+            escaped = filepath.replace("'", "'\\''")
+            cmd = [
+                'ffmpeg', '-y', '-v', 'error',
+                '-f', 'lavfi',
+                '-i', f"movie='{escaped}'[out0+subcc]",
+                '-map', '0:1',
+                '-f', 'srt',
+                output_srt_path
+            ]
+            subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=timeout)
+
         if (os.path.exists(output_srt_path)
                 and os.path.getsize(output_srt_path) > 10):
             # Clean up CC artifacts: font tags, ASS positioning, hard spaces
@@ -5388,10 +5407,10 @@ class VideoConverterApp:
         dlg = tk.Toplevel(self.root)
         dlg.title(f"Override Settings — {os.path.basename(file_info['name'])}")
         dlg.geometry("520x640")
-        dlg.transient(self.root)
+        dlg.minsize(480, 400)
         dlg.grab_set()
         self._center_on_main(dlg)
-        dlg.resizable(False, False)
+        dlg.resizable(True, True)
 
         pad = {'padx': 10, 'pady': 4}
 
