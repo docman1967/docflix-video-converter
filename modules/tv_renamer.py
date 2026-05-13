@@ -3544,8 +3544,7 @@ def open_tv_renamer(app):
 
             back_btn = ttk.Button(nav_frame, text="< Back", width=8)
             back_btn.pack(side='left')
-            cancel_btn = ttk.Button(nav_frame, text="Cancel", width=8,
-                                     command=_close_wizard)
+            cancel_btn = ttk.Button(nav_frame, text="Cancel", width=8)
             cancel_btn.pack(side='right', padx=(4, 0))
             apply_btn = ttk.Button(nav_frame, text="Apply", width=8)
             apply_btn.pack(side='right', padx=(4, 0))
@@ -4048,6 +4047,7 @@ def open_tv_renamer(app):
 
             next_btn.configure(command=_next)
             back_btn.configure(command=_back)
+            cancel_btn.configure(command=_close_wizard)
             apply_btn.configure(command=_apply)
             save_btn.configure(command=_save_and_apply)
             wiz.protocol('WM_DELETE_WINDOW', _close_wizard)

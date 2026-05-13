@@ -639,6 +639,9 @@ git push
 
 ## Change Log
 
+### 2026-05-13 (Bug Fix — MKV Tags Not Stripped by Strip Tags)
+320. **MKV Tags stripped when "Strip tags" is checked** — ffmpeg's Matroska muxer automatically writes MKV Tag elements (DURATION, BPS, NUMBER_OF_FRAMES, ENCODER per stream) on every remux and encode. The `-map_metadata -1` flag only strips ffmpeg-level metadata (container title, creation_time, stream language/title) but does NOT remove these MKV Tag elements. Fixed by adding a post-processing step using `mkvpropedit --tags all:` (from MKVToolNix) after successful ffmpeg completion. Only runs when: (1) "Strip tags" is checked, (2) output is `.mkv`, and (3) `mkvpropedit` is found on PATH. Added to both `_process_one()` in `media_processor.py` and the per-file conversion loop in `video_converter.py`. Graceful fallback — if `mkvpropedit` is not installed, the ffmpeg-level stripping still works as before and the muxer-generated tags remain (harmless).
+
 ### 2026-05-13 (Enhancement — Main App Remembers Window Size and Position)
 319. **Main app remembers window size and position** — The main app window now saves its geometry (size + position) to `prefs.json` when closed and restores it on the next launch. Added `_on_app_close()` handler via `root.protocol('WM_DELETE_WINDOW', ...)` that captures `root.geometry()` to `app._app_geometry` and saves preferences before destroying the window. On startup, if `app_geometry` is found in prefs, it's restored directly — skipping the default 1200×800 + monitor centering logic. First launch (or no saved geometry) still uses the existing monitor-aware centering with xrandr detection. The `app_geometry` key is persisted via `save_preferences()` / `load_preferences()`.
 
@@ -1211,3 +1214,6 @@ git push
 9. **Custom logo in title bar** — `logo_transparent.png` at 32×32 px via PIL/ImageTk.
 10. **Multi-monitor launch fix** — Window launches on the monitor containing the mouse pointer.
 11. **Background launcher with logging** — `run_converter.sh` uses `nohup ... &` with timestamped log files, auto-pruned to 10.
+
+### 2026-05-13
+1. **Template Wizard crash fix** — The Template Wizard failed to open from both the menu bar and the Templates window. Root cause: the Cancel button's `command=_close_wizard` was set at widget creation time (line 3548), but `_close_wizard()` wasn't defined until line 4005 — causing an `UnboundLocalError`. The other nav buttons correctly deferred their command assignment via `.configure()`. Fixed by removing the command from the Cancel button constructor and adding `cancel_btn.configure(command=_close_wizard)` alongside the other deferred button configurations.

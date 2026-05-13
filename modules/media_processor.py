@@ -1713,6 +1713,24 @@ def open_media_processor(app):
                     else:
                         final_path = out_path
 
+                    # Strip MKV Tags (DURATION, BPS, etc.) that ffmpeg's
+                    # Matroska muxer writes automatically on every remux.
+                    # -map_metadata -1 only strips metadata, not MKV Tag
+                    # elements — mkvpropedit is needed to remove them.
+                    if (_ov(f, 'strip_tags', opt_strip_tags)
+                            and final_path.lower().endswith('.mkv')
+                            and shutil.which('mkvpropedit')):
+                        try:
+                            _mkv_r = subprocess.run(
+                                ['mkvpropedit', final_path, '--tags', 'all:'],
+                                capture_output=True, text=True, timeout=30)
+                            if _mkv_r.returncode == 0:
+                                _log("  Stripped MKV tags (mkvpropedit)", 'INFO')
+                            else:
+                                _log(f"  mkvpropedit warning: {_mkv_r.stderr.strip()}", 'WARNING')
+                        except Exception as _e:
+                            _log(f"  mkvpropedit error: {_e}", 'WARNING')
+
                     # Track whether subtitles were muxed for this file
                     do_mux = _ov(f, 'mux_subs', opt_mux_subs)
                     if do_mux and f.get('ext_subs'):

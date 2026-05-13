@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.1.0"
+APP_VERSION = "3.1.1"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -9104,6 +9104,24 @@ class VideoConverterApp:
                         failed += 1
                         self.update_file_status(i, '⚠️ Verify Failed')
                         continue
+
+                # Strip MKV Tags (DURATION, BPS, etc.) that ffmpeg's
+                # Matroska muxer writes automatically on every encode.
+                # -map_metadata -1 only strips metadata, not MKV Tag
+                # elements — mkvpropedit is needed to remove them.
+                if (file_settings.get('strip_metadata_tags')
+                        and output_path.lower().endswith('.mkv')
+                        and shutil.which('mkvpropedit')):
+                    try:
+                        _mkv_r = subprocess.run(
+                            ['mkvpropedit', output_path, '--tags', 'all:'],
+                            capture_output=True, text=True, timeout=30)
+                        if _mkv_r.returncode == 0:
+                            self.add_log("  Stripped MKV tags (mkvpropedit)", 'INFO')
+                        else:
+                            self.add_log(f"  mkvpropedit warning: {_mkv_r.stderr.strip()}", 'WARNING')
+                    except Exception as _e:
+                        self.add_log(f"  mkvpropedit error: {_e}", 'WARNING')
 
                 completed += 1
                 # Store output path on file_info for "Play Output File"
