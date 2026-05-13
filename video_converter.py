@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.1.4"
+APP_VERSION = "3.1.5"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -4356,7 +4356,7 @@ class VideoConverterApp:
                                command=self.open_video_scaler)
         tools_menu.add_command(label="Docflix Whisper Transcriber...",
                                command=self.open_whisper_transcriber)
-        tools_menu.add_command(label="Docflix Sub Ripper...",
+        tools_menu.add_command(label="Docflix Sub Extractor...",
                                command=self.open_sub_ripper)
         # Help menu
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -6255,7 +6255,7 @@ class VideoConverterApp:
                                      "modules/whisper_transcriber.py not found.")
 
     def open_sub_ripper(self):
-        """Open the Docflix Sub Ripper tool."""
+        """Open the Docflix Sub Extractor tool."""
         try:
             from modules.sub_ripper import open_sub_ripper
             open_sub_ripper(self)
@@ -6269,7 +6269,7 @@ class VideoConverterApp:
                 spec.loader.exec_module(mod)
                 mod.open_sub_ripper(self)
             else:
-                messagebox.showerror("Sub Ripper",
+                messagebox.showerror("Sub Extractor",
                                      "modules/sub_ripper.py not found.")
 
     def open_tv_renamer(self):

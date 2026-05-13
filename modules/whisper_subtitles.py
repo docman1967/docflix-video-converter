@@ -143,14 +143,37 @@ def apply_offset(segments, offset_seconds: float):
     return result
 
 
-def apply_line_wrap(segments, max_width: int):
-    """Wrap subtitle text to max_width characters per line."""
+def apply_line_wrap(segments, max_width: int, max_lines: int = 2):
+    """Wrap subtitle text to max_width characters per line, max_lines per cue.
+
+    If a segment's text exceeds max_lines after wrapping, it is split into
+    multiple cues (each up to max_lines lines) with the timing distributed
+    proportionally by character count.
+    """
     if max_width <= 0:
         return segments
     result = []
     for seg in segments:
-        wrapped = "\n".join(textwrap.wrap(seg.text.strip(), width=max_width))
-        result.append(SubSegment(start=seg.start, end=seg.end, text=wrapped))
+        lines = textwrap.wrap(seg.text.strip(), width=max_width)
+        if not lines:
+            result.append(SubSegment(start=seg.start, end=seg.end, text=""))
+            continue
+        if len(lines) <= max_lines:
+            result.append(SubSegment(start=seg.start, end=seg.end,
+                                     text="\n".join(lines)))
+        else:
+            # Split into chunks of max_lines and distribute timing
+            total_chars = sum(len(line) for line in lines)
+            duration = seg.end - seg.start
+            pos = seg.start
+            for i in range(0, len(lines), max_lines):
+                chunk = lines[i:i + max_lines]
+                chunk_chars = sum(len(line) for line in chunk)
+                chunk_dur = duration * (chunk_chars / total_chars) if total_chars else 0
+                chunk_end = min(pos + chunk_dur, seg.end)
+                result.append(SubSegment(start=pos, end=chunk_end,
+                                         text="\n".join(chunk)))
+                pos = chunk_end
     return result
 
 

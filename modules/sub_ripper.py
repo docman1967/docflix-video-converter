@@ -1,5 +1,5 @@
 """
-Docflix Media Suite — Sub Ripper
+Docflix Media Suite — Sub Extractor
 
 Batch subtitle extraction tool. Probes video files for embedded
 subtitle streams, lets the user select which English subtitle types
@@ -108,10 +108,10 @@ def _play_done_sound():
 # ═══════════════════════════════════════════════════════════════════
 
 def open_sub_ripper(app):
-    """Open the Sub Ripper window."""
+    """Open the Sub Extractor window."""
     win = tk.Toplevel(app.root)
     win.withdraw()
-    win.title("Docflix Sub Ripper")
+    win.title("Docflix Sub Extractor")
     geom_str = scaled_geometry(win, 920, 720)
     win.geometry(geom_str)
     win.minsize(*scaled_minsize(win, 750, 520))
@@ -751,7 +751,7 @@ def open_sub_ripper(app):
     def _start_extraction():
         if _processing[0] or not sr_files:
             if not sr_files:
-                messagebox.showinfo("Sub Ripper", "No files loaded.")
+                messagebox.showinfo("Sub Extractor", "No files loaded.")
             return
 
         # Validate at least one type selected
@@ -760,7 +760,7 @@ def open_sub_ripper(app):
                 or opt_forced.get() or opt_sdh.get()
                 or opt_cc.get()):
             messagebox.showwarning(
-                "Sub Ripper",
+                "Sub Extractor",
                 "Select at least one subtitle type to extract.")
             return
 
@@ -1059,7 +1059,7 @@ def open_sub_ripper(app):
     # Save / Close
     # ══════════════════════════════════════════════════════════════
     def _save_prefs():
-        """Save current Sub Ripper settings to preferences."""
+        """Save current Sub Extractor settings to preferences."""
         sr_prefs = {
             'language':    opt_language.get(),
             'main':        opt_main.get(),
@@ -1103,7 +1103,7 @@ def open_sub_ripper(app):
     # Force Tk to render all widgets
     win.update_idletasks()
 
-    _log("Docflix Sub Ripper ready — add video files and select "
+    _log("Docflix Sub Extractor ready — add video files and select "
          "subtitle types to extract", 'INFO')
     _log("Supports embedded subtitle streams and closed captions (CC)",
          'INFO')
@@ -1115,11 +1115,11 @@ def open_sub_ripper(app):
 # ═══════════════════════════════════════════════════════════════════
 
 def main():
-    """Launch Sub Ripper as a standalone application."""
+    """Launch Sub Extractor as a standalone application."""
     from .standalone import create_standalone_root
 
     root, app = create_standalone_root(
-        title="Docflix Sub Ripper",
+        title="Docflix Sub Extractor",
         geometry="920x720",
         minsize=(750, 520),
     )

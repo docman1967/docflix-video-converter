@@ -867,7 +867,7 @@ def open_whisper_transcriber(app):
                textvariable=_offset_var, width=6).pack(side='left', padx=(0, 10))
 
     ttk.Label(adv2, text="Max width:").pack(side='left', padx=(0, 4))
-    _max_width_var = tk.IntVar(value=_wp.get('max_width', 0))
+    _max_width_var = tk.IntVar(value=_wp.get('max_width', 42))
     tk.Spinbox(adv2, from_=0, to=200, increment=1,
                textvariable=_max_width_var, width=5).pack(side='left', padx=(0, 10))
 
