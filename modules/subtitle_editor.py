@@ -51,6 +51,7 @@ from .subtitle_filters import (
 )
 from .smart_sync import smart_sync
 from .waveform_timeline import WaveformTimeline
+from .gpu import detect_closed_captions, extract_closed_captions_to_srt
 
 try:
     from tkinterdnd2 import DND_FILES
@@ -246,25 +247,44 @@ def open_standalone_subtitle_editor(app):
                              'dvb_teletext', 'xsub'}
 
             streams = get_subtitle_streams(video_path)
-            if not streams:
-                messagebox.showinfo("No Subtitles",
-                    f"No subtitle streams found in:\n{os.path.basename(video_path)}",
-                    parent=editor)
-                return
+            has_cc = detect_closed_captions(video_path)
 
             # Filter out bitmap subtitles
-            text_streams = [s for s in streams if s['codec_name'] not in BITMAP_CODECS]
-            if not text_streams:
-                messagebox.showwarning("No Editable Subtitles",
-                    "This video only contains bitmap subtitle streams "
-                    "(PGS/VobSub) which cannot be edited as text.",
+            text_streams = [s for s in streams
+                            if s['codec_name'] not in BITMAP_CODECS]
+
+            if not text_streams and not has_cc:
+                messagebox.showinfo("No Subtitles",
+                    f"No editable subtitle streams found in:\n"
+                    f"{os.path.basename(video_path)}",
                     parent=editor)
                 return
 
-            # If only one text stream, use it directly; otherwise show picker
-            if len(text_streams) == 1:
+            # Build a virtual CC entry so it appears alongside real streams
+            cc_entry = None
+            if has_cc:
+                cc_entry = {
+                    'index': -1,        # sentinel — not a real stream
+                    'codec_name': 'eia_608',
+                    'language': 'eng',
+                    'title': 'Closed Captions (EIA-608/708)',
+                    'default': False,
+                    'forced': False,
+                    'sdh': False,
+                    '_is_cc': True,
+                }
+
+            # If CC is the only option, use it directly
+            if not text_streams and cc_entry:
+                chosen = cc_entry
+            # If one text stream and no CC, use it directly
+            elif len(text_streams) == 1 and not cc_entry:
                 chosen = text_streams[0]
             else:
+                # Build combined list for picker: text streams + CC
+                picker_streams = list(text_streams)
+                if cc_entry:
+                    picker_streams.append(cc_entry)
                 chosen = [None]  # mutable ref for dialog result
 
                 picker = tk.Toplevel(editor)
@@ -308,7 +328,8 @@ def open_standalone_subtitle_editor(app):
 
                 stream_tree.pack(fill='both', expand=True)
 
-                for i, s in enumerate(text_streams):
+                for i, s in enumerate(picker_streams):
+                    is_cc = s.get('_is_cc', False)
                     lang = s['language'] if s['language'] != 'und' else 'Unknown'
                     flags = []
                     if s['default']:
@@ -317,10 +338,13 @@ def open_standalone_subtitle_editor(app):
                         flags.append('SDH')
                     if s['forced']:
                         flags.append('Forced')
+                    if is_cc:
+                        flags.append('CC')
                     flag_str = ', '.join(flags) if flags else ''
                     title_str = s['title'] if s['title'] else ''
+                    stream_id = 'CC' if is_cc else str(s['index'])
                     stream_tree.insert('', 'end', iid=str(i),
-                                       values=(s['index'], lang,
+                                       values=(stream_id, lang,
                                                s['codec_name'], title_str,
                                                flag_str))
 
@@ -329,7 +353,7 @@ def open_standalone_subtitle_editor(app):
                 def on_select():
                     sel = stream_tree.selection()
                     if sel:
-                        chosen[0] = text_streams[int(sel[0])]
+                        chosen[0] = picker_streams[int(sel[0])]
                     picker.destroy()
 
                 def on_double_click(event):
@@ -351,12 +375,17 @@ def open_standalone_subtitle_editor(app):
                     return  # user cancelled
 
             # Extract the selected stream to a temp SRT file
+            is_cc = chosen.get('_is_cc', False)
             stream_index = chosen['index']
             tmp_srt = tempfile.NamedTemporaryFile(suffix='.srt', delete=False,
                                                    mode='w', encoding='utf-8')
             tmp_srt.close()
-            cmd = ['ffmpeg', '-y', '-i', video_path,
-                   '-map', f'0:{stream_index}', '-c:s', 'srt', tmp_srt.name]
+
+            if is_cc:
+                # CC extraction uses the lavfi movie[subcc] filter
+                extract_label = "Extracting closed captions"
+            else:
+                extract_label = f"Importing subtitle stream #{stream_index}"
 
             # ── Progress dialog during extraction ──
             prog_dlg = tk.Toplevel(editor)
@@ -368,7 +397,7 @@ def open_standalone_subtitle_editor(app):
             prog_f = ttk.Frame(prog_dlg, padding=20)
             prog_f.pack(fill='both', expand=True)
             ttk.Label(prog_f,
-                      text=f"Importing subtitle stream #{stream_index} "
+                      text=f"{extract_label} "
                            f"from {os.path.basename(video_path)}...",
                       wraplength=350).pack(pady=(0, 10))
             prog_bar = ttk.Progressbar(prog_f, mode='indeterminate', length=300)
@@ -383,8 +412,22 @@ def open_standalone_subtitle_editor(app):
 
             def _run_extract():
                 try:
-                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-                    extract_result[0] = ('ok', r.returncode, r.stderr)
+                    if is_cc:
+                        ok = extract_closed_captions_to_srt(
+                            video_path, tmp_srt.name)
+                        if ok:
+                            extract_result[0] = ('ok', 0, '')
+                        else:
+                            extract_result[0] = ('ok', 1,
+                                'CC extraction produced no output — '
+                                'the file may not contain readable captions.')
+                    else:
+                        cmd = ['ffmpeg', '-y', '-i', video_path,
+                               '-map', f'0:{stream_index}',
+                               '-c:s', 'srt', tmp_srt.name]
+                        r = subprocess.run(cmd, capture_output=True,
+                                           text=True, timeout=60)
+                        extract_result[0] = ('ok', r.returncode, r.stderr)
                 except Exception as e:
                     extract_result[0] = ('error', e)
 
@@ -410,8 +453,10 @@ def open_standalone_subtitle_editor(app):
                     return
                 _, returncode, stderr = res
                 if returncode != 0:
+                    src_label = ("closed captions" if is_cc
+                                 else f"subtitle stream #{stream_index}")
                     messagebox.showerror("Error",
-                        f"Failed to extract subtitle stream #{stream_index}:\n"
+                        f"Failed to extract {src_label}:\n"
                         f"{stderr[-300:]}",
                         parent=editor)
                     os.unlink(tmp_srt.name)
@@ -423,8 +468,12 @@ def open_standalone_subtitle_editor(app):
 
                 # Build title
                 lang = chosen['language'] if chosen['language'] != 'und' else '?'
-                title_str = (f"Docflix Subtitle Editor — Stream #{stream_index} ({lang}) — "
-                             f"{os.path.basename(video_path)}")
+                if is_cc:
+                    title_str = (f"Docflix Subtitle Editor — Closed Captions ({lang}) — "
+                                 f"{os.path.basename(video_path)}")
+                else:
+                    title_str = (f"Docflix Subtitle Editor — Stream #{stream_index} ({lang}) — "
+                                 f"{os.path.basename(video_path)}")
 
                 if _load_cues_into_editor(srt_text, title_str, tmp_srt.name):
                     # Store video source info for re-muxing on save
@@ -434,9 +483,12 @@ def open_standalone_subtitle_editor(app):
                         'temp_srt': tmp_srt.name,
                         'streams': streams,
                         'stream_info': chosen,
+                        'is_cc': is_cc,
                     }
+                    src_label = ("closed captions" if is_cc
+                                 else f"stream #{stream_index}")
                     app.add_log(
-                        f"Opened video subtitle: stream #{stream_index} ({lang}) "
+                        f"Opened video subtitle: {src_label} ({lang}) "
                         f"from {os.path.basename(video_path)} "
                         f"({len(cues)} entries)", 'INFO')
                     # Auto-load waveform timeline
@@ -515,7 +567,24 @@ def open_standalone_subtitle_editor(app):
                 return
             removed = len(original_cues) - len(cues)
 
-            if video_source[0]:
+            if video_source[0] and video_source[0].get('is_cc'):
+                # ── CC source: save as SRT alongside the video ──
+                vs = video_source[0]
+                video_path = vs['path']
+                srt_path = str(Path(video_path).with_suffix('.srt'))
+                srt_text = write_srt(cues)
+                with open(srt_path, 'w', encoding='utf-8') as f:
+                    f.write(srt_text)
+                app.add_log(
+                    f"Closed captions saved as SRT: {len(cues)} entries "
+                    f"({removed} removed) → {os.path.basename(srt_path)}",
+                    'SUCCESS')
+                original_cues[:] = [dict(c) for c in cues]
+                current_path[0] = srt_path
+                video_source[0] = None
+                _flash_saved(f"✓ Saved — {len(cues)} entries → {os.path.basename(srt_path)}")
+
+            elif video_source[0]:
                 # ── Re-mux edited subtitle back into the video ──
                 vs = video_source[0]
                 video_path = vs['path']
