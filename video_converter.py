@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.1.3"
+APP_VERSION = "3.1.4"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"

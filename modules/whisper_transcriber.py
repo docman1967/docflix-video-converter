@@ -752,9 +752,17 @@ def open_whisper_transcriber(app):
     def _on_backend_change(_event=None):
         backend = _backend_var.get()
         if backend == "whisperx" and not is_backend_available("whisperx"):
-            _log_write("whisperx is not installed. Run: pip install whisperx", "warning")
+            if _prompt_install_backend("whisperx"):
+                _log_write("WhisperX installed successfully.", "success")
+                _refresh_backend_hints()
+            else:
+                _log_write("whisperx is not installed.", "warning")
         elif backend == "faster-whisper" and not is_backend_available("faster-whisper"):
-            _log_write("faster-whisper is not installed. Run: pip install faster-whisper", "warning")
+            if _prompt_install_backend("faster-whisper"):
+                _log_write("faster-whisper installed successfully.", "success")
+                _refresh_backend_hints()
+            else:
+                _log_write("faster-whisper is not installed.", "warning")
 
     backend_cb.bind("<<ComboboxSelected>>", _on_backend_change)
 
@@ -764,17 +772,23 @@ def open_whisper_transcriber(app):
                              values=MODELS, state='readonly', width=14)
     model_cb.grid(row=0, column=3, sticky='ew')
 
-    # Backend availability hint
-    hints = []
-    if is_backend_available("faster-whisper"):
-        hints.append("faster-whisper: available")
-    else:
-        hints.append("faster-whisper: not installed")
-    if is_backend_available("whisperx"):
-        hints.append("whisperx: available")
-    else:
-        hints.append("whisperx: not installed")
-    ttk.Label(settings_frame, text=" | ".join(hints), anchor='w').grid(
+    # Backend availability hint (updated after installs)
+    _hint_var = tk.StringVar()
+
+    def _refresh_backend_hints():
+        hints = []
+        if is_backend_available("faster-whisper"):
+            hints.append("faster-whisper: available")
+        else:
+            hints.append("faster-whisper: not installed")
+        if is_backend_available("whisperx"):
+            hints.append("whisperx: available")
+        else:
+            hints.append("whisperx: not installed")
+        _hint_var.set(" | ".join(hints))
+
+    _refresh_backend_hints()
+    ttk.Label(settings_frame, textvariable=_hint_var, anchor='w').grid(
         row=row, column=0, columnspan=2, sticky='w', padx=4)
     row += 1
 
@@ -1022,17 +1036,178 @@ def open_whisper_transcriber(app):
             fmt_parts.append("vtt")
         return fmt_parts
 
+    # ── pip install helper ──
+    def _pip_install_backend(package_name, pip_args=None):
+        """Install a Python package via pip with a progress dialog.
+
+        Shows a modal dialog with an indeterminate progress bar while
+        pip runs in a background thread.  Returns True on success.
+
+        pip_args: list of extra pip arguments, e.g. ["whisperx", "transformers<4.45"]
+                  If None, defaults to [package_name].
+        """
+        if pip_args is None:
+            pip_args = [package_name]
+
+        install_dlg = tk.Toplevel(win)
+        install_dlg.title(f"Installing {package_name}")
+        install_dlg.resizable(False, False)
+        install_dlg.grab_set()
+
+        frm = ttk.Frame(install_dlg, padding=20)
+        frm.pack(fill='both', expand=True)
+
+        ttk.Label(frm, text=f"Installing {package_name}...\n"
+                       f"This may take several minutes.",
+                  wraplength=380, justify='center').pack(pady=(0, 12))
+
+        inst_prog = ttk.Progressbar(frm, mode='indeterminate', length=350)
+        inst_prog.pack(pady=(0, 8))
+        inst_prog.start(15)
+
+        inst_status = ttk.Label(frm, text="Running pip install...", anchor='w')
+        inst_status.pack(fill='x')
+
+        inst_log = tk.Text(frm, wrap='word', height=10, width=55,
+                           state='disabled', font=('Courier', 9))
+        inst_log.pack(fill='both', expand=True, pady=(8, 0))
+
+        install_dlg.update_idletasks()
+        # Center on parent
+        w = install_dlg.winfo_reqwidth()
+        h = install_dlg.winfo_reqheight()
+        px, py = win.winfo_rootx(), win.winfo_rooty()
+        pw, ph = win.winfo_width(), win.winfo_height()
+        x = max(0, px + (pw - w) // 2)
+        y = max(0, py + (ph - h) // 2)
+        install_dlg.geometry(f"+{x}+{y}")
+        install_dlg.protocol('WM_DELETE_WINDOW', lambda: None)
+
+        result = [None]  # True/False/None
+
+        def _run_pip():
+            try:
+                cmd = [sys.executable, '-m', 'pip', 'install',
+                       '--user', '--no-input',
+                       '--break-system-packages'] + pip_args
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1)
+                for line in proc.stdout:
+                    line = line.rstrip()
+                    if line:
+                        _pip_log_q.put(line)
+                proc.wait()
+                result[0] = (proc.returncode == 0)
+            except Exception as e:
+                _pip_log_q.put(f"Error: {e}")
+                result[0] = False
+
+        _pip_log_q = queue.Queue()
+
+        def _poll_pip():
+            while True:
+                try:
+                    line = _pip_log_q.get_nowait()
+                    inst_log.config(state='normal')
+                    inst_log.insert('end', line + '\n')
+                    inst_log.see('end')
+                    inst_log.config(state='disabled')
+                    # Update status with last meaningful line
+                    if line.startswith(('Collecting', 'Downloading',
+                                        'Installing', 'Building',
+                                        'Successfully')):
+                        inst_status.config(text=line[:80])
+                except queue.Empty:
+                    break
+            if result[0] is None:
+                install_dlg.after(100, _poll_pip)
+            else:
+                inst_prog.stop()
+                if result[0]:
+                    inst_status.config(text="Installation complete!")
+                    install_dlg.after(1500, lambda: (
+                        install_dlg.grab_release(), install_dlg.destroy()))
+                else:
+                    inst_status.config(text="Installation failed — see log above.")
+                    # Keep dialog open so user can read the error
+                    install_dlg.protocol('WM_DELETE_WINDOW',
+                        lambda: (install_dlg.grab_release(),
+                                 install_dlg.destroy()))
+                    close_btn = ttk.Button(frm, text="Close",
+                        command=lambda: (install_dlg.grab_release(),
+                                         install_dlg.destroy()))
+                    close_btn.pack(pady=(8, 0))
+
+        pip_thread = threading.Thread(target=_run_pip, daemon=True)
+        pip_thread.start()
+        install_dlg.after(100, _poll_pip)
+        install_dlg.wait_window()
+        return bool(result[0])
+
+    def _prompt_install_backend(backend):
+        """Ask the user if they want to install a missing backend.
+        Returns True if installed successfully, False otherwise."""
+        if backend == 'whisperx':
+            display_name = 'WhisperX'
+            pip_args = ['whisperx', 'transformers<4.45']
+        else:
+            display_name = 'faster-whisper'
+            pip_args = ['faster-whisper']
+
+        answer = messagebox.askyesno(
+            f"{display_name} Not Installed",
+            f"'{display_name}' is not installed.\n\n"
+            f"Would you like to install it now?\n"
+            f"(This may take several minutes)",
+            parent=win)
+        if not answer:
+            return False
+        return _pip_install_backend(display_name, pip_args)
+
     # ── dep check ──
     def _check_deps_on_start():
-        missing = check_deps()
-        if missing:
-            msg = "Missing dependencies:\n\n" + "\n".join(f"  {m}" for m in missing)
-            _log_write(msg, "error")
-            _status_var.set("Missing dependencies -- see log")
-        else:
-            _log_write("All dependencies found.", "success")
-            dnd_msg = "  Drag & drop files, or use the buttons above." if HAS_DND else ""
-            _log_write(f"Add files to the list, then click Extract.{dnd_msg}", "info")
+        has_fw = is_backend_available("faster-whisper")
+        has_wx = is_backend_available("whisperx")
+
+        if not has_fw and not has_wx:
+            # Neither backend installed — ask user which to install
+            choice = messagebox.askyesnocancel(
+                "No Transcription Backend",
+                "No transcription backend is installed.\n\n"
+                "• Yes  — install faster-whisper (recommended)\n"
+                "• No   — install WhisperX\n"
+                "• Cancel — close the transcriber",
+                parent=win)
+            if choice is None:
+                # Cancel — close
+                win.after(100, _close)
+                return
+            elif choice:
+                # Yes — install faster-whisper
+                ok = _pip_install_backend("faster-whisper", ["faster-whisper"])
+            else:
+                # No — install whisperx
+                ok = _pip_install_backend("WhisperX",
+                                          ["whisperx", "transformers<4.45"])
+            if not ok:
+                _log_write("Backend installation failed.", "error")
+                _status_var.set("Installation failed -- see log")
+                return
+
+            _log_write("Backend installed successfully.", "success")
+            _refresh_backend_hints()
+
+        # Check for ffmpeg
+        if not shutil.which("ffmpeg"):
+            _log_write("ffmpeg not found — install from https://ffmpeg.org/download.html",
+                       "error")
+            _status_var.set("Missing ffmpeg -- see log")
+            return
+
+        _log_write("All dependencies found.", "success")
+        dnd_msg = "  Drag & drop files, or use the buttons above." if HAS_DND else ""
+        _log_write(f"Add files to the list, then click Extract.{dnd_msg}", "info")
 
     # ── preferences ──
     def _gather_settings() -> dict:
@@ -1154,14 +1329,12 @@ def open_whisper_transcriber(app):
                 _backend_var.set(other)
                 backend = other
             else:
-                messagebox.showerror(
-                    "No Backend",
-                    "No transcription backend installed.\n\n"
-                    "Install one:\n"
-                    "  pip install faster-whisper\n"
-                    "  pip install whisperx",
-                    parent=win)
-                return
+                # Neither available — offer to install selected backend
+                if _prompt_install_backend(backend):
+                    _log_write(f"{backend} installed successfully.", "success")
+                    _refresh_backend_hints()
+                else:
+                    return
 
         _results.clear()
         _preview_idx[0] = None
