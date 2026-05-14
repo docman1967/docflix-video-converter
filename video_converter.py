@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.1.6"
+APP_VERSION = "3.1.7"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -453,6 +453,169 @@ def get_audio_info(filepath):
         return []
 
 
+# ── Map ISO 639-2/B → Tesseract language codes ──
+_LANG_MAP = {
+    'eng': 'eng', 'fre': 'fra', 'fra': 'fra', 'ger': 'deu', 'deu': 'deu',
+    'spa': 'spa', 'ita': 'ita', 'por': 'por', 'rus': 'rus', 'jpn': 'jpn',
+    'kor': 'kor', 'chi': 'chi_sim', 'zho': 'chi_sim', 'ara': 'ara',
+    'hin': 'hin', 'und': 'eng', 'nld': 'nld', 'pol': 'pol', 'tur': 'tur',
+    'swe': 'swe', 'nor': 'nor', 'dan': 'dan', 'fin': 'fin',
+}
+
+
+def _auto_install_packages(apt_packages, pip_packages=None, progress_callback=None):
+    """Offer to install missing system/pip packages for OCR.
+
+    Shows a tkinter confirmation dialog, then installs via pkexec (graphical
+    sudo) for apt packages and pip for Python packages.
+
+    Returns:
+        True if all installations succeeded, False otherwise.
+    """
+    all_pkgs = list(apt_packages or []) + list(pip_packages or [])
+    if not all_pkgs:
+        return True
+
+    pkg_list = ', '.join(all_pkgs)
+    msg = (f"The following packages are required for bitmap subtitle OCR "
+           f"but are not installed:\n\n"
+           f"  {pkg_list}\n\n"
+           f"Would you like to install them now?")
+    if not messagebox.askyesno("Install OCR Dependencies", msg):
+        return False
+
+    # ── Install apt packages ──
+    if apt_packages:
+        if progress_callback:
+            progress_callback(f"Installing system packages: {', '.join(apt_packages)}...")
+        for installer in (['pkexec', 'apt', 'install', '-y'],
+                          ['sudo', 'apt', 'install', '-y']):
+            cmd = installer + list(apt_packages)
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                if result.returncode == 0:
+                    if progress_callback:
+                        progress_callback(f"Installed: {', '.join(apt_packages)}")
+                    break
+            except FileNotFoundError:
+                continue
+            except subprocess.TimeoutExpired:
+                if progress_callback:
+                    progress_callback("Package installation timed out")
+                return False
+        else:
+            if progress_callback:
+                progress_callback(f"Failed to install system packages. "
+                                  f"Please run: sudo apt install {' '.join(apt_packages)}")
+            messagebox.showerror("Installation Failed",
+                                 f"Could not install system packages.\n\n"
+                                 f"Please run manually in a terminal:\n"
+                                 f"  sudo apt install {' '.join(apt_packages)}")
+            return False
+
+    # ── Install pip packages ──
+    if pip_packages:
+        if progress_callback:
+            progress_callback(f"Installing Python packages: {', '.join(pip_packages)}...")
+        cmd = [sys.executable, '-m', 'pip', 'install'] + list(pip_packages)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode != 0:
+                cmd += ['--break-system-packages']
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode == 0:
+                if progress_callback:
+                    progress_callback(f"Installed: {', '.join(pip_packages)}")
+            else:
+                if progress_callback:
+                    progress_callback(f"Failed to install Python packages: {result.stderr[-200:]}")
+                messagebox.showerror("Installation Failed",
+                                     f"Could not install Python packages.\n\n"
+                                     f"Please run manually in a terminal:\n"
+                                     f"  pip install {' '.join(pip_packages)}")
+                return False
+        except subprocess.TimeoutExpired:
+            if progress_callback:
+                progress_callback("pip install timed out")
+            return False
+
+    return True
+
+
+def _ensure_tesseract_deps(language='eng', progress_callback=None):
+    """Check for all Tesseract OCR dependencies and offer to install missing ones.
+
+    Returns:
+        (True, tess_lang) if all deps are satisfied, (False, None) otherwise.
+    """
+    tess_lang = _LANG_MAP.get(language, language)
+
+    # ── Check Python packages ──
+    missing_pip = []
+    try:
+        import pytesseract  # noqa: F401
+    except ImportError:
+        missing_pip.append('pytesseract')
+    try:
+        from PIL import Image  # noqa: F401
+    except ImportError:
+        missing_pip.append('Pillow')
+
+    if missing_pip:
+        if _auto_install_packages([], missing_pip, progress_callback):
+            try:
+                import pytesseract  # noqa: F401, F811
+                from PIL import Image  # noqa: F401, F811
+            except ImportError:
+                if progress_callback:
+                    progress_callback("Python packages still missing after install — cannot OCR")
+                return False, None
+        else:
+            if progress_callback:
+                progress_callback("Required Python packages not installed — cannot OCR")
+            return False, None
+
+    # ── Check tesseract binary ──
+    if not shutil.which('tesseract'):
+        apt_pkgs = ['tesseract-ocr', f'tesseract-ocr-{tess_lang}']
+        if tess_lang == 'eng':
+            apt_pkgs = ['tesseract-ocr', 'tesseract-ocr-eng']
+        if _auto_install_packages(apt_pkgs, progress_callback=progress_callback):
+            if not shutil.which('tesseract'):
+                if progress_callback:
+                    progress_callback("tesseract still not found after install — cannot OCR")
+                return False, None
+        else:
+            if progress_callback:
+                progress_callback("tesseract not installed — cannot OCR")
+            return False, None
+
+    # ── Check language pack ──
+    try:
+        langs_result = subprocess.run(['tesseract', '--list-langs'],
+                                       capture_output=True, text=True, timeout=10)
+        available = langs_result.stderr + langs_result.stdout
+        if tess_lang not in available:
+            apt_pkg = f'tesseract-ocr-{tess_lang}'
+            if _auto_install_packages([apt_pkg], progress_callback=progress_callback):
+                langs_result = subprocess.run(['tesseract', '--list-langs'],
+                                               capture_output=True, text=True, timeout=10)
+                available = langs_result.stderr + langs_result.stdout
+                if tess_lang not in available:
+                    if progress_callback:
+                        progress_callback(f"Tesseract language pack '{tess_lang}' still not "
+                                          f"available after install — cannot OCR")
+                    return False, None
+            else:
+                if progress_callback:
+                    progress_callback(f"Tesseract language pack '{tess_lang}' not installed — cannot OCR")
+                return False, None
+    except Exception:
+        pass  # proceed anyway
+
+    return True, tess_lang
+
+
 def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                         progress_callback=None, frame_callback=None,
                         cancel_event=None):
@@ -476,41 +639,14 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
         Returns empty list on failure.
     """
     import tempfile
-    try:
-        import pytesseract
-        from PIL import Image
-    except ImportError:
-        if progress_callback:
-            progress_callback("pytesseract or Pillow not installed — cannot OCR")
+
+    # ── Ensure all OCR dependencies are installed ──
+    deps_ok, tess_lang = _ensure_tesseract_deps(language, progress_callback)
+    if not deps_ok:
         return []
 
-    if not shutil.which('tesseract'):
-        if progress_callback:
-            progress_callback("tesseract not found — install with: sudo apt install tesseract-ocr")
-        return []
-
-    # Map ISO 639-2/B → Tesseract language codes
-    LANG_MAP = {
-        'eng': 'eng', 'fre': 'fra', 'fra': 'fra', 'ger': 'deu', 'deu': 'deu',
-        'spa': 'spa', 'ita': 'ita', 'por': 'por', 'rus': 'rus', 'jpn': 'jpn',
-        'kor': 'kor', 'chi': 'chi_sim', 'zho': 'chi_sim', 'ara': 'ara',
-        'hin': 'hin', 'und': 'eng', 'nld': 'nld', 'pol': 'pol', 'tur': 'tur',
-        'swe': 'swe', 'nor': 'nor', 'dan': 'dan', 'fin': 'fin',
-    }
-    tess_lang = LANG_MAP.get(language, language)
-
-    # Check if Tesseract has the required language data
-    try:
-        langs_result = subprocess.run(['tesseract', '--list-langs'],
-                                       capture_output=True, text=True, timeout=10)
-        available = langs_result.stderr + langs_result.stdout  # varies by version
-        if tess_lang not in available:
-            if progress_callback:
-                progress_callback(f"Tesseract language pack '{tess_lang}' not installed — "
-                                  f"install with: sudo apt install tesseract-ocr-{tess_lang}")
-            return []
-    except Exception:
-        pass  # proceed anyway
+    import pytesseract
+    from PIL import Image
 
     tmpdir = tempfile.mkdtemp(prefix='docflix_ocr_')
 
@@ -6111,9 +6247,12 @@ class VideoConverterApp:
                 is_text_target = fmt in ('srt', 'ass', 'webvtt', 'ttml', 'extract only')
 
                 if is_bitmap and is_text_target:
-                    if not shutil.which('tesseract'):
-                        self.add_log(f"Tesseract not installed — cannot OCR #{s['index']}. "
-                                     "Install with: sudo apt install tesseract-ocr tesseract-ocr-eng", 'ERROR')
+                    # Ensure tesseract + language pack are installed (auto-install if needed)
+                    deps_ok, _ = _ensure_tesseract_deps(
+                        lang, progress_callback=lambda msg: self.add_log(msg, 'INFO'))
+                    if not deps_ok:
+                        self.add_log(f"Tesseract OCR dependencies not available — "
+                                     f"cannot OCR #{s['index']}", 'ERROR')
                         continue
 
                     self.add_log(f"OCR: bitmap subtitle #{s['index']} ({lang}) → {out_name}", 'INFO')

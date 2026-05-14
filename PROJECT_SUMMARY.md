@@ -1,7 +1,7 @@
 # Docflix Media Suite — Project Summary
 
-**Last Updated:** 2026-05-13 (rev 70)  
-**Version:** 3.1.0  
+**Last Updated:** 2026-05-14 (rev 71)  
+**Version:** 3.1.7  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/`  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -638,6 +638,9 @@ git push
 ---
 
 ## Change Log
+
+### 2026-05-14 (Enhancement — Auto-Install Tesseract for Bitmap Subtitle OCR)
+321. **Auto-install Tesseract OCR dependencies** — When a user attempts PGS/VobSub bitmap subtitle OCR without Tesseract installed, the app now offers to install the missing packages automatically instead of silently skipping the subtitle stream. A new `_ensure_tesseract_deps()` function checks for three dependency layers: (1) Python packages (`pytesseract`, `Pillow`), (2) the `tesseract` binary, and (3) the required language pack (e.g. `tesseract-ocr-eng`). If any are missing, a tkinter messagebox asks the user for confirmation, then installs system packages via `pkexec apt install` (graphical polkit prompt, with `sudo` fallback) and pip packages via `pip install` (with `--break-system-packages` fallback for PEP 668). After installation, each dependency is re-verified. The helper `_auto_install_packages()` handles both apt and pip installs with timeout handling and error dialogs. Added to both `modules/subtitle_ocr.py` and the duplicate `ocr_bitmap_subtitle()` in `video_converter.py`. The main converter's bitmap subtitle handler (formerly a hard `shutil.which` check) now calls `_ensure_tesseract_deps()` as well. The `LANG_MAP` dict was promoted to module level in both files for shared use.
 
 ### 2026-05-13 (Bug Fix — MKV Tags Not Stripped by Strip Tags)
 320. **MKV Tags stripped when "Strip tags" is checked** — ffmpeg's Matroska muxer automatically writes MKV Tag elements (DURATION, BPS, NUMBER_OF_FRAMES, ENCODER per stream) on every remux and encode. The `-map_metadata -1` flag only strips ffmpeg-level metadata (container title, creation_time, stream language/title) but does NOT remove these MKV Tag elements. Fixed by adding a post-processing step using `mkvpropedit --tags all:` (from MKVToolNix) after successful ffmpeg completion. Only runs when: (1) "Strip tags" is checked, (2) output is `.mkv`, and (3) `mkvpropedit` is found on PATH. Added to both `_process_one()` in `media_processor.py` and the per-file conversion loop in `video_converter.py`. Graceful fallback — if `mkvpropedit` is not installed, the ffmpeg-level stripping still works as before and the muxer-generated tags remain (harmless).
