@@ -990,7 +990,7 @@ def open_tv_renamer(app):
                         season=str(s).zfill(2),
                         episode=str(e).zfill(2),
                         title=title,
-                        year=ep_data.get('year', air_date[:4]),
+                        year=show_data.get('_year', ''),
                         tvdb=tvdb_id,
                         tmdb=tmdb_id,
                         tvdb_ep=ep_id_tag,
@@ -1022,7 +1022,6 @@ def open_tv_renamer(app):
                     ep_tag = ''.join(f"E{str(x).zfill(2)}" for x in e)
                 # Collect titles from each episode
                 titles = []
-                year = ''
                 first_ep_id = ''
                 for ep_num in e:
                     ep_data = show_data.get((s, ep_num))
@@ -1030,8 +1029,6 @@ def open_tv_renamer(app):
                         t = ep_data.get('name', '')
                         if t:
                             titles.append(t)
-                        if not year:
-                            year = ep_data.get('year', '')
                         if not first_ep_id:
                             first_ep_id = str(ep_data.get('id', ''))
                 title = ' & '.join(titles) if titles else ''
@@ -1041,7 +1038,7 @@ def open_tv_renamer(app):
                     season=str(s).zfill(2),
                     episode=ep_tag,
                     title=title,
-                    year=year,
+                    year=show_data.get('_year', ''),
                     tvdb=tvdb_id,
                     tmdb=tmdb_id,
                     tvdb_ep=ep_id_tag,
@@ -1060,7 +1057,7 @@ def open_tv_renamer(app):
                     season=str(s).zfill(2),
                     episode=str(ep_num).zfill(2),
                     title=title,
-                    year=ep_data.get('year', '') if ep_data else '',
+                    year=show_data.get('_year', ''),
                     tvdb=tvdb_id,
                     tmdb=tmdb_id,
                     tvdb_ep=ep_id_tag,
@@ -1647,6 +1644,7 @@ def open_tv_renamer(app):
                 _all_shows[show_name] = {
                     '_series_id': '',
                     '_provider': '',
+                    '_year': year,
                 }
                 _log(f"  No provider match — using \"{show_name}\" from filename")
             else:
@@ -1923,6 +1921,7 @@ def open_tv_renamer(app):
 
             show_eps['_series_id'] = str(series_id)
             show_eps['_provider'] = prov
+            show_eps['_year'] = best.get('year', '')
             _all_shows[show_name] = show_eps
             real_seasons = {s for s in seasons if s > 0} or seasons
             _log(f"  Loaded \"{show_name}\" — {len(eps)} eps, "
@@ -3306,7 +3305,7 @@ def open_tv_renamer(app):
                 "{season}     — Season number (zero-padded)\n"
                 "{episode}    — Episode number (zero-padded)\n"
                 "{title}      — Episode title\n"
-                "{year}       — Air / release year\n"
+                "{year}       — Show premiere / release year\n"
                 "{tvdb}       — TVDB ID (e.g. tvdb-475560)\n"
                 "{tmdb}       — TMDB ID (e.g. tmdb-12345)"
             )
@@ -3744,6 +3743,8 @@ def open_tv_renamer(app):
                 next_btn.pack_forget()
                 apply_btn.pack_forget()
                 save_btn.pack_forget()
+                another_btn.pack_forget()
+                cancel_btn.configure(text="Cancel")
                 if is_last:
                     save_btn.pack(side='right', padx=(4, 0))
                     apply_btn.pack(side='right', padx=(4, 0))
@@ -4013,6 +4014,12 @@ def open_tv_renamer(app):
                     provider_var.set(target)
                     _log(f"Wizard: switched provider to {target}")
 
+            # Message for the done step (set by _apply / _save_and_apply)
+            _done_message = ['']
+
+            # "Build Another" button — shown only on the done step
+            another_btn = ttk.Button(nav_frame, text="Build Another", width=14)
+
             def _close_wizard():
                 """Save wizard window geometry and destroy."""
                 try:
@@ -4024,21 +4031,73 @@ def open_tv_renamer(app):
                     pass
                 wiz.destroy()
 
+            def _show_done(message):
+                """Show the done step with a success message and
+                Build Another / Done buttons."""
+                _done_message[0] = message
+                # Clear step content
+                for w in step_frame.winfo_children():
+                    w.destroy()
+                # Hide normal nav buttons, show done buttons
+                back_btn.configure(state='disabled')
+                next_btn.pack_forget()
+                apply_btn.pack_forget()
+                save_btn.pack_forget()
+                another_btn.pack_forget()
+                cancel_btn.pack_forget()
+                # Pack done-step buttons: Done on far right, Build Another next
+                cancel_btn.configure(text="Done")
+                cancel_btn.pack(side='right', padx=(4, 0))
+                another_btn.pack(side='right', padx=(4, 0))
+
+                step_label.configure(text="")
+                title_label.configure(text="Template applied!")
+                ttk.Label(step_frame,
+                           text=message,
+                           font=('Helvetica', 10)).pack(
+                               anchor='w', pady=4, padx=10)
+
+            def _restart_wizard():
+                """Reset the wizard to step 1 to build another template."""
+                # Reset state variables to defaults
+                _step[0] = 0
+                _type.set('tv')
+                _style.set('compact')
+                _mv_style.set('year_paren')
+                _folders.set('flat')
+                _provider.set('none')
+                _prov_location.set('folder')
+                _extra_resolution.set(False)
+                _extra_vcodec.set(False)
+                _extra_acodec.set(False)
+                _extra_source.set(False)
+                _extra_hdr.set(False)
+                _extra_custom.set('')
+                _tv_year.set('none')
+                _tv_year_style.set('paren')
+                _episode_id.set(False)
+                # Restore nav button labels and layout
+                cancel_btn.configure(text="Cancel")
+                another_btn.pack_forget()
+                _show_step()
+
             def _apply():
                 tmpl = _build_template()
                 _switch_provider_if_needed()
+                kind = 'Movie' if _type.get() == 'movie' else 'TV'
                 if _type.get() == 'movie':
                     movie_template_var.set(tmpl)
                 else:
                     template_var.set(tmpl)
-                _log(f"Wizard: applied {'movie' if _type.get() == 'movie' else 'TV'} "
-                     f"template: {tmpl}")
-                _close_wizard()
+                _log(f"Wizard: applied {kind} template: {tmpl}")
+                _show_done(f"{kind} template applied:\n{tmpl}\n\n"
+                           f"Build another template or click Done to close.")
 
             def _save_and_apply():
                 tmpl = _build_template()
                 _switch_provider_if_needed()
                 is_movie = _type.get() == 'movie'
+                kind = 'Movie' if is_movie else 'TV'
                 if is_movie:
                     movie_template_var.set(tmpl)
                     customs = list(getattr(app, '_custom_movie_templates', []))
@@ -4053,15 +4112,16 @@ def open_tv_renamer(app):
                         customs.append(tmpl)
                         app._custom_tv_templates = customs
                         app.save_preferences()
-                _log(f"Wizard: saved and applied {'movie' if is_movie else 'TV'} "
-                     f"template: {tmpl}")
-                _close_wizard()
+                _log(f"Wizard: saved and applied {kind} template: {tmpl}")
+                _show_done(f"{kind} template saved and applied:\n{tmpl}\n\n"
+                           f"Build another template or click Done to close.")
 
             next_btn.configure(command=_next)
             back_btn.configure(command=_back)
             cancel_btn.configure(command=_close_wizard)
             apply_btn.configure(command=_apply)
             save_btn.configure(command=_save_and_apply)
+            another_btn.configure(command=_restart_wizard)
             wiz.protocol('WM_DELETE_WINDOW', _close_wizard)
 
             # Show first step

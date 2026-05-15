@@ -1190,26 +1190,30 @@ def open_media_processor(app):
                         variable=opt_edition_fn).pack(side='left', padx=(4, 0))
 
         # ── Progress bar ──
-        # Pack layout: buttons reserved on right first, progress bar fills remainder
+        # Grid layout: label and progress bar stretch (col 1, weight=1),
+        # buttons stay fixed on the right (col 2, minsize prevents clipping).
+        # Previous pack layout had a Tk high-DPI rendering bug where
+        # side='right' widgets weren't repainted after maximize/fullscreen.
         progress_frame = ttk.Frame(main_frame)
         progress_frame.grid(row=3, column=0, sticky='ew', pady=(0, 6))
+        progress_frame.columnconfigure(1, weight=1)   # progress bar stretches
+        progress_frame.columnconfigure(2, minsize=220) # buttons never clipped
 
         mp_progress_var = tk.DoubleVar(value=0)
 
-        # Action buttons — pack right first so they're always visible
+        mp_progress_label = ttk.Label(progress_frame, text="Ready")
+        mp_progress_label.grid(row=0, column=0, padx=(0, 8), sticky='w')
+        mp_progress_bar = ttk.Progressbar(progress_frame, variable=mp_progress_var,
+                                          maximum=100, mode='determinate')
+        mp_progress_bar.grid(row=0, column=1, sticky='ew', padx=(0, 8))
+
+        # Action buttons in a fixed-width column on the right
         btn_frame = ttk.Frame(progress_frame)
-        btn_frame.pack(side='right', padx=(8, 0))
+        btn_frame.grid(row=0, column=2, sticky='e')
         process_btn = ttk.Button(btn_frame, text="▶ Process All", command=lambda: _start_processing())
         process_btn.pack(side='left', padx=2)
         stop_btn = ttk.Button(btn_frame, text="⏹ Stop", command=lambda: _stop_processing(), state='disabled')
         stop_btn.pack(side='left', padx=2)
-
-        # Label and progress bar fill remaining space
-        mp_progress_label = ttk.Label(progress_frame, text="Ready")
-        mp_progress_label.pack(side='left', padx=(0, 8))
-        mp_progress_bar = ttk.Progressbar(progress_frame, variable=mp_progress_var,
-                                          maximum=100, mode='determinate')
-        mp_progress_bar.pack(side='left', fill='x', expand=True)
 
         # ── Log ──
         log_frame = ttk.LabelFrame(main_frame, text="Log", padding=5)

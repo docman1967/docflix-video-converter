@@ -247,8 +247,53 @@ def open_standalone_subtitle_editor(app):
             BITMAP_CODECS = {'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle',
                              'dvb_teletext', 'xsub'}
 
-            streams = get_subtitle_streams(video_path)
-            cc_types = detect_cc_types(video_path)
+            # ── Scanning dialog — runs probes in background thread ──
+            scan_dlg = tk.Toplevel(editor)
+            scan_dlg.title("Scanning")
+            scan_dlg.resizable(False, False)
+            scan_dlg.transient(editor)
+            scan_dlg.overrideredirect(False)
+
+            scan_f = ttk.Frame(scan_dlg, padding=20)
+            scan_f.pack(fill='both', expand=True)
+            ttk.Label(scan_f,
+                      text=f"Scanning for subtitles in\n"
+                           f"{os.path.basename(video_path)}...",
+                      wraplength=350).pack(pady=(0, 10))
+            scan_bar = ttk.Progressbar(scan_f, mode='indeterminate', length=300)
+            scan_bar.pack(pady=(0, 5))
+            scan_bar.start(15)
+            app._center_on_main(scan_dlg)
+            scan_dlg.grab_set()
+            scan_dlg.protocol('WM_DELETE_WINDOW', lambda: None)
+
+            scan_result = [None]  # will hold (streams, cc_types)
+
+            def _do_scan():
+                s = get_subtitle_streams(video_path)
+                cc = detect_cc_types(video_path)
+                scan_result[0] = (s, cc)
+
+            scan_thread = threading.Thread(target=_do_scan, daemon=True)
+            scan_thread.start()
+
+            def _check_scan():
+                if scan_thread.is_alive():
+                    editor.after(50, _check_scan)
+                    return
+                scan_bar.stop()
+                scan_dlg.grab_release()
+                scan_dlg.destroy()
+                _finish_load_video(video_path, *scan_result[0])
+
+            editor.after(50, _check_scan)
+
+        def _finish_load_video(video_path, streams, cc_types):
+            """Continue loading after subtitle/CC scanning completes."""
+            nonlocal cues, original_cues
+
+            BITMAP_CODECS = {'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle',
+                             'dvb_teletext', 'xsub'}
 
             # Filter out bitmap subtitles
             text_streams = [s for s in streams
