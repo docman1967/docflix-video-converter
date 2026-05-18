@@ -55,16 +55,23 @@ def detect_cc_types(filepath):
     ccx_ok = False
     if shutil.which('ccextractor'):
         try:
-            # Report mode probes CC types without full extraction
-            tmp = tempfile.NamedTemporaryFile(suffix='.srt', delete=False)
-            tmp.close()
+            # Report mode probes CC types without full extraction.
+            # ccextractor creates per-language output files next to the
+            # INPUT file regardless of -o or cwd. Work around this by
+            # symlinking the video into a temp directory so all
+            # side-effect files are created there instead.
+            tmpdir = tempfile.mkdtemp(prefix='docflix_cc_')
+            link_path = os.path.join(tmpdir, os.path.basename(filepath))
+            os.symlink(os.path.abspath(filepath), link_path)
+            tmp_out = os.path.join(tmpdir, 'cc_probe.srt')
             cmd = [
-                'ccextractor', filepath,
-                '-o', tmp.name,
+                'ccextractor', link_path,
+                '-o', tmp_out,
                 '-out=report',
                 '--no_progress_bar',
             ]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=60, cwd=tmpdir)
             output = r.stdout + r.stderr
             # ccextractor report includes lines like:
             #   ATSC Closed Caption: Yes/No
@@ -77,8 +84,9 @@ def detect_cc_types(filepath):
             if re.search(r'CEA-708:\s*Yes', output, re.IGNORECASE):
                 result['eia_708'] = True
                 ccx_ok = True
+            # Clean up entire temp directory (removes any side-effect files)
             try:
-                os.unlink(tmp.name)
+                shutil.rmtree(tmpdir)
             except OSError:
                 pass
         except Exception:

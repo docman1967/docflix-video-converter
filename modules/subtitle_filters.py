@@ -456,13 +456,31 @@ def filter_remove_hi(cues):
         r'(?:\s+(?:[A-Z]{4,}|[A-Z][A-Z\-]*-[A-Z\-]*))*:\s*',
         re.MULTILINE)
 
+    _speaker_source_text = ['']  # mutable ref for current text being processed
+
     def _speaker_replace(m):
-        label = m.group(0).lstrip('- ')
+        full_match = m.group(0)
+        label = full_match.lstrip('- ')
         name_part = label.split(':')[0].strip()
+        # Don't strip purely numeric labels (e.g. line numbers)
         if re.match(r'^\d+$', name_part):
-            return m.group(0)
+            return full_match
+        # Don't strip single-character labels
         if len(name_part) <= 1:
-            return m.group(0)
+            return full_match
+        # Don't strip if the colon is part of a time (digits:digits)
+        # Check if char before colon is a digit AND char after colon
+        # (in the source text, not just the match) is a digit.
+        # e.g. "at 3:00", "is 12:30", "at 5:00"
+        colon_pos = full_match.find(':')
+        if colon_pos >= 0:
+            before_colon = full_match[:colon_pos]
+            if before_colon and before_colon.rstrip()[-1:].isdigit():
+                # Look at the source text after the match end
+                src = _speaker_source_text[0]
+                end_pos = m.end()
+                if end_pos < len(src) and src[end_pos:end_pos+1].isdigit():
+                    return full_match
         return m.group(1)
 
     result = []
@@ -471,10 +489,14 @@ def filter_remove_hi(cues):
         text = caps_hi_label.sub(r'\1', text)
         for pat in hi_patterns:
             text = pat.sub('', text)
+        _speaker_source_text[0] = text
         text = speaker_pattern.sub(_speaker_replace, text)
-        text = re.sub(
-            r'^(-?\s*)(?:[A-Za-z][A-Za-z\d\'\.]*|[A-Z][A-Za-z\s\d\'\.#]{1,29}[A-Za-z\d])\s+:\s*', r'\1',
-            text, flags=re.MULTILINE)
+        # Second speaker pattern: "Name :" (space before colon)
+        _spk2 = re.compile(
+            r'^(-?\s*)(?:[A-Za-z][A-Za-z\d\'\.]*|[A-Z][A-Za-z\s\d\'\.#]{1,29}[A-Za-z\d])\s+:\s*',
+            re.MULTILINE)
+        _speaker_source_text[0] = text
+        text = _spk2.sub(lambda m: _speaker_replace(m), text)
         text = re.sub(r'^\s*:\s*', '', text, flags=re.MULTILINE)
         text = re.sub(r'\n\s*:\s*', '\n', text)
         text = re.sub(r'^(-\s*):\s*', r'\1', text, flags=re.MULTILINE)

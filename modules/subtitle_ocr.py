@@ -241,302 +241,373 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
     tmpdir = tempfile.mkdtemp(prefix='docflix_ocr_')
 
     try:
-        # ── Phase 1: Get subtitle packet timestamps via ffprobe ──
+        # ── Phase 1: Extract PGS stream and decode bitmaps directly ──
+        # Much faster than the ffmpeg overlay approach — only reads the
+        # subtitle stream data instead of processing the entire movie.
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import struct
+        import numpy as np
+        import time as _time
+
+        phase1_start = _time.monotonic()
+
+        # ── Step 1: Extract raw PGS stream to .sup file ──
         if progress_callback:
-            progress_callback("Probing subtitle packet timestamps...")
+            progress_callback("Extracting subtitle stream...")
 
-        probe_cmd = [
-            'ffprobe', '-v', 'quiet', '-print_format', 'json',
-            '-show_entries', 'packet=pts_time,duration_time,size',
-            '-select_streams', str(stream_index),
-            filepath
-        ]
-        result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=300)
-        if result.returncode != 0:
-            if progress_callback:
-                progress_callback("ffprobe failed to read subtitle packets")
-            return []
-
-        all_packets = json.loads(result.stdout).get('packets', [])
-
-        # Filter out zero-size packets (PGS clear/end events) and build timing list
-        packets = []
-        for pkt in all_packets:
-            size = int(pkt.get('size', 0))
-            pts = pkt.get('pts_time')
-            if size > 0 and pts is not None:
-                try:
-                    pts_f = float(pts)
-                except (ValueError, TypeError):
-                    continue
-                dur = float(pkt.get('duration_time', 0) or 0)
-                packets.append({'pts': pts_f, 'duration': dur})
-
-        if not packets:
-            if progress_callback:
-                progress_callback("No subtitle packets found in stream")
-            return []
-
-        # Calculate durations from gaps where duration is missing
-        for i, pkt in enumerate(packets):
-            if pkt['duration'] <= 0:
-                if i + 1 < len(packets):
-                    pkt['duration'] = min(packets[i + 1]['pts'] - pkt['pts'], 10.0)
-                else:
-                    pkt['duration'] = 3.0
-            # Clamp to reasonable range
-            pkt['duration'] = max(0.5, min(pkt['duration'], 15.0))
-
-        total = len(packets)
-        if progress_callback:
-            progress_callback(f"Found {total} subtitle events — starting OCR...")
-
-        # ── Phase 2: Compute relative subtitle stream index ──
-        all_streams = get_all_streams(filepath)
-        rel_idx = 0
-        for s in all_streams:
-            if s['index'] == stream_index:
-                break
-            if s['codec_type'] == 'subtitle':
-                rel_idx += 1
-
-        # ── Phase 3: Batch-extract all subtitle images in one ffmpeg pass ──
-        # Overlay subtitle stream on a black canvas, use scene detection to
-        # output one frame per subtitle change (appear + disappear).
-        if progress_callback:
-            progress_callback("Rendering subtitle images (single pass)...")
-
-        # Get video duration for the lavfi color source
-        duration = get_video_duration(filepath) or 7200  # fallback 2h
-
-        img_pattern = os.path.join(tmpdir, 'frame_%05d.png')
+        sup_path = os.path.join(tmpdir, 'subs.sup')
         extract_cmd = [
-            'ffmpeg', '-y', '-progress', 'pipe:1', '-stats_period', '1',
-            '-f', 'lavfi', '-i', f'color=c=black:s=1920x1080:r=10:d={int(duration) + 10}',
+            'ffmpeg', '-y', '-v', 'error',
             '-i', filepath,
-            '-filter_complex',
-            f"[0:v][1:s:{rel_idx}]overlay,select='gt(scene\\,0.001)',setpts=N/TB",
-            '-vsync', 'vfr',
-            img_pattern
+            '-map', f'0:{stream_index}',
+            '-c:s', 'copy',
+            sup_path
         ]
         try:
             proc = subprocess.Popen(extract_cmd, stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE, text=True, bufsize=1)
-            # Parse ffmpeg progress output in real-time
-            render_frames = [0]
-            while True:
+                                    stderr=subprocess.PIPE)
+            while proc.poll() is None:
                 if cancel_event and cancel_event.is_set():
                     proc.terminate()
-                    if progress_callback:
-                        progress_callback("Rendering cancelled by user")
+                    proc.wait()
                     return []
-                line = proc.stdout.readline()
-                if not line and proc.poll() is not None:
-                    break
-                if line.startswith('out_time_ms='):
-                    try:
-                        us = int(line.split('=')[1].strip())
-                        secs = us / 1_000_000
-                        pct = min(99, (secs / duration) * 100)
-                        if progress_callback:
-                            mins = int(secs) // 60
-                            s = int(secs) % 60
-                            progress_callback(f"Rendering subtitle images... "
-                                              f"{mins}m{s:02d}s / {int(duration)//60}m "
-                                              f"({pct:.0f}%)")
-                    except (ValueError, ZeroDivisionError):
-                        pass
-                elif line.startswith('frame='):
-                    try:
-                        render_frames[0] = int(line.split('=')[1].strip())
-                    except ValueError:
-                        pass
-            proc.wait()
+                try:
+                    proc.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    continue
             if proc.returncode != 0:
-                stderr_out = proc.stderr.read()
+                stderr_out = proc.stderr.read().decode(errors='replace')
                 if progress_callback:
-                    progress_callback(f"Failed to render subtitle images: {stderr_out[-300:]}")
+                    progress_callback(f"Extraction failed: {stderr_out[-300:]}")
                 return []
-            if progress_callback:
-                progress_callback(f"Rendering complete — {render_frames[0]} frames extracted")
         except Exception as e:
             if progress_callback:
-                progress_callback(f"Error during rendering: {e}")
+                progress_callback(f"Extraction error: {e}")
             return []
 
-        # Collect generated image files
-        import glob
-        img_files = sorted(glob.glob(os.path.join(tmpdir, 'frame_*.png')))
-
-        if not img_files:
+        if not os.path.exists(sup_path) or os.path.getsize(sup_path) == 0:
             if progress_callback:
-                progress_callback("No subtitle images were rendered")
+                progress_callback("Extracted subtitle stream is empty")
             return []
 
+        sup_size = os.path.getsize(sup_path)
         if progress_callback:
-            progress_callback(f"Rendered {len(img_files)} frames — filtering and running OCR...")
+            elapsed = _time.monotonic() - phase1_start
+            progress_callback(f"Extracted {sup_size // 1024} KB in {elapsed:.1f}s")
 
-        # ── Phase 4: Filter non-blank images, match to timestamps, OCR ──
-        # The scene-change filter produces frames for both subtitle-on and
-        # subtitle-off transitions.  We only want the subtitle-on frames
-        # (those with visible text, i.e. non-black content).
-        # Timestamps come from ffprobe packets; we filter to only the
-        # "display" packets (size > 100 bytes — clear events are ~30 bytes).
-        display_packets = [p for p in packets if p.get('_size', p.get('duration', 1)) >= 0]
-        # Use the filtered large packets for timing
-        large_packets = []
-        for pkt in all_packets:
-            size = int(pkt.get('size', 0))
-            pts = pkt.get('pts_time')
-            if size > 100 and pts is not None:
-                try:
-                    pts_f = float(pts)
-                except (ValueError, TypeError):
-                    continue
-                dur = float(pkt.get('duration_time', 0) or 0)
-                large_packets.append({'pts': pts_f, 'duration': dur})
-
-        # Recalculate durations for large packets
-        for i, pkt in enumerate(large_packets):
-            if pkt['duration'] <= 0:
-                if i + 1 < len(large_packets):
-                    pkt['duration'] = min(large_packets[i + 1]['pts'] - pkt['pts'], 10.0)
-                else:
-                    pkt['duration'] = 3.0
-            pkt['duration'] = max(0.5, min(pkt['duration'], 15.0))
-
-        # ── Pass A: Filter out blank frames (fast scan) ──
+        # ── Step 2: Parse PGS/SUP binary format ──
         if progress_callback:
-            progress_callback("Filtering blank frames...")
+            progress_callback("Parsing PGS segments...")
 
-        non_blank = []  # list of (img_path, original_index)
-        total_all = len(img_files)
-        for i, img_path in enumerate(img_files):
+        try:
+            with open(sup_path, 'rb') as f:
+                sup_data = f.read()
+        except Exception as e:
+            if progress_callback:
+                progress_callback(f"Error reading SUP file: {e}")
+            return []
+
+        pos = 0
+        sup_len = len(sup_data)
+        current_palette = {}
+        current_pts = 0.0
+        obj_data_buf = bytearray()
+        obj_width = 0
+        obj_height = 0
+        display_sets = []  # (pts, palette_dict, rle_bytes, width, height)
+        seg_count = 0
+
+        while pos + 13 <= sup_len:
             if cancel_event and cancel_event.is_set():
-                if progress_callback:
-                    progress_callback("Cancelled during filtering")
                 return []
-            try:
-                img = Image.open(img_path).convert('L')
-                img.thumbnail((96, 54))  # fast resize for blank detection
-                lo, hi = img.getextrema()
-                if hi >= 30:
-                    non_blank.append((img_path, i))
-            except Exception:
-                pass
-            if progress_callback and (i % 50 == 0 or i == total_all - 1):
-                progress_callback(f"Filtering blank frames... {i+1}/{total_all} "
-                                  f"({len(non_blank)} with content)")
+
+            if sup_data[pos:pos+2] != b'PG':
+                pos += 1
+                continue
+
+            pts_raw = struct.unpack('>I', sup_data[pos+2:pos+6])[0]
+            pts_sec = pts_raw / 90000.0
+            seg_type = sup_data[pos+10]
+            seg_size = struct.unpack('>H', sup_data[pos+11:pos+13])[0]
+            seg_data = sup_data[pos+13:pos+13+seg_size]
+            pos += 13 + seg_size
+            seg_count += 1
+
+            if len(seg_data) < seg_size:
+                break
+
+            if seg_type == 0x16:  # PCS — Presentation Composition
+                current_pts = pts_sec
+                obj_data_buf = bytearray()
+                obj_width = 0
+                obj_height = 0
+
+            elif seg_type == 0x14:  # PDS — Palette Definition
+                if len(seg_data) >= 2:
+                    p = 2
+                    while p + 5 <= len(seg_data):
+                        idx = seg_data[p]
+                        y_val = seg_data[p+1]
+                        cr = seg_data[p+2]
+                        cb = seg_data[p+3]
+                        alpha = seg_data[p+4]
+                        r = max(0, min(255, int(y_val + 1.402 * (cr - 128))))
+                        g = max(0, min(255, int(y_val - 0.344136 * (cb - 128) - 0.714136 * (cr - 128))))
+                        b = max(0, min(255, int(y_val + 1.772 * (cb - 128))))
+                        current_palette[idx] = (r, g, b, alpha)
+                        p += 5
+
+            elif seg_type == 0x15:  # ODS — Object Definition
+                if len(seg_data) >= 4:
+                    seq_flag = seg_data[3]
+                    # Check if this segment has width/height header
+                    # (present in first fragment or single-segment ODS).
+                    # The header is: obj_id(2) + ver(1) + flag(1) +
+                    #   data_len(3) + width(2) + height(2) = 11 bytes
+                    # Detect by: if we don't have dimensions yet AND
+                    # segment is large enough to contain the header.
+                    if obj_width == 0 and len(seg_data) >= 11:
+                        # First fragment (regardless of flag value)
+                        obj_width = struct.unpack('>H', seg_data[7:9])[0]
+                        obj_height = struct.unpack('>H', seg_data[9:11])[0]
+                        obj_data_buf = bytearray(seg_data[11:])
+                    elif obj_width > 0:
+                        # Continuation fragment — append RLE data
+                        obj_data_buf.extend(seg_data[4:])
+
+            elif seg_type == 0x80:  # END — End of Display Set
+                if obj_data_buf and obj_width > 0 and obj_height > 0:
+                    display_sets.append((
+                        current_pts,
+                        dict(current_palette),
+                        bytes(obj_data_buf),
+                        obj_width,
+                        obj_height
+                    ))
+
+            if progress_callback and seg_count % 500 == 0:
+                pct = (pos / sup_len) * 100
+                progress_callback(
+                    f"Parsing PGS segments... {pct:.0f}% "
+                    f"({len(display_sets)} subtitles found)")
+
+        if not display_sets:
+            if progress_callback:
+                progress_callback("No subtitle images found in PGS stream")
+            return []
+
+        # Calculate durations from gaps between display sets
+        for i in range(len(display_sets)):
+            if i + 1 < len(display_sets):
+                dur = min(display_sets[i + 1][0] - display_sets[i][0], 10.0)
+            else:
+                dur = 3.0
+            dur = max(0.5, min(dur, 15.0))
+            display_sets[i] = display_sets[i] + (dur,)
 
         if progress_callback:
-            progress_callback(f"Found {len(non_blank)} non-blank frames out of "
-                              f"{total_all} — starting OCR...")
+            elapsed = _time.monotonic() - phase1_start
+            progress_callback(
+                f"Parsed {seg_count} segments → "
+                f"{len(display_sets)} subtitles in {elapsed:.1f}s")
 
-        # Pair non-blank frames with display packet timestamps
-        total = len(non_blank)
-        ocr_jobs = []  # list of (img_path, pts, dur, original_index)
-        for j, (img_path, orig_idx) in enumerate(non_blank):
-            if j < len(large_packets):
-                pts = large_packets[j]['pts']
-                dur = large_packets[j]['duration']
-            else:
-                pts = 0
-                dur = 3.0
-            ocr_jobs.append((img_path, pts, dur, orig_idx))
-
-        # ── Pass B: Parallel OCR ──
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        import threading as _thr
+        # ── Step 3: Decode + OCR each frame (combined, parallel) ──
+        # Instead of decoding ALL bitmaps first then OCR'ing, we combine
+        # both into a single step per frame. Results appear immediately
+        # in the monitor as each frame completes.
+        total = len(display_sets)
 
         try:
             max_workers = min(os.cpu_count() or 4, 8)
         except Exception:
             max_workers = 4
 
-        cues = []
-        cues_lock = _thr.Lock()
         completed_count = [0]
+        completed_lock = threading.Lock()
 
-        def _ocr_one(job):
-            """OCR a single subtitle image. Returns (pts, dur, text, img_path) or None."""
-            img_path, pts, dur, orig_idx = job
+        if progress_callback:
+            elapsed = _time.monotonic() - phase1_start
+            progress_callback(
+                f"Parsed {total} subtitles in {elapsed:.1f}s — "
+                f"starting OCR ({max_workers} workers)...")
+
+        def _decode_and_ocr(args):
+            """Decode PGS RLE bitmap + OCR in one step."""
+            i, pts, palette, rle_data, w, h, dur = args
+            img_path = os.path.join(tmpdir, f'frame_{i+1:05d}.bmp')
             try:
-                img = Image.open(img_path).convert('L')
+                # ── Sanity check ──
+                if w <= 0 or h <= 0 or w > 4096 or h > 4096:
+                    return (pts, dur, '', img_path)
+                expected = w * h
+                if expected > 4096 * 4096:
+                    return (pts, dur, '', img_path)
 
-                # Invert if dark background (white-on-black subtitle)
-                lo, hi = img.getextrema()
-                if hi < 30:
+                # ── Decode PGS RLE ──
+                pixels = bytearray(expected)
+                pp = 0
+                dp = 0
+                rle_len = len(rle_data)
+                max_iters = rle_len * 2 + expected
+                iters = 0
+                while dp < rle_len and pp < expected:
+                    iters += 1
+                    if iters > max_iters:
+                        break
+                    byte1 = rle_data[dp]; dp += 1
+                    if byte1 != 0:
+                        pixels[pp] = byte1; pp += 1
+                    else:
+                        if dp >= rle_len: break
+                        byte2 = rle_data[dp]; dp += 1
+                        if byte2 == 0:
+                            mod = pp % w
+                            if mod != 0: pp += w - mod
+                        elif byte2 < 0x40:
+                            pp += min(byte2, expected - pp)
+                        elif byte2 < 0x80:
+                            if dp >= rle_len: break
+                            byte3 = rle_data[dp]; dp += 1
+                            pp += min(((byte2 & 0x3F) << 8) | byte3, expected - pp)
+                        elif byte2 < 0xC0:
+                            run_len = byte2 & 0x3F
+                            if dp >= rle_len: break
+                            color = rle_data[dp]; dp += 1
+                            run_len = min(run_len, expected - pp)
+                            pixels[pp:pp+run_len] = bytes([color]) * run_len
+                            pp += run_len
+                        else:
+                            if dp + 1 >= rle_len: break
+                            byte3 = rle_data[dp]; dp += 1
+                            color = rle_data[dp]; dp += 1
+                            run_len = min(((byte2 & 0x3F) << 8) | byte3, expected - pp)
+                            pixels[pp:pp+run_len] = bytes([color]) * run_len
+                            pp += run_len
+
+                # ── Palette → grayscale image ──
+                # Use luminance AND alpha to separate text from shadow.
+                # PGS subtitles have bright text (white, lum~220) with
+                # dark shadow/outline (lum~30) behind it. Both have
+                # high alpha. Using alpha alone makes shadows appear as
+                # thick dark borders that merge characters together.
+                # Instead: composite on white bg, then invert. Bright
+                # text stays bright on white → inverts to dark. Dark
+                # shadow stays dark on white → inverts to light/white.
+                idx_arr = np.frombuffer(pixels, dtype=np.uint8)
+                pal_r = np.zeros(256, dtype=np.uint8)
+                pal_g = np.zeros(256, dtype=np.uint8)
+                pal_b = np.zeros(256, dtype=np.uint8)
+                pal_a = np.zeros(256, dtype=np.uint8)
+                for idx, (r, g, b, a) in palette.items():
+                    if idx < 256:
+                        pal_r[idx] = r; pal_g[idx] = g
+                        pal_b[idx] = b; pal_a[idx] = a
+
+                r_arr = pal_r[idx_arr].astype(np.float32)
+                g_arr = pal_g[idx_arr].astype(np.float32)
+                b_arr = pal_b[idx_arr].astype(np.float32)
+                a_arr = pal_a[idx_arr].astype(np.float32) / 255.0
+
+                # Grayscale luminance
+                lum = 0.299 * r_arr + 0.587 * g_arr + 0.114 * b_arr
+
+                # Composite on BLACK background: 0*(1-a) + lum*a = lum*a
+                # Result: bright text stays bright, dark shadow stays dark,
+                # transparent background = black (0).
+                # The _ocr_one function will then see dark corners (bg),
+                # invert the image → white bg, dark text, light shadow.
+                gray = (lum * a_arr).clip(0, 255).astype(np.uint8)
+
+                if gray.max() < 10:
                     return (pts, dur, '', img_path)  # blank
-                # Use mean of extrema as a quick avg proxy
-                if (lo + hi) / 2 < 128:
-                    img = Image.eval(img, lambda x: 255 - x)
 
-                # Crop to bounding box of non-black content + padding
+                img = Image.fromarray(gray.reshape(h, w), mode='L')
+
+                # ── Crop to bounding box + padding ──
                 bbox = img.getbbox()
                 if bbox:
-                    pad = 8
+                    pad = 12
                     x1 = max(0, bbox[0] - pad)
                     y1 = max(0, bbox[1] - pad)
                     x2 = min(img.width, bbox[2] + pad)
                     y2 = min(img.height, bbox[3] + pad)
                     img = img.crop((x1, y1, x2, y2))
 
-                    # Save cropped version for preview in monitor window
-                    try:
-                        img.save(img_path)
-                    except Exception:
-                        pass
-
-                # Check if this is likely a music note frame
                 if _is_music_note_frame(img):
+                    img.save(img_path)
                     return (pts, dur, '♪', img_path)
 
+                # ── Upscale for Tesseract ──
+                if img.height < 100:
+                    scale = max(2, 100 // img.height)
+                    img = img.resize((img.width * scale, img.height * scale),
+                                     Image.LANCZOS)
+
+                # ── Add white border padding ──
+                from PIL import ImageOps
+                img = ImageOps.expand(img, border=20, fill=255)
+
+                # Save for monitor preview
+                img.save(img_path)
+
+                # ── Tesseract OCR ──
                 text = pytesseract.image_to_string(
                     img, lang=tess_lang,
-                    config='--psm 6 -c tessedit_char_blacklist=|'
+                    config='--psm 6 --oem 3'
                 ).strip()
                 text = _fix_ocr_text(text)
                 return (pts, dur, text, img_path)
             except Exception:
                 return (pts, dur, '', img_path)
 
-        if progress_callback:
-            progress_callback(f"OCR: {total} frames, {max_workers} parallel workers...")
+        # Build args list
+        all_args = [
+            (i, pts, palette, rle_data, w, h, dur)
+            for i, (pts, palette, rle_data, w, h, dur) in enumerate(display_sets)
+        ]
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_job = {}
-            for job in ocr_jobs:
+        raw_results = []
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        try:
+            future_to_idx = {}
+            for args in all_args:
                 if cancel_event and cancel_event.is_set():
                     break
-                future = executor.submit(_ocr_one, job)
-                future_to_job[future] = job
+                future = executor.submit(_decode_and_ocr, args)
+                future_to_idx[future] = args[0]
 
-            # Collect results as they complete (but we'll sort by timestamp later)
-            raw_results = []
-            for future in as_completed(future_to_job):
+            for future in as_completed(future_to_idx):
                 if cancel_event and cancel_event.is_set():
                     executor.shutdown(wait=False, cancel_futures=True)
                     if progress_callback:
-                        progress_callback("OCR cancelled by user")
-                    break
+                        progress_callback(f"OCR cancelled — {len(raw_results)} frames completed")
+                    break  # exit loop but keep partial results
 
-                completed_count[0] += 1
+                with completed_lock:
+                    completed_count[0] += 1
                 try:
-                    result = future.result()
+                    result = future.result(timeout=30)
                     pts, dur, text, img_path = result
                     raw_results.append(result)
 
-                    # Notify frame callback
                     if frame_callback:
                         frame_callback(completed_count[0] - 1, total,
                                        img_path, text or '[empty]',
                                        _seconds_to_srt_time(pts),
                                        _seconds_to_srt_time(pts + dur))
+
+                    if progress_callback and completed_count[0] % 5 == 0:
+                        progress_callback(
+                            f"OCR: {completed_count[0]}/{total} "
+                            f"({completed_count[0]*100//total}%)")
                 except Exception:
-                    completed_count[0]  # already incremented
+                    pass
+        finally:
+            executor.shutdown(wait=False)
 
         # Sort results by timestamp and build cue list
-        raw_results.sort(key=lambda r: r[0])  # sort by pts
+        raw_results.sort(key=lambda r: r[0])
+        cues = []
         for pts, dur, text, img_path in raw_results:
             if text:
                 cues.append({
@@ -546,11 +617,23 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                     'text': text,
                 })
 
+        # Count how many had text vs empty
+        with_text = sum(1 for r in raw_results if r[2])
+        empty = sum(1 for r in raw_results if not r[2])
         if progress_callback:
-            progress_callback(f"OCR complete: {len(cues)} cues extracted from {total} frames")
+            progress_callback(f"OCR complete: {len(cues)} cues extracted")
+            progress_callback(f"  Total OCR'd: {len(raw_results)}")
+            progress_callback(f"  With text: {with_text}")
+            progress_callback(f"  Empty/blank: {empty}")
 
         return cues
 
+    except Exception as e:
+        if progress_callback:
+            import traceback
+            progress_callback(f"OCR ERROR: {e}")
+            progress_callback(traceback.format_exc()[-500:])
+        return []
     finally:
         import shutil as _shutil_cleanup
         _shutil_cleanup.rmtree(tmpdir, ignore_errors=True)
@@ -607,9 +690,24 @@ def _fix_ocr_text(text):
     if not text:
         return text
 
+    # ── Fix dialogue dash misreads ──
+    # Tesseract often misreads the subtitle dialogue dash (-) as = or ~-
+    # These appear at the start of lines in multi-speaker subtitles
+    # ~- → - (tilde-dash misread)
+    text = re.sub(r'^~\s*-', '-', text, flags=re.MULTILINE)
+    # = at start of line → - (equals misread as dash)
+    text = re.sub(r'^=\s*', '- ', text, flags=re.MULTILINE)
+    # ~= at start of line → -
+    text = re.sub(r'^~\s*=\s*', '- ', text, flags=re.MULTILINE)
+
     # Fix | and / first (convert to letters before I/l rules run)
     # Replace | with I everywhere (pipe never appears in subtitles)
     text = text.replace('|', 'I')
+
+    # Fix '' (two single quotes) misread as apostrophe — very common OCR error.
+    # In contractions: I''m → I'm, don''t → don't, it''s → it's, I''ll → I'll
+    # Between letters: that''s → that's, he''d → he'd, we''re → we're
+    text = re.sub(r"(?<=[a-zA-Z])''(?=[a-zA-Z])", "'", text)
 
     # Fix / and // misread as I, l, ll and /7 as I'l (7 = apostrophe shape)
     # Order matters: fix multi-char patterns first, then single /
@@ -685,8 +783,96 @@ def _fix_ocr_text(text):
     text = re.sub(r"'™", "'", text)   # '™ → ' (avoid double apostrophe)
     text = text.replace('™', "'")      # standalone ™ → '
 
+    # ── Fix curly/smart quotes and backticks to straight apostrophe ──
+    text = text.replace('\u2018', "'")   # ' left single quote
+    text = text.replace('\u2019', "'")   # ' right single quote
+    text = text.replace('\u201C', '"')   # " left double quote
+    text = text.replace('\u201D', '"')   # " right double quote
+    text = text.replace('`', "'")        # backtick → apostrophe
+    text = text.replace('\u00B4', "'")   # ´ acute accent → apostrophe
+
+    # ── Fix broken contractions ──
+    # Tesseract often splits contractions or garbles the apostrophe.
+    # These patterns fix the most common English contractions.
+
+    # Fix I + apostrophe garble: I 'm → I'm, I 'll → I'll, I 've → I've, I 'd → I'd
+    text = re.sub(r"\bI\s+'(m|ll|ve|d)\b", r"I'\1", text)
+    # Fix space before contraction: do n't → don't, ca n't → can't, etc.
+    text = re.sub(r"\b(do|ca|wo|is|are|was|were|has|have|had|does|did|could|would|should|must|need|dare|ai)\s*n\s*'?\s*t\b",
+                  lambda m: m.group(1) + "n't", text, flags=re.IGNORECASE)
+    # Fix "' " (space after apostrophe in contractions): don' t → don't
+    text = re.sub(r"(\w)'\s+([tsmd]\b|re\b|ve\b|ll\b)", r"\1'\2", text)
+
+    # ── Fix 0/O confusion ──
+    # 0 inside words should be O: g0 → go, wh0 → who, d0 → do, n0 → no
+    text = re.sub(r'(?<=[a-zA-Z])0(?=[a-zA-Z])', 'O', text)  # mid-word: h0me → hOme
+    text = re.sub(r'(?<=[a-zA-Z])0\b', 'o', text)            # end of word: g0 → go
+    text = re.sub(r'\b0(?=[a-z])', 'O', text)                 # start of word: 0nly → Only
+    # 0 as standalone word (not a number like "100") → O (rare but happens)
+    text = re.sub(r'(?<![0-9])\b0\b(?![0-9])', 'O', text)
+
+    # ── Fix rn → m confusion (Tesseract often reads 'm' as 'rn') ──
+    # Only fix in common words where 'rn' is clearly wrong
+    _RN_WORDS = {
+        'corning': 'coming', 'sornething': 'something', 'sornebody': 'somebody',
+        'sorneone': 'someone', 'sornewhere': 'somewhere', 'sornehow': 'somehow',
+        'sornetime': 'sometime', 'becorne': 'become', 'welcorne': 'welcome',
+        'horneward': 'homeward', 'horne': 'home', 'corne': 'come',
+        'narne': 'name', 'garne': 'game', 'farne': 'fame', 'sarne': 'same',
+        'tirne': 'time', 'rnake': 'make', 'rnore': 'more', 'rnuch': 'much',
+        'rnan': 'man', 'rnen': 'men', 'rnine': 'mine', 'rnind': 'mind',
+        'rnay': 'may', 'rnust': 'must', 'rneet': 'meet', 'rnove': 'move',
+        'rnoving': 'moving', 'rnorning': 'morning', 'rnother': 'mother',
+        'rnoney': 'money', 'rnoment': 'moment', 'rnouth': 'mouth',
+        'wornan': 'woman', 'wornen': 'women', 'hurnan': 'human',
+        'rernoving': 'removing', 'rernainder': 'remainder',
+        'cornrnand': 'command', 'cornrnander': 'commander',
+        'cornrnunity': 'community', 'cornrnit': 'commit',
+        'accornpany': 'accompany', 'accornplish': 'accomplish',
+        'recornrnend': 'recommend', 'cornpany': 'company',
+        'cornplete': 'complete', 'cornputer': 'computer',
+        'cornfort': 'comfort', 'cornbat': 'combat',
+        'irnportant': 'important', 'irnpossible': 'impossible',
+        'irnagine': 'imagine', 'irnpact': 'impact',
+        'rnarriage': 'marriage', 'rnarried': 'married',
+        'rnassive': 'massive', 'rnaster': 'master',
+        'rnatter': 'matter', 'rnaterial': 'material',
+        'rnachine': 'machine', 'rnajor': 'major',
+        'rniddle': 'middle', 'rnilitary': 'military',
+        'rnillion': 'million', 'rnissing': 'missing',
+        'rnission': 'mission', 'rnistake': 'mistake',
+        'rnurder': 'murder', 'rnusic': 'music',
+        'rernerrber': 'remember', 'rernernber': 'remember',
+        'rernerber': 'remember', 'rernember': 'remember',
+    }
+    for wrong, right in _RN_WORDS.items():
+        text = re.sub(r'\b' + wrong + r'\b', right, text, flags=re.IGNORECASE)
+
+    # ── Fix other common OCR character confusions ──
+    # Fix "ii" that should be "ll" in common words: kiII → kill, wiII → will
+    text = re.sub(r'\b([Ww])iII\b', r'\1ill', text)
+    text = re.sub(r'\b([Kk])iII\b', r'\1ill', text)
+    text = re.sub(r'\b([Ff])iII\b', r'\1ill', text)
+    text = re.sub(r'\b([Ss])tiII\b', r'\1till', text)
+
+    # Fix "Il" at start of common words that should be "Il" or "I'll"
+    # "lI" → "ll": alI → all, welI → well, telI → tell
+    text = re.sub(r'(?<=[a-z])lI\b', 'll', text)
+
     # ── Music note (♪) detection ──
-    # Tesseract misreads ♪ as: 2 > $ & £ © » # * ? Sf D> P If at start/end of lines
+    # Tesseract misreads ♪ as: 2 > $ & £ © » # * ? Sf D> P If J j 7» at start/end of lines
+
+    # Standalone J or j at start/end of line → ♪ (music note misread)
+    # J/j is rarely a standalone word in subtitles; almost always a ♪
+    text = re.sub(r'^(-?\s*)[Jj]\s+', r'\1♪ ', text, flags=re.MULTILINE)  # J at start
+    text = re.sub(r'\s+[Jj]\s*$', ' ♪', text, flags=re.MULTILINE)         # j at end
+    # Standalone J or j as the entire line
+    text = re.sub(r'^(-?\s*)[Jj]\s*$', r'\1♪', text, flags=re.MULTILINE)
+
+    # 7» → ♪ (7 + right guillemet misread)
+    text = text.replace('7»', '♪')
+    # »7 variant
+    text = text.replace('»7', '♪')
 
     # End-of-line garbled ♪: Sf, D>, P, If, f (various misreadings)
     text = re.sub(r'\s+[SD][f>]\s*$', ' ♪', text, flags=re.MULTILINE)  # Sf, D>
@@ -712,16 +898,80 @@ def _fix_ocr_text(text):
     text = re.sub(_MUSIC_START, '♪ ', text, flags=re.MULTILINE)
     text = re.sub(_MUSIC_END, ' ♪', text, flags=re.MULTILINE)
 
-    # Detect garbled music note OCR output — entire cue is just garbage chars
+    # Detect garbled OCR output — short strings of mostly non-word characters.
+    # These come from music notes, symbols, or decorative elements that
+    # Tesseract can't read. Convert to ♪ if very short, or empty if garble.
+    _GARBLE_CHARS = set('Jjd}]){><%#@~^*_=2$&£©»♪.,;:\'"!?/\\|-+`´ ')
     stripped = text.strip()
-    if len(stripped) <= 3 and stripped and all(c in 'Jjd}]){><%#@~^*_=2$&£©»♪ ' for c in stripped):
-        return '♪'
+    if stripped:
+        if len(stripped) <= 3 and all(c in _GARBLE_CHARS for c in stripped):
+            return '♪'
+        # Longer garble: if the text has no word with 2+ consecutive letters,
+        # it's likely OCR noise from a symbol/music note bitmap
+        if len(stripped) <= 15 and not re.search(r'[a-zA-Z]{2,}', stripped):
+            return '♪' if any(c in 'Jjd>$£©»♪' for c in stripped) else ''
 
     # Clean up common OCR artifacts
     text = re.sub(r'\s{2,}', ' ', text)          # collapse multiple spaces
     text = re.sub(r'^\s+|\s+$', '', text, flags=re.MULTILINE)  # trim lines
 
+    # Apply user's custom OCR rules (loaded from prefs)
+    for find, replace in _get_custom_ocr_rules():
+        text = text.replace(find, replace)
+
     return text.strip()
+
+
+# ── Custom OCR Rules ────────────────────────────────────────────
+
+_OCR_RULES_FILE = os.path.join(
+    os.path.expanduser('~/.local/share/docflix'), 'ocr_rules.json')
+
+_custom_rules_cache = None  # cached list of (find, replace) tuples
+
+
+def _get_custom_ocr_rules():
+    """Return list of (find, replace) tuples from the user's custom rules."""
+    global _custom_rules_cache
+    if _custom_rules_cache is not None:
+        return _custom_rules_cache
+    _custom_rules_cache = load_ocr_rules()
+    return _custom_rules_cache
+
+
+def load_ocr_rules():
+    """Load custom OCR replacement rules from prefs file."""
+    try:
+        if os.path.exists(_OCR_RULES_FILE):
+            with open(_OCR_RULES_FILE, 'r', encoding='utf-8') as f:
+                rules = json.load(f)
+            if isinstance(rules, list):
+                return [(r['find'], r['replace']) for r in rules
+                        if isinstance(r, dict) and 'find' in r and 'replace' in r]
+    except Exception:
+        pass
+    return []
+
+
+def save_ocr_rules(rules):
+    """Save custom OCR replacement rules to prefs file.
+    rules: list of (find, replace) tuples."""
+    global _custom_rules_cache
+    try:
+        os.makedirs(os.path.dirname(_OCR_RULES_FILE), exist_ok=True)
+        data = [{'find': f, 'replace': r} for f, r in rules]
+        with open(_OCR_RULES_FILE, 'w', encoding='utf-8') as fh:
+            json.dump(data, fh, indent=2, ensure_ascii=False)
+        _custom_rules_cache = list(rules)
+    except Exception:
+        pass
+
+
+def reload_ocr_rules():
+    """Force reload of custom OCR rules from disk."""
+    global _custom_rules_cache
+    _custom_rules_cache = None
+    return _get_custom_ocr_rules()
 
 
 def run_ocr_with_monitor(app, filepath, stream_index, language,

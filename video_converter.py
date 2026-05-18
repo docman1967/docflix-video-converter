@@ -620,9 +620,17 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                         progress_callback=None, frame_callback=None,
                         cancel_event=None):
     """OCR a bitmap subtitle stream (PGS/VobSub) to a list of SRT cues.
+    Delegates to modules.subtitle_ocr if available, falls back to local implementation.
+    """
+    try:
+        from modules.subtitle_ocr import ocr_bitmap_subtitle as _module_ocr
+        return _module_ocr(filepath, stream_index, language,
+                           progress_callback, frame_callback, cancel_event)
+    except ImportError:
+        pass
 
-    Uses ffmpeg to render each subtitle event as an image on a black canvas,
-    then Tesseract OCR to extract text from each image.
+    # ── Fallback: local implementation ──
+    """OCR a bitmap subtitle stream (PGS/VobSub) to a list of SRT cues.
 
     Args:
         filepath: Path to the video file.
@@ -651,9 +659,12 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
     tmpdir = tempfile.mkdtemp(prefix='docflix_ocr_')
 
     try:
-        # ── Phase 1: Get subtitle packet timestamps via ffprobe ──
+        # ── Phase 1: Extract raw PGS stream + parse bitmaps directly ──
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import struct
+
         if progress_callback:
-            progress_callback("Probing subtitle packet timestamps...")
+            progress_callback("Phase 1/2 — Extracting subtitle stream...")
 
         probe_cmd = [
             'ffprobe', '-v', 'quiet', '-print_format', 'json',
@@ -710,14 +721,34 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
             if s['codec_type'] == 'subtitle':
                 rel_idx += 1
 
-        # ── Phase 3: Batch-extract all subtitle images in one ffmpeg pass ──
-        # Overlay subtitle stream on a black canvas, use scene detection to
-        # output one frame per subtitle change (appear + disappear).
-        if progress_callback:
-            progress_callback("Rendering subtitle images (single pass)...")
+        # ── Build large_packets timing list (display events, size > 100) ──
+        large_packets = []
+        for pkt in all_packets:
+            size = int(pkt.get('size', 0))
+            pts = pkt.get('pts_time')
+            if size > 100 and pts is not None:
+                try:
+                    pts_f = float(pts)
+                except (ValueError, TypeError):
+                    continue
+                dur = float(pkt.get('duration_time', 0) or 0)
+                large_packets.append({'pts': pts_f, 'duration': dur})
 
-        # Get video duration for the lavfi color source
-        duration = get_video_duration(filepath) or 7200  # fallback 2h
+        for i, pkt in enumerate(large_packets):
+            if pkt['duration'] <= 0:
+                if i + 1 < len(large_packets):
+                    pkt['duration'] = min(large_packets[i + 1]['pts'] - pkt['pts'], 10.0)
+                else:
+                    pkt['duration'] = 3.0
+            pkt['duration'] = max(0.5, min(pkt['duration'], 15.0))
+
+        # ── Phase 3: Render all subtitle images in one ffmpeg pass ──
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        if progress_callback:
+            progress_callback("Phase 1/2 — Rendering subtitle images...")
+
+        duration = get_video_duration(filepath) or 7200
 
         img_pattern = os.path.join(tmpdir, 'frame_%05d.png')
         extract_cmd = [
@@ -732,8 +763,6 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
         try:
             proc = subprocess.Popen(extract_cmd, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, text=True, bufsize=1)
-            # Parse ffmpeg progress output in real-time
-            render_frames = [0]
             while True:
                 if cancel_event and cancel_event.is_set():
                     proc.terminate()
@@ -751,15 +780,11 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                         if progress_callback:
                             mins = int(secs) // 60
                             s = int(secs) % 60
-                            progress_callback(f"Rendering subtitle images... "
-                                              f"{mins}m{s:02d}s / {int(duration)//60}m "
-                                              f"({pct:.0f}%)")
+                            progress_callback(
+                                f"Phase 1/2 — Rendering subtitle images... "
+                                f"{mins}m{s:02d}s / {int(duration)//60}m "
+                                f"({pct:.0f}%)")
                     except (ValueError, ZeroDivisionError):
-                        pass
-                elif line.startswith('frame='):
-                    try:
-                        render_frames[0] = int(line.split('=')[1].strip())
-                    except ValueError:
                         pass
             proc.wait()
             if proc.returncode != 0:
@@ -767,14 +792,11 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                 if progress_callback:
                     progress_callback(f"Failed to render subtitle images: {stderr_out[-300:]}")
                 return []
-            if progress_callback:
-                progress_callback(f"Rendering complete — {render_frames[0]} frames extracted")
         except Exception as e:
             if progress_callback:
                 progress_callback(f"Error during rendering: {e}")
             return []
 
-        # Collect generated image files
         import glob
         img_files = sorted(glob.glob(os.path.join(tmpdir, 'frame_*.png')))
 
@@ -784,67 +806,38 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
             return []
 
         if progress_callback:
-            progress_callback(f"Rendered {len(img_files)} frames — filtering and running OCR...")
+            progress_callback(f"Rendered {len(img_files)} frames — filtering blanks...")
 
-        # ── Phase 4: Filter non-blank images, match to timestamps, OCR ──
-        # The scene-change filter produces frames for both subtitle-on and
-        # subtitle-off transitions.  We only want the subtitle-on frames
-        # (those with visible text, i.e. non-black content).
-        # Timestamps come from ffprobe packets; we filter to only the
-        # "display" packets (size > 100 bytes — clear events are ~30 bytes).
-        display_packets = [p for p in packets if p.get('_size', p.get('duration', 1)) >= 0]
-        # Use the filtered large packets for timing
-        large_packets = []
-        for pkt in all_packets:
-            size = int(pkt.get('size', 0))
-            pts = pkt.get('pts_time')
-            if size > 100 and pts is not None:
-                try:
-                    pts_f = float(pts)
-                except (ValueError, TypeError):
-                    continue
-                dur = float(pkt.get('duration_time', 0) or 0)
-                large_packets.append({'pts': pts_f, 'duration': dur})
-
-        # Recalculate durations for large packets
-        for i, pkt in enumerate(large_packets):
-            if pkt['duration'] <= 0:
-                if i + 1 < len(large_packets):
-                    pkt['duration'] = min(large_packets[i + 1]['pts'] - pkt['pts'], 10.0)
-                else:
-                    pkt['duration'] = 3.0
-            pkt['duration'] = max(0.5, min(pkt['duration'], 15.0))
-
-        # ── Pass A: Filter out blank frames (fast scan) ──
-        if progress_callback:
-            progress_callback("Filtering blank frames...")
-
-        non_blank = []  # list of (img_path, original_index)
+        non_blank = []
         total_all = len(img_files)
         for i, img_path in enumerate(img_files):
             if cancel_event and cancel_event.is_set():
-                if progress_callback:
-                    progress_callback("Cancelled during filtering")
                 return []
             try:
                 img = Image.open(img_path).convert('L')
-                img.thumbnail((96, 54))  # fast resize for blank detection
+                img.thumbnail((96, 54))
                 lo, hi = img.getextrema()
-                if hi >= 30:
-                    non_blank.append((img_path, i))
+                if hi < 30:
+                    continue
+                pixels = list(img.getdata())
+                bright = sum(1 for p in pixels if p >= 30)
+                bright_pct = bright / len(pixels) * 100
+                if bright_pct < 1.5:
+                    continue
+                non_blank.append((img_path, i))
             except Exception:
                 pass
             if progress_callback and (i % 50 == 0 or i == total_all - 1):
                 progress_callback(f"Filtering blank frames... {i+1}/{total_all} "
                                   f"({len(non_blank)} with content)")
 
-        if progress_callback:
-            progress_callback(f"Found {len(non_blank)} non-blank frames out of "
-                              f"{total_all} — starting OCR...")
+        if not non_blank:
+            if progress_callback:
+                progress_callback("No non-blank subtitle frames found")
+            return []
 
-        # Pair non-blank frames with display packet timestamps
         total = len(non_blank)
-        ocr_jobs = []  # list of (img_path, pts, dur, original_index)
+        ocr_jobs = []
         for j, (img_path, orig_idx) in enumerate(non_blank):
             if j < len(large_packets):
                 pts = large_packets[j]['pts']
@@ -852,67 +845,94 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
             else:
                 pts = 0
                 dur = 3.0
-            ocr_jobs.append((img_path, pts, dur, orig_idx))
+            ocr_jobs.append((img_path, pts, dur))
+        if progress_callback:
+            progress_callback(f"Phase 2/2 — OCR: {total} frames with content...")
 
-        # ── Pass B: Parallel OCR ──
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        import threading as _thr
 
         try:
             max_workers = min(os.cpu_count() or 4, 8)
         except Exception:
             max_workers = 4
 
-        cues = []
-        cues_lock = _thr.Lock()
         completed_count = [0]
 
         def _ocr_one(job):
-            """OCR a single subtitle image. Returns (pts, dur, text, img_path) or None."""
-            img_path, pts, dur, orig_idx = job
+            img_path, pts, dur = job
             try:
                 img = Image.open(img_path).convert('L')
-
-                # Invert if dark background (white-on-black subtitle)
                 lo, hi = img.getextrema()
                 if hi < 30:
-                    return (pts, dur, '', img_path)  # blank
-                # Use mean of extrema as a quick avg proxy
+                    return (pts, dur, '', img_path)
                 if (lo + hi) / 2 < 128:
                     img = Image.eval(img, lambda x: 255 - x)
-
-                # Crop to bounding box of non-black content + padding
                 bbox = img.getbbox()
                 if bbox:
-                    pad = 8
+                    pad = 12
                     x1 = max(0, bbox[0] - pad)
                     y1 = max(0, bbox[1] - pad)
                     x2 = min(img.width, bbox[2] + pad)
                     y2 = min(img.height, bbox[3] + pad)
                     img = img.crop((x1, y1, x2, y2))
-
-                    # Save cropped version for preview in monitor window
+                if _is_music_note_frame(img):
                     try:
                         img.save(img_path)
                     except Exception:
                         pass
-
-                # Check if this is likely a music note frame
-                if _is_music_note_frame(img):
                     return (pts, dur, '♪', img_path)
-
+                # Upscale small images for better OCR accuracy
+                if img.height < 80:
+                    scale = max(2, 80 // img.height)
+                    img = img.resize((img.width * scale, img.height * scale),
+                                     Image.LANCZOS)
+                # Binarize with Otsu's threshold
+                try:
+                    import numpy as np
+                    arr = np.array(img)
+                    threshold = 0
+                    max_var = 0
+                    hist, _ = np.histogram(arr.ravel(), bins=256, range=(0, 256))
+                    total_px = arr.size
+                    sum_total = np.sum(np.arange(256) * hist)
+                    sum_bg = 0
+                    w_bg = 0
+                    for t in range(256):
+                        w_bg += hist[t]
+                        if w_bg == 0:
+                            continue
+                        w_fg = total_px - w_bg
+                        if w_fg == 0:
+                            break
+                        sum_bg += t * hist[t]
+                        mean_bg = sum_bg / w_bg
+                        mean_fg = (sum_total - sum_bg) / w_fg
+                        var = w_bg * w_fg * (mean_bg - mean_fg) ** 2
+                        if var > max_var:
+                            max_var = var
+                            threshold = t
+                    arr = np.where(arr > threshold, 255, 0).astype(np.uint8)
+                    img = Image.fromarray(arr)
+                except ImportError:
+                    img = img.point(lambda x: 255 if x > 128 else 0)
+                # Add white border padding
+                border = 16
+                from PIL import ImageOps
+                img = ImageOps.expand(img, border=border, fill=255)
+                try:
+                    img.save(img_path)
+                except Exception:
+                    pass
                 text = pytesseract.image_to_string(
                     img, lang=tess_lang,
-                    config='--psm 6 -c tessedit_char_blacklist=|'
+                    config='--psm 6 --oem 3'
                 ).strip()
                 text = _fix_ocr_text(text)
                 return (pts, dur, text, img_path)
             except Exception:
                 return (pts, dur, '', img_path)
 
-        if progress_callback:
-            progress_callback(f"OCR: {total} frames, {max_workers} parallel workers...")
-
+        raw_results = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_job = {}
             for job in ocr_jobs:
@@ -921,32 +941,31 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                 future = executor.submit(_ocr_one, job)
                 future_to_job[future] = job
 
-            # Collect results as they complete (but we'll sort by timestamp later)
-            raw_results = []
             for future in as_completed(future_to_job):
                 if cancel_event and cancel_event.is_set():
                     executor.shutdown(wait=False, cancel_futures=True)
                     if progress_callback:
                         progress_callback("OCR cancelled by user")
                     break
-
                 completed_count[0] += 1
                 try:
                     result = future.result()
                     pts, dur, text, img_path = result
                     raw_results.append(result)
-
-                    # Notify frame callback
                     if frame_callback:
                         frame_callback(completed_count[0] - 1, total,
                                        img_path, text or '[empty]',
                                        _seconds_to_srt_time(pts),
                                        _seconds_to_srt_time(pts + dur))
+                    if progress_callback and completed_count[0] % 5 == 0:
+                        progress_callback(
+                            f"Phase 2/2 — OCR: {completed_count[0]}/{total} "
+                            f"({completed_count[0]*100//total}%)")
                 except Exception:
-                    completed_count[0]  # already incremented
+                    pass
 
-        # Sort results by timestamp and build cue list
-        raw_results.sort(key=lambda r: r[0])  # sort by pts
+        raw_results.sort(key=lambda r: r[0])
+        cues = []
         for pts, dur, text, img_path in raw_results:
             if text:
                 cues.append({
@@ -957,7 +976,8 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                 })
 
         if progress_callback:
-            progress_callback(f"OCR complete: {len(cues)} cues extracted from {total} frames")
+            progress_callback(f"OCR complete: {len(cues)} cues extracted "
+                              f"from {total} frames")
 
         return cues
 
@@ -1020,6 +1040,9 @@ def _fix_ocr_text(text):
     # Fix | and / first (convert to letters before I/l rules run)
     # Replace | with I everywhere (pipe never appears in subtitles)
     text = text.replace('|', 'I')
+
+    # Fix '' (two single quotes) misread as apostrophe
+    text = re.sub(r"(?<=[a-zA-Z])''(?=[a-zA-Z])", "'", text)
 
     # Fix / and // misread as I, l, ll and /7 as I'l (7 = apostrophe shape)
     # Order matters: fix multi-char patterns first, then single /
@@ -1094,6 +1117,69 @@ def _fix_ocr_text(text):
     # Fix ™ misread as apostrophe: I'™m → I'm
     text = re.sub(r"'™", "'", text)   # '™ → ' (avoid double apostrophe)
     text = text.replace('™', "'")      # standalone ™ → '
+
+    # ── Fix curly/smart quotes and backticks to straight apostrophe ──
+    text = text.replace('\u2018', "'")   # ' left single quote
+    text = text.replace('\u2019', "'")   # ' right single quote
+    text = text.replace('\u201C', '"')   # " left double quote
+    text = text.replace('\u201D', '"')   # " right double quote
+    text = text.replace('`', "'")        # backtick → apostrophe
+    text = text.replace('\u00B4', "'")   # ´ acute accent → apostrophe
+
+    # ── Fix broken contractions ──
+    text = re.sub(r"\bI\s+'(m|ll|ve|d)\b", r"I'\1", text)
+    text = re.sub(r"\b(do|ca|wo|is|are|was|were|has|have|had|does|did|could|would|should|must|need|dare|ai)\s*n\s*'?\s*t\b",
+                  lambda m: m.group(1) + "n't", text, flags=re.IGNORECASE)
+    text = re.sub(r"(\w)'\s+([tsmd]\b|re\b|ve\b|ll\b)", r"\1'\2", text)
+
+    # ── Fix 0/O confusion ──
+    text = re.sub(r'(?<=[a-zA-Z])0(?=[a-zA-Z])', 'O', text)
+    text = re.sub(r'(?<=[a-zA-Z])0\b', 'o', text)
+    text = re.sub(r'\b0(?=[a-z])', 'O', text)
+    text = re.sub(r'(?<![0-9])\b0\b(?![0-9])', 'O', text)
+
+    # ── Fix rn → m confusion ──
+    _RN_WORDS = {
+        'corning': 'coming', 'sornething': 'something', 'sornebody': 'somebody',
+        'sorneone': 'someone', 'sornewhere': 'somewhere', 'sornehow': 'somehow',
+        'sornetime': 'sometime', 'becorne': 'become', 'welcorne': 'welcome',
+        'horneward': 'homeward', 'horne': 'home', 'corne': 'come',
+        'narne': 'name', 'garne': 'game', 'farne': 'fame', 'sarne': 'same',
+        'tirne': 'time', 'rnake': 'make', 'rnore': 'more', 'rnuch': 'much',
+        'rnan': 'man', 'rnen': 'men', 'rnine': 'mine', 'rnind': 'mind',
+        'rnay': 'may', 'rnust': 'must', 'rneet': 'meet', 'rnove': 'move',
+        'rnoving': 'moving', 'rnorning': 'morning', 'rnother': 'mother',
+        'rnoney': 'money', 'rnoment': 'moment', 'rnouth': 'mouth',
+        'wornan': 'woman', 'wornen': 'women', 'hurnan': 'human',
+        'rernoving': 'removing', 'rernainder': 'remainder',
+        'cornrnand': 'command', 'cornrnander': 'commander',
+        'cornrnunity': 'community', 'cornrnit': 'commit',
+        'accornpany': 'accompany', 'accornplish': 'accomplish',
+        'recornrnend': 'recommend', 'cornpany': 'company',
+        'cornplete': 'complete', 'cornputer': 'computer',
+        'cornfort': 'comfort', 'cornbat': 'combat',
+        'irnportant': 'important', 'irnpossible': 'impossible',
+        'irnagine': 'imagine', 'irnpact': 'impact',
+        'rnarriage': 'marriage', 'rnarried': 'married',
+        'rnassive': 'massive', 'rnaster': 'master',
+        'rnatter': 'matter', 'rnaterial': 'material',
+        'rnachine': 'machine', 'rnajor': 'major',
+        'rniddle': 'middle', 'rnilitary': 'military',
+        'rnillion': 'million', 'rnissing': 'missing',
+        'rnission': 'mission', 'rnistake': 'mistake',
+        'rnurder': 'murder', 'rnusic': 'music',
+        'rernerrber': 'remember', 'rernernber': 'remember',
+        'rernerber': 'remember', 'rernember': 'remember',
+    }
+    for wrong, right in _RN_WORDS.items():
+        text = re.sub(r'\b' + wrong + r'\b', right, text, flags=re.IGNORECASE)
+
+    # ── Fix other common OCR character confusions ──
+    text = re.sub(r'\b([Ww])iII\b', r'\1ill', text)
+    text = re.sub(r'\b([Kk])iII\b', r'\1ill', text)
+    text = re.sub(r'\b([Ff])iII\b', r'\1ill', text)
+    text = re.sub(r'\b([Ss])tiII\b', r'\1till', text)
+    text = re.sub(r'(?<=[a-z])lI\b', 'll', text)
 
     # ── Music note (♪) detection ──
     # Tesseract misreads ♪ as: 2 > $ & £ © » # * ? Sf D> P If at start/end of lines
@@ -1328,15 +1414,27 @@ def filter_remove_hi(cues):
         re.MULTILINE
     )
 
+    _speaker_source_text = ['']
+
     def _speaker_replace(m):
-        label = m.group(0).lstrip('- ')
+        full_match = m.group(0)
+        label = full_match.lstrip('- ')
         name_part = label.split(':')[0].strip()
         # Protect pure numbers (e.g. timestamps like "2:30")
         if re.match(r'^\d+$', name_part):
-            return m.group(0)
+            return full_match
         # Protect single-character labels
         if len(name_part) <= 1:
-            return m.group(0)
+            return full_match
+        # Don't strip if the colon is part of a time (digits:digits)
+        colon_pos = full_match.find(':')
+        if colon_pos >= 0:
+            before_colon = full_match[:colon_pos]
+            if before_colon and before_colon.rstrip()[-1:].isdigit():
+                src = _speaker_source_text[0]
+                end_pos = m.end()
+                if end_pos < len(src) and src[end_pos:end_pos+1].isdigit():
+                    return full_match
         return m.group(1)
 
     # Reuse _is_caps_hi_line from filter_remove_caps_hi to also catch
@@ -1351,6 +1449,7 @@ def filter_remove_hi(cues):
         for pat in hi_patterns:
             text = pat.sub('', text)
         # Remove speaker labels
+        _speaker_source_text[0] = text
         text = speaker_pattern.sub(_speaker_replace, text)
         # Remove ALL CAPS HI lines (UK style — e.g. SHEENA LAUGHS, THANK YOU.)
         lines = text.split('\n')
@@ -1359,7 +1458,9 @@ def filter_remove_hi(cues):
         # Clean up orphaned colons left after HI removal
         # "Speaker (description): text" → "Speaker : text" after (description) removed
         # Remove "word(s) :" speaker label remnants where parens were stripped
-        text = re.sub(r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}[A-Za-z]\s+:\s*', r'\1', text, flags=re.MULTILINE)
+        _spk2 = re.compile(r'^(-?\s*)[A-Za-z][A-Za-z\s\d\'\.]{0,29}[A-Za-z]\s+:\s*', re.MULTILINE)
+        _speaker_source_text[0] = text
+        text = _spk2.sub(lambda m: _speaker_replace(m), text)
         # Colon at start of line: "(gasps): text" → ": text" → "text"
         text = re.sub(r'^\s*:\s*', '', text, flags=re.MULTILINE)
         text = re.sub(r'\n\s*:\s*', '\n', text)
@@ -6452,25 +6553,31 @@ class VideoConverterApp:
         Returns True if OCR succeeded and cues were written."""
         import threading
         import time as _time
-        from PIL import Image, ImageTk
+        import queue as _queue
+        try:
+            from PIL import Image, ImageTk
+            _has_pil = True
+        except ImportError:
+            _has_pil = False
 
         # ── State ──
         cancel_event = threading.Event()
-        ocr_result = [None]  # [list of cues] or None
+        ocr_result = [None]
         ocr_done = [False]
 
         # ── Monitor window ──
         mon = tk.Toplevel(self.root)
         mon.title(f"OCR — {os.path.basename(filepath)}")
-        mon.geometry("750x580")
-        mon.transient(self.root)
-        mon.minsize(600, 450)
+        mon.geometry("800x750")
+        mon.minsize(650, 550)
+        mon.resizable(True, True)
         self._center_on_main(mon)
 
         main_f = ttk.Frame(mon, padding=10)
         main_f.pack(fill='both', expand=True)
         main_f.columnconfigure(0, weight=1)
-        main_f.rowconfigure(2, weight=1)  # cue list
+        main_f.rowconfigure(2, weight=3)
+        main_f.rowconfigure(4, weight=1)
 
         # ── Top: progress bar + stats ──
         top_f = ttk.Frame(main_f)
@@ -6483,7 +6590,6 @@ class VideoConverterApp:
         progress_bar = ttk.Progressbar(top_f, variable=progress_var,
                                         maximum=100, mode='determinate')
         progress_bar.grid(row=0, column=1, sticky='ew')
-
         stats_label = ttk.Label(top_f, text="")
         stats_label.grid(row=1, column=0, columnspan=2, sticky='w', pady=(4, 0))
 
@@ -6492,30 +6598,26 @@ class VideoConverterApp:
         mid_f.grid(row=1, column=0, sticky='ew', pady=(0, 8))
         mid_f.columnconfigure(1, weight=1)
 
-        # Image preview (resized to fit)
         img_label = ttk.Label(mid_f, text="[waiting]", anchor='center',
                               width=40, relief='sunken')
         img_label.grid(row=0, column=0, sticky='nsew', padx=(0, 8))
-        img_label._photo = None  # prevent GC
+        img_label._photo = None
 
-        # OCR text result
         text_frame = ttk.Frame(mid_f)
         text_frame.grid(row=0, column=1, sticky='nsew')
         text_frame.rowconfigure(0, weight=1)
         text_frame.columnconfigure(0, weight=1)
 
-        ttk.Label(text_frame, text="OCR Text:", font=('Helvetica', 9, 'bold')).grid(
-            row=0, column=0, sticky='nw')
+        ttk.Label(text_frame, text="OCR Text:",
+                  font=('Helvetica', 9, 'bold')).grid(row=0, column=0, sticky='nw')
         ocr_text_var = tk.StringVar(value="")
-        ocr_text_label = ttk.Label(text_frame, textvariable=ocr_text_var,
-                                    wraplength=350, justify='left',
-                                    font=('Courier', 11))
-        ocr_text_label.grid(row=1, column=0, sticky='nw')
-
+        ttk.Label(text_frame, textvariable=ocr_text_var,
+                  wraplength=350, justify='left',
+                  font=('Courier', 11)).grid(row=1, column=0, sticky='nw')
         time_label = ttk.Label(text_frame, text="", foreground='gray')
         time_label.grid(row=2, column=0, sticky='sw', pady=(4, 0))
 
-        # ── Bottom: scrolling cue list ──
+        # ── Cue list ──
         cue_frame = ttk.LabelFrame(main_f, text="Extracted Cues", padding=5)
         cue_frame.grid(row=2, column=0, sticky='nsew')
         cue_frame.columnconfigure(0, weight=1)
@@ -6525,104 +6627,287 @@ class VideoConverterApp:
         cue_tree = ttk.Treeview(cue_frame, columns=cue_columns,
                                 show='headings', height=8)
         cue_tree.grid(row=0, column=0, sticky='nsew')
-
-        cue_tree.heading('idx',  text='#')
+        cue_tree.heading('idx', text='#')
         cue_tree.heading('time', text='Time')
         cue_tree.heading('text', text='Text')
-        cue_tree.column('idx',  width=40,  minwidth=30, anchor='center')
+        cue_tree.column('idx', width=40, minwidth=30, anchor='center')
         cue_tree.column('time', width=180, minwidth=140)
         cue_tree.column('text', width=400, minwidth=200)
-
-        cue_scroll = ttk.Scrollbar(cue_frame, orient='vertical', command=cue_tree.yview)
+        cue_scroll = ttk.Scrollbar(cue_frame, orient='vertical',
+                                    command=cue_tree.yview)
         cue_scroll.grid(row=0, column=1, sticky='ns')
         cue_tree.configure(yscrollcommand=cue_scroll.set)
 
-        # ── Cancel button ──
+        # ── Log window ──
+        log_frame = ttk.LabelFrame(main_f, text="Log", padding=5)
+        log_frame.grid(row=4, column=0, sticky='nsew', pady=(4, 0))
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
+
+        log_text = tk.Text(log_frame, height=6, wrap='word',
+                           font=('Courier', 9), state='disabled',
+                           background='#1e1e1e', foreground='#d4d4d4')
+        log_text.grid(row=0, column=0, sticky='nsew')
+        log_scroll = ttk.Scrollbar(log_frame, orient='vertical',
+                                   command=log_text.yview)
+        log_scroll.grid(row=0, column=1, sticky='ns')
+        log_text.configure(yscrollcommand=log_scroll.set)
+
+        # ── Buttons ──
         btn_f = ttk.Frame(main_f)
-        btn_f.grid(row=3, column=0, sticky='e', pady=(8, 0))
-        cancel_btn = ttk.Button(btn_f, text="Cancel OCR",
-                                command=lambda: cancel_event.set())
+        btn_f.grid(row=5, column=0, sticky='ew', pady=(8, 0))
+
+        def _kill_ocr_processes():
+            try:
+                import psutil
+                current = psutil.Process()
+                for child in current.children(recursive=True):
+                    try:
+                        name = child.name().lower()
+                        if any(n in name for n in ('ffmpeg', 'ffprobe', 'tesseract')):
+                            child.kill()
+                    except Exception:
+                        pass
+            except ImportError:
+                pid = os.getpid()
+                for cmd in ('ffmpeg', 'ffprobe', 'tesseract'):
+                    try:
+                        subprocess.run(['pkill', '-P', str(pid), '-f', cmd],
+                                       capture_output=True, timeout=2)
+                    except Exception:
+                        pass
+
+        def _do_cancel():
+            cancel_event.set()
+            _kill_ocr_processes()
+
+        def _do_retry():
+            nonlocal cancel_event
+            cancel_event = threading.Event()
+            ocr_result[0] = None
+            ocr_done[0] = False
+            start_time[0] = _time.monotonic()
+            cue_count[0] = 0
+            progress_var.set(0)
+            status_label.configure(text="Restarting OCR...")
+            stats_label.configure(text="")
+            for item in cue_tree.get_children():
+                cue_tree.delete(item)
+            try:
+                log_text.configure(state='normal')
+                log_text.delete('1.0', 'end')
+                log_text.configure(state='disabled')
+            except Exception:
+                pass
+            cancel_btn.configure(text="Cancel OCR", command=_do_cancel)
+            for widget in btn_f.winfo_children():
+                try:
+                    txt = widget.cget('text')
+                except Exception:
+                    txt = ''
+                if txt in ('Retry', 'Save', 'Open in Editor'):
+                    widget.destroy()
+            from modules.subtitle_ocr import reload_ocr_rules
+            reload_ocr_rules()
+            t = threading.Thread(target=_ocr_thread, daemon=True)
+            t.start()
+
+        cancel_btn = ttk.Button(btn_f, text="Cancel OCR", command=_do_cancel)
         cancel_btn.pack(side='right')
 
-        # ── Track timing ──
+        def _show_ocr_rules():
+            from modules.subtitle_ocr import load_ocr_rules, save_ocr_rules
+            rules_win = tk.Toplevel(mon)
+            rules_win.title("Custom OCR Rules")
+            rules_win.geometry("520x480")
+            rules_win.minsize(400, 350)
+            rules_win.resizable(True, True)
+            self._center_on_main(rules_win)
+
+            ttk.Label(rules_win,
+                      text="Find → Replace rules applied after Tesseract OCR.\n"
+                           "Add rules for characters Tesseract consistently misreads.",
+                      padding=(10, 8)).pack(fill='x')
+
+            list_f = ttk.Frame(rules_win, padding=(10, 0, 10, 0))
+            list_f.pack(fill='both', expand=True)
+            list_f.columnconfigure(0, weight=1)
+            list_f.rowconfigure(0, weight=1)
+
+            cols = ('find', 'replace')
+            rules_tree = ttk.Treeview(list_f, columns=cols,
+                                      show='headings', height=10)
+            rules_tree.grid(row=0, column=0, sticky='nsew')
+            rules_tree.heading('find', text='Find')
+            rules_tree.heading('replace', text='Replace')
+            rules_tree.column('find', width=200, minwidth=100)
+            rules_tree.column('replace', width=200, minwidth=100)
+            r_scroll = ttk.Scrollbar(list_f, orient='vertical',
+                                     command=rules_tree.yview)
+            r_scroll.grid(row=0, column=1, sticky='ns')
+            rules_tree.configure(yscrollcommand=r_scroll.set)
+
+            for find, replace in load_ocr_rules():
+                rules_tree.insert('', 'end', values=(find, replace))
+
+            add_f = ttk.Frame(rules_win, padding=(10, 8))
+            add_f.pack(fill='x')
+            ttk.Label(add_f, text="Find:").pack(side='left')
+            find_var = tk.StringVar()
+            find_entry = ttk.Entry(add_f, textvariable=find_var, width=15)
+            find_entry.pack(side='left', padx=(4, 8))
+            ttk.Label(add_f, text="Replace:").pack(side='left')
+            replace_var = tk.StringVar()
+            replace_entry = ttk.Entry(add_f, textvariable=replace_var, width=15)
+            replace_entry.pack(side='left', padx=(4, 8))
+
+            def _add_rule():
+                f = find_var.get()
+                r = replace_var.get()
+                if f:
+                    rules_tree.insert('', 'end', values=(f, r))
+                    find_var.set(''); replace_var.set('')
+                    find_entry.focus()
+
+            ttk.Button(add_f, text="Add", width=6,
+                       command=_add_rule).pack(side='left', padx=(4, 0))
+            find_entry.bind('<Return>', lambda e: _add_rule())
+            replace_entry.bind('<Return>', lambda e: _add_rule())
+
+            rb_f = ttk.Frame(rules_win, padding=(10, 4, 10, 10))
+            rb_f.pack(fill='x')
+
+            def _save_and_close():
+                rules = []
+                for item in rules_tree.get_children():
+                    vals = rules_tree.item(item, 'values')
+                    if vals and vals[0]:
+                        rules.append((vals[0], vals[1]))
+                save_ocr_rules(rules)
+                from modules.subtitle_ocr import reload_ocr_rules
+                reload_ocr_rules()
+                rules_win.destroy()
+                _progress_queue.put(f"OCR rules updated ({len(rules)} rules)")
+
+            ttk.Button(rb_f, text="Delete Selected",
+                       command=lambda: [rules_tree.delete(s) for s in rules_tree.selection()]).pack(side='left')
+            ttk.Button(rb_f, text="Save & Close",
+                       command=_save_and_close).pack(side='right')
+            ttk.Button(rb_f, text="Cancel",
+                       command=rules_win.destroy).pack(side='right', padx=(0, 4))
+
+        ttk.Button(btn_f, text="OCR Rules",
+                   command=_show_ocr_rules).pack(side='left')
+
+        # ── Timing + state ──
         start_time = [_time.monotonic()]
         cue_count = [0]
 
-        # ── Frame callback (called from OCR thread for each frame) ──
+        # ── Queue-based UI updates ──
+        _progress_queue = _queue.Queue()
+        _frame_queue = _queue.Queue()
+        _last_log_msg = ['']
+
+        def _log(msg):
+            if msg == _last_log_msg[0]:
+                return
+            _last_log_msg[0] = msg
+            try:
+                log_text.configure(state='normal')
+                log_text.insert('end', msg + '\n')
+                log_text.see('end')
+                log_text.configure(state='disabled')
+            except tk.TclError:
+                pass
+
         def _on_frame(frame_idx, total, img_path, text, start_t, end_t):
-            def _update():
-                # Progress
-                pct = ((frame_idx + 1) / total) * 100
-                progress_var.set(pct)
-                status_label.configure(text=f"Frame {frame_idx + 1} / {total}")
-
-                # Elapsed + ETA
-                elapsed = _time.monotonic() - start_time[0]
-                if frame_idx > 0:
-                    per_frame = elapsed / (frame_idx + 1)
-                    remaining = per_frame * (total - frame_idx - 1)
-                    eta_m, eta_s = divmod(int(remaining), 60)
-                    elapsed_m, elapsed_s = divmod(int(elapsed), 60)
-                    stats_label.configure(
-                        text=f"Elapsed: {elapsed_m}m {elapsed_s}s  |  "
-                             f"ETA: {eta_m}m {eta_s}s  |  "
-                             f"Cues found: {cue_count[0]}")
-                else:
-                    stats_label.configure(text=f"Starting...")
-
-                # Image preview
-                if img_path and os.path.exists(img_path):
-                    try:
-                        pil_img = Image.open(img_path)
-                        # Resize to fit preview (max 320x80)
-                        pil_img.thumbnail((320, 80), Image.LANCZOS)
-                        photo = ImageTk.PhotoImage(pil_img)
-                        img_label.configure(image=photo, text='')
-                        img_label._photo = photo  # prevent GC
-                    except Exception:
-                        img_label.configure(image='', text='[error]')
-                else:
-                    img_label.configure(image='', text='[no image]')
-
-                # OCR text
-                ocr_text_var.set(text if text else '[empty]')
-                time_label.configure(text=f"{start_t} → {end_t}")
-
-                # Add to cue list if it's real text (not a status marker)
-                if text and not text.startswith('['):
-                    cue_count[0] += 1
-                    cue_tree.insert('', 'end', values=(
-                        cue_count[0], f"{start_t} → {end_t}", text))
-                    # Auto-scroll to bottom
-                    children = cue_tree.get_children()
-                    if children:
-                        cue_tree.see(children[-1])
-
-            mon.after(0, _update)
+            _frame_queue.put((frame_idx, total, img_path, text, start_t, end_t))
 
         def _on_progress(msg):
-            def _do():
-                status_label.configure(text=msg)
-                # Extract percentage from messages like "... (30%)" or "... 40/1932 ..."
-                import re as _re
-                pct_match = _re.search(r'\((\d+)%\)', msg)
-                if pct_match:
-                    progress_var.set(float(pct_match.group(1)))
-                else:
-                    frac_match = _re.search(r'(\d+)/(\d+)', msg)
-                    if frac_match:
-                        n, t = int(frac_match.group(1)), int(frac_match.group(2))
-                        if t > 0:
-                            progress_var.set((n / t) * 100)
-            mon.after(0, _do)
+            _progress_queue.put(msg)
+
+        def _poll_updates():
+            while not _progress_queue.empty():
+                try:
+                    msg = _progress_queue.get_nowait()
+                    status_label.configure(text=msg)
+                    _log(msg)
+                    import re as _re
+                    pct_match = _re.search(r'\((\d+)%\)', msg)
+                    if pct_match:
+                        progress_var.set(float(pct_match.group(1)))
+                    else:
+                        frac_match = _re.search(r'(\d+)/(\d+)', msg)
+                        if frac_match:
+                            n, t = int(frac_match.group(1)), int(frac_match.group(2))
+                            if t > 0:
+                                progress_var.set((n / t) * 100)
+                except _queue.Empty:
+                    break
+
+            while not _frame_queue.empty():
+                try:
+                    (frame_idx, total, img_path, text,
+                     start_t, end_t) = _frame_queue.get_nowait()
+
+                    pct = ((frame_idx + 1) / total) * 100 if total > 0 else 0
+                    progress_var.set(pct)
+                    status_label.configure(text=f"Frame {frame_idx + 1} / {total}")
+
+                    elapsed = _time.monotonic() - start_time[0]
+                    if frame_idx > 0:
+                        per_frame = elapsed / (frame_idx + 1)
+                        remaining = per_frame * (total - frame_idx - 1)
+                        eta_m, eta_s = divmod(int(remaining), 60)
+                        elapsed_m, elapsed_s = divmod(int(elapsed), 60)
+                        stats_label.configure(
+                            text=f"Elapsed: {elapsed_m}m {elapsed_s}s  |  "
+                                 f"ETA: {eta_m}m {eta_s}s  |  "
+                                 f"Cues found: {cue_count[0]}")
+
+                    if _has_pil and img_path and os.path.exists(img_path):
+                        try:
+                            pil_img = Image.open(img_path)
+                            pil_img.thumbnail((320, 80), Image.LANCZOS)
+                            photo = ImageTk.PhotoImage(pil_img)
+                            img_label.configure(image=photo, text='')
+                            img_label._photo = photo
+                        except Exception:
+                            img_label.configure(image='', text='[error]')
+                    else:
+                        img_label.configure(image='', text='[no image]')
+
+                    ocr_text_var.set(text if text else '[empty]')
+                    time_label.configure(text=f"{start_t} → {end_t}")
+
+                    if text and not text.startswith('['):
+                        cue_count[0] += 1
+                        display_text = text.replace('\n', ' ⏎ ')
+                        cue_tree.insert('', 'end', values=(
+                            cue_count[0], f"{start_t} → {end_t}",
+                            display_text))
+                        children = cue_tree.get_children()
+                        if children:
+                            cue_tree.see(children[-1])
+                except _queue.Empty:
+                    break
+
+            try:
+                if mon.winfo_exists():
+                    mon.after(200, _poll_updates)
+            except tk.TclError:
+                pass
+
+        mon.after(200, _poll_updates)
 
         # ── OCR thread ──
         def _ocr_thread():
+            _cancel = cancel_event
             cues = ocr_bitmap_subtitle(
                 filepath, stream_index, language,
                 progress_callback=_on_progress,
                 frame_callback=_on_frame,
-                cancel_event=cancel_event
+                cancel_event=_cancel
             )
             ocr_result[0] = cues
             ocr_done[0] = True
@@ -6631,16 +6916,79 @@ class VideoConverterApp:
                 elapsed = _time.monotonic() - start_time[0]
                 elapsed_m, elapsed_s = divmod(int(elapsed), 60)
 
+                if _cancel.is_set():
+                    cue_n = len(cues) if cues else 0
+                    status_label.configure(
+                        text=f"OCR cancelled — {cue_n} cues completed")
+                    cancel_btn.configure(text="Close", command=mon.destroy)
+                    ttk.Button(btn_f, text="Retry",
+                               command=_do_retry).pack(side='right', padx=(0, 8))
+
+                    if cues:
+                        write_srt_file(cues, out_path)
+
+                        def _save_partial():
+                            from tkinter import filedialog
+                            save_path = filedialog.asksaveasfilename(
+                                parent=mon, title="Save Partial OCR",
+                                initialdir=os.path.dirname(out_path),
+                                initialfile=os.path.basename(out_path).replace(
+                                    '.srt', '.partial.srt'),
+                                filetypes=[('SRT Subtitle', '*.srt'),
+                                           ('All files', '*.*')])
+                            if save_path:
+                                try:
+                                    import shutil
+                                    shutil.copy2(out_path, save_path)
+                                    status_label.configure(
+                                        text=f"Saved {cue_n} cues: "
+                                             f"{os.path.basename(save_path)}")
+                                except Exception as e:
+                                    from tkinter import messagebox
+                                    messagebox.showerror("Save Error",
+                                        f"Failed to save:\n{e}", parent=mon)
+
+                        ttk.Button(btn_f, text="Save",
+                                   command=_save_partial).pack(
+                                       side='right', padx=(0, 8))
+                        ttk.Button(btn_f, text="Open in Editor",
+                                   command=lambda: (
+                                       mon.destroy(),
+                                       self.show_subtitle_editor(
+                                           filepath, stream_index, file_info,
+                                           external_sub_path=out_path)
+                                   )).pack(side='right', padx=(0, 8))
+                    return
+
                 if cues:
                     write_srt_file(cues, out_path)
                     self.add_log(f"OCR complete: {out_name} ({len(cues)} cues, "
                                  f"{elapsed_m}m {elapsed_s}s)", 'SUCCESS')
-                    status_label.configure(text=f"Done — {len(cues)} cues extracted "
-                                                f"in {elapsed_m}m {elapsed_s}s")
+                    status_label.configure(
+                        text=f"Done — {len(cues)} cues in {elapsed_m}m {elapsed_s}s")
                     progress_var.set(100)
                     cancel_btn.configure(text="Close", command=mon.destroy)
 
-                    # Add buttons for next steps
+                    def _save_srt():
+                        from tkinter import filedialog
+                        save_path = filedialog.asksaveasfilename(
+                            parent=mon, title="Save OCR Subtitle",
+                            initialdir=os.path.dirname(out_path),
+                            initialfile=os.path.basename(out_path),
+                            filetypes=[('SRT Subtitle', '*.srt'), ('All files', '*.*')])
+                        if save_path:
+                            try:
+                                import shutil
+                                shutil.copy2(out_path, save_path)
+                                status_label.configure(
+                                    text=f"Saved: {os.path.basename(save_path)}")
+                            except Exception as e:
+                                from tkinter import messagebox
+                                messagebox.showerror("Save Error",
+                                    f"Failed to save:\n{e}", parent=mon)
+
+                    ttk.Button(btn_f, text="Save",
+                               command=_save_srt).pack(side='right', padx=(0, 8))
                     ttk.Button(btn_f, text="Open in Editor",
                                command=lambda: (
                                    mon.destroy(),
@@ -6654,17 +7002,12 @@ class VideoConverterApp:
                                  'WARNING')
                     cancel_btn.configure(text="Close", command=mon.destroy)
 
-            mon.after(0, _finish)
+            mon.after(100, _finish)
 
         t = threading.Thread(target=_ocr_thread, daemon=True)
         t.start()
 
-        # Handle window close = cancel
-        def _on_close():
-            if not ocr_done[0]:
-                cancel_event.set()
-            mon.destroy()
-        mon.protocol('WM_DELETE_WINDOW', _on_close)
+        mon.protocol('WM_DELETE_WINDOW', _do_cancel)
 
         # Block until window closes
         mon.grab_set()
@@ -6712,9 +7055,16 @@ class VideoConverterApp:
             i = 0
             while i < len(raw):
                 if raw[i] == '{':
-                    end = raw.find('}', i)
-                    paths.append(raw[i+1:end])
-                    i = end + 2
+                    depth = 1
+                    end = i + 1
+                    while end < len(raw) and depth > 0:
+                        if raw[end] == '{':
+                            depth += 1
+                        elif raw[end] == '}':
+                            depth -= 1
+                        end += 1
+                    paths.append(raw[i + 1:end - 1])
+                    i = end + 1 if end < len(raw) else end
                 else:
                     end = raw.find(' ', i)
                     if end == -1:

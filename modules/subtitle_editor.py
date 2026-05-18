@@ -53,6 +53,7 @@ from .smart_sync import smart_sync
 from .waveform_timeline import WaveformTimeline
 from .gpu import (detect_closed_captions, detect_cc_types,
                    extract_closed_captions_to_srt)
+from .subtitle_ocr import ocr_bitmap_subtitle
 
 try:
     from tkinterdnd2 import DND_FILES
@@ -295,9 +296,11 @@ def open_standalone_subtitle_editor(app):
             BITMAP_CODECS = {'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle',
                              'dvb_teletext', 'xsub'}
 
-            # Filter out bitmap subtitles
+            # Separate text and bitmap subtitle streams
             text_streams = [s for s in streams
                             if s['codec_name'] not in BITMAP_CODECS]
+            bitmap_streams = [s for s in streams
+                              if s['codec_name'] in BITMAP_CODECS]
 
             # Build virtual CC entries for each detected type
             cc_entries = []
@@ -326,15 +329,18 @@ def open_standalone_subtitle_editor(app):
                     '_cc_type': 'eia_708',
                 })
 
-            if not text_streams and not cc_entries:
+            if not text_streams and not bitmap_streams and not cc_entries:
                 messagebox.showinfo("No Subtitles",
-                    f"No editable subtitle streams found in:\n"
+                    f"No subtitle streams found in:\n"
                     f"{os.path.basename(video_path)}",
                     parent=editor)
                 return
 
             # If exactly one option total, use it directly
-            all_options = text_streams + cc_entries
+            # Mark bitmap streams so we know to use OCR
+            for s in bitmap_streams:
+                s['_is_bitmap'] = True
+            all_options = text_streams + bitmap_streams + cc_entries
             if len(all_options) == 1:
                 chosen = all_options[0]
             else:
@@ -344,7 +350,8 @@ def open_standalone_subtitle_editor(app):
 
                 picker = tk.Toplevel(editor)
                 picker.title("Select Subtitle Stream")
-                picker.geometry("640x340")
+                picker.geometry(scaled_geometry(picker, 640, 420))
+                picker.minsize(*scaled_minsize(picker, 500, 300))
                 picker.transient(editor)
                 picker.grab_set()
                 app._center_on_main(picker)
@@ -385,6 +392,7 @@ def open_standalone_subtitle_editor(app):
 
                 for i, s in enumerate(picker_streams):
                     is_cc = s.get('_is_cc', False)
+                    is_bitmap = s.get('_is_bitmap', False)
                     lang = s['language'] if s['language'] != 'und' else 'Unknown'
                     flags = []
                     if s['default']:
@@ -395,6 +403,8 @@ def open_standalone_subtitle_editor(app):
                         flags.append('Forced')
                     if is_cc:
                         flags.append('CC')
+                    if is_bitmap:
+                        flags.append('OCR')
                     flag_str = ', '.join(flags) if flags else ''
                     title_str = s['title'] if s['title'] else ''
                     stream_id = 'CC' if is_cc else str(s['index'])
@@ -431,7 +441,30 @@ def open_standalone_subtitle_editor(app):
 
             # Extract the selected stream to a temp SRT file
             is_cc = chosen.get('_is_cc', False)
+            is_bitmap = chosen.get('_is_bitmap', False)
             stream_index = chosen['index']
+
+            # ── Warn user about OCR for bitmap subtitles ──
+            if is_bitmap:
+                codec = chosen.get('codec_name', 'bitmap')
+                lang = chosen.get('language', 'und')
+                codec_label = {'hdmv_pgs_subtitle': 'PGS',
+                               'dvd_subtitle': 'VobSub',
+                               'dvb_subtitle': 'DVB'}.get(codec, codec)
+                proceed = messagebox.askyesno(
+                    "Bitmap Subtitle — OCR Required",
+                    f"This subtitle stream is in {codec_label} format "
+                    f"(bitmap/image-based).\n\n"
+                    f"Stream #{stream_index} — {lang}\n\n"
+                    f"Bitmap subtitles cannot be edited directly. "
+                    f"They must be converted to text using OCR "
+                    f"(Optical Character Recognition), which may "
+                    f"take a few minutes and may not be 100% accurate.\n\n"
+                    f"Continue with OCR?",
+                    parent=editor)
+                if not proceed:
+                    return
+
             tmp_srt = tempfile.NamedTemporaryFile(suffix='.srt', delete=False,
                                                    mode='w', encoding='utf-8')
             tmp_srt.close()
@@ -439,13 +472,595 @@ def open_standalone_subtitle_editor(app):
             cc_type = chosen.get('_cc_type', 'eia_608') if is_cc else None
 
             if is_cc:
-                # CC extraction — label with specific type
                 type_label = 'EIA-608' if cc_type == 'eia_608' else 'CEA-708'
                 extract_label = f"Extracting {type_label} closed captions"
+            elif is_bitmap:
+                extract_label = f"OCR bitmap subtitle stream #{stream_index}"
             else:
                 extract_label = f"Importing subtitle stream #{stream_index}"
 
-            # ── Progress dialog during extraction ──
+            # ── Bitmap OCR: launch live monitor window ──
+            if is_bitmap:
+                import time as _time
+                try:
+                    from PIL import Image, ImageTk
+                    _has_pil = True
+                except ImportError:
+                    _has_pil = False
+
+                ocr_lang = chosen.get('language', 'eng')
+                if ocr_lang == 'und':
+                    ocr_lang = 'eng'
+                lang_display = chosen['language'] if chosen['language'] != 'und' else '?'
+
+                cancel_event = threading.Event()
+                ocr_result = [None]
+
+                # ── Monitor window ──
+                mon = tk.Toplevel(editor)
+                mon.title(f"OCR — {os.path.basename(video_path)}")
+                mon.geometry(scaled_geometry(mon, 800, 750))
+                mon.minsize(*scaled_minsize(mon, 650, 550))
+                mon.resizable(True, True)
+                app._center_on_main(mon)
+
+                main_f = ttk.Frame(mon, padding=10)
+                main_f.pack(fill='both', expand=True)
+                main_f.columnconfigure(0, weight=1)
+                main_f.rowconfigure(2, weight=3)  # cue list gets more space
+                main_f.rowconfigure(4, weight=1)  # log gets less space
+
+                # ── Top: progress bar + stats ──
+                top_f = ttk.Frame(main_f)
+                top_f.grid(row=0, column=0, sticky='ew', pady=(0, 8))
+                top_f.columnconfigure(1, weight=1)
+
+                progress_var = tk.DoubleVar(value=0)
+                status_label = ttk.Label(top_f, text="Initializing OCR...")
+                status_label.grid(row=0, column=0, sticky='w', padx=(0, 8))
+                progress_bar = ttk.Progressbar(top_f, variable=progress_var,
+                                                maximum=100, mode='determinate')
+                progress_bar.grid(row=0, column=1, sticky='ew')
+
+                stats_label = ttk.Label(top_f, text="")
+                stats_label.grid(row=1, column=0, columnspan=2, sticky='w', pady=(4, 0))
+
+                # ── Middle: image preview + OCR text ──
+                mid_f = ttk.LabelFrame(main_f, text="Current Frame", padding=6)
+                mid_f.grid(row=1, column=0, sticky='ew', pady=(0, 8))
+                mid_f.columnconfigure(1, weight=1)
+
+                img_label = ttk.Label(mid_f, text="[waiting]", anchor='center',
+                                      width=40, relief='sunken')
+                img_label.grid(row=0, column=0, sticky='nsew', padx=(0, 8))
+                img_label._photo = None
+
+                text_frame = ttk.Frame(mid_f)
+                text_frame.grid(row=0, column=1, sticky='nsew')
+                text_frame.rowconfigure(0, weight=1)
+                text_frame.columnconfigure(0, weight=1)
+
+                ttk.Label(text_frame, text="OCR Text:",
+                          font=('Helvetica', 9, 'bold')).grid(
+                    row=0, column=0, sticky='nw')
+                ocr_text_var = tk.StringVar(value="")
+                ocr_text_label = ttk.Label(text_frame, textvariable=ocr_text_var,
+                                            wraplength=350, justify='left',
+                                            font=('Courier', 11))
+                ocr_text_label.grid(row=1, column=0, sticky='nw')
+                time_label = ttk.Label(text_frame, text="", foreground='gray')
+                time_label.grid(row=2, column=0, sticky='sw', pady=(4, 0))
+
+                # ── Bottom: scrolling cue list ──
+                cue_frame = ttk.LabelFrame(main_f, text="Extracted Cues", padding=5)
+                cue_frame.grid(row=2, column=0, sticky='nsew')
+                cue_frame.columnconfigure(0, weight=1)
+                cue_frame.rowconfigure(0, weight=1)
+
+                cue_columns = ('idx', 'time', 'text')
+                cue_tree = ttk.Treeview(cue_frame, columns=cue_columns,
+                                        show='headings', height=8)
+                cue_tree.grid(row=0, column=0, sticky='nsew')
+                cue_tree.heading('idx',  text='#')
+                cue_tree.heading('time', text='Time')
+                cue_tree.heading('text', text='Text')
+                cue_tree.column('idx',  width=40,  minwidth=30, anchor='center')
+                cue_tree.column('time', width=180, minwidth=140)
+                cue_tree.column('text', width=400, minwidth=200)
+                cue_scroll = ttk.Scrollbar(cue_frame, orient='vertical',
+                                            command=cue_tree.yview)
+                cue_scroll.grid(row=0, column=1, sticky='ns')
+                cue_tree.configure(yscrollcommand=cue_scroll.set)
+
+                # ── Log window ──
+                log_frame = ttk.LabelFrame(main_f, text="Log", padding=5)
+                log_frame.grid(row=4, column=0, sticky='nsew', pady=(4, 0))
+                log_frame.columnconfigure(0, weight=1)
+                log_frame.rowconfigure(0, weight=1)
+
+                log_text = tk.Text(log_frame, height=6, wrap='word',
+                                   font=('Courier', 9), state='disabled',
+                                   background='#1e1e1e', foreground='#d4d4d4',
+                                   insertbackground='white')
+                log_text.grid(row=0, column=0, sticky='nsew')
+                log_scroll = ttk.Scrollbar(log_frame, orient='vertical',
+                                           command=log_text.yview)
+                log_scroll.grid(row=0, column=1, sticky='ns')
+                log_text.configure(yscrollcommand=log_scroll.set)
+
+                # ── Cancel button ──
+                btn_f = ttk.Frame(main_f)
+                btn_f.grid(row=5, column=0, sticky='e', pady=(8, 0))
+                def _kill_ocr_processes():
+                    """Kill any running ffmpeg/ffprobe/tesseract children."""
+                    try:
+                        import psutil
+                        current = psutil.Process()
+                        for child in current.children(recursive=True):
+                            try:
+                                name = child.name().lower()
+                                if any(n in name for n in
+                                       ('ffmpeg', 'ffprobe', 'tesseract')):
+                                    child.kill()
+                            except Exception:
+                                pass
+                    except ImportError:
+                        import os as _os
+                        pid = _os.getpid()
+                        for cmd in ('ffmpeg', 'ffprobe', 'tesseract'):
+                            try:
+                                subprocess.run(
+                                    ['pkill', '-P', str(pid), '-f', cmd],
+                                    capture_output=True, timeout=2)
+                            except Exception:
+                                pass
+
+                def _do_cancel():
+                    """Cancel OCR: set event, kill processes, keep window open."""
+                    cancel_event.set()
+                    _kill_ocr_processes()
+
+                def _do_retry():
+                    """Re-run OCR with same file/stream (e.g. after adding rules)."""
+                    nonlocal cancel_event
+                    # Reset state
+                    cancel_event = threading.Event()
+                    ocr_result[0] = None
+                    start_time[0] = _time.monotonic()
+                    cue_count[0] = 0
+                    progress_var.set(0)
+                    status_label.configure(text="Restarting OCR...")
+                    stats_label.configure(text="")
+                    # Clear cue tree
+                    for item in cue_tree.get_children():
+                        cue_tree.delete(item)
+                    # Clear log
+                    try:
+                        log_text.configure(state='normal')
+                        log_text.delete('1.0', 'end')
+                        log_text.configure(state='disabled')
+                    except Exception:
+                        pass
+                    # Reset buttons
+                    cancel_btn.configure(text="Cancel OCR", command=_do_cancel)
+                    # Remove retry/save/load buttons if present
+                    for widget in btn_f.winfo_children():
+                        txt = ''
+                        try:
+                            txt = widget.cget('text')
+                        except Exception:
+                            pass
+                        if txt in ('Retry', 'Save', 'Load into Editor'):
+                            widget.destroy()
+                    # Reload OCR rules (in case user added new ones)
+                    from .subtitle_ocr import reload_ocr_rules
+                    reload_ocr_rules()
+                    # Start new OCR thread
+                    t = threading.Thread(target=_ocr_thread, daemon=True)
+                    t.start()
+
+                cancel_btn = ttk.Button(btn_f, text="Cancel OCR",
+                                        command=_do_cancel)
+                cancel_btn.pack(side='right')
+
+                def _show_ocr_rules():
+                    """Show dialog to manage custom OCR replacement rules."""
+                    from .subtitle_ocr import load_ocr_rules, save_ocr_rules
+
+                    rules_win = tk.Toplevel(mon)
+                    rules_win.title("Custom OCR Rules")
+                    rules_win.geometry(scaled_geometry(rules_win, 520, 480))
+                    rules_win.minsize(*scaled_minsize(rules_win, 400, 350))
+                    rules_win.resizable(True, True)
+                    app._center_on_main(rules_win)
+
+                    ttk.Label(rules_win,
+                              text="Find → Replace rules applied after Tesseract OCR.\n"
+                                   "Add rules for characters Tesseract consistently misreads.",
+                              padding=(10, 8)).pack(fill='x')
+
+                    # ── Rules list ──
+                    list_f = ttk.Frame(rules_win, padding=(10, 0, 10, 0))
+                    list_f.pack(fill='both', expand=True)
+                    list_f.columnconfigure(0, weight=1)
+                    list_f.rowconfigure(0, weight=1)
+
+                    cols = ('find', 'replace')
+                    rules_tree = ttk.Treeview(list_f, columns=cols,
+                                              show='headings', height=10)
+                    rules_tree.grid(row=0, column=0, sticky='nsew')
+                    rules_tree.heading('find', text='Find')
+                    rules_tree.heading('replace', text='Replace')
+                    rules_tree.column('find', width=200, minwidth=100)
+                    rules_tree.column('replace', width=200, minwidth=100)
+                    r_scroll = ttk.Scrollbar(list_f, orient='vertical',
+                                             command=rules_tree.yview)
+                    r_scroll.grid(row=0, column=1, sticky='ns')
+                    rules_tree.configure(yscrollcommand=r_scroll.set)
+
+                    # Load existing rules
+                    current_rules = load_ocr_rules()
+                    for find, replace in current_rules:
+                        rules_tree.insert('', 'end', values=(find, replace))
+
+                    # ── Add rule inputs ──
+                    add_f = ttk.Frame(rules_win, padding=(10, 8))
+                    add_f.pack(fill='x')
+
+                    ttk.Label(add_f, text="Find:").pack(side='left')
+                    find_var = tk.StringVar()
+                    find_entry = ttk.Entry(add_f, textvariable=find_var, width=15)
+                    find_entry.pack(side='left', padx=(4, 8))
+
+                    ttk.Label(add_f, text="Replace:").pack(side='left')
+                    replace_var = tk.StringVar()
+                    replace_entry = ttk.Entry(add_f, textvariable=replace_var,
+                                              width=15)
+                    replace_entry.pack(side='left', padx=(4, 8))
+
+                    def _add_rule():
+                        f = find_var.get()
+                        r = replace_var.get()
+                        if f:
+                            rules_tree.insert('', 'end', values=(f, r))
+                            find_var.set('')
+                            replace_var.set('')
+                            find_entry.focus()
+
+                    ttk.Button(add_f, text="Add", width=6,
+                               command=_add_rule).pack(side='left', padx=(4, 0))
+                    find_entry.bind('<Return>', lambda e: _add_rule())
+                    replace_entry.bind('<Return>', lambda e: _add_rule())
+
+                    # ── Buttons ──
+                    btn_frame = ttk.Frame(rules_win, padding=(10, 4, 10, 10))
+                    btn_frame.pack(fill='x')
+
+                    def _delete_selected():
+                        sel = rules_tree.selection()
+                        for item in sel:
+                            rules_tree.delete(item)
+
+                    def _save_and_close():
+                        rules = []
+                        for item in rules_tree.get_children():
+                            vals = rules_tree.item(item, 'values')
+                            if vals and vals[0]:
+                                rules.append((vals[0], vals[1]))
+                        save_ocr_rules(rules)
+                        from .subtitle_ocr import reload_ocr_rules
+                        reload_ocr_rules()
+                        rules_win.destroy()
+                        if progress_callback:
+                            _progress_queue.put(
+                                f"OCR rules updated ({len(rules)} rules)")
+
+                    ttk.Button(btn_frame, text="Delete Selected",
+                               command=_delete_selected).pack(side='left')
+                    ttk.Button(btn_frame, text="Save & Close",
+                               command=_save_and_close).pack(side='right')
+                    ttk.Button(btn_frame, text="Cancel",
+                               command=rules_win.destroy).pack(
+                                   side='right', padx=(0, 4))
+
+                ttk.Button(btn_f, text="OCR Rules",
+                           command=_show_ocr_rules).pack(
+                               side='left')
+
+                start_time = [_time.monotonic()]
+                cue_count = [0]
+
+                # ── Shared queues for thread-safe UI updates ──
+                import queue as _queue
+                _progress_queue = _queue.Queue()
+                _frame_queue = _queue.Queue()
+
+                # ── Callbacks: push to queue (thread-safe) ──
+                def _on_frame(frame_idx, total, img_path, text, start_t, end_t):
+                    _frame_queue.put((frame_idx, total, img_path, text, start_t, end_t))
+
+                def _on_progress(msg):
+                    _progress_queue.put(msg)
+
+                _last_log_msg = ['']  # avoid duplicate log lines
+
+                def _log(msg):
+                    """Append a message to the log window."""
+                    if msg == _last_log_msg[0]:
+                        return  # skip duplicate consecutive messages
+                    _last_log_msg[0] = msg
+                    try:
+                        log_text.configure(state='normal')
+                        log_text.insert('end', msg + '\n')
+                        log_text.see('end')
+                        log_text.configure(state='disabled')
+                    except tk.TclError:
+                        pass
+
+                # ── Periodic UI poll: drain queues and update widgets ──
+                def _poll_ocr_updates():
+                    # Drain progress queue
+                    while not _progress_queue.empty():
+                        try:
+                            msg = _progress_queue.get_nowait()
+                            status_label.configure(text=msg)
+                            _log(msg)
+                            import re as _re
+                            pct_match = _re.search(r'\((\d+)%\)', msg)
+                            if pct_match:
+                                progress_var.set(float(pct_match.group(1)))
+                            else:
+                                frac_match = _re.search(r'(\d+)/(\d+)', msg)
+                                if frac_match:
+                                    n, t = int(frac_match.group(1)), int(frac_match.group(2))
+                                    if t > 0:
+                                        progress_var.set((n / t) * 100)
+                        except _queue.Empty:
+                            break
+
+                    # Drain frame queue
+                    while not _frame_queue.empty():
+                        try:
+                            (frame_idx, total, img_path, text,
+                             start_t, end_t) = _frame_queue.get_nowait()
+
+                            pct = ((frame_idx + 1) / total) * 100 if total > 0 else 0
+                            progress_var.set(pct)
+                            status_label.configure(
+                                text=f"Frame {frame_idx + 1} / {total}")
+
+                            elapsed = _time.monotonic() - start_time[0]
+                            if frame_idx > 0:
+                                per_frame = elapsed / (frame_idx + 1)
+                                remaining = per_frame * (total - frame_idx - 1)
+                                eta_m, eta_s = divmod(int(remaining), 60)
+                                elapsed_m, elapsed_s = divmod(int(elapsed), 60)
+                                stats_label.configure(
+                                    text=f"Elapsed: {elapsed_m}m {elapsed_s}s  |  "
+                                         f"ETA: {eta_m}m {eta_s}s  |  "
+                                         f"Cues found: {cue_count[0]}")
+
+                            if _has_pil and img_path and os.path.exists(img_path):
+                                try:
+                                    pil_img = Image.open(img_path)
+                                    pil_img.thumbnail((320, 80), Image.LANCZOS)
+                                    photo = ImageTk.PhotoImage(pil_img)
+                                    img_label.configure(image=photo, text='')
+                                    img_label._photo = photo
+                                except Exception:
+                                    img_label.configure(image='', text='[error]')
+                            else:
+                                img_label.configure(image='', text='[no image]')
+
+                            ocr_text_var.set(text if text else '[empty]')
+                            time_label.configure(text=f"{start_t} → {end_t}")
+
+                            # Filter ghost/noise from the cue list display.
+                            if text and not text.startswith('['):
+                                cue_count[0] += 1
+                                # Replace newlines with ⏎ for single-line display
+                                display_text = text.replace('\n', ' ⏎ ')
+                                cue_tree.insert('', 'end', values=(
+                                    cue_count[0], f"{start_t} → {end_t}",
+                                    display_text))
+                                children = cue_tree.get_children()
+                                if children:
+                                    cue_tree.see(children[-1])
+                        except _queue.Empty:
+                            break
+
+                    # Reschedule if monitor window still exists
+                    try:
+                        if mon.winfo_exists():
+                            mon.after(200, _poll_ocr_updates)
+                    except tk.TclError:
+                        pass
+
+                # Start the UI polling loop
+                mon.after(200, _poll_ocr_updates)
+
+                # ── OCR thread ──
+                def _ocr_thread():
+                    # Use current cancel_event (may be reassigned on retry)
+                    _cancel = cancel_event
+                    ocr_cues = ocr_bitmap_subtitle(
+                        video_path, stream_index, ocr_lang,
+                        progress_callback=_on_progress,
+                        frame_callback=_on_frame,
+                        cancel_event=_cancel)
+                    ocr_result[0] = ocr_cues
+
+                    def _finish():
+                        elapsed = _time.monotonic() - start_time[0]
+                        elapsed_m, elapsed_s = divmod(int(elapsed), 60)
+
+                        if cancel_event.is_set():
+                            cue_n = len(ocr_cues) if ocr_cues else 0
+                            status_label.configure(
+                                text=f"OCR cancelled — {cue_n} cues completed")
+                            cancel_btn.configure(text="Close", command=mon.destroy)
+                            ttk.Button(btn_f, text="Retry",
+                                       command=_do_retry).pack(
+                                           side='right', padx=(0, 8))
+
+                            # Save partial results if any cues were completed
+                            if ocr_cues:
+                                srt_lines = []
+                                for i, cue in enumerate(ocr_cues, 1):
+                                    srt_lines.append(
+                                        f"{i}\n{cue['start']} --> {cue['end']}\n{cue['text']}\n")
+                                with open(tmp_srt.name, 'w', encoding='utf-8') as f:
+                                    f.write('\n'.join(srt_lines))
+
+                                def _save_partial():
+                                    video_dir = os.path.dirname(video_path)
+                                    video_stem = Path(video_path).stem
+                                    default_name = f"{video_stem}.{ocr_lang}.partial.srt"
+                                    save_path = ask_save_file(
+                                        parent=mon, title="Save Partial OCR",
+                                        initialdir=video_dir,
+                                        initialfile=default_name,
+                                        filetypes=[('SRT Subtitle', '*.srt'),
+                                                   ('All files', '*.*')])
+                                    if save_path:
+                                        try:
+                                            import shutil
+                                            shutil.copy2(tmp_srt.name, save_path)
+                                            status_label.configure(
+                                                text=f"Saved {cue_n} cues: "
+                                                     f"{os.path.basename(save_path)}")
+                                        except Exception as e:
+                                            messagebox.showerror("Save Error",
+                                                f"Failed to save:\n{e}", parent=mon)
+
+                                def _load_partial():
+                                    mon.destroy()
+                                    with open(tmp_srt.name, 'r', encoding='utf-8',
+                                              errors='replace') as f:
+                                        srt_data = f.read()
+                                    title_str = (
+                                        f"Docflix Subtitle Editor — "
+                                        f"OCR Stream #{stream_index} "
+                                        f"({lang_display}) [partial] — "
+                                        f"{os.path.basename(video_path)}")
+                                    if _load_cues_into_editor(srt_data, title_str,
+                                                              tmp_srt.name):
+                                        video_source[0] = {
+                                            'path': video_path,
+                                            'stream_index': stream_index,
+                                            'temp_srt': tmp_srt.name,
+                                            'streams': streams,
+                                            'stream_info': chosen,
+                                            'is_cc': False,
+                                        }
+
+                                ttk.Button(btn_f, text="Save",
+                                           command=_save_partial).pack(
+                                               side='right', padx=(0, 8))
+                                ttk.Button(btn_f, text="Load into Editor",
+                                           command=_load_partial).pack(
+                                               side='right', padx=(0, 8))
+                            else:
+                                try:
+                                    os.unlink(tmp_srt.name)
+                                except Exception:
+                                    pass
+                            return
+
+                        if ocr_cues:
+                            # Write OCR results as SRT
+                            srt_lines = []
+                            for i, cue in enumerate(ocr_cues, 1):
+                                srt_lines.append(
+                                    f"{i}\n{cue['start']} --> {cue['end']}\n{cue['text']}\n")
+                            srt_text = '\n'.join(srt_lines)
+                            with open(tmp_srt.name, 'w', encoding='utf-8') as f:
+                                f.write(srt_text)
+
+                            status_label.configure(
+                                text=f"Done — {len(ocr_cues)} cues in "
+                                     f"{elapsed_m}m {elapsed_s}s")
+                            progress_var.set(100)
+                            cancel_btn.configure(text="Close", command=mon.destroy)
+
+                            def _load_into_editor():
+                                mon.destroy()
+                                with open(tmp_srt.name, 'r', encoding='utf-8',
+                                          errors='replace') as f:
+                                    srt_data = f.read()
+                                title_str = (
+                                    f"Docflix Subtitle Editor — "
+                                    f"OCR Stream #{stream_index} "
+                                    f"({lang_display}) — "
+                                    f"{os.path.basename(video_path)}")
+                                if _load_cues_into_editor(srt_data, title_str,
+                                                          tmp_srt.name):
+                                    video_source[0] = {
+                                        'path': video_path,
+                                        'stream_index': stream_index,
+                                        'temp_srt': tmp_srt.name,
+                                        'streams': streams,
+                                        'stream_info': chosen,
+                                        'is_cc': False,
+                                    }
+                                    app.add_log(
+                                        f"Opened video subtitle: OCR stream "
+                                        f"#{stream_index} ({lang_display}) "
+                                        f"from {os.path.basename(video_path)} "
+                                        f"({len(cues)} entries)", 'INFO')
+                                    editor.after(200, lambda:
+                                        _load_waveform_for_video(video_path))
+                                else:
+                                    os.unlink(tmp_srt.name)
+
+                            def _save_srt():
+                                """Save OCR'd SRT alongside the video file."""
+                                video_dir = os.path.dirname(video_path)
+                                video_stem = Path(video_path).stem
+                                default_name = f"{video_stem}.{ocr_lang}.srt"
+                                save_path = ask_save_file(
+                                    parent=mon,
+                                    title="Save OCR Subtitle",
+                                    initialdir=video_dir,
+                                    initialfile=default_name,
+                                    filetypes=[
+                                        ('SRT Subtitle', '*.srt'),
+                                        ('All files', '*.*'),
+                                    ])
+                                if save_path:
+                                    try:
+                                        import shutil
+                                        shutil.copy2(tmp_srt.name, save_path)
+                                        status_label.configure(
+                                            text=f"Saved: {os.path.basename(save_path)}")
+                                        app.add_log(
+                                            f"OCR subtitle saved: {save_path}",
+                                            'SUCCESS')
+                                    except Exception as e:
+                                        messagebox.showerror("Save Error",
+                                            f"Failed to save:\n{e}",
+                                            parent=mon)
+
+                            ttk.Button(btn_f, text="Save",
+                                       command=_save_srt).pack(
+                                           side='right', padx=(0, 8))
+                            ttk.Button(btn_f, text="Load into Editor",
+                                       command=_load_into_editor).pack(
+                                           side='right', padx=(0, 8))
+                        else:
+                            status_label.configure(text="OCR produced no output")
+                            cancel_btn.configure(text="Close", command=mon.destroy)
+                            os.unlink(tmp_srt.name)
+
+                    editor.after(100, _finish)
+
+                t = threading.Thread(target=_ocr_thread, daemon=True)
+                t.start()
+
+                mon.protocol('WM_DELETE_WINDOW', _do_cancel)
+                return  # monitor window handles everything asynchronously
+
+            # ── Non-bitmap: progress dialog during extraction ──
             prog_dlg = tk.Toplevel(editor)
             prog_dlg.title("Importing Subtitle")
             prog_dlg.resizable(False, False)
@@ -454,17 +1069,18 @@ def open_standalone_subtitle_editor(app):
 
             prog_f = ttk.Frame(prog_dlg, padding=20)
             prog_f.pack(fill='both', expand=True)
-            ttk.Label(prog_f,
-                      text=f"{extract_label} "
+            prog_status = ttk.Label(prog_f,
+                      text=f"{extract_label}\n"
                            f"from {os.path.basename(video_path)}...",
-                      wraplength=350).pack(pady=(0, 10))
+                      wraplength=350)
+            prog_status.pack(pady=(0, 10))
             prog_bar = ttk.Progressbar(prog_f, mode='indeterminate', length=300)
             prog_bar.pack(pady=(0, 5))
             prog_bar.start(15)
 
             app._center_on_main(prog_dlg)
             prog_dlg.grab_set()
-            prog_dlg.protocol('WM_DELETE_WINDOW', lambda: None)  # prevent closing
+            prog_dlg.protocol('WM_DELETE_WINDOW', lambda: None)
 
             extract_result = [None]  # (returncode, stderr) or Exception
 
@@ -593,9 +1209,16 @@ def open_standalone_subtitle_editor(app):
                 i = 0
                 while i < len(raw):
                     if raw[i] == '{':
-                        end = raw.find('}', i)
-                        paths.append(raw[i + 1:end])
-                        i = end + 2
+                        depth = 1
+                        end = i + 1
+                        while end < len(raw) and depth > 0:
+                            if raw[end] == '{':
+                                depth += 1
+                            elif raw[end] == '}':
+                                depth -= 1
+                            end += 1
+                        paths.append(raw[i + 1:end - 1])
+                        i = end + 1 if end < len(raw) else end
                     elif raw[i] == ' ':
                         i += 1
                     else:
@@ -608,6 +1231,25 @@ def open_standalone_subtitle_editor(app):
                             i = end + 1
             if paths:
                 path = paths[0]
+                # If a folder was dropped, look for a video file inside
+                if os.path.isdir(path):
+                    video_files = [
+                        os.path.join(path, f) for f in sorted(os.listdir(path))
+                        if Path(f).suffix.lower() in VIDEO_EXTENSIONS
+                    ]
+                    if video_files:
+                        path = video_files[0]  # use first video found
+                    else:
+                        # Try subtitle files
+                        sub_files = [
+                            os.path.join(path, f) for f in sorted(os.listdir(path))
+                            if Path(f).suffix.lower() in SUBTITLE_EXTENSIONS
+                        ]
+                        if sub_files:
+                            path = sub_files[0]
+                        else:
+                            return  # no supported files in folder
+
                 ext = Path(path).suffix.lower()
                 if ext in VIDEO_EXTENSIONS:
                     load_video_subtitle(path)
@@ -2126,9 +2768,16 @@ def open_standalone_subtitle_editor(app):
                     i = 0
                     while i < len(raw):
                         if raw[i] == '{':
-                            end = raw.find('}', i)
-                            paths.append(raw[i + 1:end])
-                            i = end + 2
+                            depth = 1
+                            end = i + 1
+                            while end < len(raw) and depth > 0:
+                                if raw[end] == '{':
+                                    depth += 1
+                                elif raw[end] == '}':
+                                    depth -= 1
+                                end += 1
+                            paths.append(raw[i + 1:end - 1])
+                            i = end + 1 if end < len(raw) else end
                         elif raw[i] == ' ':
                             i += 1
                         else:
@@ -5305,9 +5954,16 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
                     i = 0
                     while i < len(raw):
                         if raw[i] == '{':
-                            end = raw.find('}', i)
-                            paths.append(raw[i + 1:end])
-                            i = end + 2
+                            depth = 1
+                            end = i + 1
+                            while end < len(raw) and depth > 0:
+                                if raw[end] == '{':
+                                    depth += 1
+                                elif raw[end] == '}':
+                                    depth -= 1
+                                end += 1
+                            paths.append(raw[i + 1:end - 1])
+                            i = end + 1 if end < len(raw) else end
                         elif raw[i] == ' ':
                             i += 1
                         else:
