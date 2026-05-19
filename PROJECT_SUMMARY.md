@@ -15,10 +15,10 @@
 
 | File | Size | Modified | Description |
 |------|------|----------|-------------|
-| `video_converter.py` | 9,996 lines | 2026-05-05 | Monolith — primary Tkinter desktop GUI app; tools import from modules |
+| `video_converter.py` | 10,025 lines | 2026-05-19 | Monolith — primary Tkinter desktop GUI app; tools import from modules |
 | `convert_videos.sh` | ~541 lines | 2026-04-22 | Standalone bash CLI batch converter |
 | `run_converter.sh` | 60 lines | 2026-04-27 | Launcher for Tkinter desktop app |
-| `install.sh` | 423 lines | 2026-05-01 | Installer / uninstaller (package + standalone tool commands + subtitle editor "Open with" .desktop) |
+| `install.sh` | 483 lines | 2026-05-19 | Installer / uninstaller (package + standalone tool commands + .desktop entries for subtitle editor, media details, media renamer "Open with") |
 | `logo.png` | 136 KB | 2026-03-27 | Original app logo (RGB, 840×958) |
 | `logo_transparent.png` | 100 KB | 2026-04-05 | Background-stripped version used in title bar |
 | `screenshot.png` | — | 2026-04-06 | App screenshot (used in GitHub README) |
@@ -38,28 +38,28 @@
 | `__init__.py` | 33 | Package init, exports APP_NAME, APP_VERSION |
 | `__main__.py` | 59 | Entry point for `python -m modules` |
 | `constants.py` | 259 | APP_NAME, APP_VERSION, GPU_BACKENDS, VIDEO_CODEC_MAP, EDITION_PRESETS, LANG_CODE_TO_NAME, SUBTITLE_LANGUAGES, extensions, codec maps |
-| `utils.py` | 757 | Format helpers, ffprobe wrappers, tooltips, zenity dialogs (file/folder/save), DPI scaling, font sizing |
-| `standalone.py` | 194 | StandaloneContext class for standalone tool launches, shared preferences, window management, dock icon |
+| `utils.py` | 804 | Format helpers, ffprobe wrappers, tooltips, zenity dialogs (file/folder/save), DPI scaling with screen clamping, font sizing |
+| `standalone.py` | 254 | StandaloneContext class for standalone tool launches, shared preferences, window management, dock icon |
 | `gpu.py` | 630 | GPU detection (NVENC/QSV/VAAPI), test encode verification, ffmpeg check, CC detection, video analysis |
-| `converter.py` | 856 | VideoConverter engine class — ffmpeg command building, pause/resume/stop, two-pass, subtitle/metadata/chapter handling |
-| `preferences.py` | 169 | Preferences save/load/reset as standalone functions |
+| `converter.py` | 874 | VideoConverter engine class — ffmpeg command building, pause/resume/stop, two-pass, subtitle/metadata/chapter handling |
+| `preferences.py` | 185 | Preferences save/load/reset as standalone functions |
 | `subtitle_filters.py` | 1,374 | SRT parsing/writing, all filter functions (Remove HI, Fix CAPS, etc.), timestamp manipulation, retime; optional names database (Aptivi/NamesList) for Fix CAPS with system dictionary false-positive filtering |
 | `subtitle_editor.py` | 7,482 | Both editor variants (standalone + internal), inline editing, filters, timing, search/replace, waveform timeline with embedded video, video preview, "Open with" file argument support; withdraw/deiconify window positioning; bitmap OCR scanning dialog |
 | `smart_sync.py` | 735 | Whisper-based auto-sync (faster-whisper + WhisperX), Quick/Full Scan, Direct Align, VAD snapping |
 | `spell_checker.py` | 319 | Unified incremental spell check dialog with custom dictionary and character name support |
 | `subtitle_ocr.py` | 1,202 | Bitmap subtitle OCR (PGS/VobSub → SRT via Tesseract), native PGS parser, parallel OCR, combined decode+OCR pipeline, live monitor window with log, custom OCR rules, ghost frame filtering |
-| `tv_renamer.py` | 4,782 | File Renamer — TVDB/TMDB API, multi-episode, folder templates, custom templates, TVDB/TMDB ID variables, undo, threaded loading, disambiguation; multi-separator subtitle tag detection; already-named files cleared from list; episode title matching for files without SxxExx; Edit Name dialog; embedded provider ID detection (Radarr/Sonarr); dual-provider search; cross-provider ID resolution; version/edition detection |
-| `media_processor.py` | 1,645 | Media Processor — remux, audio conversion, metadata, subtitle muxing, edition tagging, chapters, track naming templates, parallel processing, per-file progress, Settings menu |
-| `batch_filter.py` | 675 | Batch Filter — multi-file filter processing with search/replace pairs, Settings menu; withdraw/deiconify window positioning |
-| `media_info.py` | 1,768 | Media Details — comprehensive file analysis and tag editor with editable track names, language, disposition flags, chapter editor, save via ffmpeg remux with progress bar |
+| `tv_renamer.py` | 5,001 | File Renamer — TVDB/TMDB API, multi-episode, folder templates, custom templates, TVDB/TMDB ID variables, undo, threaded loading, disambiguation; multi-separator subtitle tag detection; already-named files cleared from list; episode title matching for files without SxxExx; Edit Name dialog; embedded provider ID detection (Radarr/Sonarr); dual-provider search; cross-provider ID resolution; cross-provider episode supplement; version/edition detection; subtitle subfolder support; multi-monitor centering; loose file detection; episode discrepancy highlighting; "Open with" file manager integration |
+| `media_processor.py` | 2,082 | Media Processor — remux, audio conversion, metadata, subtitle muxing, edition tagging, chapters, track naming templates, parallel processing, per-file progress, Settings menu; subtitle subfolder scanning with episode-marker matching |
+| `batch_filter.py` | 886 | Batch Filter — multi-file filter processing with search/replace pairs, Settings menu; withdraw/deiconify window positioning |
+| `media_info.py` | 1,929 | Media Details — comprehensive file analysis and tag editor with editable track names, language, disposition flags, chapter editor, save via ffmpeg remux with progress bar |
 | `chapters.py` | 257 | Chapter generation, parsing (FFMETADATA1, OGM), writing |
 | `manual_viewer.py` | 737 | Built-in user manual viewer with sidebar navigation |
 | `waveform_timeline.py` | 1,498 | Waveform Timeline widget — audio extraction, waveform rendering, cue block overlay, drag-to-move/resize, embedded mpv video playback, live subtitle preview, step navigation |
-| `video_scaler.py` | 1,088 | Video Scaler — batch resize with GPU-accelerated scaling, threaded file scanning with progress/ETA, preferences; withdraw/deiconify window positioning |
-| `whisper_subtitles.py` | — | Whisper Subtitles Backend — transcription engine for faster-whisper/WhisperX |
-| `whisper_transcriber.py` | 850+ | Whisper Transcriber GUI — batch subtitle extraction from video/audio, drag-and-drop, translation, word-level timestamps, preview panel, Docflix prefs integration |
-| `sub_ripper.py` | 889 | Sub Ripper — batch subtitle extraction from video files, English Main/Forced/SDH filtering, SRT/ASS/WebVTT output, drag-and-drop, threaded scanning with progress/ETA, preferences |
-| **Total** | **~25,600** | **24 modules** |
+| `video_scaler.py` | 1,250 | Video Scaler — batch resize with GPU-accelerated scaling, threaded file scanning with progress/ETA, preferences; withdraw/deiconify window positioning |
+| `whisper_subtitles.py` | 554 | Whisper Subtitles Backend — transcription engine for faster-whisper/WhisperX |
+| `whisper_transcriber.py` | 1,555 | Whisper Transcriber GUI — batch subtitle extraction from video/audio, drag-and-drop, translation, word-level timestamps, preview panel, Docflix prefs integration |
+| `sub_ripper.py` | 1,135 | Sub Ripper — batch subtitle extraction from video files, English Main/Forced/SDH filtering, SRT/ASS/WebVTT output, drag-and-drop, threaded scanning with progress/ETA, preferences |
+| **Total** | **~31,100** | **24 modules** |
 
 ### Standalone Tool Commands
 
@@ -634,6 +634,19 @@ git push
 #### General
 - [ ] **Subtitle Edit format compatibility** — Import/export Subtitle Edit project files (.sup, .sub) for users migrating from SE.
 - [ ] **Batch job queue** — Queue multiple different operations (encode file A, rename folder B, filter subtitles in C) and process them sequentially or in parallel.
+
+---
+
+## TODO
+
+### RHEL/Fedora Compatibility (Planned)
+- [ ] Add distro detection to `install.sh` — detect `dnf`/`apt` and map package names (`python3-tk` → `python3-tkinter`, `tesseract-ocr` → `tesseract`, `tesseract-ocr-eng` → `tesseract-langpack-eng`)
+- [ ] Add distro detection to `_auto_install_packages()` in `video_converter.py` and `subtitle_ocr.py` — use `dnf install` on RHEL/Fedora, `apt install` on Debian/Ubuntu, with correct package names
+- [ ] Update all error messages referencing `sudo apt install` to be distro-aware (~15 locations)
+- [ ] Document RPM Fusion requirement for ffmpeg on RHEL/Fedora
+- [ ] Document Python 3.8+ minimum requirement (RHEL 8's Python 3.6 lacks `capture_output=True`)
+- [ ] Document Wayland limitation for MPV video embedding in subtitle editor (requires X11/XWayland)
+- [ ] Note ccextractor unavailability on RHEL (needs manual build or COPR)
 
 ---
 
