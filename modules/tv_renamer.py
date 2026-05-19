@@ -54,9 +54,12 @@ _SOURCE_PATTERNS = [
 # Version/edition patterns detected from filenames
 _VERSION_PATTERNS = [
     (r'\bREMASTERED\b', 'Remastered'),
+    # Multi-word versions must come before their shorter prefixes
+    # so "Extended Directors Cut" isn't truncated to just "Extended"
+    (r"\bExtended[.\s]*Director'?s?[.\s]*Cut\b", "Extended Director's Cut"),
     (r'\bExtended[.\s]*Cut\b', 'Extended Cut'),
-    (r'\bEXTENDED\b', 'Extended'),
     (r"\bDirector'?s?[.\s]*Cut\b", "Director's Cut"),
+    (r'\bEXTENDED\b', 'Extended'),
     (r'\bUNRATED\b', 'Unrated'),
     (r'\bTHEATRICAL\b', 'Theatrical'),
     (r'\bSpecial[.\s]*Edition\b', 'Special Edition'),
@@ -280,7 +283,7 @@ def open_tv_renamer(app):
             all_eps = []
             page = 0
             while True:
-                url = f'/series/{series_id}/episodes/default?page={page}'
+                url = f'/series/{series_id}/episodes/default/eng?page={page}'
                 _log(f"Fetching: {TVDB_BASE}{url}")
                 result = _tvdb_request('GET', url, token=_tvdb_token[0])
                 if not result:
@@ -476,25 +479,16 @@ def open_tv_renamer(app):
                 need_tvdb = True
             if tv_prov == 'TMDB' or mv_prov == 'TMDB':
                 need_tmdb = True
+            # Collect results from all needed providers WITHOUT
+            # cross-provider deduplication.  When both providers return
+            # the same show, keep BOTH results so downstream preference
+            # logic in _load_show_by_name can pick the correct provider
+            # per media type (e.g. TVDB for TV, TMDB for movies).
             results = []
-            seen_names = set()  # deduplicate across providers
             if need_tmdb:
-                tmdb_results = _tmdb_search(query)
-                for r in tmdb_results:
-                    key = (_normalize_for_match(r.get('name', '')),
-                           r.get('year', ''), r.get('_media_type', ''))
-                    seen_names.add(key)
-                results.extend(tmdb_results)
+                results.extend(_tmdb_search(query))
             if need_tvdb:
-                tvdb_results = _tvdb_search(query)
-                for r in tvdb_results:
-                    # Avoid near-duplicates already returned by TMDB
-                    key = (_normalize_for_match(
-                               r.get('name', r.get('objectName', ''))),
-                           r.get('year', ''),
-                           r.get('_media_type', ''))
-                    if key not in seen_names:
-                        results.append(r)
+                results.extend(_tvdb_search(query))
             if not need_tvdb and not need_tmdb:
                 # Fallback — shouldn't happen, but search active provider
                 if prov == 'TMDB':
@@ -688,6 +682,14 @@ def open_tv_renamer(app):
             name = re.sub(r'[<>"|?*]', '', name)
             # Collapse multiple spaces
             name = re.sub(r'\s+', ' ', name).strip()
+            # Clean up brackets with empty/whitespace-only content
+            # e.g. "Title [ ]" → "Title", "Title []" → "Title"
+            name = re.sub(r'\[\s*\]', '', name)
+            # Remove spaces inside brackets: "[ 1080p ]" → "[1080p]"
+            name = re.sub(r'\[\s+', '[', name)
+            name = re.sub(r'\s+\]', ']', name)
+            # Clean up any resulting double spaces or trailing space
+            name = re.sub(r'\s+', ' ', name).strip()
             # Remove trailing dots/spaces (Windows compatibility)
             name = name.rstrip('. ')
             return name
@@ -704,6 +706,10 @@ def open_tv_renamer(app):
                 part = part.replace(':', ' ').replace('\\', '-')
                 part = re.sub(r'[<>"|?*]', '', part)
                 part = re.sub(r'\s+', ' ', part).strip()
+                part = re.sub(r'\[\s*\]', '', part)
+                part = re.sub(r'\[\s+', '[', part)
+                part = re.sub(r'\s+\]', ']', part)
+                part = re.sub(r'\s+', ' ', part).strip()
                 part = part.rstrip('. ')
                 if part:  # skip empty components
                     sanitized.append(part)
@@ -714,21 +720,27 @@ def open_tv_renamer(app):
         # "Series 3", "S01", "S1")
         _SEASON_FOLDER_RE = re.compile(
             r'^(?:Season|Series|S)\s*\d+$', re.IGNORECASE)
+        # Subtitle subfolder names to skip (like Season folders)
+        _SUBS_FOLDER_RE = re.compile(
+            r'^(?:subs?|subtitles?|srt|ass)$', re.IGNORECASE)
 
         def _get_show_folder(filepath):
             """Return the show-level parent folder name for a file path,
-            skipping past Season subfolders.  For a file at
-            .../Ghosts UK/Season 1/episode.mkv, returns "Ghosts UK"
-            instead of "Season 1"."""
-            parent = os.path.dirname(filepath)
-            parent_name = os.path.basename(parent)
-            if parent_name and _SEASON_FOLDER_RE.match(parent_name):
-                # Parent is a Season folder — use grandparent instead
-                grandparent = os.path.dirname(parent)
-                grandparent_name = os.path.basename(grandparent)
-                if grandparent_name:
-                    return grandparent_name
-            return parent_name
+            skipping past Season and subtitle subfolders.  Handles
+            nested cases like .../Show/Season 01/subs/S01E01.srt
+            by climbing until the folder is neither a Season nor a
+            subs folder (up to 3 levels to avoid infinite loops)."""
+            d = os.path.dirname(filepath)
+            for _ in range(3):
+                name = os.path.basename(d)
+                if not name:
+                    break
+                if (_SEASON_FOLDER_RE.match(name)
+                        or _SUBS_FOLDER_RE.match(name)):
+                    d = os.path.dirname(d)
+                else:
+                    return name
+            return os.path.basename(d)
 
         def _match_file_to_show(item):
             """Match a file to one of the loaded shows by filename and
@@ -956,7 +968,7 @@ def open_tv_renamer(app):
                     continue
                 if not isinstance(ep_data, dict):
                     continue
-                ep_title = ep_data.get('name', '')
+                ep_title = ep_data.get('name') or ''
                 if not ep_title:
                     continue
                 title_norm = _norm_title(ep_title)
@@ -1130,6 +1142,12 @@ def open_tv_renamer(app):
             if not show_name:
                 return None
             show_data = _all_shows.get(show_name, {})
+            # Check that the relevant template is not empty
+            is_movie = (isinstance(show_data, dict)
+                        and show_data.get('_is_movie'))
+            active_tmpl = (movie_template or '') if is_movie else template
+            if not active_tmpl.strip():
+                return None
 
             # Build provider ID variables for template.
             # {tvdb} resolves to the TVDB ID and {tmdb} resolves to the
@@ -1218,7 +1236,7 @@ def open_tv_renamer(app):
             if air_date:
                 ep_data = show_data.get(('date', air_date))
                 if ep_data:
-                    title = ep_data.get('name', '')
+                    title = ep_data.get('name') or ''
                     s = ep_data.get('seasonNumber', 1)
                     e = ep_data.get('number', 0)
                     ep_id = str(ep_data.get('id', ''))
@@ -1264,7 +1282,7 @@ def open_tv_renamer(app):
                 for ep_num in e:
                     ep_data = show_data.get((s, ep_num))
                     if ep_data:
-                        t = ep_data.get('name', '')
+                        t = ep_data.get('name') or ''
                         if t:
                             titles.append(t)
                         if not first_ep_id:
@@ -1287,7 +1305,7 @@ def open_tv_renamer(app):
                 # Single episode
                 ep_num = e[0] if isinstance(e, list) else e
                 ep_data = show_data.get((s, ep_num))
-                title = ep_data.get('name', '') if ep_data else ''
+                title = (ep_data.get('name') or '') if ep_data else ''
                 ep_id = str(ep_data.get('id', '')) if ep_data else ''
                 ep_id_tag = f'{prov}-{ep_id}' if prov and ep_id else ''
                 name = template.format(
@@ -1454,21 +1472,15 @@ def open_tv_renamer(app):
                     item = _file_items[idx]
                     show = item.get('matched_show')
                     if show and show not in shows_to_rematch:
-                        # Derive the search query: prefer folder name,
-                        # fall back to cleaned filename
+                        # Derive the search query: prefer the cleaned
+                        # filename (it contains the actual show name from
+                        # the episode), fall back to folder name when the
+                        # filename has no usable show name (e.g. "S01E01.mkv")
                         folder = _get_show_folder(item['path'])
                         cleaned_folder = _clean_show_name(folder) if folder else ''
                         stem = os.path.splitext(os.path.basename(item['path']))[0]
                         cleaned_stem = _clean_show_name(stem)
-                        # Use cleaned folder name if it differs from the
-                        # cleaned filename (dedicated show folder like
-                        # "Ghosts UK" vs episode filename)
-                        if cleaned_folder and _normalize_for_match(cleaned_folder) != _normalize_for_match(cleaned_stem):
-                            # Folder might be a better query if it's a
-                            # dedicated show folder
-                            query = cleaned_folder
-                        else:
-                            query = cleaned_stem or cleaned_folder or show
+                        query = cleaned_stem or cleaned_folder or show
                         shows_to_rematch[show] = query
 
             if not shows_to_rematch:
@@ -1478,13 +1490,16 @@ def open_tv_renamer(app):
             _log(f"Re-matching {count} show{'s' if count > 1 else ''}...")
 
             for old_name, query in shows_to_rematch.items():
+                # Save old data so we can restore if the user cancels
+                old_show_data = _all_shows.get(old_name)
+                old_query_mappings = {q: s for q, s in _query_to_show.items()
+                                      if s == old_name}
+
                 # 1. Remove old show data
                 _all_shows.pop(old_name, None)
 
                 # 2. Clear query→show mappings for this show
-                stale = [q for q, s in _query_to_show.items()
-                         if s == old_name]
-                for q in stale:
+                for q in old_query_mappings:
                     del _query_to_show[q]
 
                 # 3. Clear matched_show on ALL files that had this show
@@ -1494,13 +1509,28 @@ def open_tv_renamer(app):
                     if item.get('matched_show') == old_name:
                         item['matched_show'] = None
 
-                # 4. Re-search via API — shows disambiguation dialog
-                #    if multiple matches found
-                new_name = _load_show_by_name(query)
+                # 4. Re-search via API — force the picker dialog so
+                #    the user can choose a different show
+                new_name = _load_show_by_name(query, force_prompt=True)
                 if new_name:
                     _log(f"  Re-matched \"{old_name}\" → \"{new_name}\"")
                 else:
-                    _log(f"  No match found for \"{query}\"", 'WARNING')
+                    # User cancelled or no match — restore old data
+                    # so the files don't lose their show association
+                    if old_show_data is not None:
+                        _all_shows[old_name] = old_show_data
+                        _query_to_show.update(old_query_mappings)
+                        for item in _file_items:
+                            if item.get('matched_show') is None:
+                                # Re-check if this file was matched
+                                # to the old show
+                                matched = _match_file_to_show(item)
+                                if matched == old_name:
+                                    item['matched_show'] = old_name
+                        _log(f"  Cancelled — restored \"{old_name}\"")
+                    else:
+                        _log(f"  No match found for \"{query}\"",
+                             'WARNING')
 
             # 5. Refresh all filenames
             _refresh_preview()
@@ -2029,12 +2059,16 @@ def open_tv_renamer(app):
                             }
             return None
 
-        def _load_show_by_name(query, embedded_id=None):
+        def _load_show_by_name(query, embedded_id=None,
+                               force_prompt=False):
             """Search the active provider for a show name and auto-load the
             best match. Prompts the user if multiple shows share the same name.
             embedded_id is an optional (provider, id_str) tuple from a
             Radarr/Sonarr folder tag like {tmdb-3573}; when present the
             matching result is auto-selected without prompting.
+            force_prompt: when True, always show the picker dialog even
+            for a single match (used by Re-match so the user can choose
+            a different show).
             Returns the loaded show name, or None on failure."""
             if not query:
                 return None
@@ -2117,7 +2151,7 @@ def open_tv_renamer(app):
 
             close_matches = []
             seen_ids = set()
-            for r in ranked[:15]:  # limit to top 15
+            for r in ranked:  # scan all results
                 rname = r.get('name', r.get('objectName', ''))
                 rname_norm = _normalize_for_match(rname)
                 rid = (r.get('_media_type', ''), r.get('id', ''))
@@ -2170,7 +2204,7 @@ def open_tv_renamer(app):
                         retry_close = []
                         retry_seen = set(seen_ids)
                         for r in sorted(retry_results,
-                                        key=_retry_rank)[:15]:
+                                        key=_retry_rank):
                             rname = r.get('name', r.get('objectName', ''))
                             rn = _normalize_for_match(rname)
                             rid = (r.get('_media_type', ''),
@@ -2205,9 +2239,17 @@ def open_tv_renamer(app):
             # show, keep only the one from the template's preferred
             # provider for that media type.  e.g. TV template uses {tvdb}
             # → prefer TVDB results for TV shows; movie template uses
-            # {tmdb} → prefer TMDB results for movies.
+            # {tmdb} → prefer TMDB results for movies.  When a template
+            # doesn't specify a provider (no {tvdb}/{tmdb} tag), fall
+            # back to the active provider dropdown.
             tv_prov, mv_prov = _detect_template_providers()
-            if tv_prov or mv_prov:
+            # Fall back to active provider for media types whose
+            # template doesn't specify a provider preference
+            if not tv_prov:
+                tv_prov = prov   # active provider dropdown
+            if not mv_prov:
+                mv_prov = prov
+            if len(close_matches) > 1:
                 # Group by (normalized_name, year) to find cross-provider
                 # duplicates
                 from collections import defaultdict
@@ -2229,10 +2271,10 @@ def open_tv_renamer(app):
                         r_prov = r.get('_provider', '').upper()
                         r_type = r.get('_media_type', r.get('type', ''))
                         if r_type in ('tv', 'series'):
-                            if tv_prov and r_prov == tv_prov:
+                            if r_prov == tv_prov:
                                 kept.add(i)
                         elif r_type == 'movie':
-                            if mv_prov and r_prov == mv_prov:
+                            if r_prov == mv_prov:
                                 kept.add(i)
                         else:
                             kept.add(i)
@@ -2325,8 +2367,30 @@ def open_tv_renamer(app):
                     if not best:
                         _log(f"  Skipped \"{query}\"")
                         return None
-            elif len(close_matches) == 1:
+            elif len(close_matches) == 1 and not force_prompt:
                 best = close_matches[0]
+            elif len(close_matches) >= 1 and force_prompt:
+                # Re-match mode: always show the picker so the user
+                # can choose a different show or provider result.
+                # Include ALL results (not just close matches) so
+                # the user has the full list to pick from.
+                pick_list = close_matches
+                if len(results) > len(close_matches):
+                    seen = {(r.get('_media_type', ''), r.get('id', ''))
+                            for r in close_matches}
+                    for r in results[:15]:
+                        rid = (r.get('_media_type', ''), r.get('id', ''))
+                        if rid not in seen:
+                            pick_list.append(r)
+                            seen.add(rid)
+                _log(f"  Re-match: {len(pick_list)} candidates — asking...")
+                win.update_idletasks()
+                best = _ask_user_pick_show(query, pick_list)
+                if best == '__filename_fallback__':
+                    return _fallback_from_filename(query)
+                if not best:
+                    _log(f"  Skipped \"{query}\"")
+                    return None
             else:
                 # No close matches — pick the first result, preferring
                 # the provider that matches the template for its media type
@@ -2428,9 +2492,54 @@ def open_tv_renamer(app):
             show_eps['_name'] = api_name
             show_eps['_tvdb_id'] = ext_ids.get('tvdb_id', '')
             show_eps['_tmdb_id'] = ext_ids.get('tmdb_id', '')
+
+            # ── Cross-provider episode supplement ──
+            # When the primary provider has few episodes, the other
+            # provider may have more complete data (e.g. TMDB has 1 ep
+            # but TVDB has all 3).  Fetch from the other provider and
+            # merge any episodes missing from the primary data.  Primary
+            # provider data always takes priority — only gaps are filled.
+            alt_prov = None
+            alt_sid = None
+            if prov == 'tmdb' and ext_ids.get('tvdb_id'):
+                alt_prov = 'TVDB'
+                alt_sid = ext_ids['tvdb_id']
+            elif prov == 'tvdb' and ext_ids.get('tmdb_id'):
+                alt_prov = 'TMDB'
+                alt_sid = ext_ids['tmdb_id']
+            if alt_prov and alt_sid:
+                try:
+                    alt_eps = _provider_get_episodes(
+                        alt_sid, provider=alt_prov)
+                    if alt_eps:
+                        added = 0
+                        for ep in alt_eps:
+                            s2 = ep.get('seasonNumber')
+                            e2 = ep.get('number')
+                            if (s2 is not None and e2 is not None
+                                    and (s2, e2) not in show_eps):
+                                show_eps[(s2, e2)] = ep
+                                seasons.add(s2)
+                                added += 1
+                            # Fill missing air-date index too
+                            a2 = (ep.get('aired')
+                                  or ep.get('air_date') or '')
+                            if (a2 and len(a2) >= 10
+                                    and ('date', a2[:10])
+                                    not in show_eps):
+                                show_eps[('date', a2[:10])] = ep
+                        if added:
+                            _log(f"  Supplemented {added} episodes "
+                                 f"from {alt_prov}")
+                except Exception as ex:
+                    _log(f"  Cross-provider supplement failed: {ex}")
+
             _all_shows[show_name] = show_eps
+            # Count actual (season, ep) episode keys (not date indexes)
+            ep_count = len([k for k in show_eps
+                           if isinstance(k, tuple) and k[0] != 'date'])
             real_seasons = {s for s in seasons if s > 0} or seasons
-            _log(f"  Loaded \"{show_name}\" — {len(eps)} eps, "
+            _log(f"  Loaded \"{show_name}\" — {ep_count} eps, "
                  f"{len(real_seasons)} seasons")
             return show_name
 
@@ -2800,13 +2909,31 @@ def open_tv_renamer(app):
                         except (KeyError, ValueError):
                             new_name = '(template error)'
 
+                # Check if the episode exists in the provider data —
+                # if the file references an episode that the provider
+                # doesn't have, flag it so the user knows there's a
+                # discrepancy (e.g. file says S01E05 but provider only
+                # has S01E01 for that season)
+                ep_missing = False
+                if (matched and not is_movie and has_ep
+                        and not item.get('custom_name')):
+                    show_data = _all_shows.get(matched, {})
+                    if isinstance(show_data, dict):
+                        ep_num = e[0] if isinstance(e, list) else e
+                        if (show_data.get('_series_id')
+                                and (s, ep_num) not in show_data):
+                            ep_missing = True
+
                 iid = tree.insert('', 'end',
                                   values=(cur_name, type_label, new_name))
-                # Color rows without matches
-                if not new_name or new_name == '(template error)':
+                # Color rows based on status
+                if ep_missing:
+                    tree.item(iid, tags=('ep_missing',))
+                elif not new_name or new_name == '(template error)':
                     tree.item(iid, tags=('nomatch',))
 
             tree.tag_configure('nomatch', foreground='#999')
+            tree.tag_configure('ep_missing', foreground='#cc3333')
             # Update undo button state
             try:
                 undo_btn.configure(
@@ -2905,6 +3032,9 @@ def open_tv_renamer(app):
             sel = tree.selection()
             if not sel:
                 return
+            # Remember the position of the first selected item so we
+            # can select the next file after removal
+            first_idx = min(tree.index(iid) for iid in sel)
             # Get indices in reverse order to avoid shifting
             indices = sorted([tree.index(iid) for iid in sel], reverse=True)
             for idx in indices:
@@ -2918,6 +3048,15 @@ def open_tv_renamer(app):
             for s in orphaned:
                 _all_shows.pop(s, None)
             _refresh_preview()
+            # Select the next file at the same position (or the last
+            # file if we were at the end) for easy sequential deletion
+            children = tree.get_children()
+            if children:
+                next_idx = min(first_idx, len(children) - 1)
+                next_iid = children[next_idx]
+                tree.selection_set(next_iid)
+                tree.focus(next_iid)
+                tree.see(next_iid)
 
         tree.bind('<Button-3>', _on_tree_right_click)
 
@@ -3144,11 +3283,13 @@ def open_tv_renamer(app):
         def _on_tree_select(event=None):
             sel = tree.selection()
             if sel:
-                vals = tree.item(sel[0], 'values')
-                if vals and len(vals) > 2 and vals[2]:
-                    _sel_preview.configure(text=f"New: {vals[2]}")
+                # Show the full path of the selected file
+                idx = tree.index(sel[0])
+                if idx < len(_file_items):
+                    _sel_preview.configure(
+                        text=_file_items[idx]['path'])
                 else:
-                    _sel_preview.configure(text=f"Current: {vals[0]}" if vals else "")
+                    _sel_preview.configure(text="")
             else:
                 _sel_preview.configure(text="")
         tree.bind('<<TreeviewSelect>>', _on_tree_select)
@@ -3214,37 +3355,48 @@ def open_tv_renamer(app):
                         current_parent_name = os.path.basename(current_parent)
                         grandparent = os.path.dirname(current_parent)
 
-                        # Detect "loose" files — files whose parent folder
-                        # contains files from multiple different shows.
-                        # A loose file's parent is a shared root (like "TV/"),
-                        # not a dedicated show folder.  For loose files we
-                        # CREATE a new show folder instead of RENAMING the
-                        # parent (which would rename the entire root dir).
+                        # Detect "loose" files — files whose show-level
+                        # parent folder contains files from multiple
+                        # different shows.  A loose file's parent is a
+                        # shared root (like "TV/" or "test/"), not a
+                        # dedicated show folder.  For loose files we
+                        # CREATE a new show folder instead of RENAMING
+                        # the parent (which would rename the entire root).
+                        # This check applies to BOTH flat files and files
+                        # inside Season subfolders (where current_parent
+                        # is the grandparent that might be shared).
                         is_loose = False
-                        if not in_season:
-                            # Check if other files in the batch come from
-                            # the same parent but match different shows
-                            this_show = item.get('matched_show', '')
-                            for other in _file_items:
-                                if other is item:
-                                    continue
-                                other_parent = os.path.dirname(other['path'])
-                                if other_parent == file_parent:
-                                    other_show = other.get('matched_show', '')
-                                    if other_show and other_show != this_show:
-                                        is_loose = True
-                                        break
-                                # Also loose if siblings are in subfolders
-                                # of the same parent (e.g. TV/Show1/ and
-                                # loose file TV/Show4.S01E01.mkv)
-                                if os.path.dirname(other_parent) == file_parent:
+                        this_show = item.get('matched_show', '')
+                        for other in _file_items:
+                            if other is item:
+                                continue
+                            other_parent = os.path.dirname(other['path'])
+                            other_show_parent = other_parent
+                            other_parent_name = os.path.basename(other_parent)
+                            if _SEASON_FOLDER_RE.match(other_parent_name):
+                                other_show_parent = os.path.dirname(other_parent)
+                            # Same show-level parent, different show
+                            if other_show_parent == current_parent:
+                                other_show = other.get('matched_show', '')
+                                if other_show and other_show != this_show:
+                                    is_loose = True
+                                    break
+                            # Siblings: other files are in subfolders of
+                            # the same parent (e.g. test/Show1/ and
+                            # test/Season 01/)
+                            if (os.path.dirname(other_show_parent)
+                                    == current_parent
+                                    and other_show_parent != current_parent):
+                                other_show = other.get('matched_show', '')
+                                if other_show and other_show != this_show:
                                     is_loose = True
                                     break
 
                         if is_loose:
                             # Loose file: create a new show folder under
-                            # the file's parent directory
-                            new_parent = os.path.join(file_parent, show_folder)
+                            # the show-level parent directory (current_parent)
+                            new_parent = os.path.join(
+                                current_parent, show_folder)
                             if not os.path.exists(new_parent):
                                 os.makedirs(new_parent, exist_ok=True)
                                 created_dirs.append(new_parent)
@@ -3317,16 +3469,32 @@ def open_tv_renamer(app):
                 except Exception as e:
                     _log(f"Error renaming: {e}", 'ERROR')
                     errors += 1
-            # Clean up empty Season subdirectories left behind after
-            # files were moved out of them into the new structure
+            # Clean up empty Season/subs subdirectories left behind
+            # after files were moved into the new structure.
+            # Check both renamed show folders AND the original parent
+            # directories that loose files were moved out of.
             _removed_season_dirs = []
-            for new_show_dir in _renamed_parents.values():
-                if not os.path.isdir(new_show_dir):
+            _cleanup_dirs = set(_renamed_parents.values())
+            # Also check original parent dirs of all renamed files —
+            # loose season files leave empty Season folders behind
+            for old_path, new_path in batch_history:
+                if os.path.isfile(new_path):
+                    old_parent = os.path.dirname(old_path)
+                    old_grandparent = os.path.dirname(old_parent)
+                    _cleanup_dirs.add(old_parent)
+                    _cleanup_dirs.add(old_grandparent)
+            for check_dir in _cleanup_dirs:
+                if not os.path.isdir(check_dir):
                     continue
-                for entry in sorted(os.listdir(new_show_dir)):
-                    sub = os.path.join(new_show_dir, entry)
+                try:
+                    entries = sorted(os.listdir(check_dir))
+                except OSError:
+                    continue
+                for entry in entries:
+                    sub = os.path.join(check_dir, entry)
                     if (os.path.isdir(sub)
-                            and _SEASON_FOLDER_RE.match(entry)
+                            and (_SEASON_FOLDER_RE.match(entry)
+                                 or _SUBS_FOLDER_RE.match(entry))
                             and not os.listdir(sub)):
                         os.rmdir(sub)
                         _removed_season_dirs.append(sub)
@@ -3764,10 +3932,23 @@ def open_tv_renamer(app):
 
         # Template dialog
         def _center_on_parent(dlg, parent):
-            """Center a dialog over its parent window."""
+            """Center a dialog over its parent window.  Uses
+            winfo_rootx/rooty for reliable absolute coordinates on
+            multi-monitor setups."""
+            # Hide dialog before positioning to prevent flash on
+            # the wrong monitor — but only if already visible.
+            # Newly created dialogs haven't been mapped yet and
+            # withdrawing them can reset their geometry.
+            was_visible = dlg.winfo_viewable()
+            if was_visible:
+                dlg.withdraw()
             parent.update_idletasks()
             dlg.update_idletasks()
-            px, py = parent.winfo_x(), parent.winfo_y()
+            # winfo_rootx/rooty return absolute screen coordinates,
+            # which are correct on multi-monitor setups (winfo_x/y
+            # can return coordinates relative to the root window or
+            # be offset by window decorations)
+            px, py = parent.winfo_rootx(), parent.winfo_rooty()
             pw, ph = parent.winfo_width(), parent.winfo_height()
             dw, dh = dlg.winfo_width(), dlg.winfo_height()
             if dw <= 1 or dh <= 1:
@@ -3779,9 +3960,15 @@ def open_tv_renamer(app):
                 except (ValueError, IndexError):
                     dw = dlg.winfo_reqwidth()
                     dh = dlg.winfo_reqheight()
-            x = max(0, px + (pw - dw) // 2)
-            y = max(0, py + (ph - dh) // 2)
+            x = px + (pw - dw) // 2
+            y = py + (ph - dh) // 2
+            # Don't clamp to (0, screen_w) — on multi-monitor setups
+            # the parent may be on a monitor at x=1920+, so clamping
+            # to 0 would move the dialog to the wrong monitor.
+            y = max(0, y)
             dlg.geometry(f"{dw}x{dh}+{x}+{y}")
+            if was_visible:
+                dlg.deiconify()
 
         def _open_template_settings():
             dlg = tk.Toplevel(win)
@@ -3981,6 +4168,11 @@ def open_tv_renamer(app):
                         def _del(t=tmpl):
                             if t in custom_list:
                                 custom_list.remove(t)
+                                # If the deleted template is currently
+                                # loaded, clear the entry so the user
+                                # doesn't accidentally use it again
+                                if target_var.get() == t:
+                                    target_var.set('')
                                 _save_prefs()
                                 _refresh_custom()
                         ttk.Button(btn_f, text="✕", width=2,
@@ -4225,7 +4417,10 @@ def open_tv_renamer(app):
                 if custom:
                     extras.append(custom)
                 if extras:
-                    name_part = name_part + ' ' + ' '.join(extras)
+                    # Movies: use " - " separator before media tags
+                    # TV: use plain space (episode title provides context)
+                    sep = ' - ' if is_movie else ' '
+                    name_part = name_part + sep + '[' + ' '.join(extras) + ']'
 
                 # Append episode ID to filename if requested (TV only)
                 if prov != 'none' and _episode_id.get() and not is_movie:
@@ -4737,6 +4932,11 @@ def open_tv_renamer(app):
 
         # ── Window close ──
         def _close_window():
+            # Clear all cached data so a fresh session starts clean
+            _all_shows.clear()
+            _query_to_show.clear()
+            _file_items.clear()
+            _rename_history.clear()
             win.destroy()
             if getattr(app, '_standalone_mode', False):
                 app.root.destroy()
@@ -4759,10 +4959,20 @@ def open_tv_renamer(app):
         _log(f"Docflix Media Renamer ready — provider: {provider_var.get()}")
         _log("Drag and drop video files or folders to begin")
 
+        # Auto-load files/folders passed on the command line (e.g. from
+        # "Open with..." in a file manager via the .desktop entry)
+        _initial_paths = getattr(app, '_initial_paths', None)
+        if _initial_paths:
+            app._initial_paths = None  # consume so re-open doesn't reload
+            win.after(100, lambda: _add_paths(_initial_paths))
+
 
 
 def main():
-    """Launch File Renamer as a standalone application."""
+    """Launch File Renamer as a standalone application.
+    Accepts optional file/folder paths as command-line arguments
+    (e.g. from "Open with..." in a file manager)."""
+    import sys
     from .standalone import create_standalone_root
 
     root, app = create_standalone_root(
@@ -4770,6 +4980,15 @@ def main():
         geometry="960x650",
         minsize=(800, 550),
     )
+
+    # Collect file/folder paths from command-line arguments
+    initial_paths = []
+    for arg in sys.argv[1:]:
+        p = os.path.abspath(arg)
+        if os.path.isfile(p) or os.path.isdir(p):
+            initial_paths.append(p)
+    if initial_paths:
+        app._initial_paths = initial_paths
 
     app._standalone_mode = True
     root.withdraw()

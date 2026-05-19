@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.1.9"
+APP_VERSION = "3.2.0"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -5295,11 +5295,20 @@ class VideoConverterApp:
         self.add_log(f"Removed from list: {removed_name}", 'INFO')
 
     def _center_on_main(self, dlg):
-        """Position a dialog centered over the main window (keeps it on the same screen)."""
+        """Position a dialog centered over the main window.  Uses
+        winfo_rootx/rooty for reliable absolute coordinates on
+        multi-monitor setups."""
+        # Hide dialog before positioning to prevent flash on wrong
+        # monitor — but only if it's currently visible (mapped).
+        # Newly created dialogs that haven't been shown yet don't
+        # need withdraw, and withdrawing them can reset geometry.
+        was_visible = dlg.winfo_viewable()
+        if was_visible:
+            dlg.withdraw()
         self.root.update_idletasks()
         dlg.update_idletasks()
-        rx = self.root.winfo_x()
-        ry = self.root.winfo_y()
+        rx = self.root.winfo_rootx()
+        ry = self.root.winfo_rooty()
         rw = self.root.winfo_width()
         rh = self.root.winfo_height()
         # Use actual window size if available, fall back to requested size
@@ -5317,10 +5326,12 @@ class VideoConverterApp:
                 dh = dlg.winfo_reqheight()
         x = rx + (rw - dw) // 2
         y = ry + (rh - dh) // 2
-        # Ensure it stays on screen
-        x = max(0, x)
+        # Don't clamp to (0, screen_w) — on multi-monitor setups
+        # the main window may be on a monitor at x=1920+
         y = max(0, y)
         dlg.geometry(f"{dw}x{dh}+{x}+{y}")
+        if was_visible:
+            dlg.deiconify()
 
     def _get_selected_file_index(self):
         """Return (item_id, index) for the currently selected tree row, or (None, None)."""
@@ -7334,6 +7345,9 @@ class VideoConverterApp:
         ``movie.en.srt`` matches ``movie.mkv``, and
         ``movie.en.forced.srt`` matches ``movie.mkv``
         (progressively strips trailing dot-separated suffixes).
+        Also matches by episode marker when the subtitle is in a
+        subfolder (e.g. ``subs/S01E01.srt`` matches
+        ``Show - S01E01 - Title.mkv``).
         Returns True if a match was found and attached.
         """
         sub_path = Path(sub_path)
@@ -7349,9 +7363,24 @@ class VideoConverterApp:
             stem = stem.rsplit('.', 1)[0]
             candidates.append(stem)
 
+        # Extract episode marker from subtitle filename for fallback
+        # matching (e.g. "S01E01" from "S01E01.eng.srt")
+        _sub_ep = re.search(r'[Ss]\d{1,2}\s*[Ee]\d{1,3}', sub_stem)
+        sub_ep_tag = _sub_ep.group().lower() if _sub_ep else ''
+        # Only use episode matching for subs in subfolders
+        _SUB_FOLDER_NAMES = {'subs', 'sub', 'subtitles', 'subtitle'}
+        in_sub_folder = sub_path.parent.name.lower() in _SUB_FOLDER_NAMES
+
         for i, file_info in enumerate(self.files):
             video_stem = Path(file_info['path']).stem.lower()
-            if video_stem in candidates:
+            matched = video_stem in candidates
+            # Fallback: episode marker matching for subfolder subs
+            if not matched and in_sub_folder and sub_ep_tag:
+                _vid_ep = re.search(
+                    r'[Ss]\d{1,2}\s*[Ee]\d{1,3}', video_stem)
+                if _vid_ep and _vid_ep.group().lower() == sub_ep_tag:
+                    matched = True
+            if matched:
                 self._attach_external_sub(file_info, sub_path)
                 items = self.file_tree.get_children()
                 if i < len(items):
@@ -7452,8 +7481,8 @@ class VideoConverterApp:
         self.log_window.deiconify()
         self.log_window.lift()
         # Position it just below the main window
-        x = self.root.winfo_x()
-        y = self.root.winfo_y() + self.root.winfo_height() + 5
+        x = self.root.winfo_rootx()
+        y = self.root.winfo_rooty() + self.root.winfo_height() + 5
         self.log_window.geometry(f"+{x}+{y}")
         self.log_btn.configure(text="📋 Log ✓")
 

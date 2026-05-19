@@ -99,6 +99,13 @@ uninstall() {
         success "Removed desktop entry: $info_desktop"
     fi
 
+    # Remove media renamer desktop entry
+    local rename_desktop="$DESKTOP_DIR/docflix-rename.desktop"
+    if [[ -f "$rename_desktop" ]]; then
+        rm -f "$rename_desktop"
+        success "Removed desktop entry: $rename_desktop"
+    fi
+
     if [[ -f "$ICON_FILE" ]]; then
         rm -f "$ICON_FILE"
         success "Removed icon: $ICON_FILE"
@@ -399,6 +406,27 @@ EOF
 
 chmod +x "$INFO_DESKTOP"
 success "Desktop entry created: $INFO_DESKTOP"
+
+# Media Renamer .desktop file (for "Open with" on video files and folders)
+RENAME_DESKTOP="$DESKTOP_DIR/docflix-rename.desktop"
+cat > "$RENAME_DESKTOP" <<EOF
+[Desktop Entry]
+Name=Docflix Media Renamer
+Comment=Rename TV shows and movies using TVDB/TMDB metadata
+Exec=$BIN_DIR/docflix-rename %F
+Terminal=false
+Type=Application
+Icon=$ICON_FILE
+Categories=AudioVideo;Video;
+Keywords=rename;tv;movie;tvdb;tmdb;media;
+MimeType=video/x-matroska;video/mp4;video/x-msvideo;video/quicktime;video/x-ms-wmv;video/x-flv;video/webm;video/mp2t;video/mpeg;inode/directory;
+StartupNotify=false
+StartupWMClass=docflix
+NoDisplay=true
+EOF
+
+chmod +x "$RENAME_DESKTOP"
+success "Desktop entry created: $RENAME_DESKTOP"
 
 # Refresh the desktop database so the app appears in the launcher
 if command -v update-desktop-database &>/dev/null; then

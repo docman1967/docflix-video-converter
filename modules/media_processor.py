@@ -51,8 +51,8 @@ def open_media_processor(app):
             dh = int(gm.group(2)) if gm else win.winfo_reqheight()
             pw = app.root.winfo_width()
             ph = app.root.winfo_height()
-            px = app.root.winfo_x()
-            py = app.root.winfo_y()
+            px = app.root.winfo_rootx()
+            py = app.root.winfo_rooty()
             x = px + (pw - dw) // 2
             y = py + (ph - dh) // 2
             win.geometry(f'{dw}x{dh}+{max(0, x)}+{max(0, y)}')
@@ -515,16 +515,31 @@ def open_media_processor(app):
             ext_subs_found = []
             seen_paths = set()
 
-            # Scan all subtitle files in the same directory
+            # Scan subtitle files in the same directory AND common
+            # subtitle subfolders (subs/, sub/, subtitles/, etc.)
+            _SUB_FOLDER_NAMES = {'subs', 'sub', 'subtitles', 'subtitle'}
+            scan_dirs = [video_dir]
             try:
-                entries = os.listdir(video_dir)
+                for entry in os.listdir(video_dir):
+                    if entry.lower() in _SUB_FOLDER_NAMES:
+                        sub_dir = os.path.join(video_dir, entry)
+                        if os.path.isdir(sub_dir):
+                            scan_dirs.append(sub_dir)
             except OSError:
-                return []
+                pass
 
-            for fname in entries:
+            all_entries = []  # list of (directory, filename)
+            for d in scan_dirs:
+                try:
+                    for fname in os.listdir(d):
+                        all_entries.append((d, fname))
+                except OSError:
+                    continue
+
+            for scan_dir, fname in all_entries:
                 if fname.startswith('.'):
                     continue
-                fpath = os.path.join(video_dir, fname)
+                fpath = os.path.join(scan_dir, fname)
                 if not os.path.isfile(fpath):
                     continue
                 name_lower = fname.lower()
@@ -533,14 +548,36 @@ def open_media_processor(app):
                     continue
 
                 # Check if this subtitle belongs to this video —
-                # its name must start with the video's stem
+                # its name must start with the video's stem, OR
+                # (for subs in subfolders) contain the same episode
+                # marker (e.g. S01E01.srt matches ShowName - S01E01.mkv)
                 sub_stem = os.path.splitext(fname)[0]
                 sub_stem_lower = sub_stem.lower()
                 if not sub_stem_lower.startswith(video_stem_lower):
-                    continue
+                    # Try episode-marker matching for subfolder subs
+                    # whose names are just "S01E01" without the show name
+                    if scan_dir == video_dir:
+                        continue
+                    ep_pat = re.search(
+                        r'[Ss]\d{1,2}\s*[Ee]\d{1,3}', sub_stem)
+                    vid_pat = re.search(
+                        r'[Ss]\d{1,2}\s*[Ee]\d{1,3}', video_stem)
+                    if not ep_pat or not vid_pat:
+                        continue
+                    if ep_pat.group().lower() != vid_pat.group().lower():
+                        continue
 
                 # Get the suffix after the video stem (e.g. ".eng.forced")
-                suffix = sub_stem[len(video_stem):]
+                # For episode-matched subs from subfolders, strip the
+                # episode marker to get the suffix (e.g. "S01E01.eng" → ".eng")
+                if sub_stem_lower.startswith(video_stem_lower):
+                    suffix = sub_stem[len(video_stem):]
+                else:
+                    # Subfolder match — strip everything up to and
+                    # including the episode marker
+                    ep_m = re.search(
+                        r'[Ss]\d{1,2}\s*[Ee]\d{1,3}', sub_stem)
+                    suffix = sub_stem[ep_m.end():] if ep_m else ''
 
                 # Parse suffix tokens for language, forced, sdh
                 tokens = re.split(r'[\.\s_\-]+', suffix.lower())

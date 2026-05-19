@@ -433,23 +433,47 @@ def get_dpi_scale(widget):
 
 
 def scaled_geometry(widget, width, height):
-    """Return a Tk geometry string scaled for the current DPI.
+    """Return a Tk geometry string scaled for the current DPI,
+    clamped to the screen size so the window never opens larger
+    than the display (important for high-DPI / small screens).
     Usage: win.geometry(scaled_geometry(win, 920, 880))"""
     s = get_dpi_scale(widget)
     if s <= 1.05:  # No scaling needed at or below 100%
-        return f"{width}x{height}"
-    sw = int(width * s)
-    sh = int(height * s)
+        sw, sh = width, height
+    else:
+        sw = int(width * s)
+        sh = int(height * s)
+    # Clamp to screen size with margin for taskbar / panels
+    try:
+        screen_w = widget.winfo_screenwidth()
+        screen_h = widget.winfo_screenheight()
+        margin = 80  # pixels reserved for taskbar / dock
+        sw = min(sw, screen_w - margin)
+        sh = min(sh, screen_h - margin)
+    except Exception:
+        pass
     return f"{sw}x{sh}"
 
 
 def scaled_minsize(widget, width, height):
-    """Return a (width, height) tuple scaled for the current DPI.
+    """Return a (width, height) tuple scaled for the current DPI,
+    clamped to the screen size so minsize never exceeds the display.
     Usage: win.minsize(*scaled_minsize(win, 750, 650))"""
     s = get_dpi_scale(widget)
     if s <= 1.05:
-        return (width, height)
-    return (int(width * s), int(height * s))
+        mw, mh = width, height
+    else:
+        mw, mh = int(width * s), int(height * s)
+    # Clamp to screen size with margin
+    try:
+        screen_w = widget.winfo_screenwidth()
+        screen_h = widget.winfo_screenheight()
+        margin = 80
+        mw = min(mw, screen_w - margin)
+        mh = min(mh, screen_h - margin)
+    except Exception:
+        pass
+    return (mw, mh)
 
 
 def configure_dpi_scaling(root):
