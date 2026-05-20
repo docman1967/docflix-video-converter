@@ -729,15 +729,26 @@ def open_tv_renamer(app):
         # when looking for the show folder (e.g. "Season 1", "Season 02",
         # "Series 3", "S01", "S1")
         _SEASON_FOLDER_RE = re.compile(
-            r'^(?:Season|Series|S)\s*\d+$', re.IGNORECASE)
+            r'^(?:Season|Series|S)\s*\d+$'  # simple: "Season 01", "S01"
+            , re.IGNORECASE)
+        # Scene-release season pack folders like
+        # "The.Simpsons.1989.S01.1080p.WEBRip.10bit.EAC3.5.1.x265-iVy"
+        # — contains SXX (without EXX) plus quality/codec tags
+        _SCENE_SEASON_RE = re.compile(
+            r'[.\s]S\d{1,2}[.\s]'    # SXX surrounded by separators
+            r'(?!E\d)'               # NOT followed by EXX (episode)
+            r'.*(?:720|1080|2160|480|WEB|BluRay|HDTV|REMUX|x26[45]|h\.?26[45]|HEVC)',
+            re.IGNORECASE)
         # Subtitle subfolder names to skip (like Season folders)
         _SUBS_FOLDER_RE = re.compile(
             r'^(?:subs?|subtitles?|srt|ass)$', re.IGNORECASE)
 
         def _get_show_folder(filepath):
             """Return the show-level parent folder name for a file path,
-            skipping past Season and subtitle subfolders.  Handles
-            nested cases like .../Show/Season 01/subs/S01E01.srt
+            skipping past Season, subtitle, and scene-release season pack
+            subfolders.  Handles nested cases like
+            .../Show/Season 01/subs/S01E01.srt and scene packs like
+            .../Show/Show.S01.1080p.WEBRip.x265/S01E01.mkv
             by climbing until the folder is neither a Season nor a
             subs folder (up to 3 levels to avoid infinite loops)."""
             d = os.path.dirname(filepath)
@@ -746,7 +757,8 @@ def open_tv_renamer(app):
                 if not name:
                     break
                 if (_SEASON_FOLDER_RE.match(name)
-                        or _SUBS_FOLDER_RE.match(name)):
+                        or _SUBS_FOLDER_RE.match(name)
+                        or _SCENE_SEASON_RE.search(name)):
                     d = os.path.dirname(d)
                 else:
                     return name
@@ -1509,6 +1521,10 @@ def open_tv_renamer(app):
             # Truncate at episode markers (including multi-episode S01E01E02)
             name = re.sub(r'\s*[Ss]\d{1,2}\s*[Ee]\d.*', '', name)
             name = re.sub(r'\s*\d{1,2}[xX]\d.*', '', name)
+            # Truncate at standalone season markers (S01 without E01) —
+            # common in scene-release season pack folders like
+            # "The.Simpsons.1989.S01.1080p.WEBRip.x265"
+            name = re.sub(r'\s+[Ss]\d{1,2}(?:\s|$).*', '', name)
             # Truncate at date-based episode markers (2026 04 22)
             name = re.sub(r'\s*(?:19|20)\d{2}\s+(?:0[1-9]|1[0-2])\s+(?:0[1-9]|[12]\d|3[01]).*', '', name)
             # Truncate at special episode markers (SP01, OVA, Special, etc.)
@@ -1787,7 +1803,8 @@ def open_tv_renamer(app):
                             # the show folder level) for clarity
                             parent = os.path.dirname(item['path'])
                             parent_name = os.path.basename(parent)
-                            if parent_name and _SEASON_FOLDER_RE.match(parent_name):
+                            if parent_name and (_SEASON_FOLDER_RE.match(parent_name)
+                                               or _SCENE_SEASON_RE.search(parent_name)):
                                 source_folder = os.path.dirname(parent)
                             else:
                                 source_folder = parent
@@ -3556,7 +3573,8 @@ def open_tv_renamer(app):
                         # Determine the show-level folder. If the file is
                         # inside a Season subfolder, go up one level so we
                         # rename the show folder, not the season folder.
-                        in_season = _SEASON_FOLDER_RE.match(file_parent_name)
+                        in_season = (_SEASON_FOLDER_RE.match(file_parent_name)
+                                     or _SCENE_SEASON_RE.search(file_parent_name))
                         if in_season:
                             current_parent = os.path.dirname(file_parent)
                         else:
@@ -3582,7 +3600,9 @@ def open_tv_renamer(app):
                             other_parent = os.path.dirname(other['path'])
                             other_show_parent = other_parent
                             other_parent_name = os.path.basename(other_parent)
-                            if _SEASON_FOLDER_RE.match(other_parent_name):
+                            if (_SEASON_FOLDER_RE.match(other_parent_name)
+                                    or _SCENE_SEASON_RE.search(
+                                        other_parent_name)):
                                 other_show_parent = os.path.dirname(other_parent)
                             # Same show-level parent, different show
                             if other_show_parent == current_parent:
@@ -3703,7 +3723,8 @@ def open_tv_renamer(app):
                     sub = os.path.join(check_dir, entry)
                     if (os.path.isdir(sub)
                             and (_SEASON_FOLDER_RE.match(entry)
-                                 or _SUBS_FOLDER_RE.match(entry))
+                                 or _SUBS_FOLDER_RE.match(entry)
+                                 or _SCENE_SEASON_RE.search(entry))
                             and not os.listdir(sub)):
                         os.rmdir(sub)
                         _removed_season_dirs.append(sub)
