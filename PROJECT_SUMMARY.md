@@ -1,7 +1,7 @@
 # Docflix Media Suite — Project Summary
 
-**Last Updated:** 2026-05-20 (rev 78)  
-**Version:** 3.3.0  
+**Last Updated:** 2026-05-20 (rev 79)  
+**Version:** 3.3.1  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/`  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -652,7 +652,8 @@ git push
 
 ## Change Log
 
-### 2026-05-20 (v3.3.0 — Renamer: API Gzip Fix, Same-Name Movies, Edition Tagging, HiDPI Layout)
+### 2026-05-20 (v3.3.0 — Renamer: API Gzip Fix, Same-Name Movies, Edition Tagging, HiDPI Layout, Scaler Subtitle Fix)
+380. **Video Scaler stripping all subtitles except the first** — Fixed the Video Scaler only preserving the first subtitle track (and first audio track) during rescaling. Root cause: the ffmpeg command had no `-map` flags, so ffmpeg's default stream selection picked one "best" stream per type — one video, one audio, one subtitle — discarding all others. Fixed by adding explicit mapping: `-map 0:v:0?` (first video), `-map 0:a?` (all audio), `-map 0:s?` (all subtitles). The `?` suffix prevents errors when a stream type is absent.
 379. **Plex-compliant edition tagging in renamed filenames** — The `{version}` template variable is now automatically inserted as a Plex-compliant `{edition-...}` tag in the correct position, rather than appearing as plain text inside media tag brackets. The `_insert_edition_tag()` helper places the tag after the last provider ID (`{tmdb-...}` or `{tvdb-...}`) if present, otherwise after the year, and always before media tag brackets. Examples: `Emma (1996) {edition-Unrated}`, `Emma (1996) {tmdb-3573} {edition-Unrated}`, `Emma (1996) {tmdb-3573} {edition-Unrated} - [1080p x265]`. Applied to all four code paths in `_build_new_name()`: movies, date-based episodes, multi-episodes, and single episodes. The `{version}` media_vars value is set to empty so it no longer appears inside `[brackets]` — the edition is exclusively placed via the helper.
 378. **Version/edition tags not stripped from show name and not detected in underscore filenames** — Fixed two issues with version/edition tags (Unrated, Director's Cut, Extended, IMAX, etc.) in the Media Renamer: (1) `_clean_show_name()` didn't strip version tags, so filenames like `Emma_1996_unrated` cleaned to `"Emma 1996 unrated"` instead of `"Emma"`. The leftover "unrated" prevented the trailing year strip (`1996` was no longer at the end) and polluted the API search query. Fixed by adding a loop that strips all `_VERSION_PATTERNS` (20 patterns) from the name before the release group and year stripping steps. (2) `_probe_media_tags()` version detection used `\b` word boundaries on the raw filename, but `\b` doesn't match between underscores and letters (both are `\w` word characters in Python regex). So `Emma_1996_unrated.mkv` didn't trigger `\bUNRATED\b`. Fixed by replacing dots and underscores with spaces before running the version pattern search, matching what `_clean_show_name()` already does.
 377. **Media Renamer treeview squeezed at 200% scaling** — Fixed the file list (treeview) being compressed to barely one visible row at 200% DPI scaling while the log panel dominated the window. Root cause: both the treeview (row 2) and the log (row 5) had `rowconfigure(weight=1)`, splitting available space equally. At 200% scaling the log's `height=4` text lines are physically very tall, leaving minimal room for the file list. Fixed by changing the weight ratio to 3:1 — the treeview gets ~75% of the expandable space and the log gets ~25%.

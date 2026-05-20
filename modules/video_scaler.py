@@ -869,6 +869,12 @@ def open_video_scaler(app):
 
         cmd.extend(['-i', input_path])
 
+        # Map all streams — without explicit -map, ffmpeg only picks
+        # one "best" stream per type (stripping extra audio/subtitle tracks)
+        cmd.extend(['-map', '0:v:0?',   # first video stream
+                    '-map', '0:a?',      # all audio streams
+                    '-map', '0:s?'])      # all subtitle streams
+
         # Scale filter — uses explicit dimensions calculated from actual
         # decoded content size, so it works correctly with CUDA hwaccel
         # (which may deliver padded frames for cropped H.264 content)
