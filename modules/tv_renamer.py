@@ -150,7 +150,9 @@ def _probe_media_tags(filepath):
             break
 
     # Version/edition detection from filename
-    fname = os.path.basename(filepath)
+    # Replace dots and underscores with spaces so \b word boundaries
+    # work correctly (e.g. "Emma_1996_unrated.mkv" → "Emma 1996 unrated mkv")
+    fname = re.sub(r'[._]', ' ', os.path.basename(filepath))
     for pattern, label in _VERSION_PATTERNS:
         if re.search(pattern, fname, re.IGNORECASE):
             tags['version'] = label
@@ -160,9 +162,17 @@ def _probe_media_tags(filepath):
 
 
 def open_tv_renamer(app):
+        import gzip
         import urllib.request
         import urllib.parse
         import json as _json
+
+        def _read_response(resp):
+            """Read an HTTP response, decompressing gzip if needed."""
+            raw = resp.read()
+            if resp.headers.get('Content-Encoding') == 'gzip':
+                raw = gzip.decompress(raw)
+            return raw.decode()
 
         TVDB_BASE = 'https://api4.thetvdb.com/v4'
         TMDB_BASE = 'https://api.themoviedb.org/3'
@@ -218,7 +228,7 @@ def open_tv_renamer(app):
                                          method=method)
             try:
                 with urllib.request.urlopen(req, timeout=15) as resp:
-                    return _json.loads(resp.read().decode())
+                    return _json.loads(_read_response(resp))
             except urllib.error.HTTPError as e:
                 try:
                     err_body = e.read().decode()
@@ -318,7 +328,7 @@ def open_tv_renamer(app):
                 'User-Agent': 'DocflixVideoConverter/1.9'})
             try:
                 with urllib.request.urlopen(req, timeout=15) as resp:
-                    return _json.loads(resp.read().decode())
+                    return _json.loads(_read_response(resp))
             except urllib.error.HTTPError as e:
                 try:
                     err_body = e.read().decode()
@@ -837,6 +847,28 @@ def open_tv_renamer(app):
             if candidates[0][1] - candidates[1][1] >= 0.3:
                 return candidates[0][0]
 
+            # Year-based disambiguation — extract year from the filename
+            # or folder and match against the show's _year field.
+            # Helps when multiple movies share the same name but differ
+            # by year (e.g. "Emma (1996)" vs "Emma (2020)").
+            raw_fname = os.path.splitext(
+                os.path.basename(item['path']))[0]
+            raw_fname_sp = re.sub(r'[._]', ' ', raw_fname)
+            raw_folder = parent_dir or ''
+            file_year = ''
+            for source in (raw_fname_sp, raw_folder):
+                m_yr = re.search(r'\(?((?:19|20)\d{2})\)?', source)
+                if m_yr:
+                    file_year = m_yr.group(1)
+                    break
+            if file_year:
+                year_matches = [
+                    (sn, sc) for sn, sc in candidates
+                    if isinstance(_all_shows.get(sn), dict)
+                    and _all_shows[sn].get('_year') == file_year]
+                if len(year_matches) == 1:
+                    return year_matches[0][0]
+
             # Close filename scores — use parent folder to disambiguate
             if folder_cleaned:
                 for show_name, score in candidates:
@@ -1177,20 +1209,77 @@ def open_tv_renamer(app):
             # Media tags — from probed video or matched video for subtitles
             mt = item.get('media_tags', {})
             if not mt and item.get('ext') in SUBTITLE_EXTENSIONS:
-                # Try to get tags from a matching video file
+                # Try to get tags from a matching video file.
+                # First try matching by show name, then fall back to
+                # filename stem matching (strips subtitle lang/tag
+                # suffixes like .eng.sdh and compares base stems).
+                sub_stem = os.path.splitext(
+                    os.path.basename(item['path']))[0].lower()
+                # Strip trailing subtitle tags from stem for comparison
+                # e.g. "movie.eng.sdh" → "movie"
+                _st = sub_stem
+                for _tag in ('.forced', '.sdh', '.hi', '.cc'):
+                    if _st.endswith(_tag):
+                        _st = _st[:-len(_tag)]
+                # Strip language code suffix (2-3 letter codes)
+                _sp = _st.rsplit('.', 1)
+                if len(_sp) == 2 and len(_sp[1]) in (2, 3) and _sp[1].isalpha():
+                    _st = _sp[0]
+                sub_base = _st
+
                 for other in _file_items:
                     if (other.get('ext') in VIDEO_EXTENSIONS
-                            and other.get('matched_show') == show_name
                             and other.get('media_tags')):
-                        mt = other['media_tags']
-                        break
+                        # Match by show name or by filename stem
+                        if other.get('matched_show') == show_name:
+                            mt = other['media_tags']
+                            break
+                        vid_stem = os.path.splitext(
+                            os.path.basename(other['path']))[0].lower()
+                        if vid_stem == sub_base:
+                            mt = other['media_tags']
+                            break
+            # Version/edition is handled separately — inserted as a
+            # Plex-compliant {edition-...} tag after the year or
+            # provider ID, not as a plain template variable.
+            version_tag = mt.get('version', '')
+
+            def _insert_edition_tag(name, version):
+                """Insert a Plex-compliant {edition-...} tag into the
+                filename.  Placed after the last provider ID tag
+                (e.g. {tmdb-123}) if present, otherwise after the year
+                or before media tag brackets."""
+                if not version:
+                    return name
+                edition = '{' + f'edition-{version}' + '}'
+                # Work on the leaf filename (last path component)
+                parts = name.rsplit('/', 1)
+                leaf = parts[-1] if len(parts) > 1 else name
+                prefix = (parts[0] + '/') if len(parts) > 1 else ''
+                # Insert after the last } (provider ID) if present
+                last_brace = leaf.rfind('}')
+                if last_brace >= 0:
+                    ins = last_brace + 1
+                    leaf = leaf[:ins] + ' ' + edition + leaf[ins:]
+                else:
+                    # After year or before media tag brackets
+                    bracket = leaf.find(' - [')
+                    if bracket < 0:
+                        bracket = leaf.find(' [')
+                    if bracket >= 0:
+                        leaf = (leaf[:bracket] + ' ' + edition
+                                + leaf[bracket:])
+                    else:
+                        leaf = leaf + ' ' + edition
+                return prefix + leaf
+
             media_vars = {
                 'resolution': mt.get('resolution', ''),
                 'vcodec': mt.get('vcodec', ''),
                 'acodec': mt.get('acodec', ''),
                 'hdr': mt.get('hdr', ''),
                 'source': mt.get('source', ''),
-                'version': mt.get('version', ''),
+                'version': '',  # keep empty — inserted separately below
             }
 
             # ── Movie mode — uses movie template ──
@@ -1217,6 +1306,7 @@ def open_tv_renamer(app):
                     )
                 except (KeyError, IndexError):
                     name = f"{show_name} ({year})" if year else show_name
+                name = _insert_edition_tag(name, version_tag)
                 ext = item['ext']
                 sub_tags = ''
                 if ext in SUBTITLE_EXTENSIONS:
@@ -1256,6 +1346,7 @@ def open_tv_renamer(app):
                 else:
                     # No episode data found — use date as title
                     name = f"{display_name} - {air_date}"
+                name = _insert_edition_tag(name, version_tag)
                 ext = item['ext']
                 sub_tags = ''
                 if ext in SUBTITLE_EXTENSIONS:
@@ -1320,6 +1411,7 @@ def open_tv_renamer(app):
                     tmdb_ep=ep_id_tag,
                     **media_vars,
                 )
+            name = _insert_edition_tag(name, version_tag)
             ext = item['ext']
             # For subtitle files, preserve language/forced/SDH tags
             sub_tags = ''
@@ -1447,6 +1539,14 @@ def open_tv_renamer(app):
                 r'\s+(?:AMZN|NF|HULU|DSNP|ATVP|PCOK|PMTP|STAN|'
                 r'CRAV|MAX|HBO|APTV)\s.*',
                 '', name, flags=re.IGNORECASE)
+            # Strip version/edition tags (Unrated, Director's Cut, etc.)
+            # These appear after the show name and year but before or
+            # instead of quality tags, so they survive the truncations
+            # above (e.g. "Emma 1996 unrated" or "Movie Extended Cut").
+            for _vp, _vl in _VERSION_PATTERNS:
+                name = re.sub(r'\s*' + _vp + r'\s*', ' ', name,
+                              flags=re.IGNORECASE)
+            name = re.sub(r'\s+', ' ', name).strip()
             # Strip trailing release group: "-GRACE", "-DHD", "-FLUX"
             # (only after all other tags have been stripped).
             # Require at least one letter to avoid stripping numeric
@@ -1495,21 +1595,54 @@ def open_tv_renamer(app):
                 old_query_mappings = {q: s for q, s in _query_to_show.items()
                                       if s == old_name}
 
-                # 1. Remove old show data
-                _all_shows.pop(old_name, None)
-
-                # 2. Clear query→show mappings for this show
-                for q in old_query_mappings:
-                    del _query_to_show[q]
-
-                # 3. Clear matched_show on ALL files that had this show
-                #    (not just selected ones — other files from the same
-                #    show need re-matching too)
+                # 1. Check if other files have embedded IDs that lock
+                #    them to this show — if so, keep the show loaded
+                #    and only detach the selected files.
+                old_sid = (str(old_show_data.get('_series_id', ''))
+                           if isinstance(old_show_data, dict) else '')
+                has_locked_files = False
                 for item in _file_items:
-                    if item.get('matched_show') == old_name:
-                        item['matched_show'] = None
+                    if item.get('matched_show') != old_name:
+                        continue
+                    raw_parent = _get_show_folder(item['path']) or ''
+                    raw_fname = os.path.splitext(
+                        os.path.basename(item['path']))[0]
+                    emb = ((_extract_embedded_id(raw_parent)
+                            if raw_parent else None)
+                           or _extract_embedded_id(raw_fname))
+                    if emb and old_sid and emb[1] == old_sid:
+                        has_locked_files = True
+                        break
 
-                # 4. Re-search via API — force the picker dialog so
+                if not has_locked_files:
+                    # No files locked by embedded ID — safe to remove
+                    _all_shows.pop(old_name, None)
+                    for q in old_query_mappings:
+                        del _query_to_show[q]
+                # else: keep the show in _all_shows so locked files
+                # retain their match
+
+                # 2. Clear matched_show on files that had this show,
+                #    but preserve files that have their own embedded ID
+                #    pointing to this show's data (those are definitively
+                #    matched and should not be disturbed by a re-match
+                #    of a different file).
+                for item in _file_items:
+                    if item.get('matched_show') != old_name:
+                        continue
+                    raw_parent = _get_show_folder(item['path']) or ''
+                    raw_fname = os.path.splitext(
+                        os.path.basename(item['path']))[0]
+                    emb = ((_extract_embedded_id(raw_parent)
+                            if raw_parent else None)
+                           or _extract_embedded_id(raw_fname))
+                    if emb and old_sid and emb[1] == old_sid:
+                        # This file's embedded ID matches the show —
+                        # it belongs here, don't clear it
+                        continue
+                    item['matched_show'] = None
+
+                # 3. Re-search via API — force the picker dialog so
                 #    the user can choose a different show
                 new_name = _load_show_by_name(query, force_prompt=True)
                 if new_name:
@@ -1571,10 +1704,42 @@ def open_tv_renamer(app):
             _refresh_preview()
             _log("All shows cleared")
 
+        def _files_look_like_movies(query):
+            """Check if the files matching 'query' have no episode markers,
+            suggesting they are movies rather than TV episodes."""
+            query_norm = _normalize_for_match(query)
+            for item in _file_items:
+                fname = os.path.splitext(
+                    os.path.basename(item['path']))[0]
+                fname_norm = _normalize_for_match(_clean_show_name(fname))
+                folder = _get_show_folder(item['path'])
+                folder_norm = (_normalize_for_match(
+                    _clean_show_name(folder)) if folder else '')
+                if (fname_norm == query_norm
+                        or query_norm in fname_norm
+                        or fname_norm in query_norm
+                        or folder_norm == query_norm
+                        or query_norm in folder_norm
+                        or folder_norm in query_norm):
+                    s, e = item.get('season'), item.get('episode')
+                    if s is not None or e is not None:
+                        return False  # has episode info → likely TV
+                    if item.get('air_date') is not None:
+                        return False
+            return True  # no episode markers found → likely movies
+
         def _ask_user_pick_show(query, candidates):
             """Show a dialog for the user to pick from multiple show matches.
             candidates: list of dicts from TVDB search results.
             Returns the chosen dict, or None if cancelled."""
+            # Sort movies before TV series when files look like movies
+            # (no SxxExx markers).  This ensures the default selection
+            # in the picker dialog is a movie result, not a TV series.
+            if _files_look_like_movies(query):
+                candidates = sorted(
+                    candidates,
+                    key=lambda r: 0 if r.get('_media_type') == 'movie'
+                                    or r.get('type') == 'movie' else 1)
             dlg = tk.Toplevel(win)
             dlg.title("Multiple Matches")
             try:
@@ -2322,15 +2487,41 @@ def open_tv_renamer(app):
                 # Try year-based auto-disambiguation before prompting
                 # the user — extract the year from the original filename
                 # or folder (e.g. "Ghosts (2019)" or "Battlestar
-                # Galactica 2003") and match against the show's premiere
+                # Galactica 2003") and match against the show's premiere.
+                # Only consider files whose cleaned name matches the
+                # current query — otherwise files for a different movie
+                # with the same base name can supply the wrong year
+                # (e.g. "Emma 1996" supplying year 1996 for "Emma 2020").
                 if best is None:
                     context_year = ''
                     for item in _file_items:
                         raw_fname = os.path.splitext(
                             os.path.basename(item['path']))[0]
-                        raw_fname = re.sub(r'[._]', ' ', raw_fname)
-                        folder = _get_show_folder(item['path']) or ''
-                        for source in (raw_fname, folder):
+                        # Check that this file is relevant to the query
+                        item_cleaned = _normalize_for_match(
+                            _clean_show_name(raw_fname))
+                        item_folder = _get_show_folder(item['path']) or ''
+                        item_folder_cleaned = _normalize_for_match(
+                            _clean_show_name(item_folder))
+                        if not (item_cleaned == query_norm
+                                or query_norm in item_cleaned
+                                or item_cleaned in query_norm
+                                or item_folder_cleaned == query_norm
+                                or query_norm in item_folder_cleaned
+                                or item_folder_cleaned in query_norm):
+                            continue
+                        # Also skip files that have an embedded ID —
+                        # they are already matched to a specific show
+                        # and shouldn't influence year selection for
+                        # a different (non-ID) entry
+                        _emb_check = (
+                            (_extract_embedded_id(item_folder)
+                             if item_folder else None)
+                            or _extract_embedded_id(raw_fname))
+                        if _emb_check:
+                            continue
+                        raw_fname_sp = re.sub(r'[._]', ' ', raw_fname)
+                        for source in (raw_fname_sp, item_folder):
                             m_yr = re.search(
                                 r'\(?((?:19|20)\d{2})\)?', source)
                             if m_yr:
@@ -2578,7 +2769,7 @@ def open_tv_renamer(app):
             # (e.g. both "Emma (1996) {tmdb-3573}" and "Emma (1996) {tmdb-3572}"
             # clean to "Emma" but have distinct TMDB IDs).
             show_entries = {}  # key → (query, embedded_id_or_None)
-            fname_to_info = {}  # cleaned_name → [(folder_name, emb_id), ...]
+            fname_to_info = {}  # cleaned_name → [(folder_name, emb_id, raw_parent), ...]
             for item in _file_items:
                 is_sub = item.get('ext') in SUBTITLE_EXTENSIONS
                 if is_sub and has_video:
@@ -2609,7 +2800,8 @@ def open_tv_renamer(app):
                         show_entries[key] = (folder_name, emb_id)
                     continue
                 fname_to_info.setdefault(cleaned, [])
-                fname_to_info[cleaned].append((folder_name, emb_id))
+                fname_to_info[cleaned].append(
+                    (folder_name, emb_id, parent or ''))
 
             # For each filename-derived name, check if files come from
             # multiple distinct folders — if so, use folder names instead
@@ -2620,7 +2812,7 @@ def open_tv_renamer(app):
                 # Collect unique (folder_name, emb_id) pairs
                 unique_folders = {}  # folder_name → emb_id (last wins)
                 unique_ids = {}      # emb_id_str → (folder_name, emb_id)
-                for folder_name, emb_id in info_list:
+                for folder_name, emb_id, _raw in info_list:
                     if emb_id:
                         id_str = f"{emb_id[0]}-{emb_id[1]}"
                         unique_ids[id_str] = (folder_name, emb_id)
@@ -2633,6 +2825,15 @@ def open_tv_renamer(app):
                         query = folder_name or fname_name
                         key = f"{query}@@{id_str}"
                         show_entries[key] = (query, emb_id)
+                    # Also add files that have NO embedded ID — they are
+                    # separate shows that just happen to clean to the same
+                    # name (e.g. "Emma 2020" alongside "Emma {tmdb-3573}")
+                    for folder_name, emb_id, raw_parent in info_list:
+                        if emb_id is None:
+                            query = folder_name or fname_name
+                            if query not in show_entries:
+                                show_entries[query] = (query, None)
+                            break
                     continue
 
                 # Single or no embedded ID — fall back to folder logic
@@ -2838,7 +3039,7 @@ def open_tv_renamer(app):
         # ── Row 2: File list (treeview) ──
         tree_f = ttk.Frame(main_f)
         tree_f.grid(row=2, column=0, columnspan=3, sticky='nsew', padx=4, pady=4)
-        main_f.rowconfigure(2, weight=1)
+        # weight set below alongside log row (3:1 ratio)
 
         columns = ('current', 'type', 'new_name')
         tree = ttk.Treeview(tree_f, columns=columns, show='headings',
@@ -2861,14 +3062,22 @@ def open_tv_renamer(app):
             template = template_var.get().strip()
             m_template = movie_template_var.get().strip()
 
+            # First pass: match ALL files to shows so that matched_show
+            # is set on every item before any _build_new_name calls.
+            # This is needed because subtitle files inherit media tags
+            # from their matched video file via matched_show — if a
+            # subtitle appears before its video in the list, the video's
+            # matched_show would be unset during _build_new_name.
+            for item in _file_items:
+                item['matched_show'] = _match_file_to_show(item)
+
+            # Second pass: build preview names
             for item in _file_items:
                 cur_name = os.path.basename(item['path'])
                 s = item.get('season')
                 e = item.get('episode')
 
-                # Match file to a loaded show
-                matched = _match_file_to_show(item)
-                item['matched_show'] = matched
+                matched = item.get('matched_show')
 
                 new_name = ''
                 is_movie = (isinstance(_all_shows.get(matched), dict)
@@ -3858,6 +4067,11 @@ def open_tv_renamer(app):
         # ── Row 4: Log ──
         log_f = ttk.LabelFrame(main_f, text="Log", padding=4)
         log_f.grid(row=5, column=0, columnspan=3, sticky='nsew', padx=4, pady=(4, 0))
+        # Give the log less weight than the treeview (row 2, weight=3)
+        # so the file list gets ~75% of the space and the log gets ~25%.
+        # At 200% scaling the equal 1:1 split made the log dominate and
+        # the treeview was squeezed to barely one visible row.
+        main_f.rowconfigure(2, weight=3)
         main_f.rowconfigure(5, weight=1)
         log_text = tk.Text(log_f, height=4, wrap='word', font=('Courier', 9),
                            state='disabled', bg='#1e1e1e', fg='#d4d4d4')
