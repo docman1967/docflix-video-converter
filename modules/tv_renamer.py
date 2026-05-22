@@ -68,6 +68,7 @@ _VERSION_PATTERNS = [
     (r'\bUNCUT\b', 'Uncut'),
     (r'\bIMAX\b', 'IMAX'),
     (r'\bCRITERION\b', 'Criterion'),
+    (r'\bCOLORIZED\b', 'Colorized'),
     (r'\bOpen[.\s]*Matte\b', 'Open Matte'),
     (r'\b(?:2in1|2-?in-?1)\b', '2in1'),
     (r'\bHybrid\b', 'Hybrid'),
@@ -737,7 +738,7 @@ def open_tv_renamer(app):
         _SCENE_SEASON_RE = re.compile(
             r'[.\s]S\d{1,2}[.\s]'    # SXX surrounded by separators
             r'(?!E\d)'               # NOT followed by EXX (episode)
-            r'.*(?:720|1080|2160|480|WEB|BluRay|HDTV|REMUX|x26[45]|h\.?26[45]|HEVC)',
+            r'.*(?:720|1080|2160|480|WEB|BluRay|HDTV|REMUX|x26[45]|h\.?26[45]|HEVC|complete)',
             re.IGNORECASE)
         # Subtitle subfolder names to skip (like Season folders)
         _SUBS_FOLDER_RE = re.compile(
@@ -803,16 +804,35 @@ def open_tv_renamer(app):
                         return show_name
 
             # Check if the user already picked a show for this folder
-            # (via the Multiple Matches dialog during auto-load)
+            # (via the Multiple Matches dialog during auto-load).
+            # When the folder has a year (e.g. "Ghosts 2021"), verify
+            # the cached show's year matches — otherwise a cache entry
+            # for "ghosts" (from an alias of "Ghosts (2019)") would
+            # incorrectly match files in the "Ghosts 2021" folder.
             if folder_cleaned and folder_cleaned in _query_to_show:
                 mapped = _query_to_show[folder_cleaned]
                 if mapped in _all_shows:
-                    return mapped
+                    # Extract year from raw folder to verify
+                    _raw_dir = parent_dir or ''
+                    _dir_yr_m = re.search(r'((?:19|20)\d{2})', _raw_dir)
+                    if _dir_yr_m:
+                        _dir_yr = _dir_yr_m.group(1)
+                        mapped_data = _all_shows.get(mapped, {})
+                        mapped_yr = str(mapped_data.get('_year', '')) if isinstance(mapped_data, dict) else ''
+                        if mapped_yr and mapped_yr != _dir_yr:
+                            pass  # year mismatch — don't use cache, fall through
+                        else:
+                            return mapped
+                    else:
+                        return mapped
 
             best_match = None
             best_score = 0.0
             candidates = []  # collect all matches above threshold
             for show_name in _all_shows:
+                show_data = _all_shows[show_name]
+                if not isinstance(show_data, dict):
+                    continue
                 show_norm = _normalize_for_match(show_name)
                 score = 0.0
                 # Exact match on filename
@@ -825,6 +845,19 @@ def open_tv_renamer(app):
                 # Filename contained in show name
                 elif cleaned in show_norm:
                     score = len(cleaned) / max(len(show_norm), 1) * 0.8
+                # Check aliases if no strong match yet
+                if score < 0.3:
+                    for alias in show_data.get('_aliases', []):
+                        alias_norm = _normalize_for_match(alias)
+                        if alias_norm == cleaned:
+                            score = 1.0
+                            break
+                        elif alias_norm in cleaned:
+                            s = len(alias_norm) / max(len(cleaned), 1)
+                            score = max(score, s)
+                        elif cleaned in alias_norm:
+                            s = len(cleaned) / max(len(alias_norm), 1) * 0.8
+                            score = max(score, s)
                 if score >= 0.3:
                     candidates.append((show_name, score))
 
@@ -834,12 +867,20 @@ def open_tv_renamer(app):
                 for show_name in _all_shows:
                     if any(sn == show_name for sn, _ in candidates):
                         continue
-                    show_words = set(_normalize_for_match(show_name).split())
-                    if show_words and cleaned_words:
-                        overlap = (len(cleaned_words & show_words)
-                                   / len(show_words))
-                        if overlap >= 0.5:
-                            candidates.append((show_name, overlap))
+                    show_data = _all_shows[show_name]
+                    # Check primary name and all aliases
+                    names_to_check = [show_name]
+                    if isinstance(show_data, dict):
+                        names_to_check.extend(show_data.get('_aliases', []))
+                    best_overlap = 0.0
+                    for name in names_to_check:
+                        show_words = set(_normalize_for_match(name).split())
+                        if show_words and cleaned_words:
+                            overlap = (len(cleaned_words & show_words)
+                                       / len(show_words))
+                            best_overlap = max(best_overlap, overlap)
+                    if best_overlap >= 0.5:
+                        candidates.append((show_name, best_overlap))
 
             if not candidates:
                 return None
@@ -877,7 +918,7 @@ def open_tv_renamer(app):
                 year_matches = [
                     (sn, sc) for sn, sc in candidates
                     if isinstance(_all_shows.get(sn), dict)
-                    and _all_shows[sn].get('_year') == file_year]
+                    and str(_all_shows[sn].get('_year', '')) == file_year]
                 if len(year_matches) == 1:
                     return year_matches[0][0]
 
@@ -1748,14 +1789,47 @@ def open_tv_renamer(app):
             """Show a dialog for the user to pick from multiple show matches.
             candidates: list of dicts from TVDB search results.
             Returns the chosen dict, or None if cancelled."""
-            # Sort movies before TV series when files look like movies
-            # (no SxxExx markers).  This ensures the default selection
-            # in the picker dialog is a movie result, not a TV series.
-            if _files_look_like_movies(query):
-                candidates = sorted(
-                    candidates,
-                    key=lambda r: 0 if r.get('_media_type') == 'movie'
-                                    or r.get('type') == 'movie' else 1)
+            # Sort candidates so the best match appears first:
+            # 1. Year match — if the query contains a year, results
+            #    matching that year sort to the top
+            # 2. Movies first when files look like movies
+            query_yr = ''
+            _yr_m = re.search(r'((?:19|20)\d{2})', query)
+            if _yr_m:
+                query_yr = _yr_m.group(1)
+
+            _q_norm = _normalize_for_match(query)
+            # Strip year from query for name matching so "Grace 2021"
+            # still considers "Grace" an exact match
+            _q_base = re.sub(r'\s*\(?\d{4}\)?\s*$', '', _q_norm).strip()
+            _looks_like_movies = _files_look_like_movies(query)
+
+            def _pick_sort_key(r):
+                rn = _normalize_for_match(
+                    r.get('name', r.get('objectName', '')))
+                # Name relevance: exact match best, starts-with next,
+                # then substring, then everything else
+                if rn == _q_base or rn == _q_norm:
+                    name_rank = 0  # exact match
+                elif rn.startswith(_q_base + ' ') or rn.startswith(_q_base + ':'):
+                    name_rank = 1  # starts with query (e.g. "Grace: ...")
+                elif _q_base in rn:
+                    name_rank = 2  # contains query (e.g. "Saving Grace")
+                else:
+                    name_rank = 3  # reverse substring or alias match
+                # Year match: 0 = matches, 1 = doesn't
+                yr_rank = 0 if (query_yr and r.get('year', '') == query_yr) else 1
+                # Media type: prefer TV when files have episode markers,
+                # prefer movies when files look like movies
+                is_movie = (r.get('_media_type') == 'movie'
+                            or r.get('type') == 'movie')
+                if _looks_like_movies:
+                    type_rank = 0 if is_movie else 1
+                else:
+                    type_rank = 1 if is_movie else 0
+                return (yr_rank, name_rank, type_rank)
+
+            candidates = sorted(candidates, key=_pick_sort_key)
             dlg = tk.Toplevel(win)
             dlg.title("Multiple Matches")
             try:
@@ -2468,6 +2542,21 @@ def open_tv_renamer(app):
                 if filtered:
                     close_matches = filtered
 
+            # ── Year-based pre-filter ──
+            # If the query contains a year (e.g. "Ghosts 2021"), filter
+            # close_matches to prefer results matching that year.  This
+            # prevents "Ghosts (2019)" from being auto-selected when the
+            # query specifically asks for 2021.
+            _query_year_m = re.search(r'((?:19|20)\d{2})', query)
+            if _query_year_m and len(close_matches) > 1:
+                _qy = _query_year_m.group(1)
+                year_filtered = [r for r in close_matches
+                                 if r.get('year', '') == _qy]
+                if year_filtered:
+                    _log(f"  Filtered to {len(year_filtered)} result(s) "
+                         f"matching year {_qy}")
+                    close_matches = year_filtered
+
             if len(close_matches) > 1:
                 # Try embedded-ID auto-disambiguation first — if the
                 # folder/filename contains {tmdb-XXXX} or {tvdb-XXXX},
@@ -2701,6 +2790,28 @@ def open_tv_renamer(app):
             show_eps['_tvdb_id'] = ext_ids.get('tvdb_id', '')
             show_eps['_tmdb_id'] = ext_ids.get('tmdb_id', '')
 
+            # ── Aliases for matching and display ──
+            # Collect alternate names from the search result so files
+            # whose folder/filename uses an alias (e.g. "Ghosts" for
+            # "Ghosts (US)") can still match, and {show} can optionally
+            # resolve to the alias instead of the primary API name.
+            aliases = []
+            for af in ('aliases', 'original_name', 'original_title'):
+                val = best.get(af)
+                if isinstance(val, list):
+                    aliases.extend(v for v in val if v and v != api_name)
+                elif val and val != api_name:
+                    aliases.append(val)
+            # Deduplicate while preserving order
+            seen = set()
+            unique_aliases = []
+            for a in aliases:
+                a_stripped = a.strip()
+                if a_stripped and a_stripped not in seen:
+                    seen.add(a_stripped)
+                    unique_aliases.append(a_stripped)
+            show_eps['_aliases'] = unique_aliases
+
             # ── Cross-provider episode supplement ──
             # When the primary provider has few episodes, the other
             # provider may have more complete data (e.g. TMDB has 1 ep
@@ -2743,12 +2854,21 @@ def open_tv_renamer(app):
                     _log(f"  Cross-provider supplement failed: {ex}")
 
             _all_shows[show_name] = show_eps
+
+            # Register aliases in the query cache so files whose
+            # folder/filename uses an alias can find this show.
+            for alias in unique_aliases:
+                alias_key = _normalize_for_match(alias)
+                if alias_key and alias_key not in _query_to_show:
+                    _query_to_show[alias_key] = show_name
+
             # Count actual (season, ep) episode keys (not date indexes)
             ep_count = len([k for k in show_eps
                            if isinstance(k, tuple) and k[0] != 'date'])
             real_seasons = {s for s in seasons if s > 0} or seasons
+            alias_note = f" (+{len(unique_aliases)} aliases)" if unique_aliases else ""
             _log(f"  Loaded \"{show_name}\" — {ep_count} eps, "
-                 f"{len(real_seasons)} seasons")
+                 f"{len(real_seasons)} seasons{alias_note}")
             return show_name
 
         def _auto_load_shows():
@@ -2809,12 +2929,22 @@ def open_tv_renamer(app):
                 emb_id = ((_extract_embedded_id(parent) if parent else None)
                           or _extract_embedded_id(fname))
                 # When filename has no show name (e.g. "S01E03.mkv"),
-                # use the parent folder name as the show name source
+                # use the parent folder name as the show name source.
+                # Preserve the year from the raw folder name so shows
+                # like "Ghosts 2019" and "Ghosts 2021" stay separate.
                 if not cleaned:
                     if folder_name:
-                        key = (f"{folder_name}@@{emb_id[0]}-{emb_id[1]}"
-                               if emb_id else folder_name)
-                        show_entries[key] = (folder_name, emb_id)
+                        query = folder_name
+                        # Extract year from raw parent to disambiguate
+                        if parent:
+                            yr_m = re.search(
+                                r'\(?((?:19|20)\d{2})\)?',
+                                re.sub(r'[._]', ' ', parent))
+                            if yr_m:
+                                query = f"{folder_name} {yr_m.group(1)}"
+                        key = (f"{query}@@{emb_id[0]}-{emb_id[1]}"
+                               if emb_id else query)
+                        show_entries[key] = (query, emb_id)
                     continue
                 fname_to_info.setdefault(cleaned, [])
                 fname_to_info[cleaned].append(
@@ -2829,12 +2959,40 @@ def open_tv_renamer(app):
                 # Collect unique (folder_name, emb_id) pairs
                 unique_folders = {}  # folder_name → emb_id (last wins)
                 unique_ids = {}      # emb_id_str → (folder_name, emb_id)
-                for folder_name, emb_id, _raw in info_list:
+                # Track RAW (uncleaned) folder names to detect folders that
+                # clean to the same name but are actually different shows
+                # (e.g. "Ghosts 2019" and "Ghosts 2021" both clean to "Ghosts")
+                raw_folders = {}  # raw_parent → cleaned_folder_name
+                for folder_name, emb_id, raw_parent in info_list:
                     if emb_id:
                         id_str = f"{emb_id[0]}-{emb_id[1]}"
                         unique_ids[id_str] = (folder_name, emb_id)
                     if folder_name:
                         unique_folders.setdefault(folder_name, emb_id)
+                    if raw_parent:
+                        raw_folders[raw_parent] = folder_name
+
+                # Check if multiple RAW folders clean to the same name
+                # (e.g. "Ghosts 2019" and "Ghosts 2021" → both "Ghosts").
+                # If so, treat them as distinct shows using the raw name
+                # (which includes the year) as the search query.
+                if len(raw_folders) > 1 and len(unique_folders) <= 1:
+                    for raw_parent, cleaned in raw_folders.items():
+                        # Use the raw folder name (with year) as query
+                        raw_cleaned = _clean_show_name(raw_parent)
+                        # But DON'T strip the trailing year — keep it for
+                        # the API search to disambiguate
+                        raw_with_year = re.sub(r'[._]', ' ', raw_parent).strip()
+                        # Extract just show name + year from raw folder
+                        yr_m = re.search(r'\(?((?:19|20)\d{2})\)?', raw_with_year)
+                        if yr_m:
+                            query = raw_cleaned + ' ' + yr_m.group(1)
+                        else:
+                            query = raw_cleaned or cleaned
+                        query = query.strip()
+                        key = f"{query}@@raw={raw_parent}"
+                        show_entries[key] = (query, None)
+                    continue
 
                 # If there are distinct embedded IDs, create one entry per ID
                 if len(unique_ids) > 1:
@@ -2872,9 +3030,20 @@ def open_tv_renamer(app):
                     fname_norm = _normalize_for_match(fname_name)
                     if folder_norm and (fname_norm in folder_norm
                                         or folder_norm in fname_norm):
-                        key = (f"{folder_name}@@{single_emb_id[0]}-{single_emb_id[1]}"
-                               if single_emb_id else folder_name)
-                        show_entries[key] = (folder_name, single_emb_id)
+                        # Include year from raw folder name if available,
+                        # so "Ghosts 2019" searches "Ghosts 2019" not "Ghosts"
+                        query = folder_name
+                        for _, _, raw_p in info_list:
+                            if raw_p:
+                                yr_m = re.search(
+                                    r'\(?((?:19|20)\d{2})\)?',
+                                    re.sub(r'[._]', ' ', raw_p))
+                                if yr_m and yr_m.group(1) not in folder_name:
+                                    query = f"{folder_name} {yr_m.group(1)}"
+                                break
+                        key = (f"{query}@@{single_emb_id[0]}-{single_emb_id[1]}"
+                               if single_emb_id else query)
+                        show_entries[key] = (query, single_emb_id)
                     else:
                         key = (f"{fname_name}@@{single_emb_id[0]}-{single_emb_id[1]}"
                                if single_emb_id else fname_name)
@@ -2911,6 +3080,9 @@ def open_tv_renamer(app):
                             already = True
                 if not already:
                     name_lower = name.lower()
+                    # Extract year from query (e.g. "Ghosts 2021" → "2021")
+                    _q_yr_m = re.search(r'((?:19|20)\d{2})', name)
+                    _q_year = _q_yr_m.group(1) if _q_yr_m else ''
                     for loaded in _all_shows:
                         if (loaded.lower() in name_lower
                                 or name_lower in loaded.lower()):
@@ -2922,6 +3094,15 @@ def open_tv_renamer(app):
                                     '_series_id', ''))
                                 if loaded_sid != emb_id[1]:
                                     continue  # different ID — don't skip
+                            # If the query has a year, check that the loaded
+                            # show's year matches — "Ghosts 2021" should NOT
+                            # match a loaded "Ghosts" with year 2019
+                            if _q_year:
+                                loaded_data = _all_shows.get(loaded, {})
+                                if isinstance(loaded_data, dict):
+                                    loaded_year = str(loaded_data.get('_year', ''))
+                                    if loaded_year and loaded_year != _q_year:
+                                        continue  # different year — don't skip
                             already = True
                             break
                 if not already:
@@ -3571,14 +3752,27 @@ def open_tv_renamer(app):
                         file_parent_name = os.path.basename(file_parent)
 
                         # Determine the show-level folder. If the file is
-                        # inside a Season subfolder, go up one level so we
-                        # rename the show folder, not the season folder.
-                        in_season = (_SEASON_FOLDER_RE.match(file_parent_name)
-                                     or _SCENE_SEASON_RE.search(file_parent_name))
-                        if in_season:
-                            current_parent = os.path.dirname(file_parent)
-                        else:
-                            current_parent = file_parent
+                        # inside a Season, subtitle, scene-release, or per-episode
+                        # subfolder, climb up to the show folder. Handles structures
+                        # like Show/Season 01/Subs/Show.S01E01.Episode/file.srt
+                        # by climbing past the episode subfolder, Subs, and Season.
+                        current_parent = file_parent
+                        in_season = False
+                        for _ in range(4):
+                            cp_name = os.path.basename(current_parent)
+                            if (_SEASON_FOLDER_RE.match(cp_name)
+                                    or _SUBS_FOLDER_RE.match(cp_name)
+                                    or _SCENE_SEASON_RE.search(cp_name)):
+                                in_season = True
+                                current_parent = os.path.dirname(current_parent)
+                            elif (item.get('ext', '') in SUBTITLE_EXTENSIONS
+                                    and re.search(r'[Ss]\d{1,2}[Ee]\d', cp_name)):
+                                # Per-episode subtitle subfolder (e.g.
+                                # "Show.S01E01.Episode.Name/file.srt")
+                                in_season = True
+                                current_parent = os.path.dirname(current_parent)
+                            else:
+                                break
                         current_parent_name = os.path.basename(current_parent)
                         grandparent = os.path.dirname(current_parent)
 
@@ -3597,13 +3791,15 @@ def open_tv_renamer(app):
                         for other in _file_items:
                             if other is item:
                                 continue
-                            other_parent = os.path.dirname(other['path'])
-                            other_show_parent = other_parent
-                            other_parent_name = os.path.basename(other_parent)
-                            if (_SEASON_FOLDER_RE.match(other_parent_name)
-                                    or _SCENE_SEASON_RE.search(
-                                        other_parent_name)):
-                                other_show_parent = os.path.dirname(other_parent)
+                            other_show_parent = os.path.dirname(other['path'])
+                            for _ in range(3):
+                                _osp_name = os.path.basename(other_show_parent)
+                                if (_SEASON_FOLDER_RE.match(_osp_name)
+                                        or _SUBS_FOLDER_RE.match(_osp_name)
+                                        or _SCENE_SEASON_RE.search(_osp_name)):
+                                    other_show_parent = os.path.dirname(other_show_parent)
+                                else:
+                                    break
                             # Same show-level parent, different show
                             if other_show_parent == current_parent:
                                 other_show = other.get('matched_show', '')
@@ -3662,10 +3858,14 @@ def open_tv_renamer(app):
                             # Update old_path to reflect the renamed show folder.
                             # For season subfolder files the actual file is now at
                             # renamed_show/Season X/filename.ext
+                            # For scene-release packs it may be
+                            # renamed_show/scene.s02.complete/Season X/file.ext
                             if in_season:
-                                old_path = os.path.join(
-                                    current_parent, file_parent_name,
-                                    os.path.basename(old_path))
+                                # Reconstruct the relative path from the show folder
+                                # to the file (may include scene-release intermediate dir)
+                                _rel = os.path.relpath(
+                                    item['path'], orig_show_parent)
+                                old_path = os.path.join(current_parent, _rel)
                             else:
                                 old_path = os.path.join(
                                     current_parent,
@@ -3674,8 +3874,24 @@ def open_tv_renamer(app):
                             # Build new path within the (renamed) show folder
                             new_path = os.path.join(current_parent, remaining)
                     else:
-                        # Flat template: rename within the same directory
-                        new_path = os.path.join(os.path.dirname(old_path), new_name)
+                        # Flat template: rename within the same directory.
+                        # For subtitles inside a Subs/ or per-episode subfolder,
+                        # move them up to the video file's directory so they
+                        # sit alongside their matching video.
+                        dest_dir = os.path.dirname(old_path)
+                        if item.get('ext', '') in SUBTITLE_EXTENSIONS:
+                            # Climb up past episode subfolders and Subs/
+                            _sub_dest = dest_dir
+                            for _ in range(3):
+                                _dn = os.path.basename(_sub_dest)
+                                if (_SUBS_FOLDER_RE.match(_dn)
+                                        or re.search(r'[Ss]\d{1,2}[Ee]\d', _dn)):
+                                    _sub_dest = os.path.dirname(_sub_dest)
+                                else:
+                                    break
+                            if _sub_dest != dest_dir:
+                                dest_dir = _sub_dest
+                        new_path = os.path.join(dest_dir, new_name)
 
                     if old_path == new_path:
                         item['_renamed'] = True
@@ -3712,6 +3928,28 @@ def open_tv_renamer(app):
                     old_grandparent = os.path.dirname(old_parent)
                     _cleanup_dirs.add(old_parent)
                     _cleanup_dirs.add(old_grandparent)
+            def _rmdir_empty_recursive(path, depth=0, max_depth=4):
+                """Remove empty directories bottom-up, recursively.
+                Handles nested structures like Season 1/Subs/episode_folder/."""
+                if depth > max_depth or not os.path.isdir(path):
+                    return
+                try:
+                    for child in sorted(os.listdir(path)):
+                        child_path = os.path.join(path, child)
+                        if os.path.isdir(child_path):
+                            _rmdir_empty_recursive(child_path, depth + 1, max_depth)
+                except OSError:
+                    return
+                # After cleaning children, remove this dir if now empty
+                try:
+                    if not os.listdir(path):
+                        os.rmdir(path)
+                        _removed_season_dirs.append(path)
+                        rel = os.path.relpath(path, os.path.dirname(path))
+                        _log(f"  Removed empty folder: {rel}")
+                except OSError:
+                    pass
+
             for check_dir in _cleanup_dirs:
                 if not os.path.isdir(check_dir):
                     continue
@@ -3721,14 +3959,12 @@ def open_tv_renamer(app):
                     continue
                 for entry in entries:
                     sub = os.path.join(check_dir, entry)
-                    if (os.path.isdir(sub)
-                            and (_SEASON_FOLDER_RE.match(entry)
-                                 or _SUBS_FOLDER_RE.match(entry)
-                                 or _SCENE_SEASON_RE.search(entry))
-                            and not os.listdir(sub)):
-                        os.rmdir(sub)
-                        _removed_season_dirs.append(sub)
-                        _log(f"  Removed empty folder: {entry}")
+                    if not os.path.isdir(sub):
+                        continue
+                    if (_SEASON_FOLDER_RE.match(entry)
+                            or _SUBS_FOLDER_RE.match(entry)
+                            or _SCENE_SEASON_RE.search(entry)):
+                        _rmdir_empty_recursive(sub)
 
             # Save undo history (include created dirs and removed items for restore)
             renamed_items = [i.copy() for i in _file_items if i.get('_renamed')]
@@ -4211,7 +4447,13 @@ def open_tv_renamer(app):
             dlg.geometry(scaled_geometry(dlg, 860, 750))
             dlg.minsize(*scaled_minsize(dlg, 780, 650))
             dlg.resizable(True, True)
-            dlg.grab_set()
+            # Note: grab_set() without transient() causes Wayland compositors
+            # (GNOME 48+ / Ubuntu 26.04) to treat the window as a restricted
+            # popup, stripping resize handles and min/max buttons.
+            # transient() alone can also strip min/max on GNOME Wayland
+            # (transient windows are treated as auxiliary dialogs).
+            # For full decorations on both X11 and Wayland, use a plain
+            # Toplevel with no grab and no transient.
             _center_on_parent(dlg, win)
 
             # Close button packed from bottom first so it's never clipped
@@ -4649,13 +4891,16 @@ def open_tv_renamer(app):
                 if _extra_version.get():
                     extras.append('{version}')
                 custom = _extra_custom.get().strip()
-                if custom:
-                    extras.append(custom)
                 if extras:
                     # Movies: use " - " separator before media tags
                     # TV: use plain space (episode title provides context)
                     sep = ' - ' if is_movie else ' '
                     name_part = name_part + sep + '[' + ' '.join(extras) + ']'
+                if custom:
+                    # Custom text gets its own brackets, separate from media tags
+                    # Strip wrapping brackets if user already included them
+                    custom = custom.strip('[]')
+                    name_part = name_part + ' [' + custom + ']'
 
                 # Append episode ID to filename if requested (TV only)
                 if prov != 'none' and _episode_id.get() and not is_movie:

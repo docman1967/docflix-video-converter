@@ -72,6 +72,8 @@ class VideoConverter:
             two_pass      = settings.get('two_pass', False)
             is_gpu        = encoder != 'cpu'
             backend       = GPU_BACKENDS.get(encoder) if is_gpu else None
+            scale_resolution = settings.get('scale_resolution', 'Original')
+            hdr_to_sdr = settings.get('hdr_to_sdr', False)
 
             # Resolve the actual ffmpeg encoder name
             if is_gpu:
@@ -107,8 +109,13 @@ class VideoConverter:
             burn_in_subs = [s for s in ext_subs if s['mode'] == 'burn_in']
             has_burn_in = bool(burn_in_subs)
 
-            # Burn-in is incompatible with hardware decode
+            # Burn-in is incompatible with hardware decode (subtitle filter
+            # needs to read pixel data on CPU).
             effective_hw = hw_decode and not has_burn_in
+            # HDR tonemapping needs CPU filters (zscale) but GPU decode is
+            # fine — we just strip -hwaccel_output_format so frames transfer
+            # to system memory automatically after decode.
+            _hw_strip_output_fmt = hdr_to_sdr and effective_hw
 
             if has_burn_in and hw_decode:
                 self.log("Hardware decode disabled: burn-in subtitles require CPU filter pipeline", 'WARNING')
@@ -194,7 +201,15 @@ class VideoConverter:
                 """Build the common part of the ffmpeg command."""
                 c = ['ffmpeg', '-y']
                 if effective_hw and is_gpu and backend and transcode_mode in ['video', 'both'] and video_enc_name not in (None, 'copy'):
-                    c.extend(backend['hwaccel'])
+                    if _hw_strip_output_fmt:
+                        # Keep GPU decode but drop output format so frames
+                        # transfer to system memory for CPU filters (zscale)
+                        hw_flags = [f for i, f in enumerate(backend['hwaccel'])
+                                    if f != '-hwaccel_output_format'
+                                    and (i == 0 or backend['hwaccel'][i-1] != '-hwaccel_output_format')]
+                        c.extend(hw_flags)
+                    else:
+                        c.extend(backend['hwaccel'])
                 c.extend(['-i', input_path])
                 # Add external embed subtitle inputs
                 for es in embed_subs:
@@ -225,28 +240,80 @@ class VideoConverter:
                     if video_enc_name != 'copy':
                         # Video filters MUST come before -c:v for proper filter
                         # chain initialization with hwaccel_output_format surfaces
+                        #
+                        # Build a composable list of video filters instead of
+                        # mutually exclusive branches, so scale + tonemap +
+                        # burn-in + pix_fmt can all coexist in one -vf chain.
+                        from .video_scaler import RESOLUTION_MAP, _build_scale_filter, _probe_video_info
+
+                        vf_parts = []
+
+                        # ── Resolution scaling (before tonemap for performance) ──
+                        # Scale FIRST so the heavy tonemap runs on smaller frames.
+                        # 4K→1080p = 4× fewer pixels to tonemap = ~4× faster.
+                        if scale_resolution != 'Original':
+                            target_dims = RESOLUTION_MAP.get(scale_resolution)
+                            if target_dims is not None:
+                                _, target_h = target_dims
+                                src_w, src_h, _, _, _ = _probe_video_info(input_path)
+                                if src_w and src_h and src_h > 0:
+                                    target_w = round(src_w * target_h / src_h)
+                                    if target_w % 2 != 0:
+                                        target_w += 1
+                                    if src_h == target_h and src_w == target_w:
+                                        self.log(f"Source already {src_w}×{src_h} — skipping scale", 'INFO')
+                                    else:
+                                        if hdr_to_sdr or not effective_hw:
+                                            scale_backend = None
+                                        else:
+                                            scale_backend = encoder if is_gpu else None
+                                        scale_vf = _build_scale_filter(target_w, target_h, scale_backend)
+                                        if scale_vf:
+                                            vf_parts.append(scale_vf)
+                                        self.log(f"Scaling: {src_w}×{src_h} → {target_w}×{target_h} ({scale_resolution})", 'INFO')
+
+                        # ── HDR → SDR tonemapping (after scale for performance) ──
+                        if hdr_to_sdr:
+                            vf_parts.append(
+                                'zscale=t=linear:npl=100,format=gbrpf32le,'
+                                'tonemap=hable:desat=0,'
+                                'zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p')
+                            self.log("HDR → SDR via zscale (CPU tonemap)", 'INFO')
+
+                        # ── Burn-in subtitles ──
                         if has_burn_in:
                             sub_path = burn_in_subs[0]['path']
                             ext = Path(sub_path).suffix.lower()
-                            # Escape special chars for ffmpeg filter syntax
                             escaped = sub_path.replace('\\', '\\\\\\\\').replace(':', '\\:').replace("'", "\\'")
                             if ext in ('.ass', '.ssa'):
-                                c.extend(['-vf', f"ass='{escaped}'"])
+                                vf_parts.append(f"ass='{escaped}'")
                             else:
-                                c.extend(['-vf', f"subtitles='{escaped}'"])
-                        elif needs_pix_fmt_convert and backend:
-                            # GPU hwaccel: convert pixel format on-device
-                            c.extend(['-vf', backend['scale_filter']])
-                        elif codec_info['cpu_encoder'] == 'prores_ks':
-                            # ProRes requires 4:2:2 or 4:4:4
+                                vf_parts.append(f"subtitles='{escaped}'")
+
+                        # ── Pixel format conversion (GPU 10-bit → 8-bit) ──
+                        # When scale is already present via scale_cuda, the format
+                        # conversion is included in the scale filter. Only add the
+                        # standalone pix_fmt filter when no other filters are set.
+                        if needs_pix_fmt_convert and backend and not vf_parts:
+                            vf_parts.append(backend['scale_filter'])
+
+                        # ── ProRes pixel format ──
+                        if not vf_parts and codec_info['cpu_encoder'] == 'prores_ks':
                             prores_profile = settings.get('preset', '') or 'hq'
                             if prores_profile in ('4444', '4444xq'):
                                 pix = 'yuva444p10le'
                             else:
                                 pix = 'yuv422p10le'
-                            c.extend(['-vf', f'format={pix}'])
+                            vf_parts.append(f'format={pix}')
+
+                        if vf_parts:
+                            c.extend(['-vf', ','.join(vf_parts)])
 
                     c.extend(['-c:v', video_enc_name])
+
+                    # HDR → SDR color metadata flags
+                    if hdr_to_sdr:
+                        c.extend(['-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709'])
 
                     # A53 CC passthrough flags
                     if cc_passthrough_flags:

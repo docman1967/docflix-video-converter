@@ -6,7 +6,7 @@ All shared constants, codec maps, extension sets, and GPU backend definitions.
 
 # ── App identity ──
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.3.2"
+APP_VERSION = "3.4.0"
 
 # ── Defaults ──
 DEFAULT_BITRATE = "2M"
@@ -31,6 +31,7 @@ EDITION_PRESETS = [
     'IMAX',
     'Criterion',
     'Remastered',
+    'Colorized',
     'Anniversary Edition',
     'Ultimate Edition',
     'Custom...',

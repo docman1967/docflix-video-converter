@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.3.2"
+APP_VERSION = "3.4.0"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -70,6 +70,7 @@ EDITION_PRESETS = [
     'IMAX',
     'Criterion',
     'Remastered',
+    'Colorized',
     'Anniversary Edition',
     'Ultimate Edition',
     'Custom...',
@@ -1397,7 +1398,7 @@ def filter_remove_hi(cues):
     """
     hi_patterns = [
         re.compile(r'\[.*?\]', re.DOTALL),          # [music playing] — including multi-line
-        re.compile(r'^\[(?!.*\]).*', re.DOTALL),    # unclosed [ at start — remove entire cue text
+        re.compile(r'^\[(?!.*\]).*$', re.MULTILINE),  # unclosed [ — remove that line only, preserve dialog on other lines
         re.compile(r'\(.*?\)', re.DOTALL),          # (laughing) — including multi-line
     ]
     # Speaker label pattern (same as filter_remove_speaker_labels)
@@ -2099,6 +2100,48 @@ def filter_remove_duplicates(cues):
                 cue['start'] == prev['start'] and cue['end'] == prev['end']):
             continue
         result.append(cue)
+    return result
+
+
+def filter_merge_duplicates(cues, max_gap_ms=200):
+    """Merge consecutive cues with identical text into one cue.
+
+    Common in HDTV/DVB subtitles where the same text is repeated across
+    multiple display windows with near-contiguous timestamps.  The merged
+    cue keeps the first cue's start and the last cue's end.
+    """
+    if not cues:
+        return cues
+    _tag_re = re.compile(r'<[^>]+>')
+    def _strip(text):
+        return _tag_re.sub('', text).strip()
+    def _ts_to_ms(ts):
+        h, m, rest = ts.split(':')
+        s, ms = rest.split(',')
+        return int(h) * 3600000 + int(m) * 60000 + int(s) * 1000 + int(ms)
+    result = []
+    i = 0
+    while i < len(cues):
+        group_start = cues[i]['start']
+        group_end = cues[i]['end']
+        group_text = cues[i]['text']
+        stripped = _strip(group_text)
+        j = i + 1
+        while j < len(cues):
+            if _strip(cues[j]['text']) != stripped:
+                break
+            gap = _ts_to_ms(cues[j]['start']) - _ts_to_ms(group_end)
+            if gap > max_gap_ms:
+                break
+            group_end = cues[j]['end']
+            j += 1
+        result.append({
+            'index': len(result) + 1,
+            'start': group_start,
+            'end': group_end,
+            'text': group_text,
+        })
+        i = j
     return result
 
 
@@ -3537,6 +3580,8 @@ class VideoConverter:
             codec_name    = settings.get('codec_name', 'H.265 / HEVC')
             mode          = settings.get('mode', 'bitrate')
             two_pass      = settings.get('two_pass', False)
+            scale_resolution = settings.get('scale_resolution', 'Original')
+            hdr_to_sdr    = settings.get('hdr_to_sdr', False)
             is_gpu        = encoder != 'cpu'
             backend       = GPU_BACKENDS.get(encoder) if is_gpu else None
 
@@ -3574,7 +3619,10 @@ class VideoConverter:
             burn_in_subs = [s for s in ext_subs if s['mode'] == 'burn_in']
             has_burn_in = bool(burn_in_subs)
 
-            # Burn-in is incompatible with hardware decode
+            # Burn-in is incompatible with hardware decode (subtitle filter
+            # needs to read pixel data on CPU). HDR tonemapping is fine with
+            # -hwaccel cuda (no -hwaccel_output_format) — GPU decodes, frames
+            # automatically transfer to system memory for zscale/tonemap.
             effective_hw = hw_decode and not has_burn_in
 
             if has_burn_in and hw_decode:
@@ -3711,30 +3759,78 @@ class VideoConverter:
                 if transcode_mode in ['video', 'both']:
 
                     if video_enc_name != 'copy':
-                        # Video filters MUST come before -c:v for proper filter
-                        # chain initialization with hwaccel_output_format surfaces
+                        # Build composable video filter chain so scale + tonemap +
+                        # burn-in + pix_fmt can coexist in one -vf argument.
+                        from modules.video_scaler import (
+                            RESOLUTION_MAP, _build_scale_filter, _probe_video_info)
+
+                        vf_parts = []
+
+                        # ── Resolution scaling (before tonemap for performance) ──
+                        # Scale FIRST so the heavy tonemap runs on smaller frames.
+                        # 4K→1080p = 4× fewer pixels to tonemap = ~4× faster.
+                        if scale_resolution != 'Original':
+                            target_dims = RESOLUTION_MAP.get(scale_resolution)
+                            if target_dims is not None:
+                                _, target_h = target_dims
+                                src_w, src_h, _, _, _ = _probe_video_info(input_path)
+                                if src_w and src_h and src_h > 0:
+                                    target_w = round(src_w * target_h / src_h)
+                                    if target_w % 2 != 0:
+                                        target_w += 1
+                                    if src_h == target_h and src_w == target_w:
+                                        self.log(f"Source already {src_w}×{src_h} — skipping scale", 'INFO')
+                                    else:
+                                        if hdr_to_sdr or not effective_hw:
+                                            scale_vf = _build_scale_filter(target_w, target_h, None)
+                                        else:
+                                            scale_vf = _build_scale_filter(target_w, target_h,
+                                                                           encoder if is_gpu else None)
+                                        if scale_vf:
+                                            vf_parts.append(scale_vf)
+                                        self.log(f"Scaling: {src_w}×{src_h} → {target_w}×{target_h} ({scale_resolution})", 'INFO')
+
+                        # ── HDR → SDR tonemapping (after scale for performance) ──
+                        # Tonemapping on 1080p frames is ~4× faster than on 4K.
+                        if hdr_to_sdr:
+                            vf_parts.append(
+                                'zscale=t=linear:npl=100,format=gbrpf32le,'
+                                'tonemap=hable:desat=0,'
+                                'zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p')
+                            self.log("HDR → SDR via zscale (CPU tonemap)", 'INFO')
+
+                        # ── Burn-in subtitles ──
                         if has_burn_in:
                             sub_path = burn_in_subs[0]['path']
                             ext = Path(sub_path).suffix.lower()
-                            # Escape special chars for ffmpeg filter syntax
                             escaped = sub_path.replace('\\', '\\\\\\\\').replace(':', '\\:').replace("'", "\\'")
                             if ext in ('.ass', '.ssa'):
-                                c.extend(['-vf', f"ass='{escaped}'"])
+                                vf_parts.append(f"ass='{escaped}'")
                             else:
-                                c.extend(['-vf', f"subtitles='{escaped}'"])
-                        elif needs_pix_fmt_convert and backend:
-                            # GPU hwaccel: convert pixel format on-device
-                            c.extend(['-vf', backend['scale_filter']])
-                        elif codec_info['cpu_encoder'] == 'prores_ks':
-                            # ProRes requires 4:2:2 or 4:4:4
+                                vf_parts.append(f"subtitles='{escaped}'")
+
+                        # ── Pixel format conversion (GPU 10-bit → 8-bit) ──
+                        if needs_pix_fmt_convert and backend and not vf_parts:
+                            vf_parts.append(backend['scale_filter'])
+
+                        # ── ProRes pixel format ──
+                        if not vf_parts and codec_info['cpu_encoder'] == 'prores_ks':
                             prores_profile = settings.get('preset', '') or 'hq'
                             if prores_profile in ('4444', '4444xq'):
                                 pix = 'yuva444p10le'
                             else:
                                 pix = 'yuv422p10le'
-                            c.extend(['-vf', f'format={pix}'])
+                            vf_parts.append(f'format={pix}')
+
+                        if vf_parts:
+                            c.extend(['-vf', ','.join(vf_parts)])
 
                     c.extend(['-c:v', video_enc_name])
+
+                    # HDR → SDR color metadata flags
+                    if hdr_to_sdr:
+                        c.extend(['-colorspace', 'bt709', '-color_primaries', 'bt709',
+                                  '-color_trc', 'bt709'])
 
                     # A53 CC passthrough flags
                     if cc_passthrough_flags:
@@ -4430,6 +4526,9 @@ class VideoConverterApp:
         # Chapter insertion
         self.add_chapters = tk.BooleanVar(value=False)
         self.chapter_interval = tk.IntVar(value=5)  # minutes
+        # Video rescaling
+        self.scale_resolution = tk.StringVar(value='Original')
+        self.hdr_to_sdr = tk.BooleanVar(value=False)
 
         # Check system capabilities
         self.has_ffmpeg, self.ffmpeg_version = check_ffmpeg()
@@ -5112,6 +5211,23 @@ class VideoConverterApp:
                 self.add_chapters.set(False)
                 _on_add_chapters_toggle()
         self.strip_chapters.trace_add('write', _on_strip_chapters_trace)
+
+        # ── Row 11: Video rescaling ──
+        self.scale_frame = ttk.Frame(settings_frame)
+        self.scale_frame.grid(row=11, column=0, columnspan=2, sticky='w', pady=(0, 6))
+
+        ttk.Label(self.scale_frame, text="Target Resolution:").pack(side='left', padx=(5, 2))
+        from modules.video_scaler import RESOLUTION_PRESETS
+        # Exclude 'Custom' — the main app uses preset resolutions only
+        _scale_presets = [p for p in RESOLUTION_PRESETS if p != 'Custom']
+        self.scale_combo = ttk.Combobox(
+            self.scale_frame, textvariable=self.scale_resolution,
+            values=_scale_presets, width=14, state='readonly')
+        self.scale_combo.pack(side='left', padx=(0, 8))
+        self.scale_combo.set('Original')
+
+        ttk.Checkbutton(self.scale_frame, text="Convert HDR → SDR",
+                        variable=self.hdr_to_sdr).pack(side='left', padx=(0, 5))
 
         # Bind mousewheel to all child widgets inside the scrollable settings
         def _bind_wheel_recursive(widget):
@@ -5864,6 +5980,22 @@ class VideoConverterApp:
         ttk.Checkbutton(edition_frame, text="Add to filename (Plex)",
                         variable=v_edition_fn).pack(side='left', padx=(8, 0))
 
+        # ── Rescale ──
+        v_scale_res = tk.StringVar(value=ov('scale_resolution', self.scale_resolution.get()))
+        v_hdr_sdr   = tk.BooleanVar(value=ov('hdr_to_sdr', self.hdr_to_sdr.get()))
+
+        scale_frame = ttk.Frame(f)
+        scale_frame.grid(row=row, column=0, columnspan=2, sticky='w', **pad); row += 1
+
+        ttk.Label(scale_frame, text="Target Resolution:").pack(side='left', padx=(4, 2))
+        from modules.video_scaler import RESOLUTION_PRESETS
+        _ovr_scale_presets = [p for p in RESOLUTION_PRESETS if p != 'Custom']
+        ttk.Combobox(scale_frame, textvariable=v_scale_res,
+                     values=_ovr_scale_presets, width=14,
+                     state='readonly').pack(side='left', padx=(0, 8))
+        ttk.Checkbutton(scale_frame, text="Convert HDR → SDR",
+                        variable=v_hdr_sdr).pack(side='left', padx=(0, 4))
+
         # ── Dynamic update helpers ──
         def _update_presets():
             info = VIDEO_CODEC_MAP.get(v_video_codec.get(), VIDEO_CODEC_MAP['H.265 / HEVC'])
@@ -5941,6 +6073,8 @@ class VideoConverterApp:
                 'meta_sub_lang':       v_meta_sub_lang.get(),
                 'edition_tag':         v_edition.get(),
                 'edition_in_filename': v_edition_fn.get(),
+                'scale_resolution':    v_scale_res.get(),
+                'hdr_to_sdr':          v_hdr_sdr.get(),
             }
             file_info['overrides'] = overrides
             self._refresh_tree_row(item, file_info)
@@ -7745,6 +7879,8 @@ class VideoConverterApp:
             'edition_in_filename':   self.edition_in_filename.get(),
             'add_chapters':          self.add_chapters.get(),
             'chapter_interval':      self.chapter_interval.get(),
+            'scale_resolution':      self.scale_resolution.get(),
+            'hdr_to_sdr':            self.hdr_to_sdr.get(),
             'custom_ad_patterns':    self.custom_ad_patterns,
             'custom_cap_words':      self.custom_cap_words,
             'custom_replacements':   self.custom_replacements,
@@ -7835,6 +7971,8 @@ class VideoConverterApp:
             self.edition_in_filename.set(prefs.get('edition_in_filename', False))
             self.add_chapters.set(prefs.get('add_chapters', False))
             self.chapter_interval.set(prefs.get('chapter_interval', 5))
+            self.scale_resolution.set(prefs.get('scale_resolution', 'Original'))
+            self.hdr_to_sdr.set(prefs.get('hdr_to_sdr', False))
             self.verify_output.set(prefs.get('verify_output',   self.verify_output.get()))
             self.notify_sound.set(prefs.get('notify_sound',     self.notify_sound.get()))
             self.notify_sound_file.set(prefs.get('notify_sound_file', self.notify_sound_file.get()))
@@ -7932,6 +8070,8 @@ class VideoConverterApp:
         self.edition_in_filename.set(False)
         self.add_chapters.set(False)
         self.chapter_interval.set(5)
+        self.scale_resolution.set('Original')
+        self.hdr_to_sdr.set(False)
         self.default_player.set('auto')
         # Default Settings dialog values — clear folder defaults
         self.working_dir = Path.home()
@@ -9376,7 +9516,12 @@ class VideoConverterApp:
                 else:
                     self.add_log(f"CRF: {self.crf.get()}", 'INFO')
                 self.add_log(f"Preset: {self.preset_combo.get()}", 'INFO')
-        
+            scale_res = self.scale_resolution.get()
+            if scale_res and scale_res != 'Original':
+                self.add_log(f"Target Resolution: {scale_res}", 'INFO')
+            if self.hdr_to_sdr.get():
+                self.add_log("HDR → SDR: enabled (tonemap hable)", 'INFO')
+
         # Log audio settings (if applicable)
         if mode in ['audio', 'both']:
             audio_codec_display = self.audio_codec.get()
@@ -9428,6 +9573,8 @@ class VideoConverterApp:
             'edition_in_filename': self.edition_in_filename.get(),
             'add_chapters':        self.add_chapters.get(),
             'chapter_interval':    self.chapter_interval.get(),
+            'scale_resolution':    self.scale_resolution.get(),
+            'hdr_to_sdr':          self.hdr_to_sdr.get(),
         }
 
         renamed_candidates = []  # (output_path, original_input_path) for files whose originals were deleted
@@ -9483,6 +9630,8 @@ class VideoConverterApp:
                 'meta_sub_lang':       ov.get('meta_sub_lang',       settings['meta_sub_lang']),
                 'edition_tag':         ov.get('edition_tag',         settings['edition_tag']),
                 'edition_in_filename': ov.get('edition_in_filename', settings['edition_in_filename']),
+                'scale_resolution':    ov.get('scale_resolution',    settings['scale_resolution']),
+                'hdr_to_sdr':          ov.get('hdr_to_sdr',          settings['hdr_to_sdr']),
             }
 
             # Generate chapters if requested (auto-generate from duration)
@@ -9572,8 +9721,9 @@ class VideoConverterApp:
                 text=f"Converting: {os.path.basename(p)}"
             ))
 
-            # Convert — track timing for batch ETA
             import time as _time
+
+            # Convert — track timing for batch ETA
             self._file_start_time = _time.monotonic()
             self.current_output_path = output_path
             success = self.converter.convert_file(input_path, output_path, file_settings)
@@ -9829,8 +9979,9 @@ def _configure_dpi_scaling(root):
     before building any widgets.
     """
     try:
-        # Method 1: Xft.dpi from X resources (set by most DEs)
         real_dpi = None
+
+        # Method 1: Xft.dpi from X resources (set by most DEs)
         try:
             xrdb = subprocess.check_output(
                 ['xrdb', '-query'], stderr=subprocess.DEVNULL, timeout=2
@@ -9859,6 +10010,46 @@ def _configure_dpi_scaling(root):
                     real_dpi = 96.0 * float(qt_scale)
                 except (ValueError, TypeError):
                     pass
+
+        # Method 4: GNOME gsettings text-scaling-factor
+        if real_dpi is None:
+            try:
+                gs = subprocess.check_output(
+                    ['gsettings', 'get', 'org.gnome.desktop.interface',
+                     'text-scaling-factor'],
+                    stderr=subprocess.DEVNULL, timeout=2
+                ).decode().strip()
+                ts = float(gs)
+                if ts > 1.05:
+                    real_dpi = 96.0 * ts
+            except Exception:
+                pass
+
+        # Method 5: GNOME gsettings scaling-factor (integer scale)
+        if real_dpi is None:
+            try:
+                gs = subprocess.check_output(
+                    ['gsettings', 'get', 'org.gnome.desktop.interface',
+                     'scaling-factor'],
+                    stderr=subprocess.DEVNULL, timeout=2
+                ).decode().strip()
+                import re as _re
+                m = _re.search(r'(\d+)', gs)
+                if m:
+                    sf = int(m.group(1))
+                    if sf >= 2:
+                        real_dpi = 96.0 * sf
+            except Exception:
+                pass
+
+        # Method 6: Tk's own fpixels detection (Wayland with Tk 8.6.13+)
+        if real_dpi is None:
+            try:
+                fpx = float(root.tk.call('winfo', 'fpixels', root, '1i'))
+                if fpx > 100:
+                    real_dpi = fpx
+            except Exception:
+                pass
 
         if real_dpi and real_dpi > 96:
             # Tk scaling factor: 1.0 = 72 DPI (Tk's internal unit)
@@ -10013,7 +10204,7 @@ def main():
             elif p.is_dir():
                 # If a directory is passed, set it as working dir and scan
                 app.working_dir = p
-                app.refresh_file_list()
+                app.refresh_files()
                 break
         if added:
             app.add_log(f"Added {added} file(s) from command line", 'INFO')

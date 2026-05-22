@@ -445,7 +445,7 @@ def filter_remove_hi(cues):
     """
     hi_patterns = [
         re.compile(r'\[.*?\]', re.DOTALL),
-        re.compile(r'^\[(?!.*\]).*', re.DOTALL),
+        re.compile(r'^\[(?!.*\]).*$', re.MULTILINE),
         re.compile(r'\(.*?\)', re.DOTALL),
     ]
     speaker_pattern = re.compile(
@@ -1056,6 +1056,71 @@ def filter_remove_duplicates(cues):
                 and cue['end'] == prev['end']):
             continue
         result.append(cue)
+    return result
+
+
+def filter_merge_duplicates(cues, max_gap_ms=200):
+    """Merge consecutive cues with identical text into one cue.
+
+    Common in HDTV/DVB subtitles where the same text is repeated across
+    multiple display windows with near-contiguous timestamps (e.g. 40ms
+    gaps).  The merged cue takes the first cue's start time and the last
+    cue's end time, producing one continuous display.
+
+    Text comparison ignores HTML/font tags so ``<font color="...">text``
+    and ``text`` are treated as identical.
+
+    Args:
+        cues: List of cue dicts with 'text', 'start', 'end' keys.
+        max_gap_ms: Maximum gap in milliseconds between the end of one
+            cue and the start of the next for them to be considered part
+            of the same run.  Default 200ms covers the typical 40ms DVB
+            gap with generous margin.
+
+    Returns:
+        New list of cue dicts with duplicates merged.
+    """
+    if not cues:
+        return cues
+
+    _tag_re = re.compile(r'<[^>]+>')
+
+    def _strip(text):
+        return _tag_re.sub('', text).strip()
+
+    def _ts_to_ms(ts):
+        """Convert SRT timestamp 'HH:MM:SS,mmm' to milliseconds."""
+        h, m, rest = ts.split(':')
+        s, ms = rest.split(',')
+        return int(h) * 3600000 + int(m) * 60000 + int(s) * 1000 + int(ms)
+
+    result = []
+    i = 0
+    while i < len(cues):
+        group_start = cues[i]['start']
+        group_end = cues[i]['end']
+        group_text = cues[i]['text']
+        stripped = _strip(group_text)
+
+        # Absorb consecutive cues with same stripped text and small gap
+        j = i + 1
+        while j < len(cues):
+            if _strip(cues[j]['text']) != stripped:
+                break
+            gap = _ts_to_ms(cues[j]['start']) - _ts_to_ms(group_end)
+            if gap > max_gap_ms:
+                break
+            group_end = cues[j]['end']
+            j += 1
+
+        result.append({
+            'index': len(result) + 1,
+            'start': group_start,
+            'end': group_end,
+            'text': group_text,
+        })
+        i = j
+
     return result
 
 

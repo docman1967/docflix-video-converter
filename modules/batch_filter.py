@@ -21,7 +21,7 @@ from .subtitle_filters import (
     filter_remove_tags, filter_remove_ads,
     filter_remove_offscreen_quotes,
     filter_remove_leading_dashes,
-    filter_remove_duplicates, filter_merge_short,
+    filter_remove_duplicates, filter_merge_duplicates, filter_merge_short,
     # Names database (optional)
     load_names_db, unload_names_db, is_names_db_loaded,
     is_names_db_available, get_names_db_count,
@@ -564,8 +564,30 @@ def open_batch_filter(app):
                         parsed = urlparse(token)
                         paths.append(unquote(parsed.path))
             else:
-                # Tcl list format: {/path with spaces} or /plain/path
-                paths = [p.strip('{}') for p in re.findall(r'\{[^}]+\}|[^\s]+', raw)]
+                # Parse tkinterdnd2 path list. Paths with spaces are
+                # wrapped in {}. Must handle nested braces in filenames
+                # like "Show {edition-Extended}.srt" by counting brace depth.
+                i = 0
+                while i < len(raw):
+                    if raw[i] == '{':
+                        depth = 1
+                        end = i + 1
+                        while end < len(raw) and depth > 0:
+                            if raw[end] == '{':
+                                depth += 1
+                            elif raw[end] == '}':
+                                depth -= 1
+                            end += 1
+                        paths.append(raw[i + 1:end - 1])
+                        i = end + 1 if end < len(raw) else end
+                    elif raw[i] in (' ', '\t', '\r', '\n'):
+                        i += 1
+                    else:
+                        end = raw.find(' ', i)
+                        if end == -1:
+                            end = len(raw)
+                        paths.append(raw[i:end])
+                        i = end + 1
 
             # Expand directories recursively
             sub_exts = {'.srt', '.ass', '.ssa', '.vtt', '.sub'}
@@ -609,6 +631,7 @@ def open_batch_filter(app):
             ('remove_caps_hi', "Remove ALL CAPS HI (UK style)",   filter_remove_caps_hi),
             ('remove_quotes',  "Remove Off-Screen Quotes ' ' (UK style)", filter_remove_offscreen_quotes),
             ('remove_dupes',   "Remove Duplicates",               filter_remove_duplicates),
+            ('merge_dupes',    "Merge Duplicates",                filter_merge_duplicates),
             ('merge_short',    "Merge Short Cues",                filter_merge_short),
             ('reduce_lines',   "Reduce to 2 Lines",               filter_reduce_lines),
             ('fix_caps',       "Fix ALL CAPS",

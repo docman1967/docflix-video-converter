@@ -40,7 +40,7 @@ from .subtitle_filters import (
     filter_fix_ocr,
     filter_remove_offscreen_quotes,
     filter_remove_leading_dashes,
-    filter_remove_duplicates, filter_merge_short,
+    filter_remove_duplicates, filter_merge_duplicates, filter_merge_short,
     filter_reduce_lines,
     shift_timestamps, stretch_timestamps, two_point_sync,
     BUILTIN_AD_PATTERNS,
@@ -60,6 +60,63 @@ try:
     HAS_DND = True
 except ImportError:
     HAS_DND = False
+
+
+def find_allcaps_words(cues, tree, tag_caps, parent_widget):
+    """Scan cues for ALL CAPS words and highlight matching rows.
+
+    Excludes common short words (OK, I, A, etc.), words with periods
+    (U.S., U.K.), and single characters.  Highlights matching treeview
+    rows with the given tag and shows a summary dialog.
+    """
+    if not cues:
+        messagebox.showinfo("Find ALL CAPS", "No subtitle loaded.",
+                            parent=parent_widget)
+        return
+
+    # Words to exclude — common short caps, pronouns, prepositions
+    EXCLUDE = {'OK', 'I', 'A', 'TV', 'AM', 'PM', 'II', 'III',
+               'IV', 'VI', 'VII', 'VIII', 'IX', 'XI', 'XII',
+               'DJ', 'MC', 'ID'}
+    TAG_RE = re.compile(r'<[^>]+>')
+    # Match words: 2+ uppercase letters, no digits
+    CAPS_RE = re.compile(r'\b([A-Z]{2,})\b')
+
+    caps_indices = set()
+    caps_details = {}  # index -> set of caps words
+
+    for i, cue in enumerate(cues):
+        text = TAG_RE.sub('', cue['text'])
+        for m in CAPS_RE.finditer(text):
+            word = m.group(1)
+            if word in EXCLUDE:
+                continue
+            # Skip words adjacent to periods (acronyms like U.S., U.K.)
+            pos = m.start()
+            end = m.end()
+            if pos > 0 and text[pos - 1] == '.':
+                continue
+            if end < len(text) and text[end] == '.':
+                continue
+            caps_indices.add(i)
+            if i not in caps_details:
+                caps_details[i] = set()
+            caps_details[i].add(word)
+
+    # Highlight matching rows, clear previous caps highlights
+    for item in tree.get_children():
+        idx = int(item)
+        current_tags = tree.item(item, 'tags')
+        if idx in caps_indices:
+            tree.item(item, tags=(tag_caps,))
+        elif tag_caps in current_tags:
+            tree.item(item, tags=())
+
+    # Scroll to first match
+    if caps_indices:
+        first = min(caps_indices)
+        tree.see(str(first))
+        tree.selection_set(str(first))
 
 
 def open_standalone_subtitle_editor(app):
@@ -106,6 +163,7 @@ def open_standalone_subtitle_editor(app):
         TAG_LONG = 'long_line'
         TAG_SEARCH = 'search_match'
         TAG_SPELL = 'has_spelling'
+        TAG_CAPS = 'has_allcaps'
 
         # ── Spell check state ──
         spell_error_indices = set()
@@ -1741,6 +1799,8 @@ def open_standalone_subtitle_editor(app):
         filter_menu.add_separator()
         filter_menu.add_command(label="Remove Duplicates",
                                 command=lambda: apply_filter(filter_remove_duplicates, "Remove Duplicates"))
+        filter_menu.add_command(label="Merge Duplicates",
+                                command=lambda: apply_filter(filter_merge_duplicates, "Merge Duplicates"))
         filter_menu.add_command(label="Merge Short Cues",
                                 command=lambda: apply_filter(filter_merge_short, "Merge Short Cues"))
         filter_menu.add_command(label="Reduce to 2 Lines",
@@ -1995,6 +2055,9 @@ def open_standalone_subtitle_editor(app):
         filter_menu.add_command(label="Spell Check...",
                                 accelerator="F7",
                                 command=lambda: _show_spell_check())
+        filter_menu.add_command(label="Find ALL CAPS Words...",
+                                command=lambda: find_allcaps_words(
+                                    cues, tree, TAG_CAPS, editor))
         filter_menu.add_separator()
         filter_menu.add_command(label="Search/Replace List...",
                                 command=lambda: _show_saved_replacements())
@@ -3923,6 +3986,7 @@ def open_standalone_subtitle_editor(app):
         tree.tag_configure(TAG_LONG, background='#ffe0b2')
         tree.tag_configure(TAG_SEARCH, background='#c8e6c9')
         tree.tag_configure(TAG_SPELL, background='#f5c6cb')
+        tree.tag_configure(TAG_CAPS, background='#d7c4f2')    # lavender — ALL CAPS words
 
         # Mousewheel scrolling
         def on_tree_mousewheel(event):
@@ -4517,6 +4581,7 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
         TAG_LONG = 'long_line'
         TAG_SEARCH = 'search_match'
         TAG_SPELL = 'has_spelling'
+        TAG_CAPS = 'has_allcaps'
 
         # ── Spell check state ──
         spell_error_indices = set()
@@ -5130,6 +5195,8 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
         filter_menu.add_separator()
         filter_menu.add_command(label="Remove Duplicates",
                                 command=lambda: apply_filter(filter_remove_duplicates, "Remove Duplicates"))
+        filter_menu.add_command(label="Merge Duplicates",
+                                command=lambda: apply_filter(filter_merge_duplicates, "Merge Duplicates"))
         filter_menu.add_command(label="Merge Short Cues",
                                 command=lambda: apply_filter(filter_merge_short, "Merge Short Cues"))
         filter_menu.add_command(label="Reduce to 2 Lines",
@@ -5392,6 +5459,9 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
         filter_menu.add_command(label="Spell Check...",
                                 accelerator="F7",
                                 command=lambda: _show_spell_check())
+        filter_menu.add_command(label="Find ALL CAPS Words...",
+                                command=lambda: find_allcaps_words(
+                                    cues, tree, TAG_CAPS, editor))
         filter_menu.add_separator()
         filter_menu.add_command(label="Search/Replace List...",
                                 command=lambda: _show_saved_replacements())
@@ -6880,7 +6950,8 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
         tree.tag_configure(TAG_TAGS, background='#f8d7da')       # pink — has tags
         tree.tag_configure(TAG_LONG, background='#ffe0b2')       # orange — long lines
         tree.tag_configure(TAG_SEARCH, background='#c8e6c9')     # green — search match
-        tree.tag_configure(TAG_SPELL, background='#f5c6cb')      # red/salmon — spelling errors
+        tree.tag_configure(TAG_SPELL, background='#f5c6cb')
+        tree.tag_configure(TAG_CAPS, background='#d7c4f2')    # lavender — ALL CAPS words      # red/salmon — spelling errors
 
         # ── Mousewheel scrolling (consume events to prevent bleed-through) ──
         def on_tree_mousewheel(event):

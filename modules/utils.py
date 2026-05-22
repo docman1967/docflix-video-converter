@@ -488,18 +488,9 @@ def configure_dpi_scaling(root):
     before building any widgets.
     """
     try:
-        # Method 1: Xft.dpi from X resources (set by most DEs)
-        # e.g. "Xft.dpi:\t192" on a 2× scaled display
-        try:
-            xft_dpi = root.tk.call('winfo', 'fpixels', root, '1i')
-            # fpixels returns the current Tk DPI — if the system
-            # already set it correctly (e.g. Wayland with Tk 8.6.13+)
-            # we may already be fine.
-        except Exception:
-            xft_dpi = 96.0
-
-        # Try to read the real DPI from X resources
         real_dpi = None
+
+        # Method 1: Xft.dpi from X resources (set by most DEs)
         try:
             xrdb = subprocess.check_output(
                 ['xrdb', '-query'], stderr=subprocess.DEVNULL, timeout=2
@@ -528,6 +519,50 @@ def configure_dpi_scaling(root):
                     real_dpi = 96.0 * float(qt_scale)
                 except (ValueError, TypeError):
                     pass
+
+        # Method 4: GNOME gsettings text-scaling-factor
+        # Catches GNOME/Wayland setups where Xft.dpi is 96 and
+        # GDK_SCALE isn't set for non-GTK apps launched via "Open with".
+        if real_dpi is None:
+            try:
+                gs = subprocess.check_output(
+                    ['gsettings', 'get', 'org.gnome.desktop.interface',
+                     'text-scaling-factor'],
+                    stderr=subprocess.DEVNULL, timeout=2
+                ).decode().strip()
+                ts = float(gs)
+                if ts > 1.05:
+                    real_dpi = 96.0 * ts
+            except Exception:
+                pass
+
+        # Method 5: GNOME gsettings scaling-factor (integer scale, e.g. 2)
+        if real_dpi is None:
+            try:
+                gs = subprocess.check_output(
+                    ['gsettings', 'get', 'org.gnome.desktop.interface',
+                     'scaling-factor'],
+                    stderr=subprocess.DEVNULL, timeout=2
+                ).decode().strip()
+                # gsettings returns "uint32 2" — extract the number
+                import re as _re
+                m = _re.search(r'(\d+)', gs)
+                if m:
+                    sf = int(m.group(1))
+                    if sf >= 2:
+                        real_dpi = 96.0 * sf
+            except Exception:
+                pass
+
+        # Method 6: Tk's own fpixels detection (Wayland with Tk 8.6.13+)
+        # Some modern Wayland compositors inform Tk directly.
+        if real_dpi is None:
+            try:
+                fpx = float(root.tk.call('winfo', 'fpixels', root, '1i'))
+                if fpx > 100:
+                    real_dpi = fpx
+            except Exception:
+                pass
 
         if real_dpi and real_dpi > 96:
             # Tk scaling factor: 1.0 = 72 DPI (Tk's internal unit)

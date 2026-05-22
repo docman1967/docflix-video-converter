@@ -206,6 +206,346 @@ def _ensure_tesseract_deps(language='eng', progress_callback=None):
     return True, tess_lang
 
 
+def _ocr_overlay_approach(filepath, stream_index, language, tess_lang,
+                          tmpdir, progress_callback=None, frame_callback=None,
+                          cancel_event=None):
+    """OCR bitmap subtitles (DVB/VobSub) via ffmpeg overlay rendering.
+
+    Renders subtitles on a black canvas at the video's native resolution,
+    captures unique frames via scene-change detection, then OCRs each frame
+    with Tesseract. Slower than the native PGS parser but works for any
+    bitmap subtitle codec that ffmpeg can decode.
+    """
+    import pytesseract
+    from PIL import Image, ImageOps
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import time as _time
+
+    phase1_start = _time.monotonic()
+
+    # ── Get video resolution and duration ──
+    try:
+        probe_cmd = [
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_entries', 'stream=width,height,codec_type',
+            '-show_entries', 'format=duration',
+            filepath,
+        ]
+        probe_result = subprocess.run(probe_cmd, capture_output=True,
+                                      text=True, timeout=30)
+        probe_data = __import__('json').loads(probe_result.stdout)
+        vid_w, vid_h = 1920, 1080  # fallback
+        for s in probe_data.get('streams', []):
+            if s.get('codec_type') == 'video':
+                vid_w = s.get('width', vid_w)
+                vid_h = s.get('height', vid_h)
+                break
+        duration = float(probe_data.get('format', {}).get('duration', 0))
+    except Exception:
+        vid_w, vid_h, duration = 1920, 1080, 0
+
+    if progress_callback:
+        progress_callback(
+            f"Rendering subtitles via overlay ({vid_w}×{vid_h})...")
+
+    # ── Calculate subtitle stream's relative index within subtitle type ──
+    # ffmpeg overlay filter uses subtitle stream index relative to all
+    # subtitle streams (si=N), not absolute stream index.
+    try:
+        streams = get_all_streams(filepath)
+        sub_streams = [s for s in streams if s['codec_type'] == 'subtitle']
+        si = 0
+        for i, s in enumerate(sub_streams):
+            if s['index'] == stream_index:
+                si = i
+                break
+    except Exception:
+        si = 0
+
+    # ── Phase 1: Render subtitles on black canvas with scene detection ──
+    # showinfo filter outputs pts_time for each frame that passes through,
+    # giving us accurate subtitle timestamps even with scene-detection VFR.
+    frame_dir = os.path.join(tmpdir, 'frames')
+    os.makedirs(frame_dir, exist_ok=True)
+
+    dur_arg = max(duration, 60)
+    render_cmd = [
+        'ffmpeg', '-y', '-v', 'info',
+        '-f', 'lavfi', '-i',
+        f'color=c=black:s={vid_w}x{vid_h}:d={dur_arg}:r=10',
+        '-i', filepath,
+        '-filter_complex',
+        f'[0:v][1:s:{si}]overlay=x=(W-w)/2:y=(H-h)/2,'
+        f"select='gt(scene\\,0.01)',showinfo",
+        '-vsync', 'vfr',
+        os.path.join(frame_dir, 'frame_%06d.png'),
+    ]
+
+    # Run ffmpeg, parse showinfo for pts_time per frame
+    import re as _re
+    pts_re = _re.compile(r'pts_time:(\d+\.?\d*)')
+    frame_pts = []  # pts_time for each output frame (ordered)
+    try:
+        proc = subprocess.Popen(
+            render_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        # Read stderr line-by-line for showinfo + progress
+        stderr_buf = b''
+        while True:
+            if cancel_event and cancel_event.is_set():
+                proc.terminate()
+                proc.wait()
+                return []
+            chunk = proc.stderr.read(4096)
+            if not chunk:
+                break
+            stderr_buf += chunk
+            while b'\n' in stderr_buf:
+                line, stderr_buf = stderr_buf.split(b'\n', 1)
+                line_str = line.decode(errors='replace')
+                m = pts_re.search(line_str)
+                if m:
+                    frame_pts.append(float(m.group(1)))
+                    if progress_callback and len(frame_pts) % 50 == 0:
+                        progress_callback(
+                            f"Rendering... {len(frame_pts)} scene changes")
+            # Also check for process exit
+            if proc.poll() is not None:
+                # Read remaining
+                rest = proc.stderr.read()
+                if rest:
+                    stderr_buf += rest
+                    while b'\n' in stderr_buf:
+                        line, stderr_buf = stderr_buf.split(b'\n', 1)
+                        line_str = line.decode(errors='replace')
+                        m = pts_re.search(line_str)
+                        if m:
+                            frame_pts.append(float(m.group(1)))
+                    # Check last line without newline
+                    if stderr_buf.strip():
+                        m = pts_re.search(stderr_buf.decode(errors='replace'))
+                        if m:
+                            frame_pts.append(float(m.group(1)))
+                break
+
+        proc.wait()
+        if proc.returncode != 0:
+            if progress_callback:
+                progress_callback("Render failed (ffmpeg error)")
+            return []
+
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"Render error: {e}")
+        return []
+
+    # ── Collect rendered frames with timestamps from showinfo ──
+    import glob as _glob
+    frame_files = sorted(_glob.glob(os.path.join(frame_dir, 'frame_*.png')))
+    if not frame_files:
+        if progress_callback:
+            progress_callback("No frames rendered")
+        return []
+
+    if progress_callback:
+        progress_callback(
+            f"Rendered {len(frame_files)} frames — filtering blanks...")
+
+    # Build (frame_path, pts) pairs — showinfo frame N maps to file N+1
+    frame_with_pts = []
+    for i, fp in enumerate(frame_files):
+        pts = frame_pts[i] if i < len(frame_pts) else i * 0.1
+        frame_with_pts.append((fp, pts))
+
+    # ── Filter: keep only frames with actual subtitle content ──
+    content_frames = []  # list of (frame_path, pts)
+    for fp, pts in frame_with_pts:
+        if cancel_event and cancel_event.is_set():
+            return []
+        try:
+            img = Image.open(fp).convert('L')
+            if img.getextrema()[1] <= 10:
+                continue  # blank
+            import numpy as _np
+            arr = _np.array(img)
+            bright_pct = (arr >= 30).sum() / arr.size * 100
+            if bright_pct < 0.5:
+                continue  # ghost frame
+            content_frames.append((fp, pts))
+        except Exception:
+            continue
+
+    if not content_frames:
+        if progress_callback:
+            progress_callback("No subtitle content found in rendered frames")
+        return []
+
+    if progress_callback:
+        elapsed = _time.monotonic() - phase1_start
+        progress_callback(
+            f"Found {len(content_frames)} subtitle frames in {elapsed:.1f}s")
+
+    # ── Group consecutive scene-change frames into subtitle events ──
+    # Scene detection fires on both subtitle-on and subtitle-off
+    # transitions, plus within the same subtitle (minor pixel changes).
+    # Group frames that are close in time (< 1.0s gap) into one event.
+    events = []  # list of (frame_path, start_seconds, end_seconds)
+    groups = [[content_frames[0]]]
+    for i in range(1, len(content_frames)):
+        prev_pts = content_frames[i - 1][1]
+        curr_pts = content_frames[i][1]
+        if curr_pts - prev_pts < 1.0:
+            groups[-1].append(content_frames[i])
+        else:
+            groups.append([content_frames[i]])
+
+    for gi, group in enumerate(groups):
+        start_pts = group[0][1]
+        # End time: either next group's start, or last frame + default dur
+        if gi + 1 < len(groups):
+            end_pts = groups[gi + 1][0][1]
+        else:
+            end_pts = group[-1][1] + 3.0
+        dur = max(end_pts - start_pts, 0.5)
+        dur = min(dur, 15.0)
+        events.append((group[0][0], start_pts, start_pts + dur))
+
+    if progress_callback:
+        progress_callback(
+            f"Grouped into {len(events)} subtitle events — starting OCR...")
+
+    # ── Phase 2: Parallel OCR ──
+    total = len(events)
+    try:
+        max_workers = min(os.cpu_count() or 4, 8)
+    except Exception:
+        max_workers = 4
+
+    completed_count = [0]
+    completed_lock = threading.Lock()
+
+    def _ocr_frame(args):
+        """OCR a single subtitle frame image."""
+        idx, frame_path, start_s, end_s = args
+        try:
+            img = Image.open(frame_path).convert('L')
+
+            # Crop to content bounding box
+            bbox = img.getbbox()
+            if not bbox:
+                return (start_s, end_s - start_s, '', frame_path)
+            pad = 12
+            x1 = max(0, bbox[0] - pad)
+            y1 = max(0, bbox[1] - pad)
+            x2 = min(img.width, bbox[2] + pad)
+            y2 = min(img.height, bbox[3] + pad)
+            img = img.crop((x1, y1, x2, y2))
+
+            if _is_music_note_frame(img):
+                return (start_s, end_s - start_s, '♪', frame_path)
+
+            # Invert: subtitle text is light on black bg → make dark on white
+            corners = [img.getpixel((0, 0)),
+                       img.getpixel((img.width - 1, 0)),
+                       img.getpixel((0, img.height - 1)),
+                       img.getpixel((img.width - 1, img.height - 1))]
+            if sum(corners) / len(corners) < 128:
+                img = ImageOps.invert(img)
+
+            # Upscale small text
+            if img.height < 100:
+                scale = max(2, 100 // img.height)
+                img = img.resize((img.width * scale, img.height * scale),
+                                 Image.LANCZOS)
+
+            # White border padding
+            img = ImageOps.expand(img, border=20, fill=255)
+
+            # Save processed image for monitor preview
+            processed_path = os.path.join(
+                tmpdir, f'ocr_{idx + 1:05d}.png')
+            img.save(processed_path)
+
+            text = pytesseract.image_to_string(
+                img, lang=tess_lang,
+                config='--psm 6 --oem 3'
+            ).strip()
+            text = _fix_ocr_text(text)
+            return (start_s, end_s - start_s, text, processed_path)
+        except Exception:
+            return (start_s, end_s - start_s, '', frame_path)
+
+    all_args = [
+        (i, fp, start_s, end_s)
+        for i, (fp, start_s, end_s) in enumerate(events)
+    ]
+
+    raw_results = []
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        future_to_idx = {}
+        for args in all_args:
+            if cancel_event and cancel_event.is_set():
+                break
+            future = executor.submit(_ocr_frame, args)
+            future_to_idx[future] = args[0]
+
+        for future in as_completed(future_to_idx):
+            if cancel_event and cancel_event.is_set():
+                executor.shutdown(wait=False, cancel_futures=True)
+                if progress_callback:
+                    progress_callback(
+                        f"OCR cancelled — {len(raw_results)} frames completed")
+                break
+
+            with completed_lock:
+                completed_count[0] += 1
+            try:
+                result = future.result(timeout=30)
+                pts, dur, text, img_path = result
+                raw_results.append(result)
+
+                if frame_callback:
+                    frame_callback(
+                        completed_count[0] - 1, total,
+                        img_path, text or '[empty]',
+                        _seconds_to_srt_time(pts),
+                        _seconds_to_srt_time(pts + dur))
+
+                if progress_callback and completed_count[0] % 5 == 0:
+                    progress_callback(
+                        f"OCR: {completed_count[0]}/{total} "
+                        f"({completed_count[0] * 100 // total}%)")
+            except Exception:
+                pass
+    finally:
+        executor.shutdown(wait=False)
+
+    # ── Sort by timestamp and build cue list ──
+    raw_results.sort(key=lambda r: r[0])
+    cues = []
+    for pts, dur, text, img_path in raw_results:
+        if text:
+            cues.append({
+                'index': len(cues) + 1,
+                'start': _seconds_to_srt_time(pts),
+                'end': _seconds_to_srt_time(pts + dur),
+                'text': text,
+            })
+
+    with_text = sum(1 for r in raw_results if r[2])
+    empty = sum(1 for r in raw_results if not r[2])
+    if progress_callback:
+        elapsed = _time.monotonic() - phase1_start
+        progress_callback(
+            f"OCR complete: {len(cues)} cues extracted in {elapsed:.1f}s")
+        progress_callback(f"  Total OCR'd: {len(raw_results)}")
+        progress_callback(f"  With text: {with_text}")
+        progress_callback(f"  Empty/blank: {empty}")
+
+    return cues
+
+
 def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                         progress_callback=None, frame_callback=None,
                         cancel_event=None):
@@ -241,6 +581,24 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
     tmpdir = tempfile.mkdtemp(prefix='docflix_ocr_')
 
     try:
+        # ── Detect codec to choose extraction strategy ──
+        codec_name = 'hdmv_pgs_subtitle'  # default assumption
+        try:
+            streams = get_all_streams(filepath)
+            for s in streams:
+                if s.get('index') == stream_index:
+                    codec_name = s.get('codec_name', codec_name)
+                    break
+        except Exception:
+            pass
+
+        # DVB and VobSub subtitles can't be extracted to .sup (PGS-only).
+        # Use ffmpeg overlay rendering for these codecs.
+        if codec_name in ('dvb_subtitle', 'dvd_subtitle'):
+            return _ocr_overlay_approach(
+                filepath, stream_index, language, tess_lang,
+                tmpdir, progress_callback, frame_callback, cancel_event)
+
         # ── Phase 1: Extract PGS stream and decode bitmaps directly ──
         # Much faster than the ffmpeg overlay approach — only reads the
         # subtitle stream data instead of processing the entire movie.

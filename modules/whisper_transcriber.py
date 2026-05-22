@@ -751,14 +751,16 @@ def open_whisper_transcriber(app):
 
     def _on_backend_change(_event=None):
         backend = _backend_var.get()
-        if backend == "whisperx" and not is_backend_available("whisperx"):
+        if backend == "whisperx" and not _is_backend_cached("whisperx"):
             if _prompt_install_backend("whisperx"):
+                _backend_cache.pop("whisperx", None)  # clear cache after install
                 _log_write("WhisperX installed successfully.", "success")
                 _refresh_backend_hints()
             else:
                 _log_write("whisperx is not installed.", "warning")
-        elif backend == "faster-whisper" and not is_backend_available("faster-whisper"):
+        elif backend == "faster-whisper" and not _is_backend_cached("faster-whisper"):
             if _prompt_install_backend("faster-whisper"):
+                _backend_cache.pop("faster-whisper", None)
                 _log_write("faster-whisper installed successfully.", "success")
                 _refresh_backend_hints()
             else:
@@ -773,21 +775,89 @@ def open_whisper_transcriber(app):
     model_cb.grid(row=0, column=3, sticky='ew')
 
     # Backend availability hint (updated after installs)
-    _hint_var = tk.StringVar()
+    _hint_var = tk.StringVar(value="Checking backends...")
+
+    # Cache for backend availability — avoids repeated 5s imports
+    _backend_cache = {}  # backend_name -> bool
+
+    def _is_backend_cached(backend):
+        """Check backend availability with caching."""
+        if backend not in _backend_cache:
+            _backend_cache[backend] = is_backend_available(backend)
+        return _backend_cache[backend]
 
     def _refresh_backend_hints():
         hints = []
-        if is_backend_available("faster-whisper"):
+        if _is_backend_cached("faster-whisper"):
             hints.append("faster-whisper: available")
         else:
             hints.append("faster-whisper: not installed")
-        if is_backend_available("whisperx"):
+        if _is_backend_cached("whisperx"):
             hints.append("whisperx: available")
         else:
             hints.append("whisperx: not installed")
         _hint_var.set(" | ".join(hints))
 
-    _refresh_backend_hints()
+    def _refresh_backend_hints_async(on_complete=None):
+        """Check backends in a subprocess so the window isn't blocked by GIL.
+
+        Importing faster-whisper/whisperx pulls in CTranslate2, transformers,
+        and PyTorch (~5s). Even in a thread, these hold the GIL and freeze Tk.
+        A subprocess checks importability and detects GPU in one shot.
+        """
+        def _check():
+            # Check backend availability + detect GPU device in one subprocess
+            # to avoid importing heavy packages in the main process at startup.
+            check_script = (
+                "import json, sys\n"
+                "result = {}\n"
+                "for pkg in ['faster_whisper', 'whisperx']:\n"
+                "    try:\n"
+                "        __import__(pkg)\n"
+                "        result[pkg] = True\n"
+                "    except ImportError:\n"
+                "        result[pkg] = False\n"
+                "try:\n"
+                "    import ctranslate2\n"
+                "    result['device'] = 'cuda' if ctranslate2.get_cuda_device_count() > 0 else 'cpu'\n"
+                "except Exception:\n"
+                "    result['device'] = 'cpu'\n"
+                "print(json.dumps(result))\n"
+            )
+            try:
+                proc = subprocess.run(
+                    [sys.executable, '-c', check_script],
+                    capture_output=True, text=True, timeout=30)
+                if proc.returncode == 0 and proc.stdout.strip():
+                    import json
+                    data = json.loads(proc.stdout.strip())
+                    _backend_cache["faster-whisper"] = data.get("faster_whisper", False)
+                    _backend_cache["whisperx"] = data.get("whisperx", False)
+                    _backend_cache["_device"] = data.get("device", "cpu")
+                else:
+                    _backend_cache["faster-whisper"] = False
+                    _backend_cache["whisperx"] = False
+                    _backend_cache["_device"] = "cpu"
+            except Exception:
+                _backend_cache["faster-whisper"] = False
+                _backend_cache["whisperx"] = False
+                _backend_cache["_device"] = "cpu"
+            try:
+                def _update():
+                    _refresh_backend_hints()
+                    # Update device combobox if still set to "auto"
+                    detected = _backend_cache.get("_device", "cpu")
+                    if _device_var.get() == 'auto':
+                        _device_var.set(detected)
+                    # Update GPU/CPU badge in status bar
+                    _gpu_badge_var.set("GPU" if detected == "cuda" else "CPU only")
+                    if on_complete:
+                        on_complete()
+                win.after(0, _update)
+            except Exception:
+                pass
+        threading.Thread(target=_check, daemon=True).start()
+
     ttk.Label(settings_frame, textvariable=_hint_var, anchor='w').grid(
         row=row, column=0, columnspan=2, sticky='w', padx=4)
     row += 1
@@ -839,11 +909,10 @@ def open_whisper_transcriber(app):
     adv1.pack(fill='x', padx=4, pady=2)
 
     ttk.Label(adv1, text="Device:").pack(side='left', padx=(0, 4))
-    # Default device: auto-detect GPU on startup so the user sees
-    # "cuda" or "cpu" instead of a vague "auto"
-    _default_device = _wp.get('device', '')
-    if not _default_device or _default_device == 'auto':
-        _default_device = detect_device()
+    # Start with saved preference or "auto"; actual GPU detection
+    # runs in the background check thread to avoid blocking the UI
+    # for ~5s (importing ctranslate2 pulls in PyTorch/transformers).
+    _default_device = _wp.get('device', 'auto') or 'auto'
     _device_var = tk.StringVar(value=_default_device)
     dev_cb = ttk.Combobox(adv1, textvariable=_device_var,
                            values=DEVICES, state='readonly', width=7)
@@ -979,9 +1048,8 @@ def open_whisper_transcriber(app):
     ttk.Label(status_frame, textvariable=_status_var,
               anchor='w').grid(row=0, column=0, sticky='w')
 
-    gpu = detect_device()
-    badge_txt = "GPU" if gpu == "cuda" else "CPU only"
-    ttk.Label(status_frame, text=badge_txt, anchor='e').grid(
+    _gpu_badge_var = tk.StringVar(value="detecting...")
+    ttk.Label(status_frame, textvariable=_gpu_badge_var, anchor='e').grid(
         row=0, column=1, sticky='e')
 
     # ══════════════════════════════════════════════════════════════════
@@ -1167,8 +1235,8 @@ def open_whisper_transcriber(app):
 
     # ── dep check ──
     def _check_deps_on_start():
-        has_fw = is_backend_available("faster-whisper")
-        has_wx = is_backend_available("whisperx")
+        has_fw = _is_backend_cached("faster-whisper")
+        has_wx = _is_backend_cached("whisperx")
 
         if not has_fw and not has_wx:
             # Neither backend installed — ask user which to install
@@ -1318,9 +1386,9 @@ def open_whisper_transcriber(app):
 
         # Check that at least one backend is available
         backend = _backend_var.get()
-        if not is_backend_available(backend):
+        if not _is_backend_cached(backend):
             other = "whisperx" if backend == "faster-whisper" else "faster-whisper"
-            if is_backend_available(other):
+            if _is_backend_cached(other):
                 messagebox.showwarning(
                     "Backend Not Found",
                     f"'{backend}' is not installed.\n\n"
@@ -1357,7 +1425,8 @@ def open_whisper_transcriber(app):
         task_code = TASKS[_task_var.get()]
         device = _device_var.get()
         if not device or device == "auto":
-            device = detect_device()
+            # Use cached result from background check if available
+            device = _backend_cache.get("_device") or detect_device()
             _device_var.set(device)
 
         output_dir = _get_output_dir()
@@ -1521,7 +1590,10 @@ def open_whisper_transcriber(app):
     win.protocol('WM_DELETE_WINDOW', _close)
 
     # ── Initialize ──
-    _check_deps_on_start()
+    # Backend checks run in a background thread so the window appears
+    # instantly instead of blocking for ~5s on import faster_whisper.
+    # _check_deps_on_start runs on the main thread after the check completes.
+    _refresh_backend_hints_async(on_complete=_check_deps_on_start)
     _poll_queue()
 
     win.update_idletasks()
