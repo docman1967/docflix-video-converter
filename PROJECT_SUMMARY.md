@@ -1,7 +1,7 @@
 # Docflix Media Suite — Project Summary
 
 **Last Updated:** 2026-05-22 (rev 82)  
-**Version:** 3.4.0  
+**Version:** 3.4.1  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/`  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -651,6 +651,9 @@ git push
 ---
 
 ## Change Log
+
+### 2026-05-23 (Bug Fix — CC Extraction Blocking Encoding)
+405. **CC extraction no longer runs automatically during encoding** — Fixed the main converter automatically extracting closed captions to SRT before encoding any file with detected CC data, causing a long blocking delay (the lavfi `movie[subcc]` filter decodes the entire video). Root cause: entry #284 extended CC detection to all video formats (not just `.ts` files), but `extract_cc` was still auto-set to `True` whenever CC was detected. This meant any MKV/MP4 with embedded CC data triggered a full-file SRT extraction as a pre-encoding step. Fixed by changing `extract_cc` to default to `False` in all four file-loading paths (`_add_file()`, `_add_files_threaded()` small batch, `_add_files_threaded()` background worker, `refresh_files()`). Also changed the converter engine's `settings.get('extract_cc', True)` default from `True` to `False` in both `video_converter.py` and `modules/converter.py`. CC **passthrough** (preserving CC in the output video bitstream via A53 flags) still happens automatically — only the slow SRT extraction is now opt-in via the subtitle dialog. Users who want a separate SRT track from CC can enable it per-file through the internal subtitles dialog (double-click → CC track → check "extract").
 
 ### 2026-05-22 (v3.4.0 — Rescale, DVB OCR, Whisper Startup, Merge Duplicates, ALL CAPS, Aliases, HiDPI/Wayland Fixes)
 404. **Renamer: subtitle files moved from Subs/ subfolders to video directory** — Subtitles in `Subs/` or per-episode subfolders (e.g. `Season 01/Subs/Show.S01E01.Episode/file.srt`) are now moved alongside their matching video file during rename, not left in the subfolder. Three changes: (1) **Folder template**: the climbing loop in `_do_rename()` now detects per-episode subtitle subfolders (folders containing `SxxExx` in name) and climbs past them, along with `Subs/` and `Season` folders, up to 4 levels. (2) **Flat template**: when a subtitle is inside a `Subs/` or per-episode subfolder, the destination directory is climbed up to the video's directory instead of renaming in place. (3) **Cleanup**: empty per-episode subfolders are now removed bottom-up before their parent `Subs/` folder, so the entire `Subs/` tree is cleaned up after files are moved out.

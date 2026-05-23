@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.4.0"
+APP_VERSION = "3.4.1"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -3661,7 +3661,7 @@ class VideoConverter:
 
             if has_cc and strip_cc:
                 self.log("Stripping closed captions (CC data will not be preserved)", 'INFO')
-            elif has_cc and settings.get('extract_cc', True):
+            elif has_cc and settings.get('extract_cc', False):
                 import tempfile
                 cc_tmp = tempfile.NamedTemporaryFile(suffix='_cc.srt', delete=False, dir=os.path.dirname(output_path))
                 cc_tmp.close()
@@ -7301,7 +7301,7 @@ class VideoConverterApp:
             'status': 'Pending',
             'external_subs': [],
             'has_closed_captions': has_cc,
-            'extract_cc': has_cc,  # auto-extract by default if CC detected
+            'extract_cc': False,  # CC passthrough is automatic; extraction to SRT is opt-in via subtitle dialog
         }
         self.files.append(file_info)
         prefix = ''
@@ -7404,7 +7404,7 @@ class VideoConverterApp:
                 file_info['est_size'] = estimate_output_size(file_info['path'], settings)
                 has_cc = detect_closed_captions(file_info['path'])
                 file_info['has_closed_captions'] = has_cc
-                file_info['extract_cc'] = has_cc
+                # extract_cc stays False — CC passthrough is automatic; SRT extraction is opt-in
                 # Update tree row
                 try:
                     idx = self.files.index(file_info)
@@ -7436,7 +7436,7 @@ class VideoConverterApp:
                 file_info['est_size'] = estimate_output_size(file_info['path'], settings)
                 has_cc = detect_closed_captions(file_info['path'])
                 file_info['has_closed_captions'] = has_cc
-                file_info['extract_cc'] = has_cc
+                # extract_cc stays False — CC passthrough is automatic; SRT extraction is opt-in
 
                 # Progress update
                 elapsed = _time.monotonic() - start
@@ -8615,7 +8615,7 @@ class VideoConverterApp:
                 # Detect closed captions
                 has_cc = detect_closed_captions(file_info['path'])
                 file_info['has_closed_captions'] = has_cc
-                file_info['extract_cc'] = has_cc
+                # extract_cc stays False — CC passthrough is automatic; SRT extraction is opt-in
 
                 # Progress + tree row update on the main thread
                 elapsed = _time.monotonic() - start

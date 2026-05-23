@@ -153,7 +153,7 @@ class VideoConverter:
 
             if has_cc and strip_cc:
                 self.log("Stripping closed captions (CC data will not be preserved)", 'INFO')
-            elif has_cc and settings.get('extract_cc', True):
+            elif has_cc and settings.get('extract_cc', False):
                 import tempfile
                 cc_tmp = tempfile.NamedTemporaryFile(suffix='_cc.srt', delete=False, dir=os.path.dirname(output_path))
                 cc_tmp.close()
