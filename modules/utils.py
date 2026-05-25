@@ -251,6 +251,16 @@ def _run_zenity(cmd, timeout=120):
         return 1, ''
 
 
+def _ensure_dir(path):
+    """If *path* is a file, return its parent directory; otherwise return
+    it unchanged.  Used to sanitize folder-selection dialogs that allow
+    the user to select files (e.g. tkinter askdirectory on some GTK
+    backends)."""
+    if path and os.path.isfile(path):
+        return os.path.dirname(path)
+    return path
+
+
 def ask_directory(initialdir=None, title="Select Folder", parent=None,
                   multiple=False):
     """Open a folder-selection dialog.
@@ -276,8 +286,10 @@ def ask_directory(initialdir=None, title="Select Folder", parent=None,
         rc, stdout = _run_zenity(cmd)
         if rc == 0 and stdout.strip():
             if multiple:
-                return [p for p in stdout.strip().split('\n') if p]
-            return stdout.strip()
+                paths = [p for p in stdout.strip().split('\n') if p]
+                return list(dict.fromkeys(
+                    _ensure_dir(p) for p in paths))
+            return _ensure_dir(stdout.strip())
         return [] if multiple else ''
     kwargs = {'initialdir': initialdir, 'title': title}
     if parent:
@@ -290,13 +302,14 @@ def ask_directory(initialdir=None, title="Select Folder", parent=None,
             path = filedialog.askdirectory(**kwargs)
             if not path:
                 break
+            path = _ensure_dir(path)
             folders.append(path)
             kwargs['initialdir'] = os.path.dirname(path)
             kwargs['title'] = (f"Select another folder "
                                f"({len(folders)} selected) — "
                                f"Cancel to finish")
         return folders
-    return filedialog.askdirectory(**kwargs)
+    return _ensure_dir(filedialog.askdirectory(**kwargs))
 
 
 def ask_open_files(initialdir=None, title="Select Files", parent=None,

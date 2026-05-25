@@ -1,7 +1,7 @@
 # Docflix Media Suite — Project Summary
 
-**Last Updated:** 2026-05-22 (rev 82)  
-**Version:** 3.4.1  
+**Last Updated:** 2026-05-25 (rev 83)  
+**Version:** 3.4.2  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/`  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -652,7 +652,9 @@ git push
 
 ## Change Log
 
-### 2026-05-23 (Bug Fix — CC Extraction Blocking Encoding)
+### 2026-05-23 (Bug Fixes — CC Extraction, Renamer Multi-Episode Double-E)
+406. **Renamer: fix double-E in multi-episode filenames** — Fixed multi-episode files producing `S28EE12-E13` instead of `S28E12-E13`. Root cause: the multi-episode `ep_tag` in `_build_new_name()` included a leading `E` (e.g. `E12-E13`), but the template already has `E{episode}`, so the `E` was doubled. Fixed by omitting the leading `E` from `ep_tag` — contiguous ranges now produce `12-E13` and non-contiguous lists produce `01E03E05`, which combine correctly with the template's `E` prefix.
+
 405. **CC extraction no longer runs automatically during encoding** — Fixed the main converter automatically extracting closed captions to SRT before encoding any file with detected CC data, causing a long blocking delay (the lavfi `movie[subcc]` filter decodes the entire video). Root cause: entry #284 extended CC detection to all video formats (not just `.ts` files), but `extract_cc` was still auto-set to `True` whenever CC was detected. This meant any MKV/MP4 with embedded CC data triggered a full-file SRT extraction as a pre-encoding step. Fixed by changing `extract_cc` to default to `False` in all four file-loading paths (`_add_file()`, `_add_files_threaded()` small batch, `_add_files_threaded()` background worker, `refresh_files()`). Also changed the converter engine's `settings.get('extract_cc', True)` default from `True` to `False` in both `video_converter.py` and `modules/converter.py`. CC **passthrough** (preserving CC in the output video bitstream via A53 flags) still happens automatically — only the slow SRT extraction is now opt-in via the subtitle dialog. Users who want a separate SRT track from CC can enable it per-file through the internal subtitles dialog (double-click → CC track → check "extract").
 
 ### 2026-05-22 (v3.4.0 — Rescale, DVB OCR, Whisper Startup, Merge Duplicates, ALL CAPS, Aliases, HiDPI/Wayland Fixes)
@@ -1373,3 +1375,11 @@ git push
 
 ### 2026-05-17
 1. **DnD curly-brace path parsing fix** — The drag-and-drop path parsing blocks used `raw.find('}', i)` which matched the first `}` instead of the matching closing brace. This broke filenames containing curly braces (e.g. `{tmdb-3573}`). Replaced with a brace-depth counting loop that finds the correct matching `}`. Fixed in 4 locations: `modules/subtitle_editor.py` (lines ~1133, ~2666, ~5845) and `video_converter.py` (line ~6815). `tv_renamer.py` was already fixed.
+
+### 2026-05-25
+1. **TV Renamer scene-release per-episode folder fix** — `_get_show_folder()` now recognizes scene-release per-episode subfolder names (e.g. `Lethal.Weapon.S01E01.Pilot.1080p.AMZN.WEBRip.DD5.1.x264-NTb-Obfuscated`) and climbs past them to find the true show folder. Previously, only season-pack folders (`SXX` without `EXX`) were recognized by `_SCENE_SEASON_RE`. Per-episode folders containing `SxxExx` plus quality/codec tags were treated as the show folder itself, causing `_auto_load_shows()` to create a separate search query for every episode when files were organized in individual scene-release folders under a common show folder. Added `_SCENE_EPISODE_RE` regex and included it in the `_get_show_folder()` climbing logic.
+2. **Subtitle Editor auto-select next cue after delete** — After deleting one or more cues with the Delete key, the next cue at the same position is now automatically selected and focused. Previously, deletion cleared the selection, requiring the user to click the next cue with the mouse before pressing Delete again. Now the user can rapidly delete multiple cues by repeatedly pressing Delete. If the deleted cue was at the end of the list, the new last cue is selected instead. Applied to both the internal and standalone subtitle editor `delete_selected()` functions.
+3. **Subtitle Editor Delete button in toolbar** — Added a 🗑 Delete button to the status bar alongside Save, Export, and Preview in both the standalone and internal subtitle editors. Calls the same `delete_selected()` function as the Delete key and right-click menu.
+4. **Renamer Multiple Matches dialog missing file path for movies** — The Multiple Matches picker dialog now shows the source folder path and filename for movie files. Previously, the file path header only appeared for TV shows because the matching logic used exact string comparison (`==`) between the cleaned folder/filename and the query. For movies, the query often includes a year appended by `_auto_load_shows()` (e.g., `"emma 2020"`) while `_clean_show_name()` strips years from the folder name (e.g., `"emma"`), causing the exact match to fail. Fixed by adding substring matching (`folder_cleaned in query_norm`) alongside the exact match, so `"emma"` is found within `"emma 2020"`.
+5. **Folder dialog file selection safety** — `ask_directory()` now validates results from both zenity and tkinter's `askdirectory()`. If the user selects a file instead of a folder (possible on systems without zenity where the tkinter fallback dialog doesn't enforce folder-only mode), the parent directory is returned instead. Added `_ensure_dir()` helper in `modules/utils.py` that checks `os.path.isfile()` and returns the parent directory for files. Applied to all code paths: zenity single/multi-select, tkinter single, and tkinter multi-select loop. Same fix applied to the monolith's `_ask_directory()` in `video_converter.py`.
+6. **Renamer Re-match skips auto-disambiguation** — When the user right-clicks and chooses Re-match, the picker dialog now always appears even when the show could be auto-selected by embedded ID or year. Previously, `_load_show_by_name()` with `force_prompt=True` still ran embedded-ID auto-disambiguation (line 2579) and year-based auto-disambiguation (line 2615) before checking `force_prompt`, so shows with `{tmdb-XXXX}` tags or unambiguous years were silently auto-matched without showing the picker. Fixed by gating both auto-disambiguation blocks on `not force_prompt`. The picker also now includes all API results (not just close matches) when triggered from Re-match, matching the existing behavior for the single-match `force_prompt` path.

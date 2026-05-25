@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.4.1"
+APP_VERSION = "3.4.2"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -8390,6 +8390,9 @@ class VideoConverterApp:
 
         Tries zenity first (GTK dialog with proper single-click + Open
         button behaviour), then falls back to tkinter's askdirectory.
+        Results are validated — if the user selects a file instead of a
+        folder (possible on some GTK backends that don't enforce
+        folder-only mode), the parent directory is returned.
         """
         if initialdir:
             initialdir = str(initialdir)
@@ -8410,11 +8413,17 @@ class VideoConverterApp:
                     env=env
                 )
                 if result.returncode == 0 and result.stdout.strip():
-                    return result.stdout.strip()
+                    path = result.stdout.strip()
+                    if os.path.isfile(path):
+                        path = os.path.dirname(path)
+                    return path
                 return ''            # user cancelled
             except Exception:
                 pass                 # fall through to tkinter
-        return filedialog.askdirectory(initialdir=initialdir, title=title)
+        path = filedialog.askdirectory(initialdir=initialdir, title=title)
+        if path and os.path.isfile(path):
+            path = os.path.dirname(path)
+        return path
 
     def change_output_folder(self):
         """Set a custom output directory."""

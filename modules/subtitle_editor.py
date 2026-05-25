@@ -2493,10 +2493,19 @@ def open_standalone_subtitle_editor(app):
             selected = tree.selection()
             if not selected:
                 return
+            # Remember position for auto-select after delete
+            next_idx = min(int(s) for s in selected)
             push_undo()
             indices_to_remove = set(int(s) for s in selected)
             cues = [c for i, c in enumerate(cues) if i not in indices_to_remove]
             refresh_tree(cues)
+            # Auto-select the next cue so the user can keep deleting
+            if cues:
+                select_idx = min(next_idx, len(cues) - 1)
+                iid = str(select_idx)
+                tree.selection_set(iid)
+                tree.focus(iid)
+                tree.see(iid)
 
         def split_selected():
             nonlocal cues
@@ -4321,6 +4330,7 @@ def open_standalone_subtitle_editor(app):
 
         ttk.Button(status_frame, text="💾 Save", command=do_save_file).pack(side='right', padx=(4, 0))
         ttk.Button(status_frame, text="📤 Export SRT", command=do_export).pack(side='right', padx=4)
+        ttk.Button(status_frame, text="🗑 Delete", command=delete_selected).pack(side='right', padx=4)
 
         # ── Refresh tree function ──
         def refresh_tree(new_cues, search_indices=None):
@@ -4713,10 +4723,19 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
             selected = tree.selection()
             if not selected:
                 return
+            # Remember position for auto-select after delete
+            next_idx = min(int(s) for s in selected)
             push_undo()
             indices_to_remove = set(int(s) for s in selected)
             cues = [c for i, c in enumerate(cues) if i not in indices_to_remove]
             refresh_tree(cues)
+            # Auto-select the next cue so the user can keep deleting
+            if cues:
+                select_idx = min(next_idx, len(cues) - 1)
+                iid = str(select_idx)
+                tree.selection_set(iid)
+                tree.focus(iid)
+                tree.see(iid)
 
         def split_selected():
             """Split the selected cue into two at the midpoint."""
@@ -7472,6 +7491,7 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
                        command=do_save_to_video).pack(side='right', padx=(4, 0))
         ttk.Button(status_frame, text="Cancel", command=editor.destroy).pack(side='right')
         ttk.Button(status_frame, text="📤 Export SRT", command=do_export).pack(side='right', padx=4)
+        ttk.Button(status_frame, text="🗑 Delete", command=delete_selected).pack(side='right', padx=4)
         ttk.Button(status_frame, text="▶ Preview",
                    command=preview_at_cue).pack(side='right', padx=4)
 

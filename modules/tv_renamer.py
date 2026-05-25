@@ -740,18 +740,27 @@ def open_tv_renamer(app):
             r'(?!E\d)'               # NOT followed by EXX (episode)
             r'.*(?:720|1080|2160|480|WEB|BluRay|HDTV|REMUX|x26[45]|h\.?26[45]|HEVC|complete)',
             re.IGNORECASE)
+        # Scene-release per-episode folders like
+        # "Lethal.Weapon.S01E01.Pilot.1080p.AMZN.WEBRip.DD5.1.x264-NTb-Obfuscated"
+        # — contains SxxExx plus quality/codec tags
+        _SCENE_EPISODE_RE = re.compile(
+            r'[.\s]S\d{1,2}E\d{1,3}[.\s]'  # SxxExx surrounded by separators
+            r'.*(?:720|1080|2160|480|WEB|BluRay|HDTV|REMUX|x26[45]|h\.?26[45]|HEVC)',
+            re.IGNORECASE)
         # Subtitle subfolder names to skip (like Season folders)
         _SUBS_FOLDER_RE = re.compile(
             r'^(?:subs?|subtitles?|srt|ass)$', re.IGNORECASE)
 
         def _get_show_folder(filepath):
             """Return the show-level parent folder name for a file path,
-            skipping past Season, subtitle, and scene-release season pack
-            subfolders.  Handles nested cases like
-            .../Show/Season 01/subs/S01E01.srt and scene packs like
-            .../Show/Show.S01.1080p.WEBRip.x265/S01E01.mkv
-            by climbing until the folder is neither a Season nor a
-            subs folder (up to 3 levels to avoid infinite loops)."""
+            skipping past Season, subtitle, scene-release season pack,
+            and scene-release per-episode subfolders.  Handles nested
+            cases like .../Show/Season 01/subs/S01E01.srt,
+            scene packs like .../Show/Show.S01.1080p.WEBRip.x265/S01E01.mkv,
+            and per-episode folders like
+            .../Show/Show.S01E01.Title.1080p.WEBRip.x264-GRP/S01E01.mkv
+            by climbing until the folder is neither a Season, subs, nor
+            scene-release folder (up to 3 levels to avoid infinite loops)."""
             d = os.path.dirname(filepath)
             for _ in range(3):
                 name = os.path.basename(d)
@@ -759,7 +768,8 @@ def open_tv_renamer(app):
                     break
                 if (_SEASON_FOLDER_RE.match(name)
                         or _SUBS_FOLDER_RE.match(name)
-                        or _SCENE_SEASON_RE.search(name)):
+                        or _SCENE_SEASON_RE.search(name)
+                        or _SCENE_EPISODE_RE.search(name)):
                     d = os.path.dirname(d)
                 else:
                     return name
@@ -1414,12 +1424,13 @@ def open_tv_renamer(app):
 
             # ── Multi-episode support ──
             if isinstance(e, list) and len(e) > 1:
-                # Build combined episode tag: E01-E02 or E01E02E03
+                # Build combined episode tag without leading E (template already has E{episode})
+                # e.g. "01-E02" so template "S{season}E{episode}" → "S01E01-E02"
                 first_ep, last_ep = e[0], e[-1]
                 if e == list(range(first_ep, last_ep + 1)):
-                    ep_tag = f"E{str(first_ep).zfill(2)}-E{str(last_ep).zfill(2)}"
+                    ep_tag = f"{str(first_ep).zfill(2)}-E{str(last_ep).zfill(2)}"
                 else:
-                    ep_tag = ''.join(f"E{str(x).zfill(2)}" for x in e)
+                    ep_tag = str(e[0]).zfill(2) + ''.join(f"E{str(x).zfill(2)}" for x in e[1:])
                 # Collect titles from each episode
                 titles = []
                 first_ep_id = ''
@@ -1871,7 +1882,10 @@ def open_tv_renamer(app):
                         os.path.basename(item['path']))[0]
                     fname_cleaned = _normalize_for_match(
                         _clean_show_name(fname))
-                    if folder_cleaned == query_norm or fname_cleaned == query_norm:
+                    if (folder_cleaned == query_norm
+                            or fname_cleaned == query_norm
+                            or (folder_cleaned and folder_cleaned in query_norm)
+                            or (fname_cleaned and fname_cleaned in query_norm)):
                         if not source_folder:
                             # Show the full parent directory path (up to
                             # the show folder level) for clarity
@@ -2560,9 +2574,11 @@ def open_tv_renamer(app):
             if len(close_matches) > 1:
                 # Try embedded-ID auto-disambiguation first — if the
                 # folder/filename contains {tmdb-XXXX} or {tvdb-XXXX},
-                # match directly against search results by provider ID
+                # match directly against search results by provider ID.
+                # Skip auto-disambiguation when force_prompt is True
+                # (Re-match mode) — the user explicitly wants to pick.
                 best = None
-                if embedded_id:
+                if embedded_id and not force_prompt:
                     emb_prov, emb_id = embedded_id
                     for r in close_matches:
                         r_id = str(r.get('id', ''))
@@ -2598,7 +2614,8 @@ def open_tv_renamer(app):
                 # current query — otherwise files for a different movie
                 # with the same base name can supply the wrong year
                 # (e.g. "Emma 1996" supplying year 1996 for "Emma 2020").
-                if best is None:
+                # Skip when force_prompt is True (Re-match mode).
+                if best is None and not force_prompt:
                     context_year = ''
                     for item in _file_items:
                         raw_fname = os.path.splitext(
@@ -2654,11 +2671,22 @@ def open_tv_renamer(app):
                             _log(f"  Auto-selected \"{best.get('name', '')}\" "
                                  f"by year ({context_year})")
                 if best is None:
-                    # No ID or year match — ask the user to pick
-                    _log(f"  Found {len(close_matches)} matches for "
+                    # No ID or year match — ask the user to pick.
+                    # In Re-match mode, include ALL results (not just
+                    # close matches) so the user has the full list.
+                    pick_list = list(close_matches)
+                    if force_prompt and len(results) > len(close_matches):
+                        seen = {(r.get('_media_type', ''), r.get('id', ''))
+                                for r in close_matches}
+                        for r in results[:15]:
+                            rid = (r.get('_media_type', ''), r.get('id', ''))
+                            if rid not in seen:
+                                pick_list.append(r)
+                                seen.add(rid)
+                    _log(f"  Found {len(pick_list)} matches for "
                          f"\"{query}\" — asking...")
                     win.update_idletasks()
-                    best = _ask_user_pick_show(query, close_matches)
+                    best = _ask_user_pick_show(query, pick_list)
                     if best == '__filename_fallback__':
                         return _fallback_from_filename(query)
                     if not best:
