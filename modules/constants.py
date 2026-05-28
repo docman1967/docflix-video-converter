@@ -6,7 +6,7 @@ All shared constants, codec maps, extension sets, and GPU backend definitions.
 
 # ── App identity ──
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.4.2"
+APP_VERSION = "3.5.1"
 
 # ── Defaults ──
 DEFAULT_BITRATE = "2M"
@@ -131,6 +131,7 @@ VIDEO_CODEC_MAP = {
                         'fast', 'medium', 'slow', 'slower', 'veryslow'),
         'cpu_preset_default': 'ultrafast',
         'crf_min': 0, 'crf_max': 51, 'crf_default': 23,
+        'crf_presets': (18, 20, 23, 28, 30, 32),
         'crf_flag': '-crf',
         'short_name': 'H265',
     },
@@ -140,6 +141,7 @@ VIDEO_CODEC_MAP = {
                         'fast', 'medium', 'slow', 'slower', 'veryslow'),
         'cpu_preset_default': 'ultrafast',
         'crf_min': 0, 'crf_max': 51, 'crf_default': 23,
+        'crf_presets': (18, 20, 23, 28, 30, 32),
         'crf_flag': '-crf',
         'short_name': 'H264',
     },
@@ -147,8 +149,9 @@ VIDEO_CODEC_MAP = {
         'cpu_encoder': 'libsvtav1',
         'cpu_presets': ('0', '1', '2', '3', '4', '5', '6', '7',
                         '8', '9', '10', '11', '12', '13'),
-        'cpu_preset_default': '8',
-        'crf_min': 0, 'crf_max': 63, 'crf_default': 35,
+        'cpu_preset_default': '6',
+        'crf_min': 0, 'crf_max': 63, 'crf_default': 30,
+        'crf_presets': (24, 27, 30, 35, 40, 45),
         'crf_flag': '-crf',
         'short_name': 'AV1',
     },
@@ -157,6 +160,7 @@ VIDEO_CODEC_MAP = {
         'cpu_presets': ('0', '1', '2', '3', '4', '5'),
         'cpu_preset_default': '2',
         'crf_min': 0, 'crf_max': 63, 'crf_default': 33,
+        'crf_presets': (25, 30, 33, 38, 45, 50),
         'crf_flag': '-crf',
         'short_name': 'VP9',
     },
@@ -165,6 +169,7 @@ VIDEO_CODEC_MAP = {
         'cpu_presets': (),
         'cpu_preset_default': None,
         'crf_min': 1, 'crf_max': 31, 'crf_default': 4,
+        'crf_presets': (2, 4, 8, 15, 20, 25),
         'crf_flag': '-q:v',
         'short_name': 'MPEG4',
     },
@@ -174,6 +179,7 @@ VIDEO_CODEC_MAP = {
                         '4444xq'),
         'cpu_preset_default': 'hq',
         'crf_min': 0, 'crf_max': 64, 'crf_default': 10,
+        'crf_presets': (5, 10, 15, 20, 30, 40),
         'crf_flag': '-q:v',
         'short_name': 'ProRes',
     },
@@ -182,6 +188,7 @@ VIDEO_CODEC_MAP = {
         'cpu_presets': (),
         'cpu_preset_default': None,
         'crf_min': 0, 'crf_max': 51, 'crf_default': 23,
+        'crf_presets': (),
         'crf_flag': None,
         'short_name': 'copy',
     },

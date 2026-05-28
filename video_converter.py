@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.4.2"
+APP_VERSION = "3.5.1"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -163,6 +163,7 @@ VIDEO_CODEC_MAP = {
                         'medium', 'slow', 'slower', 'veryslow'),
         'cpu_preset_default': 'ultrafast',
         'crf_min': 0, 'crf_max': 51, 'crf_default': 23,
+        'crf_presets': (18, 20, 23, 28, 30, 32),
         'crf_flag': '-crf',
         'short_name': 'H265',
     },
@@ -172,14 +173,16 @@ VIDEO_CODEC_MAP = {
                         'medium', 'slow', 'slower', 'veryslow'),
         'cpu_preset_default': 'ultrafast',
         'crf_min': 0, 'crf_max': 51, 'crf_default': 23,
+        'crf_presets': (18, 20, 23, 28, 30, 32),
         'crf_flag': '-crf',
         'short_name': 'H264',
     },
     'AV1': {
         'cpu_encoder': 'libsvtav1',
         'cpu_presets': ('0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13'),
-        'cpu_preset_default': '8',
-        'crf_min': 0, 'crf_max': 63, 'crf_default': 35,
+        'cpu_preset_default': '6',
+        'crf_min': 0, 'crf_max': 63, 'crf_default': 30,
+        'crf_presets': (24, 27, 30, 35, 40, 45),
         'crf_flag': '-crf',
         'short_name': 'AV1',
     },
@@ -188,6 +191,7 @@ VIDEO_CODEC_MAP = {
         'cpu_presets': ('0', '1', '2', '3', '4', '5'),
         'cpu_preset_default': '2',
         'crf_min': 0, 'crf_max': 63, 'crf_default': 33,
+        'crf_presets': (25, 30, 33, 38, 45, 50),
         'crf_flag': '-crf',
         'short_name': 'VP9',
     },
@@ -196,6 +200,7 @@ VIDEO_CODEC_MAP = {
         'cpu_presets': (),
         'cpu_preset_default': None,
         'crf_min': 1, 'crf_max': 31, 'crf_default': 4,
+        'crf_presets': (2, 4, 8, 15, 20, 25),
         'crf_flag': '-q:v',
         'short_name': 'MPEG4',
     },
@@ -204,6 +209,7 @@ VIDEO_CODEC_MAP = {
         'cpu_presets': ('proxy', 'lt', 'standard', 'hq', '4444', '4444xq'),
         'cpu_preset_default': 'hq',
         'crf_min': 0, 'crf_max': 64, 'crf_default': 10,
+        'crf_presets': (5, 10, 15, 20, 30, 40),
         'crf_flag': '-q:v',
         'short_name': 'ProRes',
     },
@@ -212,6 +218,7 @@ VIDEO_CODEC_MAP = {
         'cpu_presets': (),
         'cpu_preset_default': None,
         'crf_min': 0, 'crf_max': 51, 'crf_default': 23,
+        'crf_presets': (),
         'crf_flag': None,
         'short_name': 'copy',
     },
@@ -3214,7 +3221,7 @@ def estimate_output_size(filepath, settings):
                 elif short == 'H265':
                     video_bps = 6_000_000 * (0.85 ** (crf - 23))
                 elif short == 'AV1':
-                    video_bps = 4_000_000 * (0.85 ** (crf - 35))
+                    video_bps = 4_000_000 * (0.85 ** (crf - 30))
                 elif short == 'MPEG4':
                     video_bps = 10_000_000 * (0.80 ** (crf - 4))
                 elif short == 'ProRes':
@@ -3222,6 +3229,33 @@ def estimate_output_size(filepath, settings):
                     video_bps = 100_000_000 * (0.90 ** (crf - 10))
                 else:  # VP9
                     video_bps = 5_000_000 * (0.85 ** (crf - 33))
+
+                # ── Preset compression factor ──
+                # Slower presets achieve better compression at the same CRF.
+                # This is a rough multiplier — real savings vary by content.
+                preset = settings.get('preset', '')
+                if short in ('H265', 'H264') and encoder == 'cpu':
+                    _PRESET_FACTOR = {
+                        'ultrafast': 1.40, 'superfast': 1.25, 'veryfast': 1.15,
+                        'faster': 1.08, 'fast': 1.03, 'medium': 1.0,
+                        'slow': 0.93, 'slower': 0.88, 'veryslow': 0.85,
+                    }
+                    video_bps *= _PRESET_FACTOR.get(preset, 1.0)
+                elif short == 'AV1' and encoder == 'cpu':
+                    # SVT-AV1 presets 0-13: preset 6 ≈ baseline (1.0)
+                    try:
+                        p = int(preset)
+                        # Each step faster ≈ +8% size, each step slower ≈ -6% size
+                        video_bps *= 1.08 ** (p - 6)
+                    except (ValueError, TypeError):
+                        pass
+                elif encoder != 'cpu':
+                    # GPU presets: rough adjustment
+                    _GPU_PRESET_FACTOR = {
+                        'p1': 1.30, 'p2': 1.20, 'p3': 1.10, 'p4': 1.0,
+                        'p5': 0.93, 'p6': 0.88, 'p7': 0.85,
+                    }
+                    video_bps *= _GPU_PRESET_FACTOR.get(preset, 1.0)
         elif transcode_mode == 'audio':
             # Audio-only mode: video is copied through, include source video bitrate
             video_bps = _probe_video_bitrate(filepath, duration)
@@ -3553,7 +3587,7 @@ class VideoConverter:
         """Send log message to callback"""
         if self.log_callback:
             timestamp = datetime.now().strftime('%H:%M:%S')
-            self.log_callback(f"[{timestamp}] [{level}] {message}")
+            self.log_callback(f"[{timestamp}] [{level}] {message}", level)
     
     def convert_file(self, input_path, output_path, settings):
         """
@@ -3593,7 +3627,7 @@ class VideoConverter:
 
             # Two-pass only makes sense for CPU bitrate mode on supported codecs
             cpu_encoder = codec_info.get('cpu_encoder', '')
-            TWO_PASS_SUPPORTED = {'libx265', 'libx264', 'libvpx-vp9', 'mpeg4'}
+            TWO_PASS_SUPPORTED = {'libx265', 'libx264', 'libvpx-vp9', 'mpeg4', 'libsvtav1'}
             use_two_pass = (
                 two_pass and
                 encoder == 'cpu' and
@@ -3639,15 +3673,25 @@ class VideoConverter:
             # fails on sources with mid-stream resolution changes (the scale_cuda
             # filter doesn't support filter graph reinit).  Without it, frames
             # pass through system memory where format conversion is automatic.
+            #
+            # AV1 special case: AV1 encoders support 10-bit natively, but many
+            # players (VLC, hardware decoders) show a black screen on 10-bit AV1.
+            # Default to 8-bit output (yuv420p) for maximum compatibility.
             needs_pix_fmt_convert = False
-            if effective_hw and is_gpu and backend and video_enc_name not in (None, 'copy'):
+            if video_enc_name not in (None, 'copy'):
                 src_pix_fmt = get_video_pix_fmt(input_path) or ''
                 is_10bit_src = '10' in src_pix_fmt  # yuv420p10le, p010le, etc.
-                _8bit_only_encoders = {'h264_nvenc', 'h264_qsv', 'h264_vaapi'}
-                if is_10bit_src and video_enc_name in _8bit_only_encoders:
-                    needs_pix_fmt_convert = True
-                    self.log(f"Source is 10-bit ({src_pix_fmt}) — adding pixel format "
-                             f"conversion for {video_enc_name}", 'INFO')
+                if is_10bit_src:
+                    _8bit_only_encoders = {'h264_nvenc', 'h264_qsv', 'h264_vaapi'}
+                    _AV1_ENCODERS = {'libsvtav1', 'av1_nvenc', 'av1_qsv', 'av1_vaapi'}
+                    if video_enc_name in _8bit_only_encoders:
+                        needs_pix_fmt_convert = True
+                        self.log(f"Source is 10-bit ({src_pix_fmt}) — adding pixel format "
+                                 f"conversion for {video_enc_name}", 'INFO')
+                    elif video_enc_name in _AV1_ENCODERS:
+                        needs_pix_fmt_convert = True
+                        self.log(f"Source is 10-bit ({src_pix_fmt}) — converting to 8-bit "
+                                 f"for AV1 player compatibility", 'INFO')
 
             # Edited subtitles — maps stream_index → (temp_srt_path, input_index)
             edited_subs = settings.get('edited_subs', {})
@@ -3809,9 +3853,16 @@ class VideoConverter:
                             else:
                                 vf_parts.append(f"subtitles='{escaped}'")
 
-                        # ── Pixel format conversion (GPU 10-bit → 8-bit) ──
-                        if needs_pix_fmt_convert and backend and not vf_parts:
-                            vf_parts.append(backend['scale_filter'])
+                        # ── Pixel format conversion (10-bit → 8-bit) ──
+                        # GPU path: use backend scale filter. CPU path: format=yuv420p.
+                        if needs_pix_fmt_convert and not vf_parts:
+                            if is_gpu and backend:
+                                vf_parts.append(backend['scale_filter'])
+                            else:
+                                vf_parts.append('format=yuv420p')
+                        elif needs_pix_fmt_convert and vf_parts:
+                            if not any('format=yuv420p' in p for p in vf_parts):
+                                vf_parts.append('format=yuv420p')
 
                         # ── ProRes pixel format ──
                         if not vf_parts and codec_info['cpu_encoder'] == 'prores_ks':
@@ -3854,6 +3905,11 @@ class VideoConverter:
                             elif not is_gpu:
                                 c.extend(['-preset', preset])
 
+                        # ── AV1: keyframe interval for seeking ──
+                        _AV1_ENCODERS = {'libsvtav1', 'av1_nvenc', 'av1_qsv', 'av1_vaapi'}
+                        if video_enc_name in _AV1_ENCODERS:
+                            c.extend(['-g', '240'])
+
                         if mode == 'crf':
                             crf_val = str(settings.get('crf', codec_info['crf_default']))
                             if is_gpu and backend:
@@ -3885,6 +3941,24 @@ class VideoConverter:
                 LOSSLESS_CODECS = {'flac', 'alac', 'pcm_s16le', 'pcm_s24le', 'wavpack', 'tta'}
                 audio_codec = settings.get('audio_codec', 'aac')
                 audio_bitrate = settings.get('audio_bitrate', '128k')
+                # Safety net: video-only mode always copies audio
+                if settings.get('transcode_mode') == 'video':
+                    audio_codec = 'copy'
+                # Atmos detection: force copy for Dolby Atmos audio
+                if audio_codec != 'copy':
+                    try:
+                        from modules.utils import get_audio_info
+                        for astream in get_audio_info(input_path):
+                            profile = astream.get('profile', '')
+                            if 'atmos' in profile.lower():
+                                audio_codec = 'copy'
+                                self.log(
+                                    "Dolby Atmos audio detected — copying "
+                                    "original stream (Atmos transcoding is "
+                                    "not supported at this time)", 'ERROR')
+                                break
+                    except Exception:
+                        pass
                 if audio_codec == 'copy':
                     c.extend(['-c:a', 'copy'])
                 else:
@@ -4527,6 +4601,7 @@ class VideoConverterApp:
         self.add_chapters = tk.BooleanVar(value=False)
         self.chapter_interval = tk.IntVar(value=5)  # minutes
         # Video rescaling
+        self.scale_enabled = tk.BooleanVar(value=False)
         self.scale_resolution = tk.StringVar(value='Original')
         self.hdr_to_sdr = tk.BooleanVar(value=False)
 
@@ -5027,19 +5102,7 @@ class VideoConverterApp:
         # CRF preset buttons - Row 4 (same as bitrate preset, they swap)
         self.crf_preset_frame = ttk.Frame(settings_frame)
         self.crf_preset_frame.grid(row=4, column=0, columnspan=2, sticky='w', pady=2)
-        
-        ttk.Button(self.crf_preset_frame, text="18", width=6,
-                  command=lambda: self.set_crf(18)).pack(side='left', padx=2)
-        ttk.Button(self.crf_preset_frame, text="20", width=6,
-                  command=lambda: self.set_crf(20)).pack(side='left', padx=2)
-        ttk.Button(self.crf_preset_frame, text="23", width=6,
-                  command=lambda: self.set_crf(23)).pack(side='left', padx=2)
-        ttk.Button(self.crf_preset_frame, text="28", width=6,
-                  command=lambda: self.set_crf(28)).pack(side='left', padx=2)
-        ttk.Button(self.crf_preset_frame, text="30", width=6,
-                  command=lambda: self.set_crf(30)).pack(side='left', padx=2)
-        ttk.Button(self.crf_preset_frame, text="32", width=6,
-                  command=lambda: self.set_crf(32)).pack(side='left', padx=2)
+        self._rebuild_crf_presets()
         
         # Hide CRF controls initially (bitrate mode is default)
         self.crf_frame.grid_remove()
@@ -5216,15 +5279,26 @@ class VideoConverterApp:
         self.scale_frame = ttk.Frame(settings_frame)
         self.scale_frame.grid(row=11, column=0, columnspan=2, sticky='w', pady=(0, 6))
 
-        ttk.Label(self.scale_frame, text="Target Resolution:").pack(side='left', padx=(5, 2))
+        def _on_scale_enabled_toggle(*_args):
+            if self.scale_enabled.get():
+                self.scale_combo.configure(state='readonly')
+                # Default to 1080p when first enabled (if still on Original)
+                if self.scale_resolution.get() == 'Original':
+                    self.scale_resolution.set('1080p')
+            else:
+                self.scale_combo.configure(state='disabled')
+                self.scale_resolution.set('Original')
+
+        ttk.Checkbutton(self.scale_frame, text="Target Resolution:",
+                        variable=self.scale_enabled,
+                        command=_on_scale_enabled_toggle).pack(side='left', padx=(5, 2))
         from modules.video_scaler import RESOLUTION_PRESETS
-        # Exclude 'Custom' — the main app uses preset resolutions only
-        _scale_presets = [p for p in RESOLUTION_PRESETS if p != 'Custom']
+        # Exclude 'Custom' and 'Original' — Original is handled by unchecking
+        _scale_presets = [p for p in RESOLUTION_PRESETS if p not in ('Custom', 'Original')]
         self.scale_combo = ttk.Combobox(
             self.scale_frame, textvariable=self.scale_resolution,
-            values=_scale_presets, width=14, state='readonly')
+            values=_scale_presets, width=14, state='disabled')
         self.scale_combo.pack(side='left', padx=(0, 8))
-        self.scale_combo.set('Original')
 
         ttk.Checkbutton(self.scale_frame, text="Convert HDR → SDR",
                         variable=self.hdr_to_sdr).pack(side='left', padx=(0, 5))
@@ -5876,9 +5950,16 @@ class VideoConverterApp:
         crf_frame.grid(row=row, column=1, sticky='w', **pad)
         crf_entry = ttk.Entry(crf_frame, textvariable=v_crf, width=6)
         crf_entry.pack(side='left')
-        for cv in ('18', '23', '28', '35'):
-            ttk.Button(crf_frame, text=cv, width=4,
-                       command=lambda c=cv: v_crf.set(c)).pack(side='left', padx=1)
+        # CRF preset buttons — rebuilt dynamically when codec changes
+        def _rebuild_ovr_crf_presets():
+            # Remove old preset buttons (keep the entry widget at index 0)
+            for child in crf_frame.winfo_children()[1:]:
+                child.destroy()
+            info = VIDEO_CODEC_MAP.get(v_video_codec.get(), VIDEO_CODEC_MAP['H.265 / HEVC'])
+            for val in info.get('crf_presets', ()):
+                ttk.Button(crf_frame, text=str(val), width=4,
+                           command=lambda c=str(val): v_crf.set(c)).pack(side='left', padx=1)
+        _rebuild_ovr_crf_presets()
         crf_row = row; row += 1
 
         # ── Preset ──
@@ -5981,18 +6062,33 @@ class VideoConverterApp:
                         variable=v_edition_fn).pack(side='left', padx=(8, 0))
 
         # ── Rescale ──
-        v_scale_res = tk.StringVar(value=ov('scale_resolution', self.scale_resolution.get()))
+        _ovr_scale_res_val = ov('scale_resolution', self.scale_resolution.get())
+        v_scale_enabled = tk.BooleanVar(value=(_ovr_scale_res_val not in ('Original', '')))
+        v_scale_res = tk.StringVar(value=_ovr_scale_res_val)
         v_hdr_sdr   = tk.BooleanVar(value=ov('hdr_to_sdr', self.hdr_to_sdr.get()))
 
         scale_frame = ttk.Frame(f)
         scale_frame.grid(row=row, column=0, columnspan=2, sticky='w', **pad); row += 1
 
-        ttk.Label(scale_frame, text="Target Resolution:").pack(side='left', padx=(4, 2))
         from modules.video_scaler import RESOLUTION_PRESETS
-        _ovr_scale_presets = [p for p in RESOLUTION_PRESETS if p != 'Custom']
-        ttk.Combobox(scale_frame, textvariable=v_scale_res,
+        _ovr_scale_presets = [p for p in RESOLUTION_PRESETS if p not in ('Custom', 'Original')]
+        ovr_scale_combo = ttk.Combobox(scale_frame, textvariable=v_scale_res,
                      values=_ovr_scale_presets, width=14,
-                     state='readonly').pack(side='left', padx=(0, 8))
+                     state='readonly' if v_scale_enabled.get() else 'disabled')
+
+        def _on_ovr_scale_toggle():
+            if v_scale_enabled.get():
+                ovr_scale_combo.configure(state='readonly')
+                if v_scale_res.get() in ('Original', ''):
+                    v_scale_res.set('1080p')
+            else:
+                ovr_scale_combo.configure(state='disabled')
+                v_scale_res.set('Original')
+
+        ttk.Checkbutton(scale_frame, text="Target Resolution:",
+                        variable=v_scale_enabled,
+                        command=_on_ovr_scale_toggle).pack(side='left', padx=(4, 2))
+        ovr_scale_combo.pack(side='left', padx=(0, 8))
         ttk.Checkbutton(scale_frame, text="Convert HDR → SDR",
                         variable=v_hdr_sdr).pack(side='left', padx=(0, 4))
 
@@ -6040,7 +6136,7 @@ class VideoConverterApp:
             audio_codec_combo.configure(state=state if state == 'disabled' else 'readonly')
             audio_br_combo.configure(state=state if state == 'disabled' else 'readonly')
 
-        codec_combo.bind('<<ComboboxSelected>>', lambda e: _update_presets())
+        codec_combo.bind('<<ComboboxSelected>>', lambda e: (_update_presets(), _rebuild_ovr_crf_presets()))
 
         # Initial state
         _update_presets()
@@ -7879,6 +7975,7 @@ class VideoConverterApp:
             'edition_in_filename':   self.edition_in_filename.get(),
             'add_chapters':          self.add_chapters.get(),
             'chapter_interval':      self.chapter_interval.get(),
+            'scale_enabled':         self.scale_enabled.get(),
             'scale_resolution':      self.scale_resolution.get(),
             'hdr_to_sdr':            self.hdr_to_sdr.get(),
             'custom_ad_patterns':    self.custom_ad_patterns,
@@ -7971,8 +8068,12 @@ class VideoConverterApp:
             self.edition_in_filename.set(prefs.get('edition_in_filename', False))
             self.add_chapters.set(prefs.get('add_chapters', False))
             self.chapter_interval.set(prefs.get('chapter_interval', 5))
+            self.scale_enabled.set(prefs.get('scale_enabled', False))
             self.scale_resolution.set(prefs.get('scale_resolution', 'Original'))
             self.hdr_to_sdr.set(prefs.get('hdr_to_sdr', False))
+            # Sync combobox state with checkbox
+            if hasattr(self, 'scale_combo'):
+                self.scale_combo.configure(state='readonly' if self.scale_enabled.get() else 'disabled')
             self.verify_output.set(prefs.get('verify_output',   self.verify_output.get()))
             self.notify_sound.set(prefs.get('notify_sound',     self.notify_sound.get()))
             self.notify_sound_file.set(prefs.get('notify_sound_file', self.notify_sound_file.get()))
@@ -8070,8 +8171,11 @@ class VideoConverterApp:
         self.edition_in_filename.set(False)
         self.add_chapters.set(False)
         self.chapter_interval.set(5)
+        self.scale_enabled.set(False)
         self.scale_resolution.set('Original')
         self.hdr_to_sdr.set(False)
+        if hasattr(self, 'scale_combo'):
+            self.scale_combo.configure(state='disabled')
         self.default_player.set('auto')
         # Default Settings dialog values — clear folder defaults
         self.working_dir = Path.home()
@@ -8330,14 +8434,15 @@ class VideoConverterApp:
                 'mode':           self.quality_mode.get(),
                 'bitrate':        self.bitrate.get(),
                 'crf':            int(self.crf.get()),
-                'audio_codec':    self.get_audio_codec_name(),
+                'audio_codec':    ('copy' if self.transcode_mode.get() == 'video'
+                                   else self.get_audio_codec_name()),
                 'audio_bitrate':  self.audio_bitrate.get(),
             }
         except Exception:
             return {'transcode_mode': 'video', 'encoder': self._default_gpu,
                     'codec_info': VIDEO_CODEC_MAP['H.265 / HEVC'],
                     'mode': 'bitrate', 'bitrate': '2M', 'crf': 23,
-                    'audio_codec': 'aac', 'audio_bitrate': '128k'}
+                    'audio_codec': 'copy', 'audio_bitrate': '128k'}
 
     def refresh_estimated_sizes(self):
         """Recalculate estimated output sizes for all files and update the tree."""
@@ -8811,7 +8916,8 @@ class VideoConverterApp:
             'crf':            int(self.crf.get()),
             'preset':         self.preset_combo.get(),
             'gpu_preset':     self.gpu_preset.get(),
-            'audio_codec':    self.get_audio_codec_name(),
+            'audio_codec':    ('copy' if self.transcode_mode.get() == 'video'
+                               else self.get_audio_codec_name()),
             'audio_bitrate':  self.audio_bitrate.get(),
             'hw_decode':      self.hw_decode.get(),
             'two_pass':       False,  # no two-pass for test
@@ -8845,17 +8951,20 @@ class VideoConverterApp:
 
             # Check for 10-bit → 8-bit pixel format conversion
             test_pix_convert = False
-            if effective_hw:
+            if video_enc not in (None, 'copy'):
                 src_pix = get_video_pix_fmt(input_path) or ''
                 _8bit_only = {'h264_nvenc', 'h264_qsv', 'h264_vaapi'}
-                if '10' in src_pix and video_enc in _8bit_only:
+                _AV1_ENCS = {'libsvtav1', 'av1_nvenc', 'av1_qsv', 'av1_vaapi'}
+                if '10' in src_pix and (video_enc in _8bit_only or video_enc in _AV1_ENCS):
                     test_pix_convert = True
 
             if tm in ('video','both'):
                 if video_enc != 'copy':
                     # Filters MUST come before -c:v for hwaccel compatibility
-                    if test_pix_convert and backend:
+                    if test_pix_convert and is_gpu and backend:
                         cmd.extend(['-vf', backend['scale_filter']])
+                    elif test_pix_convert:
+                        cmd.extend(['-vf', 'format=yuv420p'])
                     elif ci['cpu_encoder'] == 'prores_ks':
                         prores_profile = settings['preset'] or 'hq'
                         if prores_profile in ('4444', '4444xq'):
@@ -8875,6 +8984,10 @@ class VideoConverterApp:
                             cmd.extend([backend['preset_flag'], preset])
                         elif not is_gpu:
                             cmd.extend(['-preset', preset])
+                    # AV1 keyframe interval for seeking
+                    _AV1_TEST = {'libsvtav1', 'av1_nvenc', 'av1_qsv', 'av1_vaapi'}
+                    if video_enc in _AV1_TEST:
+                        cmd.extend(['-g', '240'])
                     if settings['mode'] == 'crf':
                         crf_val = str(settings['crf'])
                         if is_gpu and backend:
@@ -9093,8 +9206,9 @@ class VideoConverterApp:
                 self.crf.set(str(crf_default))
                 self.crf_var.set(crf_default)
 
-            # Update presets
+            # Update presets and CRF preset buttons
             self._apply_presets_for_codec(info, silent=False)
+            self._rebuild_crf_presets()
 
             # Re-show controls if we were in copy mode before
             self.on_transcode_mode_change()
@@ -9172,7 +9286,7 @@ class VideoConverterApp:
         mode = self.quality_mode.get()
         codec_name = self.video_codec.get()
         cpu_enc = info.get('cpu_encoder', '')
-        TWO_PASS_SUPPORTED = {'libx265', 'libx264', 'libvpx-vp9', 'mpeg4'}
+        TWO_PASS_SUPPORTED = {'libx265', 'libx264', 'libvpx-vp9', 'mpeg4', 'libsvtav1'}
 
         # Check GPU multipass support for current backend
         gpu_multipass = False
@@ -9290,14 +9404,25 @@ class VideoConverterApp:
         except (IndexError, tk.TclError):
             pass
     
+    def _rebuild_crf_presets(self):
+        """Rebuild CRF preset buttons for the current codec."""
+        for child in self.crf_preset_frame.winfo_children():
+            child.destroy()
+        info = self.get_codec_info()
+        presets = info.get('crf_presets', ())
+        for val in presets:
+            ttk.Button(self.crf_preset_frame, text=str(val), width=6,
+                       command=lambda v=val: self.set_crf(v)).pack(side='left', padx=2)
+
     def validate_crf(self, new_value):
-        """Validate CRF input - only allow integers 0-51"""
+        """Validate CRF input - only allow integers within codec range"""
         if new_value == "":
             return True
         try:
             val = int(new_value)
-            return 0 <= val <= 51
-        except ValueError:
+            info = self.get_codec_info()
+            return info['crf_min'] <= val <= info['crf_max']
+        except (ValueError, AttributeError):
             return False
     
     def on_crf_change(self, value):
@@ -9322,17 +9447,22 @@ class VideoConverterApp:
     def validate_and_apply_crf(self):
         """Validate CRF entry and apply to slider"""
         try:
+            info = self.get_codec_info()
+            crf_min = info['crf_min']
+            crf_max = info['crf_max']
+            crf_default = info['crf_default']
             value = int(self.crf_var.get())
-            # Clamp to valid range
-            value = max(0, min(51, value))
+            # Clamp to valid range for current codec
+            value = max(crf_min, min(crf_max, value))
             self.crf_var.set(value)
             self.crf.set(str(value))
             # Update slider position
             self.crf_frame.winfo_children()[1].set(value)
         except (ValueError, tk.TclError):
-            # Reset to last valid value
-            self.crf_var.set(23)
-            self.crf.set("23")
+            # Reset to codec default
+            info = self.get_codec_info()
+            self.crf_var.set(info['crf_default'])
+            self.crf.set(str(info['crf_default']))
     
     def set_crf(self, value):
         """Set CRF from preset button"""
@@ -9462,6 +9592,24 @@ class VideoConverterApp:
                 f"Please change the codec or container format.")
             return
 
+        # CPU encoder availability check (e.g. libsvtav1 may not be compiled into ffmpeg)
+        codec_info = self.get_codec_info()
+        cpu_enc = codec_info['cpu_encoder']
+        if encoder == 'cpu' and cpu_enc not in ('copy', 'libx265', 'libx264'):
+            try:
+                result = subprocess.run(['ffmpeg', '-encoders'], capture_output=True,
+                                        text=True, timeout=10)
+                if cpu_enc not in result.stdout:
+                    messagebox.showerror(
+                        "Encoder Not Available",
+                        f"The CPU encoder '{cpu_enc}' is not available in your ffmpeg build.\n\n"
+                        f"Install the required library or switch to a GPU encoder.\n\n"
+                        f"For AV1: install SVT-AV1 (libsvtav1)\n"
+                        f"For VP9: install libvpx")
+                    return
+            except Exception:
+                pass  # If ffmpeg check fails, let the encode attempt proceed
+
         # Disable controls
         self.is_converting = True
         self.pause_btn.configure(state='normal')
@@ -9565,7 +9713,8 @@ class VideoConverterApp:
             'crf': int(self.crf.get()),
             'preset': self.preset_combo.get(),
             'gpu_preset': self.gpu_preset.get(),
-            'audio_codec': self.get_audio_codec_name(),
+            'audio_codec': ('copy' if self.transcode_mode.get() == 'video'
+                           else self.get_audio_codec_name()),
             'audio_bitrate': self.audio_bitrate.get(),
             'hw_decode': self.hw_decode.get(),
             'two_pass': self.two_pass.get(),
@@ -9671,6 +9820,9 @@ class VideoConverterApp:
                 preset = file_settings.get('gpu_preset', file_settings['preset'])
             else:
                 preset = file_settings['preset']
+            # Video-only mode: force audio copy regardless of per-file override
+            if transcode_mode == 'video':
+                file_settings['audio_codec'] = 'copy'
             audio_codec    = file_settings['audio_codec']
             audio_bitrate  = file_settings['audio_bitrate']
             skip_existing  = ov.get('skip_existing',    self.skip_existing.get())

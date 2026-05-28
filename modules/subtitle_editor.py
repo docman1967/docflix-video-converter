@@ -1010,6 +1010,8 @@ def open_standalone_subtitle_editor(app):
                                             'streams': streams,
                                             'stream_info': chosen,
                                             'is_cc': False,
+                                            'is_ocr': True,
+                                            'ocr_lang': ocr_lang,
                                         }
 
                                 ttk.Button(btn_f, text="Save",
@@ -1060,6 +1062,8 @@ def open_standalone_subtitle_editor(app):
                                         'streams': streams,
                                         'stream_info': chosen,
                                         'is_cc': False,
+                                        'is_ocr': True,
+                                        'ocr_lang': ocr_lang,
                                     }
                                     app.add_log(
                                         f"Opened video subtitle: OCR stream "
@@ -1342,6 +1346,38 @@ def open_standalone_subtitle_editor(app):
                 video_source[0] = None
                 _flash_saved(f"✓ Saved — {len(cues)} entries → {os.path.basename(srt_path)}")
 
+            elif video_source[0] and video_source[0].get('is_ocr'):
+                # ── OCR source: save as SRT file (bitmap can't be re-muxed as text) ──
+                vs = video_source[0]
+                video_path = vs['path']
+                ocr_lang = vs.get('ocr_lang', 'eng')
+                video_stem = Path(video_path).stem
+                default_name = f"{video_stem}.{ocr_lang}.srt"
+                out_dir = str(Path(video_path).parent)
+                out_path = ask_save_file(
+                    parent=editor,
+                    initialdir=out_dir,
+                    initialfile=default_name,
+                    defaultextension='.srt',
+                    filetypes=[('SubRip', '*.srt'), ('All files', '*.*')]
+                )
+                if not out_path:
+                    return
+                with open(out_path, 'w', encoding='utf-8') as f:
+                    f.write(write_srt(cues))
+                app.add_log(
+                    f"OCR subtitle saved: {len(cues)} entries "
+                    f"({removed} removed) → {os.path.basename(out_path)}",
+                    'SUCCESS')
+                original_cues[:] = [dict(c) for c in cues]
+                current_path[0] = out_path
+                video_source[0] = None
+                editor.title(
+                    f"Docflix Subtitle Editor — {os.path.basename(out_path)}")
+                _flash_saved(
+                    f"✓ Saved — {len(cues)} entries → "
+                    f"{os.path.basename(out_path)}")
+
             elif video_source[0]:
                 # ── Re-mux edited subtitle back into the video ──
                 vs = video_source[0]
@@ -1465,8 +1501,14 @@ def open_standalone_subtitle_editor(app):
             else:
                 ref_path = None
             out_dir = str(Path(ref_path).parent) if ref_path else ''
-            default_name = (f"{Path(ref_path).stem}.srt"
-                            if ref_path else "subtitle.srt")
+            if (video_source[0] and video_source[0].get('is_ocr')
+                    and ref_path):
+                ocr_lang = video_source[0].get('ocr_lang', 'eng')
+                default_name = f"{Path(ref_path).stem}.{ocr_lang}.srt"
+            elif ref_path:
+                default_name = f"{Path(ref_path).stem}.srt"
+            else:
+                default_name = "subtitle.srt"
             out_path = ask_save_file(
                 parent=editor,
                 initialdir=out_dir,
@@ -1496,8 +1538,14 @@ def open_standalone_subtitle_editor(app):
             else:
                 ref_path = None
             out_dir = str(Path(ref_path).parent) if ref_path else ''
-            default_name = (f"{Path(ref_path).stem}.srt"
-                            if ref_path else "subtitle.srt")
+            if (video_source[0] and video_source[0].get('is_ocr')
+                    and ref_path):
+                ocr_lang = video_source[0].get('ocr_lang', 'eng')
+                default_name = f"{Path(ref_path).stem}.{ocr_lang}.srt"
+            elif ref_path:
+                default_name = f"{Path(ref_path).stem}.srt"
+            else:
+                default_name = "subtitle.srt"
             out_path = ask_save_file(
                 parent=editor,
                 initialdir=out_dir,

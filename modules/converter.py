@@ -43,7 +43,7 @@ class VideoConverter:
         """Send log message to callback"""
         if self.log_callback:
             timestamp = datetime.now().strftime('%H:%M:%S')
-            self.log_callback(f"[{timestamp}] [{level}] {message}")
+            self.log_callback(f"[{timestamp}] [{level}] {message}", level)
     
     def convert_file(self, input_path, output_path, settings):
         """
@@ -83,7 +83,7 @@ class VideoConverter:
 
             # Two-pass only makes sense for CPU bitrate mode on supported codecs
             cpu_encoder = codec_info.get('cpu_encoder', '')
-            TWO_PASS_SUPPORTED = {'libx265', 'libx264', 'libvpx-vp9', 'mpeg4'}
+            TWO_PASS_SUPPORTED = {'libx265', 'libx264', 'libvpx-vp9', 'mpeg4', 'libsvtav1'}
             use_two_pass = (
                 two_pass and
                 encoder == 'cpu' and
@@ -131,15 +131,26 @@ class VideoConverter:
             # fails on sources with mid-stream resolution changes (the scale_cuda
             # filter doesn't support filter graph reinit).  Without it, frames
             # pass through system memory where format conversion is automatic.
+            #
+            # AV1 special case: AV1 encoders support 10-bit natively, but many
+            # players (VLC, hardware decoders) show a black screen on 10-bit AV1.
+            # Default to 8-bit output (yuv420p) for maximum compatibility.
             needs_pix_fmt_convert = False
-            if effective_hw and is_gpu and backend and video_enc_name not in (None, 'copy'):
+            if video_enc_name not in (None, 'copy'):
                 src_pix_fmt = get_video_pix_fmt(input_path) or ''
                 is_10bit_src = '10' in src_pix_fmt  # yuv420p10le, p010le, etc.
-                _8bit_only_encoders = {'h264_nvenc', 'h264_qsv', 'h264_vaapi'}
-                if is_10bit_src and video_enc_name in _8bit_only_encoders:
-                    needs_pix_fmt_convert = True
-                    self.log(f"Source is 10-bit ({src_pix_fmt}) — adding pixel format "
-                             f"conversion for {video_enc_name}", 'INFO')
+                if is_10bit_src:
+                    _8bit_only_encoders = {'h264_nvenc', 'h264_qsv', 'h264_vaapi'}
+                    # AV1 encoders: support 10-bit but default to 8-bit for player compat
+                    _AV1_ENCODERS = {'libsvtav1', 'av1_nvenc', 'av1_qsv', 'av1_vaapi'}
+                    if video_enc_name in _8bit_only_encoders:
+                        needs_pix_fmt_convert = True
+                        self.log(f"Source is 10-bit ({src_pix_fmt}) — adding pixel format "
+                                 f"conversion for {video_enc_name}", 'INFO')
+                    elif video_enc_name in _AV1_ENCODERS:
+                        needs_pix_fmt_convert = True
+                        self.log(f"Source is 10-bit ({src_pix_fmt}) — converting to 8-bit "
+                                 f"for AV1 player compatibility", 'INFO')
 
             # Edited subtitles — maps stream_index → (temp_srt_path, input_index)
             edited_subs = settings.get('edited_subs', {})
@@ -290,12 +301,21 @@ class VideoConverter:
                             else:
                                 vf_parts.append(f"subtitles='{escaped}'")
 
-                        # ── Pixel format conversion (GPU 10-bit → 8-bit) ──
-                        # When scale is already present via scale_cuda, the format
-                        # conversion is included in the scale filter. Only add the
-                        # standalone pix_fmt filter when no other filters are set.
-                        if needs_pix_fmt_convert and backend and not vf_parts:
-                            vf_parts.append(backend['scale_filter'])
+                        # ── Pixel format conversion (10-bit → 8-bit) ──
+                        # GPU path: when scale is already present via scale_cuda,
+                        # the format conversion is included in the scale filter.
+                        # Only add the standalone filter when no other filters exist.
+                        # CPU path (incl. AV1): use format=yuv420p directly.
+                        if needs_pix_fmt_convert and not vf_parts:
+                            if is_gpu and backend:
+                                vf_parts.append(backend['scale_filter'])
+                            else:
+                                vf_parts.append('format=yuv420p')
+                        elif needs_pix_fmt_convert and vf_parts:
+                            # Other filters already present — append format conversion
+                            # at the end so it runs after scale/tonemap/burn-in.
+                            if not any('format=yuv420p' in p for p in vf_parts):
+                                vf_parts.append('format=yuv420p')
 
                         # ── ProRes pixel format ──
                         if not vf_parts and codec_info['cpu_encoder'] == 'prores_ks':
@@ -337,6 +357,15 @@ class VideoConverter:
                             elif not is_gpu:
                                 c.extend(['-preset', preset])
 
+                        # ── AV1: keyframe interval for seeking ──
+                        # AV1 streams need regular keyframes for seeking; without
+                        # -g the default can be very sparse, causing players
+                        # (GNOME Videos, mpv) to be unable to fast-forward.
+                        # -g 240 = one keyframe every ~10s at 24fps.
+                        _AV1_ENCODERS = {'libsvtav1', 'av1_nvenc', 'av1_qsv', 'av1_vaapi'}
+                        if video_enc_name in _AV1_ENCODERS:
+                            c.extend(['-g', '240'])
+
                         if mode == 'crf':
                             crf_val = str(settings.get('crf', codec_info['crf_default']))
                             if is_gpu and backend:
@@ -368,6 +397,24 @@ class VideoConverter:
                 LOSSLESS_CODECS = {'flac', 'alac', 'pcm_s16le', 'pcm_s24le', 'wavpack', 'tta'}
                 audio_codec = settings.get('audio_codec', 'aac')
                 audio_bitrate = settings.get('audio_bitrate', '128k')
+                # Safety net: video-only mode always copies audio
+                if settings.get('transcode_mode') == 'video':
+                    audio_codec = 'copy'
+                # Atmos detection: force copy for Dolby Atmos audio
+                if audio_codec != 'copy':
+                    try:
+                        from .utils import get_audio_info
+                        for astream in get_audio_info(input_path):
+                            profile = astream.get('profile', '')
+                            if 'atmos' in profile.lower():
+                                audio_codec = 'copy'
+                                self.log(
+                                    "Dolby Atmos audio detected — copying "
+                                    "original stream (Atmos transcoding is "
+                                    "not supported at this time)", 'ERROR')
+                                break
+                    except Exception:
+                        pass
                 if audio_codec == 'copy':
                     c.extend(['-c:a', 'copy'])
                 else:

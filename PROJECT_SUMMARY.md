@@ -1,7 +1,7 @@
 # Docflix Media Suite — Project Summary
 
-**Last Updated:** 2026-05-25 (rev 83)  
-**Version:** 3.4.2  
+**Last Updated:** 2026-05-28 (rev 85)  
+**Version:** 3.5.1  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/`  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -583,6 +583,7 @@ git push
 - [ ] **Complete monolith migration** — Continue migrating remaining inline code in `video_converter.py` to modules; eventually remove the monolith entirely and run from the package
 - [ ] **Standalone app launcher icons** — Create unique icons for each standalone tool (Subtitle Editor, Media Processor, Media Renamer, Media Rescale) so they're visually distinct from the main suite icon
 - [ ] **App menu integration** — Add `.desktop` entries for each standalone tool with right-click quick actions (Option C) or individual launcher entries; requires unique icons first
+- [ ] **Standalone Audio Converter tool** — Dedicated audio conversion module (`docflix-audio`) with full control over codec, bitrate, channel layout, downmixing, and sample rate. Handles multi-channel (5.1/7.1), Atmos (EAC3 JOC), DTS:X, and TrueHD sources with appropriate bitrate scaling and channel mapping. Integrate into the main app's Tools menu like the existing standalone tools.
 
 ### TV Show Renamer Improvements
 - [x] ~~**Undo after rename** — Keep a rename history so the user can revert file renames (store old → new path mappings, add an Undo button)~~ *(completed 2026-04-27)*
@@ -610,7 +611,7 @@ git push
 
 #### Encoding (vs StaxRip — deeper filter chains, Dolby Vision)
 - [ ] **Dolby Vision encoding** — Pass through DV metadata during H.265 encoding when ffmpeg support matures. Requires `dovi_tool` for RPU extraction and injection. Complex but high-value for 4K HDR users.
-- [ ] **AV1 encoding support** — Add SVT-AV1 and AOM-AV1 encoder options alongside H.265/H.264. Growing format adoption (YouTube, Netflix).
+- [x] ~~**AV1 encoding support** — Add SVT-AV1 and AOM-AV1 encoder options alongside H.265/H.264. Growing format adoption (YouTube, Netflix).~~ *(completed 2026-05-26 — SVT-AV1 CPU + GPU AV1 via NVENC/QSV/VAAPI)*
 - [ ] **VapourSynth/AviSynth filter chains** — Advanced video filtering (deinterlacing, denoising, grain). Very complex to integrate; consider as a long-term stretch goal.
 - [ ] **Two-pass ABR encoding** — Target a specific file size via average bitrate with two-pass analysis. HandBrake and StaxRip both support this.
 
@@ -651,6 +652,55 @@ git push
 ---
 
 ## Change Log
+
+### 2026-05-28 (v3.5.1 — Bug Fix — Video-Only Mode Re-encodes Audio; Atmos Auto-Copy; OCR Save; zenity 4.x)
+417. **Converter log messages now color-coded by level** — Fixed all converter engine log messages showing in blue (INFO) regardless of their actual level (WARNING, ERROR, SUCCESS). Root cause: `VideoConverter.log()` embedded the level text into the message string (e.g. `[ERROR] message`) but passed only one argument to `log_callback`, which is `add_log(message, level='INFO')`. The `level` parameter defaulted to `'INFO'` so the Tkinter text tag was always blue. Fixed by passing `level` as the second argument in both `video_converter.py` and `modules/converter.py`. Now WARNING messages show in orange and ERROR messages show in red as intended.
+
+416. **Dolby Atmos audio auto-detected and copied instead of transcoded** — The converter now detects Dolby Atmos audio (EAC3 JOC and TrueHD Atmos) via ffprobe's `profile` field and automatically forces `-c:a copy` instead of re-encoding. Atmos is object-based spatial audio that cannot be meaningfully transcoded to channel-based codecs — the result is degraded quality with lost spatial metadata. Detection: `get_audio_info()` in `modules/utils.py` now includes the `profile` field from ffprobe. In `_add_audio_args()` (both `video_converter.py` and `modules/converter.py`), when `audio_codec != 'copy'`, the function probes the source file's audio streams and checks if any profile contains "atmos" (case-insensitive). If detected, `audio_codec` is forced to `'copy'` and an ERROR-level log message is emitted in red: *"Dolby Atmos audio detected — copying original stream (Atmos transcoding is not supported at this time)"*. Tested against `Spider-Noir.S01E01` EAC3 Atmos file: ffprobe reports `profile: "Dolby Digital Plus + Dolby Atmos"`, correctly detected and copied.
+
+415. **Video-only mode re-encoded audio instead of copying** — Fixed the main converter re-encoding audio to AAC when "Video Only" transcode mode was selected, instead of stream-copying it (`-c:a copy`). Root cause: selecting video-only mode hid the audio controls and logged "audio will be copied," but the underlying `audio_codec` StringVar still held its last value (default: `'aac'`). Neither the settings-gathering code nor the ffmpeg command builder checked `transcode_mode == 'video'` to force `audio_codec = 'copy'`. Fixed in 5 locations: (1) `run_conversion()` settings dict at line 9696 — forces `'copy'` when mode is `'video'`. (2) `_current_settings()` at line 8419 (estimates) — same fix. (3) Test encode settings at line 8900 — same fix. (4) Per-file override merge at line 9808 — forces `file_settings['audio_codec'] = 'copy'` when `transcode_mode == 'video'`. (5) Safety net in `_add_audio_args()` in both `video_converter.py` and `modules/converter.py` — overrides `audio_codec` to `'copy'` when `transcode_mode == 'video'`, catching any code path that might bypass the UI fix. Also fixed the fallback dict in `_current_settings()` exception handler which hardcoded `'aac'` for video-only mode.
+
+414. **zenity 4.x save dialog filename fix** — Fixed all save dialogs (Save, Save As, Export) not pre-filling the filename on zenity 4.x (GTK4). Root cause: zenity 4.0.x has a bug where the `--filename` flag for `--save` dialogs only navigates to the directory but ignores the basename — the filename text field stays empty (shows just the directory name like "tmp/"). This affected every `ask_save_file()` call in the app. Fix: added `_zenity_major_version()` helper to `modules/utils.py` that parses `zenity --version` output. When zenity >= 4 and an `initialfile` is specified, `ask_save_file()` skips zenity and falls back to tkinter's `asksaveasfilename()` which correctly handles `initialfile`. zenity is still used for save dialogs that don't need a pre-filled filename, and for all open/folder dialogs (unaffected by the bug). zenity < 4 (GTK3) continues to work as before.
+
+413. **Subtitle editor Save after OCR uses video filename** — After OCR extraction and "Load into Editor", pressing Save (Ctrl+S) now opens a save dialog pre-populated with `{video_stem}.{lang}.srt` (e.g. `Movie.eng.srt`) in the video's directory, instead of attempting to re-mux the text subtitle back into the video container (which doesn't make sense for bitmap-to-text OCR conversions). Added `is_ocr` and `ocr_lang` flags to `video_source[0]` when loading OCR results (both full and partial). New `is_ocr` branch in `do_save_file()` handles OCR saves: prompts with a save dialog, writes the SRT, updates `current_path` and editor title, clears `video_source`. Save As and Export also now include the language code in the default filename for OCR sources (e.g. `Movie.eng.srt` instead of `Movie.srt`). Applied to `modules/subtitle_editor.py` only — the monolith's OCR path uses a separate monitor window with its own Save button.
+
+### 2026-05-27 (Enhancement — Target Resolution Checkbox)
+412. **Target Resolution checkbox to enable/disable rescaling** — Replaced the "Target Resolution:" label with a checkbox that enables/disables the resolution combobox. When unchecked (default), the combobox is disabled and `scale_resolution` is set to `'Original'` (no scaling). When checked, the combobox activates and defaults to `1080p` if no resolution was previously selected. The `'Original'` option is removed from the combobox values since unchecking the checkbox serves that purpose. Applied to both the main settings panel (Row 11) and the per-file Override Settings dialog. New `scale_enabled` BooleanVar added to preferences save/load/reset. The converter engine is unchanged — it already skips scaling when `scale_resolution` is `'Original'`.
+
+### 2026-05-26 (v3.5.0 — AV1 Encoding Support)
+411. **Estimated output size now accounts for preset** — The CRF-mode file size estimator was a pure function of CRF value only — changing the preset had zero effect on the displayed estimate, even though slower presets produce significantly smaller files in practice. Added preset compression factor multipliers to `estimate_output_size()`: H.264/H.265 CPU presets (ultrafast=1.40× to veryslow=0.85× relative to medium=1.0), SVT-AV1 CPU presets (each step from baseline preset 6 scales by ±8%), GPU presets (p1=1.30× to p7=0.85× relative to p4=1.0). Also fixed the AV1 CRF baseline from `crf - 35` to `crf - 30` to match the new default CRF.
+
+410. **AV1 quality tuning — better defaults for real-world compression gains** — Adjusted AV1 encoding defaults so AV1 actually delivers its promised quality/size advantage over H.265. Three changes: (1) **Default preset changed from 8 → 6** — preset 8 was too fast for SVT-AV1 to use its advanced coding tools, producing files barely better than x265 ultrafast. Preset 6 is the sweet spot: ~3× slower than preset 8 but achieves ~25-35% smaller files at the same quality. (2) **Default CRF changed from 35 → 30** — CRF 35 is mediocre quality territory for SVT-AV1; CRF 30 is roughly equivalent to x265 CRF 23 (visually transparent). (3) **Removed `fast-decode=1`** — this flag was added in entry 409 to help VLC compatibility but it actively degrades compression efficiency by limiting which coding tools SVT-AV1 can use. The VLC black screen is a VLC hardware decode config issue, not something to degrade encoder output for. CRF preset buttons updated from `(28, 30, 35, 40, 45, 50)` → `(24, 27, 30, 35, 40, 45)`. CLI default preset also updated from 8 → 6. Applied to both `VIDEO_CODEC_MAP` copies (constants.py + monolith).
+
+409. **AV1 keyframe interval for seeking** — Fixed AV1-encoded files that can't be seeked/fast-forwarded in GNOME Videos (Totem) and other GStreamer-based players. Root cause: no keyframe interval (`-g`) was being set for AV1 encoders, so SVT-AV1 used its default (which can be very sparse). Without regular keyframes, players can't seek to arbitrary positions — they can only play linearly or jump to the rare keyframes. Changes: all AV1 encoders (`libsvtav1`, `av1_nvenc`, `av1_qsv`, `av1_vaapi`) now get `-g 240` (one keyframe every 240 frames ≈ 10 seconds at 24fps). Applied to 4 code paths: module converter `_add_video_args`, monolith converter `_add_video_args`, monolith test encode `_run`, and CLI script `convert_file()`.
+
+408. **AV1 10-bit black screen fix — automatic pixel format conversion** — Fixed AV1-encoded files showing a black screen in VLC and other players when the source video is 10-bit (e.g. `yuv420p10le`). Root cause: the pixel format compatibility check in the converter only applied to H.264 GPU encoders (which don't support 10-bit at all). AV1 encoders accept 10-bit natively so they were never flagged for conversion — but most players' AV1 hardware decoders can't handle 10-bit AV1, producing a black screen. Fix: expanded `needs_pix_fmt_convert` to also trigger for all AV1 encoders (`libsvtav1`, `av1_nvenc`, `av1_qsv`, `av1_vaapi`) when the source is 10-bit, adding `format=yuv420p` to the filter chain for 8-bit output. Also fixed the filter insertion logic which previously only worked for GPU backends (`backend and not vf_parts`) — CPU encoding now gets `format=yuv420p` directly, and when other filters are already present (scale, tonemap, burn-in), the format conversion is appended at the end if not already included. Applied to both `converter.py` (module), `video_converter.py` (monolith main path and test encode path). Three code paths fixed: (1) module converter `_add_video_args`, (2) monolith converter `_add_video_args`, (3) monolith test encode `_run`.
+
+407. **Full AV1 encoding support in main converter and CLI** — AV1 was already partially integrated in the codec maps and GPU backend definitions but had several gaps preventing reliable use. Changes across 5 files:
+
+   **Data model (`constants.py`, `video_converter.py`):**
+   - Added `crf_presets` key to every entry in `VIDEO_CODEC_MAP` (both module and monolith copies). AV1 presets: `(28, 30, 35, 40, 45, 50)`, H.265/H.264: `(18, 20, 23, 28, 30, 32)`, VP9: `(25, 30, 33, 38, 45, 50)`, MPEG-4: `(2, 4, 8, 15, 20, 25)`, ProRes: `(5, 10, 15, 20, 30, 40)`. CRF preset buttons in the main UI and override dialog are now rebuilt dynamically from this data when the codec changes.
+
+   **CRF validation fixes (`video_converter.py`):**
+   - `validate_crf()` was hardcoded to `0 <= val <= 51` — now reads `crf_min`/`crf_max` from the current codec info. AV1 and VP9 use 0–63, MPEG-4 uses 1–31, ProRes uses 0–64.
+   - `validate_and_apply_crf()` was also hardcoded to clamp to 0–51 — now uses the codec's range.
+   - CRF preset buttons are now dynamically generated via `_rebuild_crf_presets()` — called on codec change and at startup. Override dialog CRF buttons also rebuild on codec change via `_rebuild_ovr_crf_presets()`.
+
+   **Two-pass encoding (`converter.py`, `video_converter.py`):**
+   - Added `libsvtav1` to `TWO_PASS_SUPPORTED` sets in all three locations (module converter line 86, monolith lines 3596/9175). SVT-AV1 supports two-pass via ffmpeg's `-pass` flag for bitrate mode.
+
+   **CPU encoder availability check (`video_converter.py`, `gpu.py`):**
+   - `start_conversion()` now checks that the selected CPU encoder (e.g. `libsvtav1`, `libvpx-vp9`) is available in the user's ffmpeg build before starting encoding. Shows a clear error dialog if missing. Only checks non-standard encoders (skips `libx265`/`libx264` which are always present).
+   - Added `check_cpu_encoder()` function to `modules/gpu.py` for reuse by module-based code.
+
+   **CLI script (`convert_videos.sh`):**
+   - Added `--av1` flag that switches encoding from H.265 to AV1. Works with all GPU backends (`av1_nvenc`, `av1_qsv`, `av1_vaapi`) and CPU (`libsvtav1`).
+   - Added `VIDEO_CODEC` variable (`h265` or `av1`) that controls encoder selection throughout.
+   - GPU detection in `check_prerequisites()` now checks for the correct codec-specific GPU encoder (e.g. `av1_nvenc` instead of `hevc_nvenc` when `--av1` is used).
+   - CPU AV1 encoding auto-checks for `libsvtav1` availability and exits with a clear error if missing.
+   - Default CPU preset auto-switches from `ultrafast` (H.265) to `8` (AV1) when `--av1` is used.
+   - `_update_suffix()` includes codec tag in output filename (e.g. `-CRF35-svtav1_8`, `-2M-NVENC_AV1_p4`).
+   - Usage text updated with AV1 examples, preset range (0–13), and CRF range (0–63).
 
 ### 2026-05-23 (Bug Fixes — CC Extraction, Renamer Multi-Episode Double-E)
 406. **Renamer: fix double-E in multi-episode filenames** — Fixed multi-episode files producing `S28EE12-E13` instead of `S28E12-E13`. Root cause: the multi-episode `ep_tag` in `_build_new_name()` included a leading `E` (e.g. `E12-E13`), but the template already has `E{episode}`, so the `E` was doubled. Fixed by omitting the leading `E` from `ep_tag` — contiguous ranges now produce `12-E13` and non-contiguous lists produce `01E03E05`, which combine correctly with the template's `E` prefix.

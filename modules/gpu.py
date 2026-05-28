@@ -511,6 +511,19 @@ def _verify_gpu_encoder(backend_id, backend):
 
 
 
+def check_cpu_encoder(encoder_name):
+    """Check if a CPU encoder (e.g. libsvtav1) is available in ffmpeg.
+
+    Returns True if found, False otherwise.
+    """
+    try:
+        result = subprocess.run(['ffmpeg', '-encoders'], capture_output=True,
+                                text=True, timeout=10)
+        return encoder_name in result.stdout
+    except Exception:
+        return False
+
+
 def detect_gpu_backends():
     """Detect all available GPU encoding backends.
 

@@ -165,7 +165,7 @@ def get_all_streams(filepath):
 def get_audio_info(filepath):
     """Return a list of audio stream dicts for the given file.
 
-    Each dict has: index, codec_name, codec_long_name, channels,
+    Each dict has: index, codec_name, codec_long_name, profile, channels,
     sample_rate, bit_rate, language, title.
     """
     try:
@@ -188,6 +188,7 @@ def get_audio_info(filepath):
                 'index':          s.get('index', 0),
                 'codec_name':     s.get('codec_name', 'unknown'),
                 'codec_long_name': s.get('codec_long_name', ''),
+                'profile':        s.get('profile', ''),
                 'channels':       s.get('channels', 0),
                 'sample_rate':    s.get('sample_rate', ''),
                 'bit_rate':       s.get('bit_rate', ''),
@@ -386,16 +387,34 @@ def ask_open_file(initialdir=None, title="Select File", parent=None,
     return result or ''
 
 
+def _zenity_major_version():
+    """Return the major version of zenity (e.g. 3 or 4), or 0 if unknown."""
+    try:
+        result = subprocess.run(['zenity', '--version'], capture_output=True,
+                                text=True, timeout=5)
+        return int(result.stdout.strip().split('.')[0])
+    except Exception:
+        return 0
+
+
 def ask_save_file(initialdir=None, initialfile=None, title="Save As",
                    parent=None, filetypes=None, defaultextension=None):
     """Open a save-file dialog.
 
     Tries zenity first, falls back to tkinter.
+    zenity 4.x (GTK4) has a bug where --filename no longer pre-fills
+    the filename in save dialogs, so we skip zenity for save dialogs
+    when an initialfile is requested and zenity >= 4.
     Returns a file path string, or '' if cancelled.
     """
     if initialdir:
         initialdir = str(initialdir)
-    if shutil.which('zenity'):
+    # zenity 4.x save dialogs ignore the filename portion of --filename
+    # (GTK4 GtkFileDialog bug) — only use zenity when no initialfile is
+    # needed, or when zenity < 4 where --filename works correctly.
+    use_zenity = (shutil.which('zenity')
+                  and (not initialfile or _zenity_major_version() < 4))
+    if use_zenity:
         cmd = [
             'zenity', '--file-selection', '--save',
             '--confirm-overwrite',
