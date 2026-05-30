@@ -788,10 +788,16 @@ def open_batch_filter(app):
                         errors += 1
                         continue
 
-                    # Apply each active filter in order
+                    # Apply each active filter in order.
+                    # When multiple filters are selected, run a second
+                    # pass to catch cross-filter residue (e.g. Remove HI
+                    # can leave stray ♪ lines that Remove Stray Notes
+                    # would catch on a second pass).
                     before = len(cues)
-                    for f_label, f_func in active_filters:
-                        cues = f_func(cues)
+                    passes = 2 if len(active_filters) > 1 else 1
+                    for _pass in range(passes):
+                        for f_label, f_func in active_filters:
+                            cues = f_func(cues)
 
                     # Apply search & replace pairs (only if checkbox is checked)
                     if has_replacements:

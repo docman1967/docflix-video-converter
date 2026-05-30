@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.5.1"
+APP_VERSION = "3.5.2"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -9994,9 +9994,12 @@ class VideoConverterApp:
                     except Exception as e:
                         self.add_log(f"Failed to delete original: {e}", 'ERROR')
             else:
-                failed += 1
-                self.update_file_status(i, '❌ Failed')
-            
+                if self.converter.is_stopped:
+                    self.update_file_status(i, '⏹️ Stopped')
+                else:
+                    failed += 1
+                    self.update_file_status(i, '❌ Failed')
+
             # Update overall progress
             total = len(self.files)
             processed = completed + failed + skipped

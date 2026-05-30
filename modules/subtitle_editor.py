@@ -2103,6 +2103,8 @@ def open_standalone_subtitle_editor(app):
         filter_menu.add_command(label="Spell Check...",
                                 accelerator="F7",
                                 command=lambda: _show_spell_check())
+        filter_menu.add_command(label="Highlight Spelling Errors",
+                                command=lambda: _highlight_spelling())
         filter_menu.add_command(label="Find ALL CAPS Words...",
                                 command=lambda: find_allcaps_words(
                                     cues, tree, TAG_CAPS, editor))
@@ -2527,6 +2529,46 @@ def open_standalone_subtitle_editor(app):
             _show_next()
 
         editor.bind('<F7>', lambda e: _show_spell_check())
+
+        def _highlight_spelling():
+            """Highlight cues with spelling errors without opening the
+            interactive correction dialog.  Useful for quickly spotting
+            OCR errors at a glance."""
+            if not cues:
+                messagebox.showinfo("Highlight Spelling",
+                                    "No subtitle loaded.",
+                                    parent=editor)
+                return
+            from modules.spell_checker import run_spell_highlight_scan
+            errors_by_cue = run_spell_highlight_scan(
+                app, editor, cues, spell_error_indices)
+            if errors_by_cue is None:
+                return
+            refresh_tree(cues)
+            if not errors_by_cue:
+                messagebox.showinfo("Highlight Spelling",
+                                    "No spelling errors found.",
+                                    parent=editor)
+                return
+            # Scroll to first error
+            first = min(errors_by_cue.keys())
+            items = tree.get_children()
+            if first < len(items):
+                tree.see(items[first])
+                tree.selection_set(items[first])
+            # Build summary of unique misspelled words
+            all_words = set()
+            for word_list in errors_by_cue.values():
+                all_words.update(w.lower() for w in word_list)
+            word_sample = sorted(all_words)[:30]
+            summary = ', '.join(word_sample)
+            if len(all_words) > 30:
+                summary += f', ... (+{len(all_words) - 30} more)'
+            messagebox.showinfo(
+                "Highlight Spelling",
+                f"Found {len(all_words)} unique misspelled words "
+                f"in {len(errors_by_cue)} cues.\n\n{summary}",
+                parent=editor)
 
         # ── Edit menu ──
         edit_menu = tk.Menu(menubar, tearoff=0)
@@ -5526,6 +5568,8 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
         filter_menu.add_command(label="Spell Check...",
                                 accelerator="F7",
                                 command=lambda: _show_spell_check())
+        filter_menu.add_command(label="Highlight Spelling Errors",
+                                command=lambda: _highlight_spelling())
         filter_menu.add_command(label="Find ALL CAPS Words...",
                                 command=lambda: find_allcaps_words(
                                     cues, tree, TAG_CAPS, editor))
@@ -5950,6 +5994,46 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
             _show_next()
 
         editor.bind('<F7>', lambda e: _show_spell_check())
+
+        def _highlight_spelling():
+            """Highlight cues with spelling errors without opening the
+            interactive correction dialog.  Useful for quickly spotting
+            OCR errors at a glance."""
+            if not cues:
+                messagebox.showinfo("Highlight Spelling",
+                                    "No subtitle loaded.",
+                                    parent=editor)
+                return
+            from modules.spell_checker import run_spell_highlight_scan
+            errors_by_cue = run_spell_highlight_scan(
+                app, editor, cues, spell_error_indices)
+            if errors_by_cue is None:
+                return
+            refresh_tree(cues)
+            if not errors_by_cue:
+                messagebox.showinfo("Highlight Spelling",
+                                    "No spelling errors found.",
+                                    parent=editor)
+                return
+            # Scroll to first error
+            first = min(errors_by_cue.keys())
+            items = tree.get_children()
+            if first < len(items):
+                tree.see(items[first])
+                tree.selection_set(items[first])
+            # Build summary of unique misspelled words
+            all_words = set()
+            for word_list in errors_by_cue.values():
+                all_words.update(w.lower() for w in word_list)
+            word_sample = sorted(all_words)[:30]
+            summary = ', '.join(word_sample)
+            if len(all_words) > 30:
+                summary += f', ... (+{len(all_words) - 30} more)'
+            messagebox.showinfo(
+                "Highlight Spelling",
+                f"Found {len(all_words)} unique misspelled words "
+                f"in {len(errors_by_cue)} cues.\n\n{summary}",
+                parent=editor)
 
         # ── Edit menu ──
         edit_menu = tk.Menu(menubar, tearoff=0)

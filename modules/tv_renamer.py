@@ -343,12 +343,30 @@ def open_tv_renamer(app):
             """Search TMDB for TV series and movies. Returns results
             normalized to the same dict format as TVDB for the
             disambiguation dialog."""
-            encoded_q = urllib.parse.quote(query)
+            # Extract a trailing year from the query (e.g. "Emma 2020")
+            # and pass it as the TMDB year parameter instead of embedding
+            # it in the search text.  TMDB's text search treats "Emma 1996"
+            # as a title containing "1996", which returns 0 results.
+            # Passing year= separately tells TMDB to filter by release
+            # year while searching for just the name.
+            _yr_m = re.search(r'\s+((?:19|20)\d{2})$', query)
+            if _yr_m:
+                search_name = query[:_yr_m.start()].strip()
+                search_year = _yr_m.group(1)
+            else:
+                search_name = query
+                search_year = ''
+            encoded_q = urllib.parse.quote(search_name)
+            year_param_tv = (f'&first_air_date_year={search_year}'
+                             if search_year else '')
+            year_param_mv = (f'&year={search_year}'
+                             if search_year else '')
             normalized = []
             seen_ids = set()
 
             # Search TV series
-            tv_result = _tmdb_request(f'/search/tv?query={encoded_q}')
+            tv_result = _tmdb_request(
+                f'/search/tv?query={encoded_q}{year_param_tv}')
             if tv_result and 'results' in tv_result:
                 for r in tv_result['results']:
                     rid = ('tv', r.get('id', ''))
@@ -380,7 +398,8 @@ def open_tv_renamer(app):
                     })
 
             # Search movies
-            movie_result = _tmdb_request(f'/search/movie?query={encoded_q}')
+            movie_result = _tmdb_request(
+                f'/search/movie?query={encoded_q}{year_param_mv}')
             if movie_result and 'results' in movie_result:
                 for r in movie_result['results']:
                     rid = ('movie', r.get('id', ''))
@@ -843,7 +862,15 @@ def open_tv_renamer(app):
                 show_data = _all_shows[show_name]
                 if not isinstance(show_data, dict):
                     continue
-                show_norm = _normalize_for_match(show_name)
+                # Use the clean API name (_name) for matching instead of
+                # the internal key, which may be disambiguated with "[ID]"
+                # when two shows share the same API name (e.g. both
+                # "Ghosts" UK and US are called "Ghosts" on TVDB/TMDB,
+                # but the second one is stored as "Ghosts [359083]").
+                # Without this, the disambiguated key scores poorly
+                # against filenames and the wrong show wins the match.
+                api_name = show_data.get('_name', show_name)
+                show_norm = _normalize_for_match(api_name)
                 score = 0.0
                 # Exact match on filename
                 if show_norm == cleaned:
@@ -878,8 +905,10 @@ def open_tv_renamer(app):
                     if any(sn == show_name for sn, _ in candidates):
                         continue
                     show_data = _all_shows[show_name]
-                    # Check primary name and all aliases
-                    names_to_check = [show_name]
+                    # Check primary name (clean API name) and all aliases
+                    _api = (show_data.get('_name', show_name)
+                            if isinstance(show_data, dict) else show_name)
+                    names_to_check = [_api]
                     if isinstance(show_data, dict):
                         names_to_check.extend(show_data.get('_aliases', []))
                     best_overlap = 0.0
@@ -935,7 +964,13 @@ def open_tv_renamer(app):
             # Close filename scores — use parent folder to disambiguate
             if folder_cleaned:
                 for show_name, score in candidates:
-                    show_norm = _normalize_for_match(show_name)
+                    # Use clean API name for folder comparison too —
+                    # disambiguated keys like "Ghosts [ID]" would never
+                    # match a folder named "Ghosts (2019)".
+                    _sd = _all_shows.get(show_name)
+                    _api = (_sd.get('_name', show_name)
+                            if isinstance(_sd, dict) else show_name)
+                    show_norm = _normalize_for_match(_api)
                     # Folder matches show name exactly
                     if show_norm == folder_cleaned:
                         return show_name
@@ -1867,6 +1902,12 @@ def open_tv_renamer(app):
             # which directory is being matched (helpful when two shows have
             # similar names, e.g. "Ghosts (US)" vs "Ghosts (2019)").
             query_norm = _normalize_for_match(query)
+            # Extract year from query to prevent cross-matching when
+            # multiple same-name entries differ only by year (e.g. query
+            # "Emma 1996" should not match files from "Emma. (2020)/"
+            # just because "emma" is a substring of "emma 1996").
+            _pick_yr_m = re.search(r'((?:19|20)\d{2})', query)
+            _pick_yr = _pick_yr_m.group(1) if _pick_yr_m else ''
             source_folder = ''
             matching_files = []
             _has_video = any(i.get('ext') in VIDEO_EXTENSIONS
@@ -1886,6 +1927,12 @@ def open_tv_renamer(app):
                             or fname_cleaned == query_norm
                             or (folder_cleaned and folder_cleaned in query_norm)
                             or (fname_cleaned and fname_cleaned in query_norm)):
+                        # When query has a year, verify the raw folder
+                        # also contains that year — prevents "Emma (2020)"
+                        # from matching query "Emma 1996"
+                        if _pick_yr and folder:
+                            if _pick_yr not in folder:
+                                continue
                         if not source_folder:
                             # Show the full parent directory path (up to
                             # the show folder level) for clarity
@@ -2202,15 +2249,26 @@ def open_tv_renamer(app):
             if not query or query in _all_shows:
                 return query if query in _all_shows else None
 
-            # Scan files to find year and decide movie vs TV
+            # Scan files to find year and decide movie vs TV.
+            # The query may include a year (e.g. "Emma 1996") that
+            # _clean_show_name strips from filenames, so also compare
+            # against the query with its trailing year removed.
             year = ''
             is_tv = False
+            query_norm = _normalize_for_match(query)
+            # Strip trailing year from query for fallback comparison
+            _fq_yr = re.search(r'\s+(?:19|20)\d{2}$', query)
+            query_base_norm = (_normalize_for_match(query[:_fq_yr.start()])
+                               if _fq_yr else '')
             for item in _file_items:
                 if item.get('ext') in SUBTITLE_EXTENSIONS:
                     continue
                 fname = os.path.splitext(os.path.basename(item['path']))[0]
                 cleaned = _clean_show_name(fname).strip()
-                if _normalize_for_match(cleaned) != _normalize_for_match(query):
+                cleaned_norm = _normalize_for_match(cleaned)
+                if (cleaned_norm != query_norm
+                        and (not query_base_norm
+                             or cleaned_norm != query_base_norm)):
                     continue
                 # Check for episode markers → TV
                 s = item.get('season')
@@ -2505,13 +2563,13 @@ def open_tv_renamer(app):
                                      f"{len(retry_results)} results, "
                                      f"{len(close_matches)} close matches")
 
-            # ── Provider preference: when both providers returned the same
-            # show, keep only the one from the template's preferred
-            # provider for that media type.  e.g. TV template uses {tvdb}
-            # → prefer TVDB results for TV shows; movie template uses
-            # {tmdb} → prefer TMDB results for movies.  When a template
-            # doesn't specify a provider (no {tvdb}/{tmdb} tag), fall
-            # back to the active provider dropdown.
+            # ── Provider preference: when templates specify providers,
+            # only show results from the correct provider per media type.
+            # e.g. TV template uses {tvdb} → only show TVDB results for
+            # TV shows; movie template uses {tmdb} → only show TMDB
+            # results for movies.  When a template doesn't specify a
+            # provider (no {tvdb}/{tmdb} tag), fall back to the active
+            # provider dropdown.
             tv_prov, mv_prov = _detect_template_providers()
             # Fall back to active provider for media types whose
             # template doesn't specify a provider preference
@@ -2519,40 +2577,32 @@ def open_tv_renamer(app):
                 tv_prov = prov   # active provider dropdown
             if not mv_prov:
                 mv_prov = prov
+            # Also determine whether the files for this query look like
+            # TV shows or movies — used to filter out the wrong media type
+            # entirely (e.g. don't show TMDB movie results when the files
+            # clearly have SxxExx episode markers).
+            _is_movie_query = _files_look_like_movies(query)
             if len(close_matches) > 1:
-                # Group by (normalized_name, year) to find cross-provider
-                # duplicates
-                from collections import defaultdict
-                groups = defaultdict(list)
-                for r in close_matches:
-                    gkey = (_normalize_for_match(
-                                r.get('name', r.get('objectName', ''))),
-                            r.get('year', ''))
-                    groups[gkey].append(r)
+                # Filter by provider AND media type.  Two layers:
+                # 1. Provider: TV results from tv_prov, movies from mv_prov
+                # 2. Media type: when files have episode markers, remove
+                #    movie results; when files look like movies, remove
+                #    TV results
                 filtered = []
-                for gkey, group in groups.items():
-                    if len(group) <= 1:
-                        filtered.extend(group)
-                        continue
-                    # Multiple results with same name+year from different
-                    # providers — pick the preferred one per media type
-                    kept = set()  # indices to keep
-                    for i, r in enumerate(group):
-                        r_prov = r.get('_provider', '').upper()
-                        r_type = r.get('_media_type', r.get('type', ''))
-                        if r_type in ('tv', 'series'):
-                            if r_prov == tv_prov:
-                                kept.add(i)
-                        elif r_type == 'movie':
-                            if r_prov == mv_prov:
-                                kept.add(i)
-                        else:
-                            kept.add(i)
-                    # If nothing was preferred, keep them all
-                    if not kept:
-                        kept = set(range(len(group)))
-                    for i in sorted(kept):
-                        filtered.append(group[i])
+                for r in close_matches:
+                    r_prov = r.get('_provider', '').upper()
+                    r_type = r.get('_media_type', r.get('type', ''))
+                    if r_type in ('tv', 'series'):
+                        if tv_prov and r_prov != tv_prov:
+                            continue  # wrong provider for TV
+                        if _is_movie_query:
+                            continue  # files look like movies, skip TV
+                    elif r_type == 'movie':
+                        if mv_prov and r_prov != mv_prov:
+                            continue  # wrong provider for movies
+                        if not _is_movie_query:
+                            continue  # files look like TV, skip movies
+                    filtered.append(r)
                 if filtered:
                     close_matches = filtered
 
@@ -2615,6 +2665,11 @@ def open_tv_renamer(app):
                 # with the same base name can supply the wrong year
                 # (e.g. "Emma 1996" supplying year 1996 for "Emma 2020").
                 # Skip when force_prompt is True (Re-match mode).
+                # Also extract query year so we can verify files belong
+                # to the right entry when multiple same-name entries
+                # differ only by year (e.g. "Emma 1996" vs "Emma 2020").
+                _ctx_q_yr_m = re.search(r'((?:19|20)\d{2})', query)
+                _ctx_q_yr = _ctx_q_yr_m.group(1) if _ctx_q_yr_m else ''
                 if best is None and not force_prompt:
                     context_year = ''
                     for item in _file_items:
@@ -2633,6 +2688,12 @@ def open_tv_renamer(app):
                                 or query_norm in item_folder_cleaned
                                 or item_folder_cleaned in query_norm):
                             continue
+                        # When the query has a year, verify the raw folder
+                        # also contains that year — prevents files from
+                        # "Emma. (2020)/" polluting query "Emma 1996"
+                        if _ctx_q_yr and item_folder:
+                            if _ctx_q_yr not in item_folder:
+                                continue
                         # Also skip files that have an embedded ID —
                         # they are already matched to a specific show
                         # and shouldn't influence year selection for
@@ -2680,9 +2741,19 @@ def open_tv_renamer(app):
                                 for r in close_matches}
                         for r in results[:15]:
                             rid = (r.get('_media_type', ''), r.get('id', ''))
-                            if rid not in seen:
-                                pick_list.append(r)
-                                seen.add(rid)
+                            if rid in seen:
+                                continue
+                            # Apply same provider filter to extra results
+                            r_prov = r.get('_provider', '').upper()
+                            r_type = r.get('_media_type', r.get('type', ''))
+                            if (r_type in ('tv', 'series')
+                                    and tv_prov and r_prov != tv_prov):
+                                continue
+                            if (r_type == 'movie'
+                                    and mv_prov and r_prov != mv_prov):
+                                continue
+                            pick_list.append(r)
+                            seen.add(rid)
                     _log(f"  Found {len(pick_list)} matches for "
                          f"\"{query}\" — asking...")
                     win.update_idletasks()
@@ -2699,15 +2770,25 @@ def open_tv_renamer(app):
                 # can choose a different show or provider result.
                 # Include ALL results (not just close matches) so
                 # the user has the full list to pick from.
-                pick_list = close_matches
+                pick_list = list(close_matches)
                 if len(results) > len(close_matches):
                     seen = {(r.get('_media_type', ''), r.get('id', ''))
                             for r in close_matches}
                     for r in results[:15]:
                         rid = (r.get('_media_type', ''), r.get('id', ''))
-                        if rid not in seen:
-                            pick_list.append(r)
-                            seen.add(rid)
+                        if rid in seen:
+                            continue
+                        # Apply same provider filter to extra results
+                        r_prov = r.get('_provider', '').upper()
+                        r_type = r.get('_media_type', r.get('type', ''))
+                        if (r_type in ('tv', 'series')
+                                and tv_prov and r_prov != tv_prov):
+                            continue
+                        if (r_type == 'movie'
+                                and mv_prov and r_prov != mv_prov):
+                            continue
+                        pick_list.append(r)
+                        seen.add(rid)
                 _log(f"  Re-match: {len(pick_list)} candidates — asking...")
                 win.update_idletasks()
                 best = _ask_user_pick_show(query, pick_list)
@@ -3000,6 +3081,30 @@ def open_tv_renamer(app):
                     if raw_parent:
                         raw_folders[raw_parent] = folder_name
 
+                # If there are distinct embedded IDs, create one entry per ID.
+                # This check comes BEFORE the raw_folders check because
+                # embedded IDs are more reliable than year-based queries —
+                # they allow direct API fetch and auto-selection.  Without
+                # this priority, folders like "Emma (1996) {tmdb-12254}"
+                # and "Emma. (2020) {tmdb-556678}" would hit the raw_folders
+                # path which drops the embedded IDs, making it impossible
+                # to auto-select the correct movie from search results.
+                if len(unique_ids) > 1:
+                    for id_str, (folder_name, emb_id) in unique_ids.items():
+                        query = folder_name or fname_name
+                        key = f"{query}@@{id_str}"
+                        show_entries[key] = (query, emb_id)
+                    # Also add files that have NO embedded ID — they are
+                    # separate shows that just happen to clean to the same
+                    # name (e.g. "Emma 2020" alongside "Emma {tmdb-3573}")
+                    for folder_name, emb_id, raw_parent in info_list:
+                        if emb_id is None:
+                            query = folder_name or fname_name
+                            if query not in show_entries:
+                                show_entries[query] = (query, None)
+                            break
+                    continue
+
                 # Check if multiple RAW folders clean to the same name
                 # (e.g. "Ghosts 2019" and "Ghosts 2021" → both "Ghosts").
                 # If so, treat them as distinct shows using the raw name
@@ -3018,25 +3123,11 @@ def open_tv_renamer(app):
                         else:
                             query = raw_cleaned or cleaned
                         query = query.strip()
+                        # Extract embedded ID from raw folder name so
+                        # direct API fetch works as a fallback
+                        raw_emb = _extract_embedded_id(raw_parent)
                         key = f"{query}@@raw={raw_parent}"
-                        show_entries[key] = (query, None)
-                    continue
-
-                # If there are distinct embedded IDs, create one entry per ID
-                if len(unique_ids) > 1:
-                    for id_str, (folder_name, emb_id) in unique_ids.items():
-                        query = folder_name or fname_name
-                        key = f"{query}@@{id_str}"
-                        show_entries[key] = (query, emb_id)
-                    # Also add files that have NO embedded ID — they are
-                    # separate shows that just happen to clean to the same
-                    # name (e.g. "Emma 2020" alongside "Emma {tmdb-3573}")
-                    for folder_name, emb_id, raw_parent in info_list:
-                        if emb_id is None:
-                            query = folder_name or fname_name
-                            if query not in show_entries:
-                                show_entries[query] = (query, None)
-                            break
+                        show_entries[key] = (query, raw_emb)
                     continue
 
                 # Single or no embedded ID — fall back to folder logic

@@ -147,6 +147,7 @@ def open_sub_ripper(app):
     opt_cc          = tk.BooleanVar(value=_sr_prefs.get('cc', False))
     opt_format      = tk.StringVar(value=_sr_prefs.get('format', 'SRT'))
     opt_overwrite   = tk.BooleanVar(value=_sr_prefs.get('overwrite', False))
+    opt_ocr         = tk.BooleanVar(value=_sr_prefs.get('ocr', False))
 
     # ── Main frame ──
     main_frame = ttk.Frame(win, padding=10)
@@ -389,8 +390,215 @@ def open_sub_ripper(app):
     fmt_combo.pack(side='left')
 
     # Overwrite checkbox
-    ttk.Checkbutton(options_frame, text="Overwrite existing files",
+    ttk.Checkbutton(options_frame, text="Overwrite",
                     variable=opt_overwrite).pack(side='left', padx=(16, 4))
+
+    # OCR bitmap checkbox
+    ttk.Checkbutton(options_frame, text="OCR Bitmap",
+                    variable=opt_ocr).pack(side='left', padx=(8, 4))
+
+    # ── Post-extraction filters ──
+    _FILTER_DEFS = [
+        ('remove_hi',      "Remove HI  [brackets] (parens) Speaker:"),
+        ('remove_tags',    "Remove Tags  <i> {\\an8}"),
+        ('remove_ads',     "Remove Ads / Credits"),
+        ('remove_music',   "Remove Stray Notes  ♪ ♫"),
+        ('fix_music',      "Fix Music Notes  ♪ (OCR)"),
+        ('fix_ocr',        "Fix OCR Errors  '' | 0"),
+        ('remove_dashes',  "Remove Leading Dashes  -"),
+        ('remove_caps_hi', "Remove ALL CAPS HI (UK)"),
+        ('remove_quotes',  "Remove Off-Screen Quotes (UK)"),
+        ('remove_dupes',   "Remove Duplicates"),
+        ('merge_dupes',    "Merge Duplicates"),
+        ('merge_short',    "Merge Short Cues"),
+        ('reduce_lines',   "Reduce to 2 Lines"),
+        ('fix_caps',       "Fix ALL CAPS"),
+    ]
+
+    _saved_filters = _sr_prefs.get('filters', {})
+    filter_vars = {key: tk.BooleanVar(value=_saved_filters.get(key, False))
+                   for key, _ in _FILTER_DEFS}
+    opt_apply_sr = tk.BooleanVar(
+        value=_saved_filters.get('search_replace', False))
+
+    def _active_filter_count():
+        n = sum(1 for v in filter_vars.values() if v.get())
+        if opt_apply_sr.get():
+            n += 1
+        return n
+
+    def _update_filter_btn_text():
+        n = _active_filter_count()
+        if n:
+            filter_btn.configure(text=f"🔧 Filters ({n})")
+        else:
+            filter_btn.configure(text="🔧 Filters...")
+
+    def _open_filter_dialog():
+        dlg = tk.Toplevel(win)
+        dlg.title("Post-Extraction Filters")
+        dlg.transient(win)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill='both', expand=True)
+        ttk.Label(frm,
+                  text="Selected filters are applied to each subtitle\n"
+                       "file after extraction (two-pass when multiple).",
+                  wraplength=340).pack(pady=(0, 8))
+
+        chk_frame = ttk.Frame(frm)
+        chk_frame.pack(fill='x')
+        for i, (key, label) in enumerate(_FILTER_DEFS):
+            ttk.Checkbutton(chk_frame, text=label,
+                            variable=filter_vars[key]).grid(
+                row=i, column=0, sticky='w', pady=1)
+
+        # Search & Replace checkbox
+        sr_pairs = getattr(app, 'custom_replacements', [])
+        sr_count = len(sr_pairs)
+        sr_label = f"Search && Replace ({sr_count} pairs)" \
+            if sr_count else "Search && Replace (none configured)"
+        sr_row = len(_FILTER_DEFS)
+        ttk.Separator(chk_frame, orient='horizontal').grid(
+            row=sr_row, column=0, sticky='ew', pady=4)
+        sr_chk = ttk.Checkbutton(chk_frame, text=sr_label,
+                                  variable=opt_apply_sr)
+        sr_chk.grid(row=sr_row + 1, column=0, sticky='w', pady=1)
+        if not sr_count:
+            sr_chk.configure(state='disabled')
+            opt_apply_sr.set(False)
+
+        btn_frame = ttk.Frame(frm)
+        btn_frame.pack(fill='x', pady=(10, 0))
+
+        def _select_all():
+            for v in filter_vars.values():
+                v.set(True)
+
+        def _select_none():
+            for v in filter_vars.values():
+                v.set(False)
+
+        ttk.Button(btn_frame, text="Select All",
+                   command=_select_all).pack(side='left', padx=(0, 4))
+        ttk.Button(btn_frame, text="Select None",
+                   command=_select_none).pack(side='left')
+        ttk.Button(btn_frame, text="Close",
+                   command=dlg.destroy).pack(side='right')
+
+        dlg.protocol('WM_DELETE_WINDOW', dlg.destroy)
+        center_window_on_parent(dlg, win)
+
+        def _on_close():
+            _update_filter_btn_text()
+        dlg.bind('<Destroy>', lambda e: _on_close()
+                 if e.widget == dlg else None)
+
+    filter_btn = ttk.Button(options_frame, text="🔧 Filters...",
+                            command=_open_filter_dialog)
+    filter_btn.pack(side='left', padx=(8, 4))
+    _update_filter_btn_text()
+
+    def _get_filter_funcs():
+        """Return list of (label, func) for active filters, in order."""
+        from .subtitle_filters import (
+            filter_remove_hi, filter_remove_tags, filter_remove_ads,
+            filter_remove_music_notes, filter_fix_music_notes,
+            filter_fix_ocr, filter_remove_leading_dashes,
+            filter_remove_caps_hi, filter_remove_offscreen_quotes,
+            filter_remove_duplicates, filter_merge_duplicates,
+            filter_merge_short, filter_reduce_lines, filter_fix_caps,
+        )
+        func_map = {
+            'remove_hi':      filter_remove_hi,
+            'remove_tags':    filter_remove_tags,
+            'remove_ads':     lambda c: filter_remove_ads(
+                c, getattr(app, 'custom_ad_patterns', [])),
+            'remove_music':   filter_remove_music_notes,
+            'fix_music':      filter_fix_music_notes,
+            'fix_ocr':        filter_fix_ocr,
+            'remove_dashes':  filter_remove_leading_dashes,
+            'remove_caps_hi': filter_remove_caps_hi,
+            'remove_quotes':  filter_remove_offscreen_quotes,
+            'remove_dupes':   filter_remove_duplicates,
+            'merge_dupes':    filter_merge_duplicates,
+            'merge_short':    filter_merge_short,
+            'reduce_lines':   filter_reduce_lines,
+            'fix_caps':       lambda c: filter_fix_caps(
+                c, getattr(app, 'custom_cap_words', []),
+                use_names_db=getattr(app, 'use_names_db', False)),
+        }
+        active = []
+        for key, label in _FILTER_DEFS:
+            if filter_vars[key].get():
+                active.append((label, func_map[key]))
+        return active
+
+    def _apply_search_replace(cues):
+        """Apply search & replace pairs to cues."""
+        sr_pairs = getattr(app, 'custom_replacements', [])
+        if not opt_apply_sr.get() or not sr_pairs:
+            return cues
+        for pair in sr_pairs:
+            find_str, repl_str = pair[0], pair[1]
+            case_sensitive = pair[2] if len(pair) > 2 else False
+            flags = 0 if case_sensitive else re.IGNORECASE
+            pattern = re.escape(find_str)
+            for cue in cues:
+                cue['text'] = re.sub(pattern, repl_str,
+                                     cue['text'], flags=flags)
+        # Remove cues that became empty after replacements
+        return [c for c in cues if c['text'].strip()]
+
+    def _apply_post_filters(srt_path):
+        """Apply selected filters to an extracted SRT file in-place.
+        Returns (original_count, filtered_count) or None if no filters."""
+        active = _get_filter_funcs()
+        has_sr = opt_apply_sr.get() and bool(
+            getattr(app, 'custom_replacements', []))
+        if not active and not has_sr:
+            return None
+        try:
+            from .subtitle_filters import parse_srt, write_srt
+            with open(srt_path, 'r', encoding='utf-8',
+                      errors='replace') as f:
+                srt_text = f.read()
+            cues = parse_srt(srt_text)
+            if not cues:
+                return None
+            before = len(cues)
+            # Two passes when multiple filters selected
+            if active:
+                passes = 2 if len(active) > 1 else 1
+                for _pass in range(passes):
+                    for _label, func in active:
+                        cues = func(cues)
+            # Search & replace after filters
+            cues = _apply_search_replace(cues)
+            after = len(cues)
+            with open(srt_path, 'w', encoding='utf-8') as f:
+                f.write(write_srt(cues))
+            return (before, after)
+        except Exception:
+            return None
+
+    def _apply_post_filters_cues(cues):
+        """Apply selected filters to a list of cues (for OCR output).
+        Returns the filtered cues list."""
+        active = _get_filter_funcs()
+        has_sr = opt_apply_sr.get() and bool(
+            getattr(app, 'custom_replacements', []))
+        if not active and not has_sr:
+            return cues
+        if active:
+            passes = 2 if len(active) > 1 else 1
+            for _pass in range(passes):
+                for _label, func in active:
+                    cues = func(cues)
+        cues = _apply_search_replace(cues)
+        return cues
 
     # NOTE: _on_language_change() is called after tree is built (below)
 
@@ -672,19 +880,28 @@ def open_sub_ripper(app):
 
     def _get_matching_streams(file_dict):
         """Return list of (stream, classification) tuples matching
-        the current language and checkbox selections."""
+        the current language and checkbox selections.
+        When OCR Bitmap is enabled, bitmap streams matching the language
+        are included regardless of the main/forced/sdh checkboxes."""
         all_langs   = opt_language.get() == _ALL_LANGUAGES
         want_main   = opt_main.get()
         want_forced = opt_forced.get()
         want_sdh    = opt_sdh.get()
+        want_ocr    = opt_ocr.get()
 
         matches = []
         for stream in file_dict['sub_streams']:
             if not _matches_language(stream):
                 continue
             cls = _classify_stream(stream)
+            codec = stream.get('codec_name', '').lower()
+            is_bitmap = codec in BITMAP_SUB_CODECS
             if all_langs:
                 # All Languages — include everything
+                matches.append((stream, cls))
+            elif is_bitmap and want_ocr:
+                # OCR enabled — include all bitmap streams regardless
+                # of main/forced/sdh checkboxes
                 matches.append((stream, cls))
             elif cls == 'main' and want_main:
                 matches.append((stream, cls))
@@ -777,10 +994,15 @@ def open_sub_ripper(app):
 
     def _stop_extraction():
         _stop[0] = True
+        _ocr_cancel.set()
+
+    # Shared cancel event for OCR — set by _stop_extraction()
+    _ocr_cancel = threading.Event()
 
     def _extract_worker():
         """Background thread: extract subtitles from all files."""
         overwrite = opt_overwrite.get()
+        _ocr_cancel.clear()
 
         all_langs = opt_language.get() == _ALL_LANGUAGES
         want_cc = opt_cc.get() or all_langs
@@ -833,14 +1055,132 @@ def open_sub_ripper(app):
                 stream_index = stream['index']
                 codec_name = stream.get('codec_name', 'unknown')
 
-                # Skip bitmap codecs
+                # Bitmap codecs — OCR or skip
                 if codec_name in BITMAP_SUB_CODECS:
-                    _log(f"  {name}: stream #{stream_index} is bitmap "
-                         f"({codec_name}) — cannot extract to text",
-                         'WARNING', filename=name)
-                    bitmap_total += 1
-                    file_skipped += 1
+                    if not opt_ocr.get():
+                        _log(f"  {name}: stream #{stream_index} is bitmap "
+                             f"({codec_name}) — skipping (enable OCR "
+                             f"Bitmap to extract)",
+                             'WARNING', filename=name)
+                        bitmap_total += 1
+                        file_skipped += 1
+                        job_num += 1
+                        continue
+
+                    # ── OCR extraction for bitmap subtitles ──
+                    ocr_lang = _normalize_lang(
+                        stream.get('language', 'und'))
+                    if ocr_lang == 'und':
+                        sel = opt_language.get()
+                        if sel != _ALL_LANGUAGES:
+                            ocr_lang = _NAME_TO_CODE.get(sel, 'eng')
+                        else:
+                            ocr_lang = 'eng'
+
+                    # Build output path (always SRT for OCR)
+                    if cls == 'main':
+                        main_idx += 1
+                    ocr_stem = Path(filepath).stem
+                    ocr_parent = Path(filepath).parent
+                    if cls == 'forced':
+                        ocr_tag = f".{ocr_lang}.forced"
+                    elif cls == 'sdh':
+                        ocr_tag = f".{ocr_lang}.sdh"
+                    else:
+                        if main_count > 1:
+                            ocr_tag = f".{ocr_lang}.{main_idx}"
+                        else:
+                            ocr_tag = f".{ocr_lang}"
+                    out_path = str(ocr_parent / f"{ocr_stem}{ocr_tag}.srt")
+
+                    if not overwrite and os.path.exists(out_path):
+                        _log(f"  {name}: {os.path.basename(out_path)} "
+                             f"exists — skipping OCR",
+                             'SKIP', filename=name)
+                        file_skipped += 1
+                        skipped_total += 1
+                        job_num += 1
+                        continue
+
+                    win.after(0, lambda i=fi:
+                              _update_tree_status(i, 'OCR...'))
+                    _log(f"  {name}: OCR stream #{stream_index} "
+                         f"({codec_name}) → SRT",
+                         'INFO', filename=name)
+
+                    try:
+                        from .subtitle_ocr import ocr_bitmap_subtitle
+
+                        def _ocr_progress(msg):
+                            # Strip leading "OCR: " if the message
+                            # already includes it to avoid "OCR: OCR:"
+                            display = msg[:35]
+                            if display.upper().startswith('OCR:'):
+                                display = display[4:].lstrip()
+                            win.after(0, lambda i=fi, m=display:
+                                      _update_tree_status(
+                                          i, f'OCR: {m}'))
+
+                        ocr_cues = ocr_bitmap_subtitle(
+                            filepath, stream_index,
+                            language=ocr_lang,
+                            progress_callback=_ocr_progress,
+                            cancel_event=_ocr_cancel)
+
+                        if _stop[0]:
+                            job_num += 1
+                            continue
+
+                        if ocr_cues:
+                            # Apply post-extraction filters to OCR cues
+                            before_ocr = len(ocr_cues)
+                            ocr_cues = _apply_post_filters_cues(ocr_cues)
+
+                            # Write SRT file
+                            srt_lines = []
+                            for ci, cue in enumerate(ocr_cues, 1):
+                                srt_lines.append(
+                                    f"{ci}\n{cue['start']} --> "
+                                    f"{cue['end']}\n{cue['text']}\n")
+                            with open(out_path, 'w',
+                                      encoding='utf-8') as f:
+                                f.write('\n'.join(srt_lines))
+
+                            out_name = os.path.basename(out_path)
+                            filt_note = ''
+                            if before_ocr != len(ocr_cues):
+                                filt_note = (f", filtered "
+                                             f"{before_ocr}→"
+                                             f"{len(ocr_cues)}")
+                            _log(f"  {name} → {out_name} "
+                                 f"(OCR, {len(ocr_cues)} cues"
+                                 f"{filt_note})",
+                                 'SUCCESS', filename=name)
+                            file_extracted += 1
+                            extracted_total += 1
+                        else:
+                            _log(f"  {name}: OCR stream "
+                                 f"#{stream_index} produced no cues",
+                                 'ERROR', filename=name)
+                            file_errors += 1
+                            error_total += 1
+                    except ImportError:
+                        _log(f"  {name}: OCR requires tesseract-ocr "
+                             f"and pytesseract — not installed",
+                             'ERROR', filename=name)
+                        file_errors += 1
+                        error_total += 1
+                    except Exception as e:
+                        _log(f"  {name}: OCR stream "
+                             f"#{stream_index} error — {e}",
+                             'ERROR', filename=name)
+                        file_errors += 1
+                        error_total += 1
+
                     job_num += 1
+                    win.after(0, lambda i=fi, s=job_num, t=total_jobs:
+                              _update_tree_status(
+                                  i, f'Extracting {s}/{t}'))
                     continue
 
                 # Build output path
@@ -876,8 +1216,14 @@ def open_sub_ripper(app):
                         capture_output=True, text=True, timeout=120)
                     if proc.returncode == 0:
                         out_name = os.path.basename(out_path)
-                        _log(f"  {name} → {out_name}", 'SUCCESS',
-                             filename=name)
+                        # Apply post-extraction filters
+                        filt = _apply_post_filters(out_path)
+                        filt_note = ''
+                        if filt and filt[0] != filt[1]:
+                            filt_note = (f" (filtered "
+                                         f"{filt[0]}→{filt[1]})")
+                        _log(f"  {name} → {out_name}{filt_note}",
+                             'SUCCESS', filename=name)
                         file_extracted += 1
                         extracted_total += 1
                     else:
@@ -953,7 +1299,13 @@ def open_sub_ripper(app):
 
                     if cc_ok:
                         cc_name = os.path.basename(cc_out_path)
-                        _log(f"  {name} → {cc_name} (CC)",
+                        # Apply post-extraction filters
+                        filt = _apply_post_filters(cc_out_path)
+                        filt_note = ''
+                        if filt and filt[0] != filt[1]:
+                            filt_note = (f" (filtered "
+                                         f"{filt[0]}→{filt[1]})")
+                        _log(f"  {name} → {cc_name} (CC){filt_note}",
                              'SUCCESS', filename=name)
                         file_extracted += 1
                         extracted_total += 1
@@ -998,7 +1350,7 @@ def open_sub_ripper(app):
         if skipped_total:
             parts.append(f"{skipped_total} skipped")
         if bitmap_total:
-            parts.append(f"{bitmap_total} bitmap (unsupported)")
+            parts.append(f"{bitmap_total} bitmap (skipped)")
         if error_total:
             parts.append(f"{error_total} errors")
         _log(f"Complete — {', '.join(parts)}", 'SUCCESS')
@@ -1011,8 +1363,10 @@ def open_sub_ripper(app):
 
         _processing[0] = False
 
-        # Completion sound
-        _play_done_sound()
+        # Completion sound — respect main app's preference
+        notify = getattr(app, 'notify_sound', None)
+        if notify is None or (hasattr(notify, 'get') and notify.get()):
+            _play_done_sound()
 
     # ══════════════════════════════════════════════════════════════
     # Drag and drop support
@@ -1068,6 +1422,9 @@ def open_sub_ripper(app):
             'cc':          opt_cc.get(),
             'format':      opt_format.get(),
             'overwrite':   opt_overwrite.get(),
+            'ocr':         opt_ocr.get(),
+            'filters':     {**{k: v.get() for k, v in filter_vars.items()},
+                            'search_replace': opt_apply_sr.get()},
         }
         try:
             prefs_path = getattr(app, '_prefs_path', None)
@@ -1105,8 +1462,8 @@ def open_sub_ripper(app):
 
     _log("Docflix Sub Extractor ready — add video files and select "
          "subtitle types to extract", 'INFO')
-    _log("Supports embedded subtitle streams and closed captions (CC)",
-         'INFO')
+    _log("Supports embedded subtitle streams, closed captions (CC), "
+         "and bitmap subtitle OCR (PGS/VobSub/DVB)", 'INFO')
     _log("Tip: drag and drop video files onto this window", 'INFO')
 
 

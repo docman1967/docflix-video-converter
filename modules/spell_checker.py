@@ -94,6 +94,86 @@ def run_spell_check_scan(app, parent_window, cues, spell_error_indices):
     return errors_by_cue
 
 
+def run_spell_highlight_scan(app, parent_window, cues, spell_error_indices):
+    """Scan all cues for spelling errors (highlight-only, no candidates).
+
+    Faster than run_spell_check_scan() because it skips candidate
+    generation — only identifies which cues contain misspelled words.
+
+    Args:
+        app: Application context with custom_cap_words, custom_spell_words.
+        parent_window: Tk window for dialogs.
+        cues: List of subtitle cue dicts.
+        spell_error_indices: Set to populate with cue indices that have
+                             errors.
+
+    Returns:
+        Dict of {cue_index: [word, ...]} listing misspelled words per cue,
+        or None if spell checker is not available.
+    """
+    try:
+        from spellchecker import SpellChecker
+    except ImportError:
+        if messagebox.askyesno(
+                "Missing Package",
+                "pyspellchecker is not installed.\n\n"
+                "Would you like to install it now?",
+                parent=parent_window):
+            try:
+                if hasattr(app, 'add_log'):
+                    app.add_log("Installing pyspellchecker...", 'INFO')
+                _pip_result = subprocess.run(
+                    [sys.executable, '-m', 'pip', 'install',
+                     '--user', '--break-system-packages',
+                     'pyspellchecker'],
+                    capture_output=True, text=True, timeout=60)
+                if _pip_result.returncode == 0:
+                    from spellchecker import SpellChecker
+                    if hasattr(app, 'add_log'):
+                        app.add_log(
+                            "pyspellchecker installed successfully",
+                            'SUCCESS')
+                else:
+                    messagebox.showerror(
+                        "Install Failed",
+                        f"pip install failed:\n"
+                        f"{_pip_result.stderr[-300:]}",
+                        parent=parent_window)
+                    return None
+            except Exception as _e:
+                messagebox.showerror(
+                    "Install Failed",
+                    f"Could not install pyspellchecker:\n{_e}",
+                    parent=parent_window)
+                return None
+        else:
+            return None
+
+    spell = SpellChecker()
+    cap_words = getattr(app, 'custom_cap_words', [])
+    spell_words = getattr(app, 'custom_spell_words', [])
+    known = [w.lower() for w in cap_words + spell_words]
+    if known:
+        spell.word_frequency.load_words(known)
+
+    spell_error_indices.clear()
+    errors_by_cue = {}
+    for i, cue in enumerate(cues):
+        clean = re.sub(r'<[^>]+>|\{\\[^}]+\}|♪', '', cue['text'])
+        words = re.findall(r"[a-zA-Z]+(?:'[a-zA-Z]+)?", clean)
+        if not words:
+            continue
+        unknown = spell.unknown(words)
+        if unknown:
+            spell_error_indices.add(i)
+            cue_words = []
+            for w in words:
+                if w.lower() in unknown or w in unknown:
+                    cue_words.append(w)
+            errors_by_cue[i] = cue_words
+    return errors_by_cue
+
+
 def show_spell_check_dialog(app, editor_window, cues, tree,
                             refresh_tree_func, push_undo_func,
                             spell_error_indices):
