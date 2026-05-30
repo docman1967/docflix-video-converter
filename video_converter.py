@@ -5470,19 +5470,23 @@ class VideoConverterApp:
             self.tree_context_menu.tk_popup(event.x_root, event.y_root)
 
     def remove_selected_file(self):
-        """Remove the selected file from the list."""
+        """Remove the selected file(s) from the list."""
         selected = self.file_tree.selection()
         if not selected:
             return
-        item = selected[0]
-        # Find its index in self.files by matching the tree item's position
-        all_items = self.file_tree.get_children()
-        index = list(all_items).index(item)
-        removed_name = self.files[index]['name']
-        # Remove from data and tree
-        self.files.pop(index)
-        self.file_tree.delete(item)
-        self.add_log(f"Removed from list: {removed_name}", 'INFO')
+        # Build indices in reverse order so higher indices are removed
+        # first — prevents index shifting from invalidating later pops
+        all_items = list(self.file_tree.get_children())
+        indices = sorted(
+            [all_items.index(item) for item in selected], reverse=True)
+        names = [self.files[i]['name'] for i in indices]
+        for i in indices:
+            self.files.pop(i)
+        self.file_tree.delete(*selected)
+        if len(names) == 1:
+            self.add_log(f"Removed from list: {names[0]}", 'INFO')
+        else:
+            self.add_log(f"Removed {len(names)} files from list", 'INFO')
 
     def _center_on_main(self, dlg):
         """Position a dialog centered over the main window.  Uses
