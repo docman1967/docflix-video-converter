@@ -223,6 +223,39 @@ def _ocr_overlay_approach(filepath, stream_index, language, tess_lang,
 
     phase1_start = _time.monotonic()
 
+    # ── Pre-check: detect empty subtitle tracks via packet sizes ──
+    # DVB subtitle tracks often have keepalive/clear packets (14 bytes)
+    # with no actual subtitle content.  MKV stats tags
+    # (NUMBER_OF_FRAMES/NUMBER_OF_BYTES) are frequently absent for
+    # DVB streams, so the normal empty-track detection in
+    # get_all_streams() misses them.  A fast ffprobe packet scan
+    # catches it before we waste time on the full overlay render.
+    try:
+        pkt_cmd = [
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_entries', 'packet=size',
+            '-select_streams', str(stream_index),
+            filepath,
+        ]
+        pkt_result = subprocess.run(pkt_cmd, capture_output=True,
+                                    text=True, timeout=60)
+        pkt_data = __import__('json').loads(pkt_result.stdout)
+        packets = pkt_data.get('packets', [])
+        # DVB clear/keepalive segments are ≤14 bytes.  If every
+        # packet in the stream is that small, there's no subtitle
+        # content to OCR.
+        _DVB_EMPTY_THRESHOLD = 20   # bytes — generous for padding
+        if packets and all(int(p.get('size', 0)) <= _DVB_EMPTY_THRESHOLD
+                           for p in packets):
+            msg = (f"Subtitle track #{stream_index} is empty "
+                   f"({len(packets)} packets, all ≤{_DVB_EMPTY_THRESHOLD} "
+                   f"bytes — no subtitle content)")
+            if progress_callback:
+                progress_callback(msg)
+            return []
+    except Exception:
+        pass  # probe failed — fall through to render attempt
+
     # ── Get video resolution and duration ──
     try:
         probe_cmd = [
@@ -344,7 +377,9 @@ def _ocr_overlay_approach(filepath, stream_index, language, tess_lang,
     frame_files = sorted(_glob.glob(os.path.join(frame_dir, 'frame_*.png')))
     if not frame_files:
         if progress_callback:
-            progress_callback("No frames rendered")
+            progress_callback(
+                "No frames rendered — subtitle track may be empty "
+                "(no visible subtitle content found)")
         return []
 
     if progress_callback:

@@ -80,6 +80,40 @@ def get_video_duration(filepath):
     return None
 
 
+def _probe_bitmap_empty(filepath, stream_index, threshold=20):
+    """Fast check whether a bitmap subtitle stream is empty.
+
+    DVB subtitle tracks in HDTV recordings often contain only
+    keepalive/clear segments (≤14 bytes each) with no actual subtitle
+    graphics.  MKV muxer statistics (NUMBER_OF_FRAMES/NUMBER_OF_BYTES)
+    are frequently absent for these tracks, so the normal empty
+    detection misses them.
+
+    Probes the first 200 packets in the stream — if ALL are ≤
+    *threshold* bytes, the track is considered empty.  Returns True
+    (empty) or False (has content).
+    """
+    try:
+        cmd = [
+            'ffprobe', '-v', 'quiet', '-print_format', 'json',
+            '-show_entries', 'packet=size',
+            '-select_streams', str(stream_index),
+            '-read_intervals', '%+120',    # first 120s is enough
+            filepath,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=30)
+        if result.returncode != 0:
+            return False
+        data = json.loads(result.stdout)
+        packets = data.get('packets', [])
+        if not packets:
+            return True   # no packets at all → empty
+        return all(int(p.get('size', 0)) <= threshold for p in packets)
+    except Exception:
+        return False
+
+
 def get_subtitle_streams(filepath):
     """Return a list of subtitle stream dicts for the given file.
 
@@ -117,9 +151,19 @@ def get_subtitle_streams(filepath):
             except ValueError:
                 num_bytes = -1
             is_empty = (num_frames == 0 or num_bytes == 0)
+            # DVB/VobSub tracks often lack MKV stats tags.  Detect
+            # empty DVB tracks by probing actual packet sizes — if
+            # every packet is ≤20 bytes it's just keepalive/clear
+            # segments with no subtitle content.
+            codec_name = s.get('codec_name', 'unknown')
+            if (not is_empty
+                    and codec_name in ('dvb_subtitle', 'dvd_subtitle')
+                    and num_frames == -1 and num_bytes == -1):
+                is_empty = _probe_bitmap_empty(filepath,
+                                               s.get('index', 0))
             streams.append({
                 'index':      s.get('index', 0),
-                'codec_name': s.get('codec_name', 'unknown'),
+                'codec_name': codec_name,
                 'language':   tags.get('language', 'und'),
                 'title':      tags.get('title', ''),
                 'forced':     bool(disp.get('forced', 0)),

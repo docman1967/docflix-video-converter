@@ -412,6 +412,7 @@ def open_sub_ripper(app):
         ('merge_dupes',    "Merge Duplicates"),
         ('merge_short',    "Merge Short Cues"),
         ('reduce_lines',   "Reduce to 2 Lines"),
+        ('collapse_cc',    "Collapse Paint-On CC"),
         ('fix_caps',       "Fix ALL CAPS"),
     ]
 
@@ -509,7 +510,8 @@ def open_sub_ripper(app):
             filter_fix_ocr, filter_remove_leading_dashes,
             filter_remove_caps_hi, filter_remove_offscreen_quotes,
             filter_remove_duplicates, filter_merge_duplicates,
-            filter_merge_short, filter_reduce_lines, filter_fix_caps,
+            filter_merge_short, filter_reduce_lines,
+            filter_collapse_paint_on, filter_fix_caps,
         )
         func_map = {
             'remove_hi':      filter_remove_hi,
@@ -526,6 +528,7 @@ def open_sub_ripper(app):
             'merge_dupes':    filter_merge_duplicates,
             'merge_short':    filter_merge_short,
             'reduce_lines':   filter_reduce_lines,
+            'collapse_cc':    filter_collapse_paint_on,
             'fix_caps':       lambda c: filter_fix_caps(
                 c, getattr(app, 'custom_cap_words', []),
                 use_names_db=getattr(app, 'use_names_db', False)),

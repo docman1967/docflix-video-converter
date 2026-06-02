@@ -41,7 +41,7 @@ from .subtitle_filters import (
     filter_remove_offscreen_quotes,
     filter_remove_leading_dashes,
     filter_remove_duplicates, filter_merge_duplicates, filter_merge_short,
-    filter_reduce_lines,
+    filter_reduce_lines, filter_collapse_paint_on,
     shift_timestamps, stretch_timestamps, two_point_sync,
     BUILTIN_AD_PATTERNS,
     # Names database (optional)
@@ -1136,34 +1136,134 @@ def open_standalone_subtitle_editor(app):
                            f"from {os.path.basename(video_path)}...",
                       wraplength=350)
             prog_status.pack(pady=(0, 10))
-            prog_bar = ttk.Progressbar(prog_f, mode='indeterminate', length=300)
+            prog_var = tk.DoubleVar(value=0)
+            prog_bar = ttk.Progressbar(prog_f, mode='determinate',
+                                       variable=prog_var,
+                                       maximum=100, length=300)
             prog_bar.pack(pady=(0, 5))
-            prog_bar.start(15)
+
+            cancel_flag = [False]
+            proc_ref = [None]
+
+            def _on_cancel_extract():
+                cancel_flag[0] = True
+                if proc_ref[0]:
+                    try:
+                        proc_ref[0].kill()
+                    except Exception:
+                        pass
+
+            cancel_btn = ttk.Button(prog_f, text="Cancel",
+                                    command=_on_cancel_extract)
+            cancel_btn.pack(pady=(5, 0))
 
             app._center_on_main(prog_dlg)
             prog_dlg.grab_set()
-            prog_dlg.protocol('WM_DELETE_WINDOW', lambda: None)
+            prog_dlg.protocol('WM_DELETE_WINDOW', _on_cancel_extract)
 
             extract_result = [None]  # (returncode, stderr) or Exception
 
             def _run_extract():
                 try:
                     if is_cc:
-                        ok = extract_closed_captions_to_srt(
-                            video_path, tmp_srt.name, cc_type=cc_type)
-                        if ok:
+                        # Three-tier CC extraction:
+                        #   1. ccextractor direct (fast)
+                        #   2. ffmpeg pipe → ccextractor (fast,
+                        #      works around MKV parser crash)
+                        #   3. ffmpeg movie[subcc] (slow, last resort)
+                        import shutil as _shutil
+                        from .gpu import (_clean_cc_srt,
+                                          _run_ccx_pipe,
+                                          _run_ffmpeg_subcc,
+                                          _have_cc_output,
+                                          _cleanup_ccx_side_files)
+                        from .utils import get_video_duration
+                        has_ccx = bool(
+                            _shutil.which('ccextractor'))
+                        dur = get_video_duration(video_path)
+                        t_out = (max(120, int(dur * 0.5) + 60)
+                                 if dur else 600)
+
+                        def _on_progress(pct):
+                            """Thread-safe progress update."""
+                            editor.after(0, lambda p=pct: (
+                                prog_var.set(p),
+                                prog_status.configure(
+                                    text=f"Extracting closed "
+                                         f"captions… {int(p)}%")))
+
+                        # Tier 1: ccextractor direct
+                        if has_ccx and not cancel_flag[0]:
+                            cmd = [
+                                'ccextractor', video_path,
+                                '-o', tmp_srt.name,
+                                '--no_progress_bar',
+                            ]
+                            if cc_type == 'eia_708':
+                                cmd += ['--svc', '1']
+                            try:
+                                proc = subprocess.Popen(
+                                    cmd,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE,
+                                    text=True)
+                                proc_ref[0] = proc
+                                proc.wait()
+                            except Exception:
+                                pass
+                            _cleanup_ccx_side_files(
+                                tmp_srt.name)
+
+                        # Tier 2: ffmpeg pipe → ccextractor stdin
+                        if (has_ccx
+                                and not _have_cc_output(tmp_srt.name)
+                                and not cancel_flag[0]):
+                            try:
+                                _run_ccx_pipe(video_path,
+                                              tmp_srt.name,
+                                              cc_type, t_out,
+                                              duration=dur,
+                                              progress_callback=
+                                              _on_progress)
+                            except Exception:
+                                pass
+                            _cleanup_ccx_side_files(
+                                tmp_srt.name)
+
+                        # Tier 3: ffmpeg movie[subcc] (slow)
+                        if (not _have_cc_output(tmp_srt.name)
+                                and not cancel_flag[0]):
+                            try:
+                                _run_ffmpeg_subcc(video_path,
+                                                  tmp_srt.name,
+                                                  t_out)
+                            except Exception:
+                                pass
+
+                        if cancel_flag[0]:
+                            extract_result[0] = ('ok', 1, 'Cancelled')
+                        elif _have_cc_output(tmp_srt.name):
+                            _clean_cc_srt(tmp_srt.name)
                             extract_result[0] = ('ok', 0, '')
                         else:
                             extract_result[0] = ('ok', 1,
                                 'CC extraction produced no output — '
-                                'the file may not contain readable captions.')
+                                'the file may not contain readable '
+                                'captions.')
                     else:
                         cmd = ['ffmpeg', '-y', '-i', video_path,
                                '-map', f'0:{stream_index}',
                                '-c:s', 'srt', tmp_srt.name]
-                        r = subprocess.run(cmd, capture_output=True,
-                                           text=True, timeout=60)
-                        extract_result[0] = ('ok', r.returncode, r.stderr)
+                        proc = subprocess.Popen(
+                            cmd, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, text=True)
+                        proc_ref[0] = proc
+                        _, stderr = proc.communicate(timeout=60)
+                        if cancel_flag[0]:
+                            extract_result[0] = ('ok', 1, 'Cancelled')
+                        else:
+                            extract_result[0] = ('ok', proc.returncode,
+                                                 stderr or '')
                 except Exception as e:
                     extract_result[0] = ('error', e)
 
@@ -1853,6 +1953,8 @@ def open_standalone_subtitle_editor(app):
                                 command=lambda: apply_filter(filter_merge_short, "Merge Short Cues"))
         filter_menu.add_command(label="Reduce to 2 Lines",
                                 command=lambda: apply_filter(filter_reduce_lines, "Reduce to 2 Lines"))
+        filter_menu.add_command(label="Collapse Paint-On CC",
+                                command=lambda: apply_filter(filter_collapse_paint_on, "Collapse Paint-On CC"))
         filter_menu.add_separator()
 
         # ── Fix ALL CAPS ──
@@ -5310,6 +5412,8 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
                                 command=lambda: apply_filter(filter_merge_short, "Merge Short Cues"))
         filter_menu.add_command(label="Reduce to 2 Lines",
                                 command=lambda: apply_filter(filter_reduce_lines, "Reduce to 2 Lines"))
+        filter_menu.add_command(label="Collapse Paint-On CC",
+                                command=lambda: apply_filter(filter_collapse_paint_on, "Collapse Paint-On CC"))
         filter_menu.add_separator()
 
         # ── Fix ALL CAPS ──

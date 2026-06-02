@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.5.2"
+APP_VERSION = "3.5.3"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -1249,12 +1249,119 @@ def detect_closed_captions(filepath):
         return False
 
 
+def _run_ccx_pipe(filepath, output_srt_path, cc_type, timeout,
+                   duration=None, progress_callback=None):
+    """Extract CC via ffmpeg→ccextractor pipe.
+
+    Pipes the video stream as MPEG-TS (stream copy, no decode) into
+    ccextractor via stdin.  Works around ccextractor's Matroska parser
+    crash (segfault on certain MKV files in ccextractor 0.94) while
+    still being fast — only remuxes, no video decoding.
+
+    If *duration* (seconds) and *progress_callback* are provided,
+    ffmpeg's stderr is parsed for ``time=`` progress and the callback
+    is called with a percentage (0-99).
+    """
+    import re as _re
+    report_progress = (duration and duration > 0
+                       and progress_callback is not None)
+    ffmpeg_cmd = [
+        'ffmpeg', '-v', 'error',
+        '-i', filepath,
+        '-map', '0:v:0',
+        '-c:v', 'copy',
+        '-f', 'mpegts',
+    ]
+    if report_progress:
+        ffmpeg_cmd += ['-progress', 'pipe:2']
+    ffmpeg_cmd.append('-')
+
+    ccx_cmd = [
+        'ccextractor', '-stdin',
+        '-o', output_srt_path,
+        '--no_progress_bar',
+    ]
+    if cc_type == 'eia_708':
+        ccx_cmd += ['--svc', '1']
+
+    ff = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE if report_progress
+                          else subprocess.DEVNULL)
+    ccx = subprocess.Popen(ccx_cmd, stdin=ff.stdout,
+                           stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+    ff.stdout.close()          # allow ff to receive SIGPIPE if ccx exits
+
+    if report_progress:
+        for line in ff.stderr:
+            line = line.strip()
+            m = _re.match(r'out_time_ms=(\d+)', line)
+            if m:
+                secs = int(m.group(1)) / 1_000_000
+                pct = min(99, int((secs / duration) * 100))
+                progress_callback(pct)
+
+    ccx.wait(timeout=timeout)
+    ff.wait(timeout=30)
+
+
+def _run_ffmpeg_subcc(filepath, output_srt_path, timeout):
+    """Last-resort CC extraction via ffmpeg lavfi movie[subcc] filter.
+
+    Slow — decodes the entire video — but handles edge cases where
+    both ccextractor direct and pipe modes fail.
+    """
+    escaped = filepath.replace("'", "'\\''")
+    cmd = [
+        'ffmpeg', '-y', '-v', 'error',
+        '-f', 'lavfi',
+        '-i', f"movie='{escaped}'[out0+subcc]",
+        '-map', '0:1',
+        '-f', 'srt',
+        output_srt_path
+    ]
+    subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def _have_cc_output(path):
+    """Check if a CC extraction produced usable output."""
+    return (os.path.exists(path) and os.path.getsize(path) > 10)
+
+
+def _cleanup_ccx_side_files(output_srt_path):
+    """Remove side-effect files created by ccextractor.
+
+    ccextractor creates extra files alongside the ``-o`` output for
+    each CEA-708 service it finds, e.g.::
+
+        output.srt            ← intended output
+        output.p1.svc01.srt   ← side-effect (CEA-708 program 1, service 1)
+
+    This function globs for those files and removes them.
+    """
+    import glob
+    stem = output_srt_path
+    if stem.lower().endswith('.srt'):
+        stem = stem[:-4]
+    for path in glob.glob(glob.escape(stem) + '.p*.svc*.srt'):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def extract_closed_captions_to_srt(filepath, output_srt_path,
                                    cc_type='eia_608', timeout=None):
     """Extract closed captions to SRT.
 
-    cc_type: 'eia_608' uses ffmpeg lavfi movie[subcc] filter (fast, reliable).
-             'eia_708' uses ccextractor --svc 1 (CEA-708 service 1).
+    Three-tier strategy, fastest first:
+      1. ccextractor direct — reads CC from container packets (fast,
+         works natively with .ts files)
+      2. ffmpeg pipe → ccextractor stdin — remuxes video as MPEG-TS
+         stream copy into ccextractor (fast, works around ccextractor's
+         MKV/MP4 parser crashes)
+      3. ffmpeg lavfi movie[subcc] — decodes the entire video (slow,
+         last resort)
 
     Returns True on success, False otherwise.
     """
@@ -1263,54 +1370,85 @@ def extract_closed_captions_to_srt(filepath, output_srt_path,
             dur = get_video_duration(filepath)
             timeout = max(120, int(dur * 0.5) + 60) if dur else 600
 
-        if cc_type == 'eia_708' and shutil.which('ccextractor'):
-            # CEA-708 — use ccextractor service extraction
+        has_ccx = bool(shutil.which('ccextractor'))
+
+        # Tier 1: ccextractor direct
+        if has_ccx:
             cmd = [
                 'ccextractor', filepath,
                 '-o', output_srt_path,
-                '--svc', '1',
                 '--no_progress_bar',
             ]
-            subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=timeout)
-        else:
-            # EIA-608 — use ffmpeg lavfi movie[subcc] filter
-            escaped = filepath.replace("'", "'\\''")
-            cmd = [
-                'ffmpeg', '-y', '-v', 'error',
-                '-f', 'lavfi',
-                '-i', f"movie='{escaped}'[out0+subcc]",
-                '-map', '0:1',
-                '-f', 'srt',
-                output_srt_path
-            ]
-            subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=timeout)
+            if cc_type == 'eia_708':
+                cmd += ['--svc', '1']
+            try:
+                subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=timeout)
+            except Exception:
+                pass
+            _cleanup_ccx_side_files(output_srt_path)
+            if _have_cc_output(output_srt_path):
+                _clean_cc_srt(output_srt_path)
+                return True
 
-        if (os.path.exists(output_srt_path)
-                and os.path.getsize(output_srt_path) > 10):
-            # Clean up CC artifacts: font tags, ASS positioning, hard spaces
+        # Tier 2: ffmpeg remux → ccextractor stdin pipe
+        if has_ccx:
+            try:
+                _run_ccx_pipe(filepath, output_srt_path,
+                              cc_type, timeout)
+            except Exception:
+                pass
+            _cleanup_ccx_side_files(output_srt_path)
+            if _have_cc_output(output_srt_path):
+                _clean_cc_srt(output_srt_path)
+                return True
+
+        # Tier 3: ffmpeg lavfi movie[subcc] (slow — full video decode)
+        try:
+            _run_ffmpeg_subcc(filepath, output_srt_path, timeout)
+        except Exception:
+            pass
+        if _have_cc_output(output_srt_path):
             _clean_cc_srt(output_srt_path)
             return True
+
         return False
     except Exception:
         return False
 
 
 def _clean_cc_srt(srt_path):
-    """Strip CC formatting artifacts from an SRT extracted via ffmpeg subcc."""
+    """Strip CC formatting artifacts and collapse paint-on buildup cues.
+
+    Handles both ffmpeg subcc output (font tags, positioning codes) and
+    ccextractor output (paint-on character-by-character buildup cues,
+    fixed-width whitespace padding).
+    """
     import re
     try:
         with open(srt_path, 'r', encoding='utf-8') as f:
             text = f.read()
+        # Strip ffmpeg subcc artifacts
         text = re.sub(r'</?font[^>]*>', '', text)       # <font ...>...</font>
         text = re.sub(r'\{\\an\d+\}', '', text)         # {\an7} positioning
         text = re.sub(r'\\h', ' ', text)                 # \h hard spaces
+        text = text.replace('\xa0', ' ')                 # non-breaking spaces
         text = re.sub(r'  +', ' ', text)                 # collapse spaces
         lines = [line.strip() for line in text.splitlines()]
         text = '\n'.join(lines)
         with open(srt_path, 'w', encoding='utf-8') as f:
             f.write(text)
+
+        # Collapse paint-on buildup cues (ccextractor output)
+        from modules.subtitle_filters import parse_srt, write_srt
+        from modules.subtitle_filters import filter_collapse_paint_on
+        cues = parse_srt(text)
+        if cues:
+            collapsed = filter_collapse_paint_on(cues)
+            if len(collapsed) < len(cues):
+                # Paint-on cues were found and collapsed — rewrite
+                with open(srt_path, 'w', encoding='utf-8') as f:
+                    f.write(write_srt(collapsed))
     except Exception:
         pass
 
@@ -6234,19 +6372,19 @@ class VideoConverterApp:
                 self.add_log(f"CC extraction error: {e}", 'ERROR')
                 return None
 
-            # Get duration for progress calculation
-            dur_secs = get_video_duration(filepath) or 0
+            # Three-tier CC extraction: ccextractor direct → ffmpeg
+            # pipe to ccextractor → ffmpeg movie[subcc] (slow)
+            use_ccx = bool(shutil.which('ccextractor'))
 
-            # Build ffmpeg command
-            escaped = filepath.replace("'", "'\\''")
-            cmd = [
-                'ffmpeg', '-y',
-                '-f', 'lavfi',
-                '-i', f"movie='{escaped}'[out0+subcc]",
-                '-map', '0:1',
-                '-f', 'srt',
-                cc_tmp.name
-            ]
+            # Tier 1 command (ccextractor direct)
+            ccx_cmd = [
+                'ccextractor', filepath,
+                '-o', cc_tmp.name,
+                '--no_progress_bar',
+            ] if use_ccx else None
+
+            # Get duration for progress calculation (ffmpeg fallback)
+            dur_secs = get_video_duration(filepath) or 0
 
             # Progress dialog
             prog_dlg = tk.Toplevel(dlg)
@@ -6278,23 +6416,153 @@ class VideoConverterApp:
 
             result = [False]
 
+            def _update_progress(pct, label_text=None):
+                """Thread-safe progress bar + label update."""
+                prog_dlg.after(0, lambda p=pct: prog_var.set(p))
+                if label_text:
+                    prog_dlg.after(0, lambda t=label_text:
+                        prog_label.configure(text=t))
+
+            def _on_pipe_progress(pct):
+                """Progress callback for Tier 2 pipe extraction."""
+                _update_progress(pct,
+                    f"Extracting closed captions… {int(pct)}%")
+
+            def _run_ffmpeg_fallback():
+                """Run the slow ffmpeg movie[subcc] path with progress."""
+                escaped = filepath.replace("'", "'\\''")
+                ffcmd = [
+                    'ffmpeg', '-y',
+                    '-f', 'lavfi',
+                    '-i', f"movie='{escaped}'[out0+subcc]",
+                    '-map', '0:1',
+                    '-f', 'srt',
+                    cc_tmp.name
+                ]
+                _update_progress(0,
+                    "Extracting closed captions (ffmpeg)…")
+                proc2 = subprocess.Popen(ffcmd,
+                                         stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.PIPE,
+                                         text=True)
+                proc_ref[0] = proc2
+                for line in proc2.stderr:
+                    if cancel_flag[0]:
+                        proc2.kill()
+                        break
+                    m = _re.search(
+                        r'time=(\d+):(\d+):(\d+)\.(\d+)', line)
+                    if m and dur_secs > 0:
+                        t = (int(m.group(1)) * 3600
+                             + int(m.group(2)) * 60
+                             + int(m.group(3)))
+                        pct = min(99, (t / dur_secs) * 100)
+                        _update_progress(pct,
+                            f"Extracting closed captions"
+                            f" (ffmpeg)… {int(pct)}%")
+                proc2.wait()
+
+            def _run_ccx_pipe_inline():
+                """Tier 2: ffmpeg remux → ccextractor stdin pipe
+                with progress."""
+                import re as _re2
+                ffmpeg_cmd = [
+                    'ffmpeg', '-v', 'error',
+                    '-i', filepath,
+                    '-map', '0:v:0',
+                    '-c:v', 'copy',
+                    '-f', 'mpegts',
+                    '-progress', 'pipe:2',
+                    '-',
+                ]
+                ccx_cmd2 = [
+                    'ccextractor', '-stdin',
+                    '-o', cc_tmp.name,
+                    '--no_progress_bar',
+                ]
+                ff = subprocess.Popen(ffmpeg_cmd,
+                                      stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE)
+                ccx = subprocess.Popen(ccx_cmd2, stdin=ff.stdout,
+                                       stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL)
+                ff.stdout.close()
+                proc_ref[0] = ccx
+                # Parse ffmpeg progress for real-time updates
+                for line in ff.stderr:
+                    if cancel_flag[0]:
+                        ccx.kill()
+                        ff.kill()
+                        break
+                    line = line.strip()
+                    if isinstance(line, bytes):
+                        line = line.decode('utf-8', errors='replace')
+                    m = _re2.match(r'out_time_ms=(\d+)', line)
+                    if m and dur_secs > 0:
+                        secs = int(m.group(1)) / 1_000_000
+                        pct = min(99, int((secs / dur_secs) * 100))
+                        _update_progress(pct,
+                            f"Extracting closed captions… "
+                            f"{pct}%")
+                ccx.wait()
+                ff.wait(timeout=30)
+
             def _extract_thread():
                 try:
-                    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                            stderr=subprocess.PIPE, text=True)
-                    proc_ref[0] = proc
-                    for line in proc.stderr:
-                        if cancel_flag[0]:
-                            proc.kill()
-                            break
-                        m = _re.search(r'time=(\d+):(\d+):(\d+)\.(\d+)', line)
-                        if m and dur_secs > 0:
-                            t = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
-                            pct = min(99, (t / dur_secs) * 100)
-                            prog_dlg.after(0, lambda p=pct: prog_var.set(p))
-                            prog_dlg.after(0, lambda p=int(pct):
-                                prog_label.configure(text=f"Extracting closed captions… {p}%"))
-                    proc.wait()
+                    if use_ccx:
+                        # Tier 1: ccextractor direct
+                        proc = subprocess.Popen(
+                            ccx_cmd, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, text=True)
+                        proc_ref[0] = proc
+                        proc.wait()
+                        _cleanup_ccx_side_files(cc_tmp.name)
+                        ccx_ok = (not cancel_flag[0]
+                                  and _have_cc_output(cc_tmp.name))
+
+                        # Tier 2: ffmpeg pipe → ccextractor stdin
+                        if not ccx_ok and not cancel_flag[0]:
+                            try:
+                                _run_ccx_pipe_inline()
+                                _cleanup_ccx_side_files(
+                                    cc_tmp.name)
+                                ccx_ok = (not cancel_flag[0]
+                                          and _have_cc_output(
+                                              cc_tmp.name))
+                            except Exception:
+                                ccx_ok = False
+
+                        # Tier 3: ffmpeg movie[subcc] (slow)
+                        if not ccx_ok and not cancel_flag[0]:
+                            _run_ffmpeg_fallback()
+                    else:
+                        # No ccextractor — ffmpeg path with progress
+                        escaped = filepath.replace("'", "'\\''")
+                        ff_cmd = [
+                            'ffmpeg', '-y',
+                            '-f', 'lavfi',
+                            '-i',
+                            f"movie='{escaped}'[out0+subcc]",
+                            '-map', '0:1',
+                            '-f', 'srt',
+                            cc_tmp.name
+                        ]
+                        proc = subprocess.Popen(
+                            ff_cmd, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, text=True)
+                        proc_ref[0] = proc
+                        for line in proc.stderr:
+                            if cancel_flag[0]:
+                                proc.kill()
+                                break
+                            m = _re.search(r'time=(\d+):(\d+):(\d+)\.(\d+)', line)
+                            if m and dur_secs > 0:
+                                t = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+                                pct = min(99, (t / dur_secs) * 100)
+                                prog_dlg.after(0, lambda p=pct: prog_var.set(p))
+                                prog_dlg.after(0, lambda p=int(pct):
+                                    prog_label.configure(text=f"Extracting closed captions… {p}%"))
+                        proc.wait()
                     if (not cancel_flag[0]
                             and os.path.exists(cc_tmp.name)
                             and os.path.getsize(cc_tmp.name) > 10):

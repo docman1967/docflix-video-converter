@@ -22,6 +22,7 @@ from .subtitle_filters import (
     filter_remove_offscreen_quotes,
     filter_remove_leading_dashes,
     filter_remove_duplicates, filter_merge_duplicates, filter_merge_short,
+    filter_collapse_paint_on,
     # Names database (optional)
     load_names_db, unload_names_db, is_names_db_loaded,
     is_names_db_available, get_names_db_count,
@@ -634,6 +635,7 @@ def open_batch_filter(app):
             ('merge_dupes',    "Merge Duplicates",                filter_merge_duplicates),
             ('merge_short',    "Merge Short Cues",                filter_merge_short),
             ('reduce_lines',   "Reduce to 2 Lines",               filter_reduce_lines),
+            ('collapse_cc',    "Collapse Paint-On CC",            filter_collapse_paint_on),
             ('fix_caps',       "Fix ALL CAPS",
              lambda c: filter_fix_caps(c, app.custom_cap_words,
                                        use_names_db=getattr(

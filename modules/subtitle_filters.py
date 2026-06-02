@@ -1148,6 +1148,70 @@ def filter_merge_short(cues, max_gap_ms=1000):
     return result
 
 
+def filter_collapse_paint_on(cues):
+    """Collapse paint-on / pop-on closed caption cues.
+
+    EIA-608 closed captions transmitted via ccextractor arrive as
+    character-by-character buildup cues (~33ms each), where each cue
+    is a superset of the previous one as more text is "painted on"::
+
+        00:00:04,804 --> 00:00:04,838   " - So"
+        00:00:04,838 --> 00:00:04,871   " - Some"
+        00:00:04,871 --> 00:00:04,904   " - Some s"
+        ...
+        00:00:05,338 --> 00:00:07,107   " - Some stories
+                                          are unforgettable."
+
+    This filter keeps only the final (complete) cue of each buildup
+    sequence: if the next cue's stripped text starts with the current
+    cue's stripped text, the current cue is a partial buildup and is
+    dropped.  The kept cue inherits the first partial's start time so
+    the subtitle appears at the right moment.
+
+    Also strips the fixed-width trailing whitespace padding that
+    ccextractor adds to fill the 32-character CC field.
+    """
+    if not cues:
+        return cues
+
+    # Strip trailing whitespace from every line in every cue
+    cleaned = []
+    for cue in cues:
+        lines = cue['text'].splitlines()
+        text = '\n'.join(line.rstrip() for line in lines).strip()
+        if text:
+            cleaned.append({**cue, 'text': text})
+
+    if not cleaned:
+        return []
+
+    result = []
+    i = 0
+    while i < len(cleaned):
+        # Collect a run of buildup cues: each is a prefix of the next
+        run_start = i
+        cur_stripped = cleaned[i]['text'].replace('\n', ' ').strip()
+        while i + 1 < len(cleaned):
+            next_stripped = (cleaned[i + 1]['text']
+                            .replace('\n', ' ').strip())
+            if next_stripped.startswith(cur_stripped):
+                i += 1
+                cur_stripped = next_stripped
+            else:
+                break
+        # Keep only the final cue (complete text), but use the
+        # start time from the first cue in the run
+        final = dict(cleaned[i])
+        final['start'] = cleaned[run_start]['start']
+        result.append(final)
+        i += 1
+
+    # Re-number
+    for idx, cue in enumerate(result, 1):
+        cue['index'] = idx
+    return result
+
+
 def filter_reduce_lines(cues, max_lines=2, max_chars=42):
     """Reflow subtitle cues to max_lines, splitting at the most natural
     break point for readable two-line subtitles.

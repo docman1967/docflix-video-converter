@@ -3834,6 +3834,7 @@ def open_tv_renamer(app):
                 return
             renamed = 0
             skipped = 0
+            skipped_exists = 0
             errors = 0
             batch_history = []  # [(old_path, new_path), ...]
             created_dirs = []   # track dirs created for undo cleanup
@@ -3999,12 +4000,34 @@ def open_tv_renamer(app):
                         # sit alongside their matching video.
                         dest_dir = os.path.dirname(old_path)
                         if item.get('ext', '') in SUBTITLE_EXTENSIONS:
-                            # Climb up past episode subfolders and Subs/
+                            # Climb up past subtitle subfolders (e.g.
+                            # Subs/S01E01.Episode/) but NOT past episode
+                            # folders that contain video files (e.g.
+                            # Show.S05E01.1080p.WEB.h264-BAE/).
                             _sub_dest = dest_dir
                             for _ in range(3):
                                 _dn = os.path.basename(_sub_dest)
-                                if (_SUBS_FOLDER_RE.match(_dn)
-                                        or re.search(r'[Ss]\d{1,2}[Ee]\d', _dn)):
+                                _is_sub_folder = _SUBS_FOLDER_RE.match(_dn)
+                                _is_ep_folder = (
+                                    not _is_sub_folder
+                                    and re.search(
+                                        r'[Ss]\d{1,2}[Ee]\d', _dn))
+                                if _is_ep_folder:
+                                    # Only climb past episode-named folders
+                                    # if they don't contain video files —
+                                    # scene-release folders like
+                                    # Show.S05E01.1080p.WEB.h264-BAE/
+                                    # contain the video and subtitles should
+                                    # stay alongside it.
+                                    _has_video = any(
+                                        f.lower().endswith(tuple(
+                                            VIDEO_EXTENSIONS))
+                                        for f in os.listdir(_sub_dest)
+                                        if os.path.isfile(
+                                            os.path.join(_sub_dest, f)))
+                                    if _has_video:
+                                        break
+                                if _is_sub_folder or _is_ep_folder:
                                     _sub_dest = os.path.dirname(_sub_dest)
                                 else:
                                     break
@@ -4018,7 +4041,7 @@ def open_tv_renamer(app):
                         continue
                     if os.path.exists(new_path):
                         _log(f"Skipped (exists): {new_name}", 'WARNING')
-                        skipped += 1
+                        skipped_exists += 1
                         continue
                     # Create subdirectories if needed (e.g. Season 01)
                     new_dir = os.path.dirname(new_path)
@@ -4098,6 +4121,8 @@ def open_tv_renamer(app):
             parts = [f"Renamed {renamed} files"]
             if skipped:
                 parts.append(f"{skipped} skipped (no match)")
+            if skipped_exists:
+                parts.append(f"{skipped_exists} skipped (exists)")
             if errors:
                 parts.append(f"{errors} errors")
             msg = " — ".join(parts)
