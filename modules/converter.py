@@ -704,40 +704,13 @@ class VideoConverter:
                     c.extend(['-map_chapters', '-1'])
                     self.log("Stripping chapters from output", 'INFO')
 
-                # Strip global tags/metadata
+                # Strip tags — handled by mkvpropedit post-step, not here.
+                # Do NOT use -map_metadata -1 — it strips per-stream language
+                # and title tags along with the junk statistics tags.  The
+                # mkvpropedit --delete-track-statistics-tags post-step (after
+                # encoding) removes only BPS/DURATION/NUMBER_OF_FRAMES/etc.
                 if settings.get('strip_metadata_tags', False):
-                    c.extend(['-map_metadata', '-1'])
-                    self.log("Stripping global tags/metadata from output", 'INFO')
-                    # -map_metadata -1 also strips per-stream language tags.
-                    # Re-apply original languages so they survive the strip.
-                    # (Only when set_track_metadata is off — that path handles
-                    # its own language assignment.)
-                    if not settings.get('set_track_metadata', False):
-                        from .utils import get_audio_info
-                        try:
-                            _audio_streams = get_audio_info(input_path)
-                        except Exception:
-                            _audio_streams = []
-                        for _ai, _ainfo in enumerate(_audio_streams):
-                            c.extend([f'-metadata:s:a:{_ai}',
-                                      f"language={_ainfo.get('language', 'und')}"])
-                        # Subtitle languages: only restore from source in the
-                        # simple passthrough path (−map 0:s?).  In the explicit
-                        # mapping path, _add_subtitle_args already wrote the
-                        # correct language per output index.
-                        sub_settings = settings.get('subtitle_settings', {})
-                        _simple_sub_path = (not sub_settings
-                                            and not embed_subs
-                                            and not settings.get('strip_internal_subs', False)
-                                            and not edited_subs)
-                        if _simple_sub_path:
-                            try:
-                                _sub_streams = get_subtitle_streams(input_path)
-                            except Exception:
-                                _sub_streams = []
-                            for _si, _sinfo in enumerate(_sub_streams):
-                                c.extend([f'-metadata:s:s:{_si}',
-                                          f"language={_sinfo.get('language', 'und')}"])
+                    self.log("Strip tags enabled (mkvpropedit post-step)", 'INFO')
 
                 # Set track metadata (language, clear names/title)
                 if settings.get('set_track_metadata', False):

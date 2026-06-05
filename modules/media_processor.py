@@ -1571,8 +1571,10 @@ def open_media_processor(app):
                 cmd.extend(['-map_chapters', '-1'])
 
             # ── Tags ──
-            if _ov(f, 'strip_tags', opt_strip_tags):
-                cmd.extend(['-map_metadata', '-1'])
+            # Note: do NOT use -map_metadata -1 here — it strips per-stream
+            # language and title tags.  Tag stripping is handled by the
+            # mkvpropedit --delete-track-statistics-tags post-step.
+            do_strip_tags = _ov(f, 'strip_tags', opt_strip_tags)
 
             # ── Track metadata ──
             if do_set_meta:
@@ -1757,19 +1759,21 @@ def open_media_processor(app):
                     else:
                         final_path = out_path
 
-                    # Strip MKV Tags (DURATION, BPS, etc.) that ffmpeg's
-                    # Matroska muxer writes automatically on every remux.
-                    # -map_metadata -1 only strips metadata, not MKV Tag
-                    # elements — mkvpropedit is needed to remove them.
-                    if (_ov(f, 'strip_tags', opt_strip_tags)
+                    # Strip MKV statistics tags (DURATION, BPS,
+                    # NUMBER_OF_FRAMES, etc.) that ffmpeg's Matroska muxer
+                    # writes automatically on every remux.  Uses targeted
+                    # --delete-track-statistics-tags to preserve per-stream
+                    # language and title tags.
+                    if (do_strip_tags
                             and final_path.lower().endswith('.mkv')
                             and shutil.which('mkvpropedit')):
                         try:
                             _mkv_r = subprocess.run(
-                                ['mkvpropedit', final_path, '--tags', 'all:'],
+                                ['mkvpropedit', final_path,
+                                 '--delete-track-statistics-tags'],
                                 capture_output=True, text=True, timeout=30)
                             if _mkv_r.returncode == 0:
-                                _log("  Stripped MKV tags (mkvpropedit)", 'INFO')
+                                _log("  Stripped MKV statistics tags (mkvpropedit)", 'INFO')
                             else:
                                 _log(f"  mkvpropedit warning: {_mkv_r.stderr.strip()}", 'WARNING')
                         except Exception as _e:

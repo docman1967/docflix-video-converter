@@ -4387,39 +4387,13 @@ class VideoConverter:
                     c.extend(['-map_chapters', '-1'])
                     self.log("Stripping chapters from output", 'INFO')
 
-                # Strip global tags/metadata
+                # Strip tags — handled by mkvpropedit post-step, not here.
+                # Do NOT use -map_metadata -1 — it strips per-stream language
+                # and title tags along with the junk statistics tags.  The
+                # mkvpropedit --delete-track-statistics-tags post-step (after
+                # encoding) removes only BPS/DURATION/NUMBER_OF_FRAMES/etc.
                 if settings.get('strip_metadata_tags', False):
-                    c.extend(['-map_metadata', '-1'])
-                    self.log("Stripping global tags/metadata from output", 'INFO')
-                    # -map_metadata -1 also strips per-stream language tags.
-                    # Re-apply original languages so they survive the strip.
-                    # (Only when set_track_metadata is off — that path handles
-                    # its own language assignment.)
-                    if not settings.get('set_track_metadata', False):
-                        try:
-                            _audio_streams = get_audio_info(input_path)
-                        except Exception:
-                            _audio_streams = []
-                        for _ai, _ainfo in enumerate(_audio_streams):
-                            c.extend([f'-metadata:s:a:{_ai}',
-                                      f"language={_ainfo.get('language', 'und')}"])
-                        # Subtitle languages: only restore from source in the
-                        # simple passthrough path (−map 0:s?).  In the explicit
-                        # mapping path, _add_subtitle_args already wrote the
-                        # correct language per output index.
-                        sub_settings = settings.get('subtitle_settings', {})
-                        _simple_sub_path = (not sub_settings
-                                            and not embed_subs
-                                            and not settings.get('strip_internal_subs', False)
-                                            and not edited_subs)
-                        if _simple_sub_path:
-                            try:
-                                _sub_streams = get_subtitle_streams(input_path)
-                            except Exception:
-                                _sub_streams = []
-                            for _si, _sinfo in enumerate(_sub_streams):
-                                c.extend([f'-metadata:s:s:{_si}',
-                                          f"language={_sinfo.get('language', 'und')}"])
+                    self.log("Strip tags enabled (mkvpropedit post-step)", 'INFO')
 
                 # Set track metadata (language, clear names/title)
                 if settings.get('set_track_metadata', False):
@@ -10278,19 +10252,21 @@ class VideoConverterApp:
                         self.update_file_status(i, '⚠️ Verify Failed')
                         continue
 
-                # Strip MKV Tags (DURATION, BPS, etc.) that ffmpeg's
-                # Matroska muxer writes automatically on every encode.
-                # -map_metadata -1 only strips metadata, not MKV Tag
-                # elements — mkvpropedit is needed to remove them.
+                # Strip MKV statistics tags (DURATION, BPS, NUMBER_OF_FRAMES,
+                # NUMBER_OF_BYTES, _STATISTICS_*) that ffmpeg's Matroska muxer
+                # writes automatically on every encode.  Uses targeted
+                # --delete-track-statistics-tags instead of --tags all: to
+                # preserve per-stream language and title tags.
                 if (file_settings.get('strip_metadata_tags')
                         and output_path.lower().endswith('.mkv')
                         and shutil.which('mkvpropedit')):
                     try:
                         _mkv_r = subprocess.run(
-                            ['mkvpropedit', output_path, '--tags', 'all:'],
+                            ['mkvpropedit', output_path,
+                             '--delete-track-statistics-tags'],
                             capture_output=True, text=True, timeout=30)
                         if _mkv_r.returncode == 0:
-                            self.add_log("  Stripped MKV tags (mkvpropedit)", 'INFO')
+                            self.add_log("  Stripped MKV statistics tags (mkvpropedit)", 'INFO')
                         else:
                             self.add_log(f"  mkvpropedit warning: {_mkv_r.stderr.strip()}", 'WARNING')
                     except Exception as _e:
