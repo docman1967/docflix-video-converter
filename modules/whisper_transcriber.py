@@ -270,6 +270,9 @@ class BatchTranscribeWorker(threading.Thread):
             self._run_faster_whisper()
 
     def _run_whisperx(self):
+        import warnings
+        warnings.filterwarnings("ignore", message="TensorFloat-32.*",
+                                module="pyannote")
         import whisperx
 
         compute_type = "float16" if self.device == "cuda" else "int8"
