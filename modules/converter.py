@@ -704,11 +704,11 @@ class VideoConverter:
                     c.extend(['-map_chapters', '-1'])
                     self.log("Stripping chapters from output", 'INFO')
 
-                # Strip tags — handled by mkvpropedit post-step, not here.
-                # Do NOT use -map_metadata -1 — it strips per-stream language
-                # and title tags along with the junk statistics tags.  The
-                # mkvpropedit --delete-track-statistics-tags post-step (after
-                # encoding) removes only BPS/DURATION/NUMBER_OF_FRAMES/etc.
+                # Strip tags — handled by mkvpropedit --tags all: post-step.
+                # Do NOT use -map_metadata -1 here — it strips per-stream
+                # language and title tags (stored in TrackEntry headers).
+                # mkvpropedit --tags all: only removes the Tags section
+                # (BPS, DURATION, ENCODER, etc.) and leaves TrackEntry intact.
                 if settings.get('strip_metadata_tags', False):
                     self.log("Strip tags enabled (mkvpropedit post-step)", 'INFO')
 
