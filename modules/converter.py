@@ -610,6 +610,9 @@ class VideoConverter:
                             else:
                                 c.extend(['-map', f"0:{ist['index']}"])
                                 c.extend([f'-c:s:{out_sub_idx}', _internal_sub_codec(ist)])
+                                # Preserve original language (MKV muxer defaults to 'eng' otherwise)
+                                ist_lang = ist.get('language', 'und')
+                                c.extend([f'-metadata:s:s:{out_sub_idx}', f'language={ist_lang}'])
                                 out_sub_idx += 1
                         if replaced:
                             labels = []
@@ -625,6 +628,9 @@ class VideoConverter:
                             c.extend(['-map', '0:s?'])
                             for ist in internal_streams:
                                 c.extend([f'-c:s:{out_sub_idx}', _internal_sub_codec(ist)])
+                                # Preserve original language (MKV muxer defaults to 'eng' otherwise)
+                                ist_lang = ist.get('language', 'und')
+                                c.extend([f'-metadata:s:s:{out_sub_idx}', f'language={ist_lang}'])
                                 out_sub_idx += 1
                         else:
                             # Some streams edited — map individually
@@ -637,8 +643,17 @@ class VideoConverter:
                                 else:
                                     c.extend(['-map', f"0:{ist['index']}"])
                                     c.extend([f'-c:s:{out_sub_idx}', _internal_sub_codec(ist)])
+                                # Preserve original language (MKV muxer defaults to 'eng' otherwise)
+                                ist_lang = ist.get('language', 'und')
+                                c.extend([f'-metadata:s:s:{out_sub_idx}', f'language={ist_lang}'])
                                 out_sub_idx += 1
                 else:
+                    # Build stream index → language lookup for preserving metadata
+                    try:
+                        _ss_streams = get_subtitle_streams(input_path)
+                    except Exception:
+                        _ss_streams = []
+                    _ss_lang_map = {s['index']: s.get('language', 'und') for s in _ss_streams}
                     for stream_index, ss in sub_settings.items():
                         if not ss.get('keep', True):
                             continue
@@ -656,6 +671,9 @@ class VideoConverter:
                         else:
                             c.extend(['-map', f"0:{stream_index}"])
                             c.extend([f'-c:s:{out_sub_idx}', fmt])
+                        # Preserve original language (MKV muxer defaults to 'eng' otherwise)
+                        ss_lang = _ss_lang_map.get(stream_index, 'und')
+                        c.extend([f'-metadata:s:s:{out_sub_idx}', f'language={ss_lang}'])
                         out_sub_idx += 1
 
                 # ── Phase 3: Map remaining (non-forced) external subs ──
@@ -704,9 +722,10 @@ class VideoConverter:
                     # Audio track
                     c.extend(['-metadata:s:a:0', f'language={audio_lang}',
                               '-metadata:s:a:0', 'title='])
-                    # First subtitle track
-                    c.extend(['-metadata:s:s:0', f'language={sub_lang}',
-                              '-metadata:s:s:0', f'title={sub_lang.upper() if len(sub_lang) <= 3 else sub_lang}'])
+                    # All subtitle tracks
+                    for _si in range(max(out_sub_idx, 1)):
+                        c.extend([f'-metadata:s:s:{_si}', f'language={sub_lang}',
+                                  f'-metadata:s:s:{_si}', f'title={sub_lang.upper() if len(sub_lang) <= 3 else sub_lang}'])
                     self.log(f"Setting track metadata: video={video_lang}, audio={audio_lang}, sub={sub_lang}", 'INFO')
 
                 # Edition tag — write to container title

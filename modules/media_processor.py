@@ -1599,12 +1599,15 @@ def open_media_processor(app):
                             cmd.extend([f'-metadata:s:a:{ai}', 'title='])
                 else:
                     cmd.extend(['-metadata:s:a:0', f'language={a_lang}', '-metadata:s:a:0', 'title='])
-                # Internal subtitle track(s): language + title per stream
+                # Internal subtitle track(s): preserve original language + title per stream
                 if not do_strip_subs and f.get('sub_count', 0) > 0:
                     int_subs = f.get('sub_info') or []
                     if not sub_inputs:
                         for si_idx, sinfo in enumerate(int_subs):
-                            cmd.extend([f'-metadata:s:s:{si_idx}', f'language={s_lang}'])
+                            # Preserve each track's original language instead of
+                            # overwriting all tracks to s_lang
+                            orig_lang = sinfo.get('language', 'und')
+                            cmd.extend([f'-metadata:s:s:{si_idx}', f'language={orig_lang}'])
                             if do_name_tracks and opt_name_sub.get():
                                 s_title = _resolve_track_name(opt_name_sub.get(), sinfo)
                                 cmd.extend([f'-metadata:s:s:{si_idx}', f'title={s_title}'])
