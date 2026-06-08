@@ -1,7 +1,7 @@
 # Docflix Media Suite — Project Summary
 
-**Last Updated:** 2026-06-05 (rev 88)  
-**Version:** 3.5.4  
+**Last Updated:** 2026-06-08 (rev 89)  
+**Version:** 3.5.5  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/`  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -58,8 +58,8 @@
 | `video_scaler.py` | 1,250 | Video Scaler — batch resize with GPU-accelerated scaling, threaded file scanning with progress/ETA, preferences; withdraw/deiconify window positioning |
 | `whisper_subtitles.py` | 554 | Whisper Subtitles Backend — transcription engine for faster-whisper/WhisperX |
 | `whisper_transcriber.py` | 1,555 | Whisper Transcriber GUI — batch subtitle extraction from video/audio, drag-and-drop, translation, word-level timestamps, preview panel, Docflix prefs integration |
-| `sub_ripper.py` | 1,235 | Sub Ripper — batch subtitle extraction from video files, English Main/Forced/SDH filtering, SRT/ASS/WebVTT output, bitmap subtitle OCR (PGS/VobSub/DVB via Tesseract), drag-and-drop, threaded scanning with progress/ETA, preferences |
-| **Total** | **~31,100** | **24 modules** |
+| `sub_ripper.py` | 1,540 | Sub Ripper — batch subtitle extraction from video files, English Main/Forced/SDH filtering, SRT/ASS/WebVTT output, bitmap subtitle OCR (PGS/VobSub/DVB via Tesseract), drag-and-drop, threaded scanning with progress/ETA, parallel file processing via ThreadPoolExecutor, preferences |
+| **Total** | **~31,400** | **24 modules** |
 
 ### Standalone Tool Commands
 
@@ -663,6 +663,9 @@ git push
    **(3) `set_track_metadata` only targeted first subtitle track** (`video_converter.py`, `modules/converter.py`): When "Set Track Metadata" was enabled, only `s:s:0` received the language override — tracks 2+ were left to the muxer's default behavior. A video with English, Spanish, and French subtitle tracks would only have the first track tagged. Fixed by looping over all output subtitle tracks (0 through `out_sub_idx - 1`) instead of hardcoding `s:s:0`.
 
    **(4) Media Processor overwrote all internal subtitle languages** (`modules/media_processor.py`): When `do_set_meta` was enabled, the code iterated over ALL internal subtitle tracks and set them all to the global `s_lang` value (default `eng`), destroying Spanish, French, Japanese, etc. language tags. Fixed by using each track's original `sinfo.get('language', 'und')` instead of the global `s_lang`.
+
+### 2026-06-08 (Enhancement — Sub Extractor Parallel Processing)
+438. **Sub Extractor parallel file processing** — Added optional parallel file processing to the Sub Extractor, following the same ThreadPoolExecutor pattern used by the Media Processor. New UI controls: "Parallel" checkbox and "Jobs" spinbox (1-32) in the options bar. When enabled, files are processed concurrently using ThreadPoolExecutor with the specified number of worker threads. Sequential mode remains the default. Thread safety: added `_lock` (threading.Lock) for shared counter updates, and `_ocr_semaphore` (threading.Semaphore(1)) to limit concurrent OCR to one at a time since the OCR pipeline already uses its own internal ThreadPoolExecutor. Refactored `_extract_worker()` by extracting per-file logic into a nested `_extract_one()` function that returns a result dict with per-file counters. All Tkinter updates use existing thread-safe `win.after(0, ...)` calls. Preferences for `parallel` and `max_jobs` are saved/loaded with the rest of the Sub Extractor settings. Applied to `modules/sub_ripper.py`.
 
 ### 2026-06-02 (Bug Fix — Empty DVB Subtitle Track Detection)
 437. **Empty DVB subtitle tracks detected before OCR attempt** — Fixed OCR failing with "No frames rendered" on DVB subtitle tracks that contain only keepalive/clear segments with no actual subtitle content (e.g. HDTV recordings where DVB service was present but carried no subtitles). Root cause: DVB tracks in MKV containers often lack `NUMBER_OF_FRAMES`/`NUMBER_OF_BYTES` muxer statistics tags, so the existing empty-track detection in `get_subtitle_streams()` returned `empty: False` even though every packet was a 14-byte clear segment. The OCR pipeline then spent time launching the full ffmpeg overlay render, which produced zero frames and gave the unhelpful "No frames rendered" error. Two fixes: (1) Added `_probe_bitmap_empty()` helper to `modules/utils.py` — fast ffprobe packet-size scan that reads the first 120s of packets; if all packets are ≤20 bytes, the track is flagged as empty. Called from `get_subtitle_streams()` for DVB/VobSub tracks when MKV stats tags are absent. This also enables the `[⚠ EMPTY]` flag in the Internal Subtitles dialog for these tracks. (2) Added matching pre-check at the top of `_ocr_overlay_approach()` in `modules/subtitle_ocr.py` — scans all packet sizes before the expensive overlay render; exits immediately with a clear message: "Subtitle track #N is empty (531 packets, all ≤20 bytes — no subtitle content)". Also improved the fallback "No frames rendered" message to suggest the track may be empty. Applied to `modules/utils.py` and `modules/subtitle_ocr.py`.

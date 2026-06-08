@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time as _time
 import tkinter as tk
 from datetime import datetime
@@ -136,6 +137,8 @@ def open_sub_ripper(app):
     _scanning = [False]     # prevent overlapping scans
     _processing = [False]
     _stop = [False]
+    _lock = threading.Lock()
+    _ocr_semaphore = threading.Semaphore(1)  # limit concurrent OCR to 1
 
     # ── Load preferences ──
     _sr_prefs = getattr(app, '_prefs', {}).get('sub_ripper', {})
@@ -148,6 +151,12 @@ def open_sub_ripper(app):
     opt_format      = tk.StringVar(value=_sr_prefs.get('format', 'SRT'))
     opt_overwrite   = tk.BooleanVar(value=_sr_prefs.get('overwrite', False))
     opt_ocr         = tk.BooleanVar(value=_sr_prefs.get('ocr', False))
+    opt_parallel    = tk.BooleanVar(value=_sr_prefs.get('parallel', False))
+    try:
+        _cpu_count = os.cpu_count() or 4
+    except Exception:
+        _cpu_count = 4
+    opt_max_jobs    = tk.IntVar(value=_sr_prefs.get('max_jobs', min(_cpu_count, 8)))
 
     # ── Main frame ──
     main_frame = ttk.Frame(win, padding=10)
@@ -396,6 +405,15 @@ def open_sub_ripper(app):
     # OCR bitmap checkbox
     ttk.Checkbutton(options_frame, text="OCR Bitmap",
                     variable=opt_ocr).pack(side='left', padx=(8, 4))
+
+    # Parallel processing
+    ttk.Separator(options_frame, orient='vertical').pack(
+        side='left', fill='y', padx=8)
+    ttk.Checkbutton(options_frame, text="Parallel",
+                    variable=opt_parallel).pack(side='left', padx=(0, 4))
+    ttk.Label(options_frame, text="Jobs:").pack(side='left', padx=(0, 2))
+    ttk.Spinbox(options_frame, textvariable=opt_max_jobs, from_=1, to=32,
+                width=3).pack(side='left')
 
     # ── Post-extraction filters ──
     _FILTER_DEFS = [
@@ -1010,23 +1028,28 @@ def open_sub_ripper(app):
         all_langs = opt_language.get() == _ALL_LANGUAGES
         want_cc = opt_cc.get() or all_langs
         total_files = len(sr_files)
-        extracted_total = 0
-        skipped_total = 0
-        error_total = 0
-        bitmap_total = 0
-        cc_total = 0
 
-        for fi, fdata in enumerate(sr_files):
+        # Shared counters (protected by _lock in parallel mode)
+        counters = {'extracted': 0, 'skipped': 0, 'errors': 0,
+                    'bitmap': 0, 'cc': 0, 'done': 0}
+
+        use_parallel = opt_parallel.get()
+        max_jobs = max(1, opt_max_jobs.get())
+
+        mode_label = f"parallel ({max_jobs} jobs)" if (use_parallel and max_jobs > 1) else "sequential"
+        _log(f"Processing {total_files} file(s) — {mode_label}", 'INFO')
+
+        def _extract_one(fi, fdata):
+            """Extract subtitles from a single file. Returns a result dict."""
             if _stop[0]:
-                _log("Extraction stopped by user", 'WARNING')
-                break
+                return {'fi': fi, 'extracted': 0, 'skipped': 0,
+                        'errors': 0, 'bitmap': 0, 'cc': 0}
 
             filepath = fdata['path']
             name = fdata['name']
             has_cc = fdata.get('has_cc', False)
 
             matches = _get_matching_streams(fdata)
-            # Count total jobs: subtitle streams + CC (if applicable)
             cc_job = 1 if (want_cc and has_cc) else 0
             total_jobs = len(matches) + cc_job
 
@@ -1035,12 +1058,12 @@ def open_sub_ripper(app):
                 lang_desc = opt_language.get()
                 _log(f"{name}: no matching {lang_desc} subtitle streams",
                      'SKIP', filename=name)
-                continue
+                return {'fi': fi, 'extracted': 0, 'skipped': 0,
+                        'errors': 0, 'bitmap': 0, 'cc': 0}
 
             win.after(0, lambda i=fi: _update_tree_status(
                 i, f'Extracting 0/{total_jobs}'))
 
-            # Count main streams for disambiguation
             main_streams = [(s, c) for s, c in matches if c == 'main']
             main_count = len(main_streams)
             main_idx = 0
@@ -1048,6 +1071,8 @@ def open_sub_ripper(app):
             file_extracted = 0
             file_skipped = 0
             file_errors = 0
+            file_bitmap = 0
+            file_cc = 0
             job_num = 0
 
             # ── Extract subtitle streams ──
@@ -1065,7 +1090,7 @@ def open_sub_ripper(app):
                              f"({codec_name}) — skipping (enable OCR "
                              f"Bitmap to extract)",
                              'WARNING', filename=name)
-                        bitmap_total += 1
+                        file_bitmap += 1
                         file_skipped += 1
                         job_num += 1
                         continue
@@ -1101,7 +1126,6 @@ def open_sub_ripper(app):
                              f"exists — skipping OCR",
                              'SKIP', filename=name)
                         file_skipped += 1
-                        skipped_total += 1
                         job_num += 1
                         continue
 
@@ -1111,16 +1135,20 @@ def open_sub_ripper(app):
                          f"({codec_name}) → SRT",
                          'INFO', filename=name)
 
+                    # Acquire OCR semaphore to limit concurrent OCR
+                    _ocr_semaphore.acquire()
                     try:
+                        if _stop[0]:
+                            job_num += 1
+                            continue
+
                         from .subtitle_ocr import ocr_bitmap_subtitle
 
-                        def _ocr_progress(msg):
-                            # Strip leading "OCR: " if the message
-                            # already includes it to avoid "OCR: OCR:"
+                        def _ocr_progress(msg, _fi=fi):
                             display = msg[:35]
                             if display.upper().startswith('OCR:'):
                                 display = display[4:].lstrip()
-                            win.after(0, lambda i=fi, m=display:
+                            win.after(0, lambda i=_fi, m=display:
                                       _update_tree_status(
                                           i, f'OCR: {m}'))
 
@@ -1135,11 +1163,9 @@ def open_sub_ripper(app):
                             continue
 
                         if ocr_cues:
-                            # Apply post-extraction filters to OCR cues
                             before_ocr = len(ocr_cues)
                             ocr_cues = _apply_post_filters_cues(ocr_cues)
 
-                            # Write SRT file
                             srt_lines = []
                             for ci, cue in enumerate(ocr_cues, 1):
                                 srt_lines.append(
@@ -1160,25 +1186,23 @@ def open_sub_ripper(app):
                                  f"{filt_note})",
                                  'SUCCESS', filename=name)
                             file_extracted += 1
-                            extracted_total += 1
                         else:
                             _log(f"  {name}: OCR stream "
                                  f"#{stream_index} produced no cues",
                                  'ERROR', filename=name)
                             file_errors += 1
-                            error_total += 1
                     except ImportError:
                         _log(f"  {name}: OCR requires tesseract-ocr "
                              f"and pytesseract — not installed",
                              'ERROR', filename=name)
                         file_errors += 1
-                        error_total += 1
                     except Exception as e:
                         _log(f"  {name}: OCR stream "
                              f"#{stream_index} error — {e}",
                              'ERROR', filename=name)
                         file_errors += 1
-                        error_total += 1
+                    finally:
+                        _ocr_semaphore.release()
 
                     job_num += 1
                     win.after(0, lambda i=fi, s=job_num, t=total_jobs:
@@ -1200,7 +1224,6 @@ def open_sub_ripper(app):
                     _log(f"  {name}: {os.path.basename(out_path)} exists "
                          f"— skipping", 'SKIP', filename=name)
                     file_skipped += 1
-                    skipped_total += 1
                     job_num += 1
                     continue
 
@@ -1219,7 +1242,6 @@ def open_sub_ripper(app):
                         capture_output=True, text=True, timeout=120)
                     if proc.returncode == 0:
                         out_name = os.path.basename(out_path)
-                        # Apply post-extraction filters
                         filt = _apply_post_filters(out_path)
                         filt_note = ''
                         if filt and filt[0] != filt[1]:
@@ -1228,34 +1250,28 @@ def open_sub_ripper(app):
                         _log(f"  {name} → {out_name}{filt_note}",
                              'SUCCESS', filename=name)
                         file_extracted += 1
-                        extracted_total += 1
                     else:
                         stderr = proc.stderr.strip().split('\n')[-1] \
                             if proc.stderr else 'Unknown error'
                         _log(f"  {name}: stream #{stream_index} failed — "
                              f"{stderr}", 'ERROR', filename=name)
                         file_errors += 1
-                        error_total += 1
                 except subprocess.TimeoutExpired:
                     _log(f"  {name}: stream #{stream_index} timed out "
                          f"(120s)", 'ERROR', filename=name)
                     file_errors += 1
-                    error_total += 1
                 except Exception as e:
                     _log(f"  {name}: stream #{stream_index} error — {e}",
                          'ERROR', filename=name)
                     file_errors += 1
-                    error_total += 1
 
                 job_num += 1
-                # Update progress for this file
                 win.after(0, lambda i=fi, s=job_num, t=total_jobs:
                           _update_tree_status(i, f'Extracting {s}/{t}'))
 
             # ── Extract closed captions ──
             if want_cc and has_cc and not _stop[0]:
                 fmt_info = _OUTPUT_FORMATS[opt_format.get()]
-                # CC is natively SRT — use SRT for Original mode too
                 cc_ext = fmt_info['ext'] if fmt_info['ext'] else '.srt'
                 cc_codec = fmt_info['codec'] if fmt_info['codec'] != 'copy' else 'srt'
                 stem = Path(filepath).stem
@@ -1266,18 +1282,14 @@ def open_sub_ripper(app):
                     _log(f"  {name}: {os.path.basename(cc_out_path)} exists "
                          f"— skipping CC", 'SKIP', filename=name)
                     file_skipped += 1
-                    skipped_total += 1
                 else:
                     win.after(0, lambda i=fi, t=total_jobs:
                               _update_tree_status(
                                   i, f'Extracting CC...'))
-                    # CC extraction always produces SRT first, then
-                    # convert if a different format is requested
                     if cc_ext == '.srt':
                         cc_ok = extract_closed_captions_to_srt(
                             filepath, cc_out_path)
                     else:
-                        # Extract to temp SRT, then convert
                         import tempfile
                         tmp = tempfile.NamedTemporaryFile(
                             suffix='.srt', delete=False)
@@ -1302,7 +1314,6 @@ def open_sub_ripper(app):
 
                     if cc_ok:
                         cc_name = os.path.basename(cc_out_path)
-                        # Apply post-extraction filters
                         filt = _apply_post_filters(cc_out_path)
                         filt_note = ''
                         if filt and filt[0] != filt[1]:
@@ -1311,14 +1322,12 @@ def open_sub_ripper(app):
                         _log(f"  {name} → {cc_name} (CC){filt_note}",
                              'SUCCESS', filename=name)
                         file_extracted += 1
-                        extracted_total += 1
-                        cc_total += 1
+                        file_cc += 1
                     else:
                         _log(f"  {name}: CC extraction failed "
                              f"(no CC data or extraction error)",
                              'ERROR', filename=name)
                         file_errors += 1
-                        error_total += 1
 
                 job_num += 1
                 win.after(0, lambda i=fi, s=job_num, t=total_jobs:
@@ -1338,24 +1347,58 @@ def open_sub_ripper(app):
             win.after(0, lambda i=fi, s=status:
                       _update_tree_status(i, s))
 
-            # Overall progress
-            pct = ((fi + 1) / total_files) * 100
+            # Update batch progress
+            with _lock:
+                counters['extracted'] += file_extracted
+                counters['skipped'] += file_skipped
+                counters['errors'] += file_errors
+                counters['bitmap'] += file_bitmap
+                counters['cc'] += file_cc
+                counters['done'] += 1
+                done = counters['done']
+
+            pct = (done / total_files) * 100
             win.after(0, lambda p=pct: progress_var.set(p))
-            win.after(0, lambda n=fi+1, t=total_files:
+            win.after(0, lambda n=done, t=total_files:
                       progress_label.configure(
                           text=f"File {n}/{t}"))
 
+            return {'fi': fi, 'extracted': file_extracted,
+                    'skipped': file_skipped, 'errors': file_errors,
+                    'bitmap': file_bitmap, 'cc': file_cc}
+
+        # ── Run extraction: parallel or sequential ──
+        if use_parallel and max_jobs > 1:
+            with ThreadPoolExecutor(max_workers=max_jobs) as executor:
+                futures = {}
+                for fi, fdata in enumerate(sr_files):
+                    if _stop[0]:
+                        break
+                    future = executor.submit(_extract_one, fi, fdata)
+                    futures[future] = fi
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        idx = futures[future]
+                        _log(f"File {idx} unexpected error: {e}", 'ERROR')
+        else:
+            for fi, fdata in enumerate(sr_files):
+                if _stop[0]:
+                    break
+                _extract_one(fi, fdata)
+
         # ── Summary ──
         _log("═" * 50, 'INFO')
-        parts = [f"{extracted_total} extracted"]
-        if cc_total:
-            parts.append(f"{cc_total} CC")
-        if skipped_total:
-            parts.append(f"{skipped_total} skipped")
-        if bitmap_total:
-            parts.append(f"{bitmap_total} bitmap (skipped)")
-        if error_total:
-            parts.append(f"{error_total} errors")
+        parts = [f"{counters['extracted']} extracted"]
+        if counters['cc']:
+            parts.append(f"{counters['cc']} CC")
+        if counters['skipped']:
+            parts.append(f"{counters['skipped']} skipped")
+        if counters['bitmap']:
+            parts.append(f"{counters['bitmap']} bitmap (skipped)")
+        if counters['errors']:
+            parts.append(f"{counters['errors']} errors")
         _log(f"Complete — {', '.join(parts)}", 'SUCCESS')
         _log("═" * 50, 'INFO')
 
@@ -1426,6 +1469,8 @@ def open_sub_ripper(app):
             'format':      opt_format.get(),
             'overwrite':   opt_overwrite.get(),
             'ocr':         opt_ocr.get(),
+            'parallel':    opt_parallel.get(),
+            'max_jobs':    opt_max_jobs.get(),
             'filters':     {**{k: v.get() for k, v in filter_vars.items()},
                             'search_replace': opt_apply_sr.get()},
         }
