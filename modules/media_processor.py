@@ -1767,6 +1767,7 @@ def open_media_processor(app):
                     # --tags all: removes the Tags section only — track header
                     # properties (Language, Name) are in TrackEntry elements
                     # and are NOT affected.
+                    do_strip_tags = _ov(f, 'strip_tags', opt_strip_tags)
                     if (do_strip_tags
                             and final_path.lower().endswith('.mkv')
                             and shutil.which('mkvpropedit')):
