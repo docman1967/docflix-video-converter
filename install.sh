@@ -28,6 +28,7 @@ DESKTOP_FILE="$DESKTOP_DIR/docflix.desktop"
 ICON_FILE="$ICON_DIR/docflix.png"
 BIN_FILE="$BIN_DIR/$APP_CMD"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_VERSION=$(grep -oP 'APP_VERSION\s*=\s*"\K[^"]+' "$SCRIPT_DIR/modules/constants.py" 2>/dev/null || echo "unknown")
 
 # Files to install (relative to SCRIPT_DIR)
 APP_FILES=(
@@ -463,7 +464,7 @@ done
 #── Done ───────────────────────────────────────────────────────────────────────
 echo ""
 echo "========================================="
-echo -e "  ${GREEN}✅ Installation complete!${NC}"
+echo -e "  ${GREEN}✅ v${APP_VERSION} Installation complete!${NC}"
 echo "========================================="
 echo ""
 echo "  Launch options:"
