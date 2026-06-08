@@ -41,7 +41,7 @@
 | `utils.py` | 804 | Format helpers, ffprobe wrappers, tooltips, zenity dialogs (file/folder/save), DPI scaling with screen clamping, font sizing |
 | `standalone.py` | 254 | StandaloneContext class for standalone tool launches, shared preferences, window management, dock icon |
 | `gpu.py` | 630 | GPU detection (NVENC/QSV/VAAPI), test encode verification, ffmpeg check, CC detection, video analysis |
-| `converter.py` | 904 | VideoConverter engine class — ffmpeg command building, pause/resume/stop, two-pass, subtitle/metadata/chapter handling, video rescaling, HDR→SDR tonemapping |
+| `converter.py` | 1,025 | VideoConverter engine class — ffmpeg command building, pause/resume/stop, two-pass, subtitle/metadata/chapter handling, video rescaling, HDR→SDR tonemapping, GPU quality tuning, audio copy-if-same-codec |
 | `preferences.py` | 185 | Preferences save/load/reset as standalone functions |
 | `subtitle_filters.py` | 1,374 | SRT parsing/writing, all filter functions (Remove HI, Fix CAPS, etc.), timestamp manipulation, retime; optional names database (Aptivi/NamesList) for Fix CAPS with system dictionary false-positive filtering |
 | `subtitle_editor.py` | 7,482 | Both editor variants (standalone + internal), inline editing, filters, timing, search/replace, waveform timeline with embedded video, video preview, "Open with" file argument support; withdraw/deiconify window positioning; bitmap OCR scanning dialog |
@@ -59,7 +59,7 @@
 | `whisper_subtitles.py` | 554 | Whisper Subtitles Backend — transcription engine for faster-whisper/WhisperX |
 | `whisper_transcriber.py` | 1,555 | Whisper Transcriber GUI — batch subtitle extraction from video/audio, drag-and-drop, translation, word-level timestamps, preview panel, Docflix prefs integration |
 | `sub_ripper.py` | 1,540 | Sub Ripper — batch subtitle extraction from video files, English Main/Forced/SDH filtering, SRT/ASS/WebVTT output, bitmap subtitle OCR (PGS/VobSub/DVB via Tesseract), drag-and-drop, threaded scanning with progress/ETA, parallel file processing via ThreadPoolExecutor, preferences |
-| **Total** | **~31,400** | **24 modules** |
+| **Total** | **~31,500** | **24 modules** |
 
 ### Standalone Tool Commands
 
@@ -664,7 +664,13 @@ git push
 
    **(4) Media Processor overwrote all internal subtitle languages** (`modules/media_processor.py`): When `do_set_meta` was enabled, the code iterated over ALL internal subtitle tracks and set them all to the global `s_lang` value (default `eng`), destroying Spanish, French, Japanese, etc. language tags. Fixed by using each track's original `sinfo.get('language', 'und')` instead of the global `s_lang`.
 
-### 2026-06-08 (Enhancement — Sub Extractor Parallel Processing)
+### 2026-06-08 (v3.5.5 — Sub Extractor Parallel Processing, Encoding Optimizations, Bug Fixes)
+441. **Fixed missing imports in module converter** — `modules/converter.py` was missing `from pathlib import Path` (crash on burn-in subtitles), `DEFAULT_BITRATE` (crash in bitrate mode), and `SUBTITLE_LANGUAGES` (crash building subtitle track titles). These only affected the module codepath — the monolith's converter worked because it had its own imports. Added all three to the import block. Applied to `modules/converter.py`.
+
+440. **NVENC/QSV encoder quality tuning flags** — Added `quality_args` to each GPU backend in `GPU_BACKENDS`. NVENC gets `-rc vbr -rc-lookahead 32 -temporal-aq 1 -spatial-aq 1` (VBR rate control with 32-frame lookahead and adaptive quantization — better bit distribution and less banding at zero or near-zero speed cost). QSV gets `-look_ahead 1 -look_ahead_depth 40` (lookahead for better quality decisions). VAAPI gets empty args (no equivalent tuning). Wired into `_add_video_args()` in both `modules/converter.py` and `video_converter.py` — quality args are appended after the preset when a GPU backend is active. Applied to `modules/constants.py`, `modules/converter.py`, `video_converter.py`.
+
+439. **Audio copy-if-same-codec optimization** — The converter now detects when the source audio codec already matches the target codec and stream-copies instead of re-encoding. Previously, setting audio to AAC when the source was already AAC would wastefully re-encode — degrading quality and adding encoding time. The check runs after Atmos detection, reusing the same `get_audio_info()` probe data: if `src_codec == audio_codec`, forces copy with an INFO log message ("Audio already aac — copying (no re-encode needed)"). Applied to `_add_audio_args()` in both `modules/converter.py` and `video_converter.py`.
+
 438. **Sub Extractor parallel file processing** — Added optional parallel file processing to the Sub Extractor, following the same ThreadPoolExecutor pattern used by the Media Processor. New UI controls: "Parallel" checkbox and "Jobs" spinbox (1-32) in the options bar. When enabled, files are processed concurrently using ThreadPoolExecutor with the specified number of worker threads. Sequential mode remains the default. Thread safety: added `_lock` (threading.Lock) for shared counter updates, and `_ocr_semaphore` (threading.Semaphore(1)) to limit concurrent OCR to one at a time since the OCR pipeline already uses its own internal ThreadPoolExecutor. Refactored `_extract_worker()` by extracting per-file logic into a nested `_extract_one()` function that returns a result dict with per-file counters. All Tkinter updates use existing thread-safe `win.after(0, ...)` calls. Preferences for `parallel` and `max_jobs` are saved/loaded with the rest of the Sub Extractor settings. Applied to `modules/sub_ripper.py`.
 
 ### 2026-06-02 (Bug Fix — Empty DVB Subtitle Track Detection)

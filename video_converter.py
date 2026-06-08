@@ -102,6 +102,8 @@ GPU_BACKENDS = {
         'cq_flag':        '-cq',
         'multipass_encoders': {'hevc_nvenc', 'h264_nvenc', 'av1_nvenc'},
         'multipass_args':     ['-multipass', 'fullres'],
+        'quality_args':       ['-rc', 'vbr', '-rc-lookahead', '32',
+                               '-temporal-aq', '1', '-spatial-aq', '1'],
     },
     'qsv': {
         'label':        'Intel (QSV)',
@@ -125,6 +127,7 @@ GPU_BACKENDS = {
         'cq_flag':        '-global_quality',
         'multipass_encoders': set(),
         'multipass_args':     [],
+        'quality_args':       ['-look_ahead', '1', '-look_ahead_depth', '40'],
     },
     'vaapi': {
         'label':        'AMD / VAAPI',
@@ -149,6 +152,7 @@ GPU_BACKENDS = {
         'cq_flag':        '-qp',    # VAAPI uses -qp for constant quality
         'multipass_encoders': set(),
         'multipass_args':     [],
+        'quality_args':       [],
     },
 }
 
@@ -4043,6 +4047,11 @@ class VideoConverter:
                             elif not is_gpu:
                                 c.extend(['-preset', preset])
 
+                        # ── GPU encoder quality tuning ──
+                        quality_args = backend.get('quality_args', []) if (is_gpu and backend) else []
+                        if quality_args:
+                            c.extend(quality_args)
+
                         # ── AV1: keyframe interval for seeking ──
                         _AV1_ENCODERS = {'libsvtav1', 'av1_nvenc', 'av1_qsv', 'av1_vaapi'}
                         if video_enc_name in _AV1_ENCODERS:
@@ -4082,11 +4091,12 @@ class VideoConverter:
                 # Safety net: video-only mode always copies audio
                 if settings.get('transcode_mode') == 'video':
                     audio_codec = 'copy'
-                # Atmos detection: force copy for Dolby Atmos audio
+                # Atmos detection + copy-if-same-codec optimization
                 if audio_codec != 'copy':
                     try:
                         from modules.utils import get_audio_info
-                        for astream in get_audio_info(input_path):
+                        src_streams = get_audio_info(input_path)
+                        for astream in src_streams:
                             profile = astream.get('profile', '')
                             if 'atmos' in profile.lower():
                                 audio_codec = 'copy'
@@ -4095,6 +4105,14 @@ class VideoConverter:
                                     "original stream (Atmos transcoding is "
                                     "not supported at this time)", 'ERROR')
                                 break
+                        # Copy instead of re-encoding if source already matches target
+                        if audio_codec != 'copy' and src_streams:
+                            src_codec = src_streams[0].get('codec_name', '')
+                            if src_codec == audio_codec:
+                                audio_codec = 'copy'
+                                self.log(
+                                    f"Audio already {src_codec} — copying "
+                                    f"(no re-encode needed)", 'INFO')
                     except Exception:
                         pass
                 if audio_codec == 'copy':

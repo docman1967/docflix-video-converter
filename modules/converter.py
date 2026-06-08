@@ -15,8 +15,9 @@ import subprocess
 import threading
 from datetime import datetime
 
+from pathlib import Path
 from .constants import (
-    GPU_BACKENDS, VIDEO_CODEC_MAP,
+    GPU_BACKENDS, VIDEO_CODEC_MAP, DEFAULT_BITRATE, SUBTITLE_LANGUAGES,
     get_gpu_encoder,
 )
 from .utils import (
@@ -357,6 +358,11 @@ class VideoConverter:
                             elif not is_gpu:
                                 c.extend(['-preset', preset])
 
+                        # ── GPU encoder quality tuning ──
+                        quality_args = backend.get('quality_args', []) if (is_gpu and backend) else []
+                        if quality_args:
+                            c.extend(quality_args)
+
                         # ── AV1: keyframe interval for seeking ──
                         # AV1 streams need regular keyframes for seeking; without
                         # -g the default can be very sparse, causing players
@@ -400,11 +406,12 @@ class VideoConverter:
                 # Safety net: video-only mode always copies audio
                 if settings.get('transcode_mode') == 'video':
                     audio_codec = 'copy'
-                # Atmos detection: force copy for Dolby Atmos audio
+                # Atmos detection + copy-if-same-codec optimization
                 if audio_codec != 'copy':
                     try:
                         from .utils import get_audio_info
-                        for astream in get_audio_info(input_path):
+                        src_streams = get_audio_info(input_path)
+                        for astream in src_streams:
                             profile = astream.get('profile', '')
                             if 'atmos' in profile.lower():
                                 audio_codec = 'copy'
@@ -413,6 +420,14 @@ class VideoConverter:
                                     "original stream (Atmos transcoding is "
                                     "not supported at this time)", 'ERROR')
                                 break
+                        # Copy instead of re-encoding if source already matches target
+                        if audio_codec != 'copy' and src_streams:
+                            src_codec = src_streams[0].get('codec_name', '')
+                            if src_codec == audio_codec:
+                                audio_codec = 'copy'
+                                self.log(
+                                    f"Audio already {src_codec} — copying "
+                                    f"(no re-encode needed)", 'INFO')
                     except Exception:
                         pass
                 if audio_codec == 'copy':

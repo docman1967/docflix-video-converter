@@ -70,6 +70,8 @@ GPU_BACKENDS = {
         'cq_flag':        '-cq',
         'multipass_encoders': {'hevc_nvenc', 'h264_nvenc', 'av1_nvenc'},
         'multipass_args':     ['-multipass', 'fullres'],
+        'quality_args':       ['-rc', 'vbr', '-rc-lookahead', '32',
+                               '-temporal-aq', '1', '-spatial-aq', '1'],
     },
     'qsv': {
         'label':        'Intel (QSV)',
@@ -95,6 +97,7 @@ GPU_BACKENDS = {
         'cq_flag':        '-global_quality',
         'multipass_encoders': set(),
         'multipass_args':     [],
+        'quality_args':       ['-look_ahead', '1', '-look_ahead_depth', '40'],
     },
     'vaapi': {
         'label':        'AMD / VAAPI',
@@ -120,6 +123,7 @@ GPU_BACKENDS = {
         'cq_flag':        '-qp',
         'multipass_encoders': set(),
         'multipass_args':     [],
+        'quality_args':       [],
     },
 }
 
