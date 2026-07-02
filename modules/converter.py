@@ -45,7 +45,40 @@ class VideoConverter:
         if self.log_callback:
             timestamp = datetime.now().strftime('%H:%M:%S')
             self.log_callback(f"[{timestamp}] [{level}] {message}", level)
-    
+
+    def _src_audio_decodable(self, input_path):
+        """Return False if ffmpeg cannot decode the source audio streams.
+
+        Some files carry corrupt or non-standard audio (e.g. malformed AAC
+        that trips 'channel element is not allocated' / 'Number of bands
+        exceeds limit').  When the per-stream decode error rate exceeds
+        ffmpeg's internal ceiling (~0.667), ffmpeg aborts the entire job
+        (exit 69), so any attempt to re-encode that audio fails.  This runs
+        a fast decode-to-null preflight whose exit code exactly predicts
+        that abort, letting the caller fall back to stream-copy.
+
+        Result is cached per input path (convert calls this once per pass).
+        On any probe error/timeout it returns True (fail open — never block
+        an encode because the probe itself misbehaved).
+        """
+        cache = getattr(self, '_audio_decode_cache', None)
+        if cache is None:
+            cache = self._audio_decode_cache = {}
+        if input_path in cache:
+            return cache[input_path]
+        ok = True
+        try:
+            proc = subprocess.run(
+                ['ffmpeg', '-v', 'error', '-nostdin', '-i', input_path,
+                 '-map', '0:a', '-c:a', 'pcm_s16le', '-f', 'null', '-'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=180)
+            ok = (proc.returncode == 0)
+        except Exception:
+            ok = True
+        cache[input_path] = ok
+        return ok
+
     def convert_file(self, input_path, output_path, settings):
         """
         Convert a single video file
@@ -66,6 +99,7 @@ class VideoConverter:
         try:
             encoder       = settings.get('encoder', 'cpu')
             hw_decode     = settings.get('hw_decode', False)
+            gpu_index     = settings.get('gpu_index', 0)  # which GPU to use for NVENC/QSV
             transcode_mode = settings.get('transcode_mode', 'both')
             codec_info    = settings.get('codec_info', VIDEO_CODEC_MAP['H.265 / HEVC'])
             codec_name    = settings.get('codec_name', 'H.265 / HEVC')
@@ -113,6 +147,20 @@ class VideoConverter:
             # Burn-in is incompatible with hardware decode (subtitle filter
             # needs to read pixel data on CPU).
             effective_hw = hw_decode and not has_burn_in
+
+            # CUDA decode only supports certain codecs — disable hwaccel for
+            # unsupported sources (XviD, MPEG-4, WMV, etc.) to prevent
+            # scale_cuda failures and silent CPU fallback overhead.
+            _CUDA_HW_DECODE_CODECS = {
+                'h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1',
+                'mpeg1video', 'mpeg2video', 'vc1', 'mjpeg',
+            }
+            if effective_hw and encoder == 'nvenc':
+                _src_codec_hw = get_video_codec(input_path) or ''
+                if _src_codec_hw.lower() not in _CUDA_HW_DECODE_CODECS:
+                    effective_hw = False
+                    self.log(f"Hardware decode disabled: '{_src_codec_hw}' not supported by CUDA", 'INFO')
+
             # HDR tonemapping needs CPU filters (zscale) but GPU decode is
             # fine — we just strip -hwaccel_output_format so frames transfer
             # to system memory automatically after decode.
@@ -213,6 +261,9 @@ class VideoConverter:
                 """Build the common part of the ffmpeg command."""
                 c = ['ffmpeg', '-y']
                 if effective_hw and is_gpu and backend and transcode_mode in ['video', 'both'] and video_enc_name not in (None, 'copy'):
+                    # GPU device selection for CUDA hwaccel decode
+                    if encoder == 'nvenc' and gpu_index > 0:
+                        c.extend(['-hwaccel_device', str(gpu_index)])
                     if _hw_strip_output_fmt:
                         # Keep GPU decode but drop output format so frames
                         # transfer to system memory for CPU filters (zscale)
@@ -275,8 +326,21 @@ class VideoConverter:
                                     if src_h == target_h and src_w == target_w:
                                         self.log(f"Source already {src_w}×{src_h} — skipping scale", 'INFO')
                                     else:
+                                        # CUDA decode doesn't support all codecs — fall back to
+                                        # CPU scaling for sources that can't be GPU-decoded.
+                                        # Without this, scale_cuda gets frames in system memory
+                                        # and fails with "Function not implemented".
+                                        _CUDA_SUPPORTED_CODECS = {
+                                            'h264', 'hevc', 'h265', 'vp8', 'vp9', 'av1',
+                                            'mpeg1video', 'mpeg2video', 'vc1', 'mjpeg',
+                                        }
+                                        _src_codec = get_video_codec(input_path) or ''
+                                        _cuda_can_decode = _src_codec.lower() in _CUDA_SUPPORTED_CODECS
                                         if hdr_to_sdr or not effective_hw:
                                             scale_backend = None
+                                        elif not _cuda_can_decode and is_gpu and encoder == 'nvenc':
+                                            scale_backend = None  # CPU scale + GPU encode
+                                            self.log(f"Source codec '{_src_codec}' not CUDA-decodable — using CPU scaling", 'INFO')
                                         else:
                                             scale_backend = encoder if is_gpu else None
                                         scale_vf = _build_scale_filter(target_w, target_h, scale_backend)
@@ -331,6 +395,10 @@ class VideoConverter:
                             c.extend(['-vf', ','.join(vf_parts)])
 
                     c.extend(['-c:v', video_enc_name])
+
+                    # GPU device selection for NVENC (allows targeting specific GPU)
+                    if is_gpu and encoder == 'nvenc' and gpu_index > 0:
+                        c.extend(['-gpu', str(gpu_index)])
 
                     # HDR → SDR color metadata flags
                     if hdr_to_sdr:
@@ -428,6 +496,22 @@ class VideoConverter:
                                 self.log(
                                     f"Audio already {src_codec} — copying "
                                     f"(no re-encode needed)", 'INFO')
+                    except Exception:
+                        pass
+                # Undecodable-audio fallback: if the source audio can't be
+                # decoded (corrupt/non-standard stream), re-encoding to the
+                # target codec would make ffmpeg abort the whole job. Copy
+                # the original stream instead so the file still converts.
+                if audio_codec != 'copy':
+                    try:
+                        if not self._src_audio_decodable(input_path):
+                            self.log(
+                                f"Source audio cannot be decoded — copying "
+                                f"the original stream instead of re-encoding "
+                                f"to {audio_codec} (the audio is corrupt or "
+                                f"non-standard; re-encoding it would fail)",
+                                'WARNING')
+                            audio_codec = 'copy'
                     except Exception:
                         pass
                 if audio_codec == 'copy':

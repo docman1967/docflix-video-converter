@@ -1,7 +1,7 @@
 # Docflix Media Suite — Project Summary
 
-**Last Updated:** 2026-06-08 (rev 89)  
-**Version:** 3.5.5  
+**Last Updated:** 2026-07-02 (rev 92)  
+**Version:** 3.5.6  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/`  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -55,7 +55,8 @@
 | `chapters.py` | 257 | Chapter generation, parsing (FFMETADATA1, OGM), writing |
 | `manual_viewer.py` | 737 | Built-in user manual viewer with sidebar navigation |
 | `waveform_timeline.py` | 1,498 | Waveform Timeline widget — audio extraction, waveform rendering, cue block overlay, drag-to-move/resize, embedded mpv video playback, live subtitle preview, step navigation |
-| `video_scaler.py` | 1,250 | Video Scaler — batch resize with GPU-accelerated scaling, threaded file scanning with progress/ETA, preferences; withdraw/deiconify window positioning |
+| `ai_upscaler.py` | 430 | AI Upscaler — Real-ESRGAN ncnn-vulkan download/install manager, frame-based AI upscaling pipeline (extract→upscale→reassemble), 3 models (General, Fast, Anime) |
+| `video_scaler.py` | 1,400 | Video Scaler — batch resize with GPU-accelerated scaling, AI upscaling via Real-ESRGAN, threaded file scanning with progress/ETA, preferences; withdraw/deiconify window positioning |
 | `whisper_subtitles.py` | 554 | Whisper Subtitles Backend — transcription engine for faster-whisper/WhisperX |
 | `whisper_transcriber.py` | 1,555 | Whisper Transcriber GUI — batch subtitle extraction from video/audio, drag-and-drop, translation, word-level timestamps, preview panel, Docflix prefs integration |
 | `sub_ripper.py` | 1,540 | Sub Ripper — batch subtitle extraction from video files, English Main/Forced/SDH filtering, SRT/ASS/WebVTT output, bitmap subtitle OCR (PGS/VobSub/DVB via Tesseract), drag-and-drop, threaded scanning with progress/ETA, parallel file processing via ThreadPoolExecutor, preferences |
@@ -652,6 +653,35 @@ git push
 ---
 
 ## Change Log
+
+### 2026-07-02 (v3.5.6 release — Multi-GPU Selection, CUDA Decode Guard, Undecodable-Audio Fallback)
+
+> **Release note:** v3.5.6 was never committed/tagged, so this release bundles the AI Upscaler (documented below under 2026-06-12), the multi-GPU selection feature, the CUDA hardware-decode codec guard, and the undecodable-audio fallback into a single `3.5.6` version bump (`modules/constants.py` 3.5.5 → 3.5.6).
+
+446. **Multi-GPU NVIDIA selection** — Added support for selecting which NVIDIA GPU to use for NVENC encoding on multi-GPU systems (e.g. a dual RTX 2000E Ada rig). New `enumerate_nvidia_gpus()` in `modules/gpu.py` queries `nvidia-smi` for each GPU's index, name, VRAM total/used, utilization, and temperature. In `video_converter.py`, when more than one NVIDIA GPU is detected, the encoder dropdown lists a separate entry per GPU (e.g. "RTX 2000E Ada GPU 0 (NVENC)", "…GPU 1 (NVENC)") via a new `_encoder_gpu_index` map; a `self.gpu_index` `IntVar` carries the choice, is saved into per-file and default settings dicts (`gpu_index`), and defaults to GPU 0. In `modules/converter.py`, `convert_file()` reads `settings['gpu_index']` and, for NVENC with `gpu_index > 0`, adds `-hwaccel_device <index>` to the ffmpeg command for CUDA-decode device selection. Single-GPU and non-NVIDIA setups are unchanged (falls back to the original single-entry dropdown). Applied to `modules/gpu.py`, `modules/converter.py`, `video_converter.py`.
+
+445. **CUDA hardware-decode codec guard** — Fixed potential `scale_cuda`/decode failures and silent CPU-fallback overhead when hardware decode was enabled for source codecs that CUDA cannot decode (XviD, MPEG-4 ASP, WMV, etc.). Added a `_CUDA_HW_DECODE_CODECS` whitelist (h264, hevc/h265, vp8, vp9, av1, mpeg1video, mpeg2video, vc1, mjpeg) in `modules/converter.py`; when NVENC is the encoder and HW decode is effective, the source video codec is probed via `get_video_codec()` and, if not in the whitelist, `-hwaccel cuda` is dropped with an INFO log ("Hardware decode disabled: '<codec>' not supported by CUDA"). GPU encoding still proceeds; only decode falls back to CPU. Applied to `modules/converter.py`.
+
+444. **Undecodable-audio fallback to stream-copy** — Fixed conversions hard-failing (ffmpeg exit 69, empty output) when a source file carries corrupt/non-standard audio that ffmpeg's native decoder cannot decode. Trigger case: a WEB-DL episode (`Stuff.The.British.Stole.S03E02...AAC2.0.H.264-HiNGS.mkv`) whose AAC stream throws `channel element 3.14 is not allocated`, `Number of bands exceeds limit`, `Prediction is not allowed in AAC-LC` on essentially every packet. With the decode error rate at 0.999 (ceiling 0.667), ffmpeg terminates the decoder thread and aborts the entire job — so re-encoding the audio to AC3 (the default) was impossible and the file produced no usable output. Investigation confirmed the stream is genuinely undecodable: `-max_error_rate 1.0`/`-err_detect ignore_err` still abort (and decode 0 samples when they don't), the `aac_fixed` decoder fails identically, a raw-ADTS remux won't decode, and there's no `libfdk_aac` on the system. Stream-copy (`-c:a copy`) is the only way to preserve the audio, and it works cleanly. Fix: added `VideoConverter._src_audio_decodable(input_path)` — a cached preflight that runs `ffmpeg -v error -nostdin -i <src> -map 0:a -c:a pcm_s16le -f null -`; its exit code exactly predicts ffmpeg's real-run abort. In `_add_audio_args()`, when audio is set to re-encode (not already copy/Atmos/same-codec), the converter calls this check and, if the source audio can't be decoded, falls back to `-c:a copy` with a prominent WARNING ("Source audio cannot be decoded — copying the original stream instead of re-encoding to {codec}"). The video still transcodes normally (H.264→H.265); only the audio re-encode is skipped. Fail-open: any probe error/timeout (180s cap) leaves the encode untouched. Result cached per input path so two-pass/retry don't re-probe. Applied to both `video_converter.py` (monolith) and `modules/converter.py` (module). Mirrors the existing Atmos→copy and GPU→CPU-retry graceful-degradation patterns.
+
+### 2026-06-12 (v3.5.6 — AI Upscaling with Real-ESRGAN)
+439. **AI upscaling via Real-ESRGAN ncnn-vulkan** — Added `modules/ai_upscaler.py`, a complete AI video upscaling module that integrates with the existing Media Rescale tool. When a file would be upscaled (target resolution > source), a new "Upscale Method" row appears with two options: `Standard (ffmpeg)` (existing bilinear) and `AI (Real-ESRGAN)`. AI upscaling uses a frame-extraction pipeline: extract PNG frames → upscale with Real-ESRGAN → reassemble with original audio/subs/chapters via ffmpeg.
+
+   **Three AI models available:**
+   - `General (x4)` — `realesrgan-x4plus`, best quality for live-action
+   - `General (x4) Fast` — `realesr-animevideov3`, faster video-optimized model (default)
+   - `Anime (x4)` — `realesrgan-x4plus-anime`, optimized for animation
+
+   **Auto-download:** If Real-ESRGAN is not installed, a "Download Real-ESRGAN" button appears. Clicking it downloads the v0.2.5.0 ncnn-vulkan binary (~45 MB) from GitHub and installs to `~/.local/share/docflix/realesrgan/`. Status indicator shows installed version. Also checks system PATH for existing installs.
+
+   **Smart resolution targeting:** AI upscale always uses 4x, then scales DOWN to the target resolution if needed. E.g., 480p source → 4x = 1920p → ffmpeg scale to 1080p target. This preserves maximum AI-enhanced detail while hitting the exact target resolution.
+
+   **Integration points:**
+   - `modules/ai_upscaler.py` — Installation management, `AIUpscaleJob` pipeline class, `upscale_video()` convenience function
+   - `modules/video_scaler.py` — New `opt_upscale_method` and `opt_ai_model` preferences, method row auto-shows when upscaling detected, `_process_one_ai()` handler, stop/cancel support for AI jobs
+   - Preferences saved/restored (`upscale_method`, `ai_model` in `video_scaler` prefs)
+   - CRF auto-lowers from 23→18 when AI method selected (more detail to preserve)
+   - Output files tagged with `-ai` suffix (e.g., `movie-1080p-ai.mkv`)
 
 ### 2026-06-05 (Bug Fix — Subtitle and Audio Languages Stripped During Encoding)
 438. **Track languages preserved when "Strip tags" is enabled** — Fixed all subtitle and audio track languages being stripped from the output file when "Strip tags" was checked but "Set Track Metadata" was unchecked. Four related bugs across 3 files:

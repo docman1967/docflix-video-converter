@@ -248,6 +248,9 @@ def open_video_scaler(app):
     # ── Load saved preferences ──
     _sp = getattr(app, '_scaler_prefs', {})
 
+    # ── AI upscaler import ──
+    from . import ai_upscaler
+
     # ── Options ──
     opt_resolution   = tk.StringVar(value=_sp.get('resolution', '1080p'))
     opt_custom_w     = tk.StringVar(value=_sp.get('custom_w', '1280'))
@@ -261,6 +264,8 @@ def open_video_scaler(app):
     opt_output_mode  = tk.StringVar(value=_sp.get('output_mode', 'folder'))
     opt_output_folder = tk.StringVar(value=_sp.get('output_folder', ''))
     opt_hdr_to_sdr   = tk.BooleanVar(value=_sp.get('hdr_to_sdr', False))
+    opt_upscale_method = tk.StringVar(value=_sp.get('upscale_method', 'Standard (ffmpeg)'))
+    opt_ai_model     = tk.StringVar(value=_sp.get('ai_model', ai_upscaler.DEFAULT_MODEL))
 
     # Detect GPU backends
     gpu_backends = _detect_gpu_backends_quick()
@@ -487,6 +492,103 @@ def open_video_scaler(app):
                 crf_label.configure(text="CQ:")
     enc_combo.bind('<<ComboboxSelected>>', _on_encoder_change)
 
+    # Row 1b: Upscale Method (only visible when upscaling)
+    row1b = ttk.Frame(settings_frame)
+    # Initially hidden — shown/hidden by _on_method_change
+
+    upscale_methods = ['Standard (ffmpeg)', 'AI (Real-ESRGAN)']
+    ttk.Label(row1b, text="Upscale Method:").pack(side='left', padx=(0, 4))
+    method_combo = ttk.Combobox(row1b, textvariable=opt_upscale_method,
+                                 values=upscale_methods, width=18, state='readonly')
+    method_combo.pack(side='left', padx=(0, 8))
+
+    ttk.Separator(row1b, orient='vertical').pack(side='left', fill='y', padx=4)
+
+    ai_model_label = ttk.Label(row1b, text="AI Model:")
+    ai_model_label.pack(side='left', padx=(8, 4))
+    ai_model_combo = ttk.Combobox(row1b, textvariable=opt_ai_model,
+                                    values=list(ai_upscaler.MODELS.keys()),
+                                    width=20, state='readonly')
+    ai_model_combo.pack(side='left', padx=(0, 8))
+
+    # AI status label (shows installed/not installed)
+    ai_status_var = tk.StringVar(value='')
+    ai_status_label = ttk.Label(row1b, textvariable=ai_status_var,
+                                 font=('', 9))
+    ai_status_label.pack(side='left', padx=(0, 4))
+
+    # Download/Install button
+    ai_download_btn = ttk.Button(row1b, text="Download Real-ESRGAN")
+    ai_download_btn.pack(side='left', padx=(0, 4))
+
+    def _update_ai_status():
+        """Update AI status label and button visibility."""
+        if ai_upscaler.is_installed():
+            ver = ai_upscaler.get_version() or ''
+            ai_status_var.set(f"✓ Installed ({ver})" if ver else "✓ Installed")
+            ai_status_label.configure(foreground='green')
+            ai_download_btn.pack_forget()
+        else:
+            ai_status_var.set("Not installed")
+            ai_status_label.configure(foreground='red')
+            ai_download_btn.pack(side='left', padx=(0, 4))
+
+    def _download_realesrgan():
+        """Download Real-ESRGAN in a background thread."""
+        ai_download_btn.configure(state='disabled', text="Downloading...")
+
+        def _worker():
+            try:
+                ai_upscaler.download_and_install(
+                    progress_callback=lambda p, s: win.after(0, lambda: (
+                        _update_progress(p, s)
+                    )),
+                    log_callback=lambda m, l: _log(f"  [AI] {m}", l),
+                )
+                win.after(0, lambda: (
+                    _update_ai_status(),
+                    _reset_progress(),
+                    _log("Real-ESRGAN installed successfully!", 'SUCCESS'),
+                ))
+            except Exception as e:
+                win.after(0, lambda: (
+                    _log(f"Download failed: {e}", 'ERROR'),
+                    ai_download_btn.configure(state='normal', text="Download Real-ESRGAN"),
+                    _reset_progress(),
+                ))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    ai_download_btn.configure(command=_download_realesrgan)
+
+    def _on_method_change(*args):
+        """Show/hide AI-specific controls based on upscale method."""
+        method = opt_upscale_method.get()
+        if method == 'AI (Real-ESRGAN)':
+            ai_model_label.pack(side='left', padx=(8, 4))
+            ai_model_combo.pack(side='left', padx=(0, 8))
+            ai_status_label.pack(side='left', padx=(0, 4))
+            _update_ai_status()
+            # Use lower CRF for AI upscale (more detail to preserve)
+            if opt_crf.get() in ('23', '28'):
+                opt_crf.set('18')
+        else:
+            ai_model_label.pack_forget()
+            ai_model_combo.pack_forget()
+            ai_status_label.pack_forget()
+            ai_download_btn.pack_forget()
+
+    method_combo.bind('<<ComboboxSelected>>', _on_method_change)
+
+    def _check_show_method_row():
+        """Show the method row when any file would be upscaled."""
+        any_upscale = any(_is_upscale(f) for f in files) if files else False
+        if any_upscale:
+            row1b.pack(fill='x', pady=2, after=row1)
+            _on_method_change()
+        else:
+            row1b.pack_forget()
+
     # Row 2: Codec, CRF, Audio, Container, Output
     row2 = ttk.Frame(settings_frame)
     row2.pack(fill='x', pady=2)
@@ -586,6 +688,8 @@ def open_video_scaler(app):
             'output_mode':   opt_output_mode.get(),
             'output_folder': opt_output_folder.get(),
             'hdr_to_sdr':    opt_hdr_to_sdr.get(),
+            'upscale_method': opt_upscale_method.get(),
+            'ai_model':      opt_ai_model.get(),
         }
         app._scaler_prefs = sp
         try:
@@ -747,8 +851,11 @@ def open_video_scaler(app):
                 src += f" {f['hdr']}"
             tgt = _target_str(f)
             warn = ' (upscale)' if _is_upscale(f) else ''
+            if warn and opt_upscale_method.get() == 'AI (Real-ESRGAN)':
+                warn = ' (AI upscale)'
             iid = tree.insert('', 'end', text=f['name'],
                               values=(src, tgt + warn, f['size_str'], f['status']))
+        _check_show_method_row()
 
     def _update_targets():
         """Update target column for all files."""
@@ -758,7 +865,10 @@ def open_video_scaler(app):
                 f = files[i]
                 tgt = _target_str(f)
                 warn = ' (upscale)' if _is_upscale(f) else ''
+                if warn and opt_upscale_method.get() == 'AI (Real-ESRGAN)':
+                    warn = ' (AI upscale)'
                 tree.set(iid, 'target_res', tgt + warn)
+        _check_show_method_row()
 
     # Bind custom entry changes to update targets
     opt_custom_w.trace_add('write', lambda *a: _update_targets())
@@ -970,10 +1080,17 @@ def open_video_scaler(app):
             _log(f"  Skipped (Original): {f['name']}", 'WARNING')
             return True
 
-        if _is_upscale(f):
+        use_ai = (_is_upscale(f)
+                  and opt_upscale_method.get() == 'AI (Real-ESRGAN)')
+
+        if _is_upscale(f) and not use_ai:
             _log(f"  Warning: upscaling {f['name']} ({f['height']}p -> {target[1]}p)", 'WARNING')
 
         win.after(0, lambda: _update_status(i, 'Processing...'))
+
+        if use_ai:
+            return _process_one_ai(i, f, target)
+
         hdr_note = f" (HDR → SDR)" if opt_hdr_to_sdr.get() and f.get('hdr') else ''
         _log(f"  Scaling: {f['name']} -> {_target_str(f)}{hdr_note}", 'INFO')
         _update_progress(0.0, f"File {i + 1}/{len(files)}: {f['name']}")
@@ -1114,6 +1231,124 @@ def open_video_scaler(app):
             _log(f"  Error: {e}", 'ERROR')
             return False
 
+    def _process_one_ai(i, f, target):
+        """Process a single file using AI upscaling. Returns True on success."""
+        import time as _time
+
+        if not ai_upscaler.is_installed():
+            _log("  Real-ESRGAN not installed — use the Download button", 'ERROR')
+            win.after(0, lambda: _update_status(i, 'Error'))
+            return False
+
+        _, target_h = target
+        model_name = opt_ai_model.get()
+        _log(f"  AI upscaling: {f['name']} -> {_target_str(f)} ({model_name})", 'INFO')
+        _update_progress(0.0, f"File {i + 1}/{len(files)}: AI upscale — {f['name']}")
+
+        # Build output path
+        input_path = f['path']
+        base = Path(input_path).stem
+        ext = opt_container.get()
+        res_tag = f"{target_h}p-ai"
+        if opt_output_mode.get() == 'folder' and opt_output_folder.get():
+            out_dir = opt_output_folder.get()
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = os.path.join(out_dir, f"{base}-{res_tag}{ext}")
+        else:
+            out_path = str(Path(input_path).parent / f"{base}-{res_tag}{ext}")
+
+        # Determine encoder
+        enc_label = opt_encoder.get()
+        bid = encoder_ids.get(enc_label, 'cpu')
+        codec_name = opt_codec.get()
+        codec_info = VIDEO_CODEC_MAP.get(codec_name, VIDEO_CODEC_MAP['H.265 / HEVC'])
+        if bid == 'cpu':
+            video_enc = codec_info['cpu_encoder']
+        else:
+            backend = GPU_BACKENDS.get(bid, {})
+            video_enc = backend.get('encoders', {}).get(codec_name)
+            if not video_enc:
+                video_enc = codec_info['cpu_encoder']
+
+        file_start_time = _time.monotonic()
+
+        job = ai_upscaler.AIUpscaleJob(
+            input_path=input_path,
+            output_path=out_path,
+            model_name=model_name,
+            target_height=target_h,
+            video_encoder=video_enc,
+            crf=opt_crf.get(),
+            preset=opt_preset.get(),
+            audio_codec=opt_audio.get(),
+            gpu_id=0,
+            log_callback=lambda m, l: _log(f"  {m}", l),
+            progress_callback=lambda p, s: (
+                _update_progress(p, f"File {i + 1}/{len(files)}: {s}"),
+                win.after(0, lambda s2=f"{p:.0f}%": _update_status(i, s2))
+                if not stop_flag[0] else None
+            ),
+        )
+        current_proc[0] = job  # store for cancel
+
+        # Check for stop
+        def _check_stop():
+            if stop_flag[0]:
+                job.cancel()
+        stop_check_id = win.after(500, _check_stop)
+
+        try:
+            success = job.run()
+        finally:
+            try:
+                win.after_cancel(stop_check_id)
+            except Exception:
+                pass
+            current_proc[0] = None
+
+        elapsed = _time.monotonic() - file_start_time
+
+        if stop_flag[0]:
+            if os.path.isfile(out_path):
+                try:
+                    os.remove(out_path)
+                except OSError:
+                    pass
+            _log(f"  Stopped: {f['name']}", 'WARNING')
+            win.after(0, lambda: _update_status(i, 'Stopped'))
+            return False
+
+        if success and os.path.isfile(out_path):
+            size = os.path.getsize(out_path)
+            if size > 0:
+                if size >= 1_073_741_824:
+                    sz = f"{size / 1_073_741_824:.1f} GB"
+                else:
+                    sz = f"{size / 1_048_576:.0f} MB"
+                if elapsed >= 3600:
+                    elapsed_str = f"{int(elapsed // 3600)}h {int((elapsed % 3600) // 60)}m"
+                elif elapsed >= 60:
+                    elapsed_str = f"{int(elapsed // 60)}m {int(elapsed % 60)}s"
+                else:
+                    elapsed_str = f"{int(elapsed)}s"
+                _update_progress(100.0, f"File {i + 1}/{len(files)}: Done in {elapsed_str}")
+                win.after(0, lambda: _update_status(i, f'Done ({sz})'))
+                _log(f"  Done: {os.path.basename(out_path)} ({sz}, {elapsed_str})", 'SUCCESS')
+
+                if opt_output_mode.get() == 'inplace':
+                    try:
+                        os.replace(out_path, f['path'])
+                        _log(f"  Replaced original", 'INFO')
+                    except OSError as e:
+                        _log(f"  Could not replace original: {e}", 'WARNING')
+                return True
+            else:
+                os.remove(out_path)
+
+        win.after(0, lambda: _update_status(i, 'Failed'))
+        _log(f"  AI upscale failed for: {f['name']}", 'ERROR')
+        return False
+
     def _start_processing():
         if processing[0]:
             return
@@ -1163,10 +1398,14 @@ def open_video_scaler(app):
 
     def _stop():
         stop_flag[0] = True
-        # Kill running ffmpeg process immediately (SIGKILL)
-        if current_proc[0]:
+        # Kill running process immediately
+        proc = current_proc[0]
+        if proc:
             try:
-                current_proc[0].kill()
+                if isinstance(proc, ai_upscaler.AIUpscaleJob):
+                    proc.cancel()
+                else:
+                    proc.kill()
             except OSError:
                 pass
 

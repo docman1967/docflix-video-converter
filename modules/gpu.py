@@ -667,6 +667,40 @@ def check_cpu_encoder(encoder_name):
         return False
 
 
+def enumerate_nvidia_gpus():
+    """Detect individual NVIDIA GPUs and their current load.
+
+    Returns a list of dicts:
+        [{"index": 0, "name": "NVIDIA RTX 2000E Ada", "vram_total": 16380,
+          "vram_used": 6786, "utilization": 6, "temp": 54}, ...]
+    Returns empty list if nvidia-smi is not available.
+    """
+    try:
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu',
+             '--format=csv,noheader,nounits'],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return []
+
+        gpus = []
+        for line in result.stdout.strip().splitlines():
+            parts = [p.strip() for p in line.split(',')]
+            if len(parts) >= 6:
+                gpus.append({
+                    'index': int(parts[0]),
+                    'name': parts[1],
+                    'vram_total': int(parts[2]),
+                    'vram_used': int(parts[3]),
+                    'utilization': int(parts[4]),
+                    'temp': int(parts[5]),
+                })
+        return gpus
+    except Exception:
+        return []
+
+
 def detect_gpu_backends():
     """Detect all available GPU encoding backends.
 

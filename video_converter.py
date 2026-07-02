@@ -3730,7 +3730,40 @@ class VideoConverter:
         if self.log_callback:
             timestamp = datetime.now().strftime('%H:%M:%S')
             self.log_callback(f"[{timestamp}] [{level}] {message}", level)
-    
+
+    def _src_audio_decodable(self, input_path):
+        """Return False if ffmpeg cannot decode the source audio streams.
+
+        Some files carry corrupt or non-standard audio (e.g. malformed AAC
+        that trips 'channel element is not allocated' / 'Number of bands
+        exceeds limit').  When the per-stream decode error rate exceeds
+        ffmpeg's internal ceiling (~0.667), ffmpeg aborts the entire job
+        (exit 69), so any attempt to re-encode that audio fails.  This runs
+        a fast decode-to-null preflight whose exit code exactly predicts
+        that abort, letting the caller fall back to stream-copy.
+
+        Result is cached per input path (convert calls this once per pass).
+        On any probe error/timeout it returns True (fail open — never block
+        an encode because the probe itself misbehaved).
+        """
+        cache = getattr(self, '_audio_decode_cache', None)
+        if cache is None:
+            cache = self._audio_decode_cache = {}
+        if input_path in cache:
+            return cache[input_path]
+        ok = True
+        try:
+            proc = subprocess.run(
+                ['ffmpeg', '-v', 'error', '-nostdin', '-i', input_path,
+                 '-map', '0:a', '-c:a', 'pcm_s16le', '-f', 'null', '-'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=180)
+            ok = (proc.returncode == 0)
+        except Exception:
+            ok = True
+        cache[input_path] = ok
+        return ok
+
     def convert_file(self, input_path, output_path, settings):
         """
         Convert a single video file
@@ -4113,6 +4146,22 @@ class VideoConverter:
                                 self.log(
                                     f"Audio already {src_codec} — copying "
                                     f"(no re-encode needed)", 'INFO')
+                    except Exception:
+                        pass
+                # Undecodable-audio fallback: if the source audio can't be
+                # decoded (corrupt/non-standard stream), re-encoding to the
+                # target codec would make ffmpeg abort the whole job. Copy
+                # the original stream instead so the file still converts.
+                if audio_codec != 'copy':
+                    try:
+                        if not self._src_audio_decodable(input_path):
+                            self.log(
+                                f"Source audio cannot be decoded — copying "
+                                f"the original stream instead of re-encoding "
+                                f"to {audio_codec} (the audio is corrupt or "
+                                f"non-standard; re-encoding it would fail)",
+                                'WARNING')
+                            audio_codec = 'copy'
                     except Exception:
                         pass
                 if audio_codec == 'copy':
@@ -5031,22 +5080,43 @@ class VideoConverterApp:
         encoder_frame.grid(row=0, column=1, sticky="e", padx=10)
 
         # Build display labels for the encoder combobox
+        # Multi-GPU: each NVIDIA GPU gets its own entry (GPU 0, GPU 1, etc.)
         self._encoder_labels = {}  # display_label -> backend_id
         self._encoder_ids = {}     # backend_id -> display_label
-        cpu_label = 'CPU'
-        self._encoder_labels[cpu_label] = 'cpu'
-        self._encoder_ids['cpu'] = cpu_label
+        self._encoder_gpu_index = {}  # display_label -> gpu index
+
+        from modules.gpu import enumerate_nvidia_gpus
+        nvidia_gpus = enumerate_nvidia_gpus()
+
         for bid in self.gpu_backends:
             backend = GPU_BACKENDS[bid]
             gpu_name = self.gpu_backends[bid]
-            if gpu_name and gpu_name is not True:
-                # Extract short GPU model name from detection output
-                short_name = _short_gpu_name(gpu_name, bid)
-                lbl_text = f"{short_name} ({backend['short']})"
+
+            if bid == 'nvenc' and len(nvidia_gpus) > 1:
+                # Multi-GPU NVIDIA: create a separate entry per GPU
+                for g in nvidia_gpus:
+                    short = g['name'].replace('NVIDIA ', '').replace('Generation ', '').strip()
+                    lbl_text = f"{short} GPU {g['index']} ({backend['short']})"
+                    self._encoder_labels[lbl_text] = bid
+                    self._encoder_gpu_index[lbl_text] = g['index']
+                    if g['index'] == 0:
+                        self._encoder_ids[bid] = lbl_text  # default to GPU 0
             else:
-                lbl_text = backend['label']
-            self._encoder_labels[lbl_text] = bid
-            self._encoder_ids[bid] = lbl_text
+                # Single GPU or non-NVIDIA backend
+                if gpu_name and gpu_name is not True:
+                    short_name = _short_gpu_name(gpu_name, bid)
+                    lbl_text = f"{short_name} ({backend['short']})"
+                else:
+                    lbl_text = backend['label']
+                self._encoder_labels[lbl_text] = bid
+                self._encoder_ids[bid] = lbl_text
+                self._encoder_gpu_index[lbl_text] = 0
+
+        # CPU always last
+        cpu_label = 'CPU'
+        self._encoder_labels[cpu_label] = 'cpu'
+        self._encoder_ids['cpu'] = cpu_label
+        self._encoder_gpu_index[cpu_label] = 0
 
         self.encoder_combo = ttk.Combobox(
             encoder_frame, state='readonly',
@@ -5055,6 +5125,9 @@ class VideoConverterApp:
         self.encoder_combo.set(self._encoder_ids.get(self.encoder_mode.get(), cpu_label))
         self.encoder_combo.pack(side='left', padx=(0, 8))
         self.encoder_combo.bind('<<ComboboxSelected>>', lambda e: self._on_encoder_combo())
+
+        # Multi-GPU support: gpu_index IntVar for settings, _encoder_gpu_index populated above
+        self.gpu_index = tk.IntVar(value=0)
 
         # Hardware decode checkbox
         self.hw_decode_check = tk.Checkbutton(
@@ -8267,6 +8340,7 @@ class VideoConverterApp:
             'skip_existing':        self.skip_existing.get(),
             'delete_originals':     self.delete_originals.get(),
             'hw_decode':            self.hw_decode.get(),
+            'gpu_index':            self.gpu_index.get(),
             'strip_internal_subs':  self.strip_internal_subs.get(),
             'strip_cc':             self.strip_cc.get(),
             'two_pass':             self.two_pass.get(),
@@ -8749,6 +8823,7 @@ class VideoConverterApp:
                 'audio_codec':    ('copy' if self.transcode_mode.get() == 'video'
                                    else self.get_audio_codec_name()),
                 'audio_bitrate':  self.audio_bitrate.get(),
+                'gpu_index':      self.gpu_index.get(),
             }
         except Exception:
             return {'transcode_mode': 'video', 'encoder': self._default_gpu,
@@ -9532,10 +9607,14 @@ class VideoConverterApp:
         """Rebuild the encoder combobox values, disabling backends that don't support the codec."""
         if codec_name is None:
             codec_name = self.video_codec.get()
-        labels = [self._encoder_ids['cpu']]
+        labels = []
         for bid in self.gpu_backends:
             if self._encoder_has_codec(codec_name, bid) or codec_name == 'Copy (no re-encode)':
-                labels.append(self._encoder_ids[bid])
+                # Add ALL labels for this backend (multi-GPU creates multiple labels per bid)
+                for lbl, lbl_bid in self._encoder_labels.items():
+                    if lbl_bid == bid and lbl not in labels:
+                        labels.append(lbl)
+        labels.append(self._encoder_ids['cpu'])
         self.encoder_combo['values'] = labels
 
     def _apply_presets_for_codec(self, info, silent=True):
@@ -9623,6 +9702,8 @@ class VideoConverterApp:
         label = self.encoder_combo.get()
         bid = self._encoder_labels.get(label, 'cpu')
         self.encoder_mode.set(bid)
+        # Set GPU index from the selected label (multi-GPU support)
+        self.gpu_index.set(self._encoder_gpu_index.get(label, 0))
         self.on_encoder_change()
 
     def on_encoder_change(self, silent=False):
@@ -9630,9 +9711,13 @@ class VideoConverterApp:
         info = self.get_codec_info()
         encoder = self.encoder_mode.get()
 
-        # Sync the combobox display
-        display = self._encoder_ids.get(encoder, self._encoder_ids.get('cpu', 'CPU'))
-        if self.encoder_combo.get() != display:
+        # Sync the combobox display — preserve current selection if it maps
+        # to the same backend (don't reset GPU 1 back to GPU 0)
+        current_label = self.encoder_combo.get()
+        current_bid = self._encoder_labels.get(current_label)
+        if current_bid != encoder:
+            # Different backend selected — use default label for this backend
+            display = self._encoder_ids.get(encoder, self._encoder_ids.get('cpu', 'CPU'))
             self.encoder_combo.set(display)
 
         self._apply_presets_for_codec(info, silent=silent)
