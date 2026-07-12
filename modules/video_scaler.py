@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -266,6 +267,19 @@ def open_video_scaler(app):
     opt_hdr_to_sdr   = tk.BooleanVar(value=_sp.get('hdr_to_sdr', False))
     opt_upscale_method = tk.StringVar(value=_sp.get('upscale_method', 'Standard (ffmpeg)'))
     opt_ai_model     = tk.StringVar(value=_sp.get('ai_model', ai_upscaler.DEFAULT_MODEL))
+    opt_ai_gpu       = tk.StringVar(value=_sp.get('ai_gpu', 'Auto (all GPUs)'))
+    opt_ai_preview_start = tk.StringVar(value=_sp.get('ai_preview_start', '120'))
+    opt_ai_tta       = tk.BooleanVar(value=_sp.get('ai_tta', False))
+
+    # Real-ESRGAN GPU choices — label -> value accepted by ai_upscaler.normalize_gpu_ids()
+    _ai_gpu_choices = {'Auto (all GPUs)': 'auto'}
+    for _g in ai_upscaler.detect_gpus():
+        _ai_gpu_choices[f"GPU {_g['index']}"] = str(_g['index'])
+    _ai_gpu_choices['CPU (slow)'] = 'cpu'
+
+    def _resolve_ai_gpu():
+        """Selected GPU label -> value for AIUpscaleJob (defaults to 'auto')."""
+        return _ai_gpu_choices.get(opt_ai_gpu.get(), 'auto')
 
     # Detect GPU backends
     gpu_backends = _detect_gpu_backends_quick()
@@ -511,6 +525,27 @@ def open_video_scaler(app):
                                     width=20, state='readonly')
     ai_model_combo.pack(side='left', padx=(0, 8))
 
+    ai_gpu_label = ttk.Label(row1b, text="GPU:")
+    ai_gpu_label.pack(side='left', padx=(8, 4))
+    ai_gpu_combo = ttk.Combobox(row1b, textvariable=opt_ai_gpu,
+                                 values=list(_ai_gpu_choices.keys()),
+                                 width=16, state='readonly')
+    ai_gpu_combo.pack(side='left', padx=(0, 8))
+
+    # Quick 30s side-by-side preview (original | AI-upscaled)
+    ai_preview_frame = ttk.Frame(row1b)
+    ai_preview_frame.pack(side='left', padx=(6, 4))
+    ai_preview_btn = ttk.Button(ai_preview_frame, text="👁 Preview 30s")
+    ai_preview_btn.pack(side='left', padx=(0, 2))
+    ttk.Label(ai_preview_frame, text="@").pack(side='left')
+    ttk.Entry(ai_preview_frame, textvariable=opt_ai_preview_start,
+              width=4).pack(side='left', padx=(2, 1))
+    ttk.Label(ai_preview_frame, text="s").pack(side='left')
+
+    ai_tta_check = ttk.Checkbutton(row1b, text="Max Quality (~8× slower)",
+                                   variable=opt_ai_tta)
+    ai_tta_check.pack(side='left', padx=(6, 4))
+
     # AI status label (shows installed/not installed)
     ai_status_var = tk.StringVar(value='')
     ai_status_label = ttk.Label(row1b, textvariable=ai_status_var,
@@ -561,12 +596,108 @@ def open_video_scaler(app):
 
     ai_download_btn.configure(command=_download_realesrgan)
 
+    _preview_job = [None]  # holds the running preview AIUpscaleJob (or None)
+
+    def _cancel_preview():
+        job = _preview_job[0]
+        if job is not None:
+            _log("Cancelling preview…", 'INFO')
+            job.cancel()
+
+    def _preview_selected():
+        """Generate a quick 30s side-by-side (original | AI-upscaled) preview of
+        the selected file using the CURRENT AI settings, then open it."""
+        if not ai_upscaler.is_installed():
+            _log("Real-ESRGAN not installed — use the Download button first.", 'ERROR')
+            return
+        if not files:
+            _log("Add a file first, then Preview.", 'ERROR')
+            return
+        items = list(tree.get_children())
+        focus = tree.focus()
+        idx = items.index(focus) if focus in items else 0
+        f = files[idx]
+
+        target = _get_target(f)
+        target_h = target[1] if target else None
+
+        # Encoder — mirror the full AI job build
+        bid = encoder_ids.get(opt_encoder.get(), 'cpu')
+        codec_name = opt_codec.get()
+        codec_info = VIDEO_CODEC_MAP.get(codec_name, VIDEO_CODEC_MAP['H.265 / HEVC'])
+        if bid == 'cpu':
+            video_enc = codec_info['cpu_encoder']
+        else:
+            video_enc = (GPU_BACKENDS.get(bid, {}).get('encoders', {}).get(codec_name)
+                         or codec_info['cpu_encoder'])
+
+        try:
+            start = float(opt_ai_preview_start.get())
+        except (ValueError, TypeError):
+            start = 120.0
+
+        out_path = os.path.join(tempfile.gettempdir(),
+                                f"docflix_preview_{Path(f['path']).stem}.mkv")
+
+        ai_preview_btn.configure(text="✖ Cancel", command=_cancel_preview)
+        _log(f"Preview: {f['name']} — 30s @ {start:.0f}s "
+             f"({opt_ai_model.get()}, GPU={_resolve_ai_gpu()})", 'INFO')
+
+        def _worker():
+            ok = False
+            was_cancelled = False
+            try:
+                job = ai_upscaler.AIUpscaleJob(
+                    input_path=f['path'], output_path=out_path,
+                    model_name=opt_ai_model.get(), target_height=target_h,
+                    video_encoder=video_enc, crf=opt_crf.get(),
+                    preset=opt_preset.get(), audio_codec=opt_audio.get(),
+                    gpu_id=_resolve_ai_gpu(),
+                    tta=opt_ai_tta.get(),
+                    log_callback=lambda m, l: win.after(
+                        0, lambda m=m, l=l: _log(f"  [preview] {m}", l)),
+                    progress_callback=lambda p, s: win.after(
+                        0, lambda p=p, s=s: _update_progress(p, f"Preview: {s}")),
+                )
+                _preview_job[0] = job
+                ok = job.run_preview(start=start, duration=30.0)
+                was_cancelled = job._cancelled
+            except Exception as e:
+                win.after(0, lambda e=e: _log(f"Preview error: {e}", 'ERROR'))
+            finally:
+                _preview_job[0] = None
+
+            def _done():
+                ai_preview_btn.configure(text="👁 Preview 30s", command=_preview_selected)
+                _reset_progress()
+                if ok and os.path.isfile(out_path):
+                    _log(f"Preview ready → {out_path} (opening…)", 'SUCCESS')
+                    try:
+                        subprocess.Popen(['xdg-open', out_path],
+                                         stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL)
+                    except Exception:
+                        _log("(Couldn't auto-open; file is at the path above.)", 'INFO')
+                elif was_cancelled:
+                    _log("Preview cancelled.", 'INFO')
+                else:
+                    _log("Preview failed — see the log above.", 'ERROR')
+            win.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    ai_preview_btn.configure(command=_preview_selected)
+
     def _on_method_change(*args):
         """Show/hide AI-specific controls based on upscale method."""
         method = opt_upscale_method.get()
         if method == 'AI (Real-ESRGAN)':
             ai_model_label.pack(side='left', padx=(8, 4))
             ai_model_combo.pack(side='left', padx=(0, 8))
+            ai_gpu_label.pack(side='left', padx=(8, 4))
+            ai_gpu_combo.pack(side='left', padx=(0, 8))
+            ai_preview_frame.pack(side='left', padx=(6, 4))
+            ai_tta_check.pack(side='left', padx=(6, 4))
             ai_status_label.pack(side='left', padx=(0, 4))
             _update_ai_status()
             # Use lower CRF for AI upscale (more detail to preserve)
@@ -575,6 +706,10 @@ def open_video_scaler(app):
         else:
             ai_model_label.pack_forget()
             ai_model_combo.pack_forget()
+            ai_gpu_label.pack_forget()
+            ai_gpu_combo.pack_forget()
+            ai_preview_frame.pack_forget()
+            ai_tta_check.pack_forget()
             ai_status_label.pack_forget()
             ai_download_btn.pack_forget()
 
@@ -645,10 +780,12 @@ def open_video_scaler(app):
     progress_var = tk.DoubleVar(value=0.0)
     progress_bar = ttk.Progressbar(progress_frame, variable=progress_var,
                                     maximum=100, mode='determinate')
-    progress_bar.grid(row=0, column=0, sticky='ew', padx=(0, 8))
+    progress_bar.grid(row=0, column=0, columnspan=2, sticky='ew')
 
-    progress_label = ttk.Label(progress_frame, text="", width=40, anchor='e')
-    progress_label.grid(row=0, column=1, sticky='e')
+    # Status text on its own full-width row, left-aligned — never truncates and
+    # grows with the window (was width=40/anchor='e' in a fixed column).
+    progress_label = ttk.Label(progress_frame, text="", anchor='w')
+    progress_label.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(2, 0))
 
     # ── Log panel ──
     log_frame = ttk.Frame(main_frame)
@@ -690,6 +827,9 @@ def open_video_scaler(app):
             'hdr_to_sdr':    opt_hdr_to_sdr.get(),
             'upscale_method': opt_upscale_method.get(),
             'ai_model':      opt_ai_model.get(),
+            'ai_gpu':        opt_ai_gpu.get(),
+            'ai_preview_start': opt_ai_preview_start.get(),
+            'ai_tta':        opt_ai_tta.get(),
         }
         app._scaler_prefs = sp
         try:
@@ -1281,7 +1421,8 @@ def open_video_scaler(app):
             crf=opt_crf.get(),
             preset=opt_preset.get(),
             audio_codec=opt_audio.get(),
-            gpu_id=0,
+            gpu_id=_resolve_ai_gpu(),
+            tta=opt_ai_tta.get(),
             log_callback=lambda m, l: _log(f"  {m}", l),
             progress_callback=lambda p, s: (
                 _update_progress(p, f"File {i + 1}/{len(files)}: {s}"),

@@ -229,6 +229,78 @@ def uninstall():
 # AI Upscaling Pipeline
 # ═══════════════════════════════════════════════════════════════════
 
+def detect_gpus():
+    """Detect GPUs available to Real-ESRGAN (ncnn-vulkan).
+
+    Returns a list like [{'index': 0, 'name': 'NVIDIA ...'}, ...]; an empty
+    list means none were found (caller falls back to CPU via -g -1).
+
+    NOTE: Real-ESRGAN addresses GPUs by *Vulkan* device index. On a standard
+    NVIDIA-only host these align 1:1 with nvidia-smi indices (0, 1, ...), which
+    is what we query here. (vulkaninfo would be authoritative but isn't required
+    for this setup.)
+    """
+    gpus = []
+    try:
+        r = subprocess.run(
+            ['nvidia-smi', '--query-gpu=index,name', '--format=csv,noheader'],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode == 0:
+            for line in r.stdout.strip().splitlines():
+                parts = [p.strip() for p in line.split(',', 1)]
+                if len(parts) == 2 and parts[0].isdigit():
+                    gpus.append({'index': int(parts[0]), 'name': parts[1]})
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return gpus
+
+
+def normalize_gpu_ids(gpu_id):
+    """Normalize a GPU selection into a list of int indices.
+
+    Accepts:
+      int          -> [n]           (single GPU; -1 = CPU)
+      list / tuple -> [ints]
+      'auto'/'all' -> every detected GPU (or [-1] CPU if none found)
+      'cpu'/'-1'   -> [-1]
+      '0,1'        -> [0, 1]        (comma-separated string)
+    Always returns a non-empty list.
+    """
+    if isinstance(gpu_id, str):
+        s = gpu_id.strip().lower()
+        if s in ('auto', 'all'):
+            gpus = detect_gpus()
+            return [g['index'] for g in gpus] if gpus else [-1]
+        if s in ('cpu', '-1'):
+            return [-1]
+        try:
+            ids = [int(x) for x in s.split(',') if x.strip() != '']
+            return ids or [0]
+        except ValueError:
+            return [0]
+    if isinstance(gpu_id, (list, tuple)):
+        ids = [int(x) for x in gpu_id]
+        return ids or [0]
+    return [int(gpu_id)]
+
+
+def _best_temp_dir(est_bytes):
+    """Prefer the RAM disk (/dev/shm) for the work dir when it has room for
+    est_bytes + 30% margin; otherwise return None so the caller falls back to
+    /tmp. Keeps huge full-movie frame sets off RAM while letting bounded jobs
+    (previews, short clips) run in memory — where the GPUs stop starving on disk.
+    """
+    shm = '/dev/shm'
+    try:
+        if est_bytes > 0 and os.path.isdir(shm):
+            if shutil.disk_usage(shm).free > est_bytes * 1.3:
+                return shm
+    except OSError:
+        pass
+    return None
+
+
 class AIUpscaleJob:
     """Manages the frame-based AI upscaling pipeline for a single video.
 
@@ -271,7 +343,7 @@ class AIUpscaleJob:
     def __init__(self, input_path, output_path, model_name=None,
                  target_height=None, video_encoder='libx265',
                  crf='18', preset='medium', audio_codec='copy',
-                 gpu_id=0, log_callback=None, progress_callback=None):
+                 gpu_id=0, tta=False, log_callback=None, progress_callback=None):
         """
         Args:
             input_path: source video file
@@ -282,7 +354,8 @@ class AIUpscaleJob:
             crf: quality setting
             preset: encoder preset
             audio_codec: 'copy' or specific codec
-            gpu_id: GPU index for Real-ESRGAN (-1 for CPU)
+            gpu_id: GPU selection — int index, list, 'auto'/'all', or '0,1' (-1 = CPU)
+            tta: Real-ESRGAN TTA mode (-x) — 8-orientation averaging, higher quality, ~8x slower
             log_callback: fn(msg, level)
             progress_callback: fn(percent, status_str)
         """
@@ -294,7 +367,9 @@ class AIUpscaleJob:
         self.crf = crf
         self.preset = preset
         self.audio_codec = audio_codec
-        self.gpu_id = gpu_id
+        self.gpu_ids = normalize_gpu_ids(gpu_id)
+        self.gpu_id = self.gpu_ids[0] if self.gpu_ids else -1  # primary (back-compat)
+        self.tta = bool(tta)
         self._log_cb = log_callback
         self._progress_cb = progress_callback
         self._cancelled = False
@@ -330,29 +405,29 @@ class AIUpscaleJob:
             self._log(f"Unknown model: {self.model_name}", 'ERROR')
             return False
 
-        self._temp_dir = tempfile.mkdtemp(prefix='docflix_upscale_')
+        # ── Step 1: Probe first, so the work dir can be sized (RAM vs disk) ──
+        self._progress(0, "Analyzing video...")
+        duration, fps, src_w, src_h = self._probe_video()
+        if not fps or not duration:
+            self._log("Could not determine video FPS or duration", 'ERROR')
+            return False
+        total_frames = int(duration * fps)
+        self._log(
+            f"Source: {src_w}x{src_h} @ {fps:.2f} fps, "
+            f"{total_frames} frames, {duration:.1f}s"
+        )
+
+        self._temp_dir = self._make_workdir(
+            'docflix_upscale_', total_frames, src_w, src_h, model_info['scale'])
         frames_in = os.path.join(self._temp_dir, 'frames_in')
         frames_out = os.path.join(self._temp_dir, 'frames_out')
         os.makedirs(frames_in)
         os.makedirs(frames_out)
 
         try:
-            # ── Step 1: Get video info ──
-            self._progress(0, "Analyzing video...")
-            duration, fps, src_w, src_h = self._probe_video()
-            if not fps or not duration:
-                self._log("Could not determine video FPS or duration", 'ERROR')
-                return False
-
-            total_frames = int(duration * fps)
-            self._log(
-                f"Source: {src_w}x{src_h} @ {fps:.2f} fps, "
-                f"{total_frames} frames, {duration:.1f}s"
-            )
-
             # ── Step 2: Extract frames ──
             self._progress(2, "Extracting frames...")
-            if not self._extract_frames(frames_in, fps):
+            if not self._extract_frames(frames_in, fps, total_frames):
                 return False
             if self._cancelled:
                 return False
@@ -393,6 +468,156 @@ class AIUpscaleJob:
                 except OSError:
                     pass
 
+    def _run_proc(self, cmd):
+        """Run a cancellable subprocess (ffmpeg); True on success."""
+        try:
+            self._process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            )
+            for _line in self._process.stdout:
+                if self._cancelled:
+                    self._process.kill()
+                    return False
+            self._process.wait()
+            return self._process.returncode == 0
+        except Exception as e:
+            self._log(f"Subprocess failed: {e}", 'ERROR')
+            return False
+
+    @staticmethod
+    def _estimate_workdir_bytes(n_frames, src_w, src_h, scale):
+        """Rough total size of the input+output PNG frame sets (~2 bytes/px for
+        photographic content) — used to decide RAM vs disk for the work dir."""
+        in_px = max(1, (src_w or 0) * (src_h or 0))
+        out_px = in_px * scale * scale
+        return int(max(1, n_frames) * (in_px + out_px) * 2)
+
+    def _make_workdir(self, prefix, n_frames, src_w, src_h, scale):
+        """Create the temp frame dir — on the RAM disk when the frame set fits,
+        else on /tmp. RAM keeps the GPUs fed (the pipeline is otherwise I/O-bound)."""
+        base = _best_temp_dir(
+            self._estimate_workdir_bytes(n_frames, src_w, src_h, scale))
+        d = tempfile.mkdtemp(prefix=prefix, dir=base)
+        self._log("Work dir on " + ("RAM disk (fast)" if base == '/dev/shm' else "disk"))
+        return d
+
+    def run_preview(self, start=120.0, duration=30.0):
+        """Generate a fast side-by-side (original | AI-upscaled) preview clip.
+
+        Uses the IDENTICAL model / scale / target / encoder as a full job, but on
+        a short segment only — so what you see is what the full encode produces.
+        Writes a left(original, bicubic) / right(AI-upscaled) hstack to
+        self.output_path. The window is clamped to fit short sources.
+        """
+        binary = get_binary_path()
+        if not binary:
+            self._log("Real-ESRGAN not installed. Use the download button.", 'ERROR')
+            return False
+        model_info = MODELS.get(self.model_name)
+        if not model_info:
+            self._log(f"Unknown model: {self.model_name}", 'ERROR')
+            return False
+        scale = model_info['scale']
+
+        self._progress(0, "Analyzing video...")
+        total_dur, fps, src_w, src_h = self._probe_video()
+        if not fps or not total_dur or not src_w:
+            self._log("Could not probe video for preview", 'ERROR')
+            return False
+
+        # Clamp the preview window to fit the source length
+        if total_dur <= duration:
+            start, clip = 0.0, max(1.0, total_dur)
+        elif start + duration > total_dur:
+            start = max(0.0, min(total_dur * 0.1, total_dur - duration))
+            clip = duration
+        else:
+            clip = duration
+        self._log(
+            f"Preview: {clip:.0f}s @ {start:.0f}s  "
+            f"(source {src_w}x{src_h} @ {fps:.2f}fps, {total_dur:.0f}s total)"
+        )
+
+        self._temp_dir = self._make_workdir(
+            'docflix_preview_', int(clip * fps), src_w, src_h, scale)
+        frames_in = os.path.join(self._temp_dir, 'frames_in')
+        frames_out = os.path.join(self._temp_dir, 'frames_out')
+        os.makedirs(frames_in)
+        os.makedirs(frames_out)
+
+        try:
+
+            # Per-panel dimensions = exactly what the full run would output
+            if self.target_height:
+                panel_h = int(self.target_height)
+                panel_w = int(round(src_w * panel_h / src_h)) // 2 * 2
+            else:
+                panel_h = src_h * scale
+                panel_w = src_w * scale
+
+            # ── Extract just the segment (fast -ss before -i) ──
+            self._progress(5, "Extracting preview segment...")
+            extract = [
+                'ffmpeg', '-y', '-ss', f'{start:.3f}', '-t', f'{clip:.3f}',
+                '-i', self.input_path, '-vsync', '0',
+                '-compression_level', '1',  # fast PNG: ~half the CPU, still lossless
+                os.path.join(frames_in, f'frame_%08d.{FRAME_FORMAT}'),
+            ]
+            if not self._run_proc(extract):
+                self._log("Preview segment extract failed", 'ERROR')
+                return False
+            if self._cancelled:
+                return False
+            fcount = len([f for f in os.listdir(frames_in)
+                          if f.endswith(f'.{FRAME_FORMAT}')])
+            if fcount == 0:
+                self._log("No frames extracted for preview", 'ERROR')
+                return False
+
+            # ── Upscale the segment (multi-GPU applies automatically) ──
+            self._progress(15, "Upscaling preview...")
+            if not self._upscale_frames(binary, frames_in, frames_out,
+                                        model_info, fcount):
+                return False
+            if self._cancelled:
+                return False
+
+            # ── Stitch side-by-side: original(bicubic) | AI-upscaled ──
+            self._progress(92, "Building side-by-side...")
+            enc = self.NVENC_ENCODERS.get(self.video_encoder)
+            if enc:
+                enc_args = [enc['preset_flag'], enc.get('preset_default', 'p5')]
+                enc_args += enc['quality_args']
+                pix = enc['pix_fmt']
+            else:
+                enc_args = ['-preset', str(self.preset), '-crf', str(self.crf)]
+                pix = 'yuv420p'
+            filt = (
+                f"[1:v]scale={panel_w}:{panel_h}:flags=bicubic,setsar=1,fps={fps}[orig];"
+                f"[0:v]scale={panel_w}:{panel_h}:flags=lanczos,setsar=1,fps={fps}[up];"
+                f"[orig][up]hstack=inputs=2[out]"
+            )
+            build = [
+                'ffmpeg', '-y',
+                '-framerate', f'{fps}',
+                '-i', os.path.join(frames_out, f'frame_%08d.{FRAME_FORMAT}'),
+                '-ss', f'{start:.3f}', '-t', f'{clip:.3f}', '-i', self.input_path,
+                '-filter_complex', filt, '-map', '[out]',
+                '-c:v', self.video_encoder, *enc_args, '-pix_fmt', pix,
+                '-an', '-sn',
+                self.output_path,
+            ]
+            if not self._run_proc(build):
+                self._log("Preview side-by-side build failed", 'ERROR')
+                return False
+
+            self._progress(100, "Preview ready")
+            self._log(f"Preview saved: {self.output_path}", 'SUCCESS')
+            return True
+        finally:
+            if self._temp_dir and os.path.isdir(self._temp_dir):
+                shutil.rmtree(self._temp_dir, ignore_errors=True)
+
     def _probe_video(self):
         """Probe input video for duration, fps, width, height."""
         cmd = [
@@ -423,12 +648,13 @@ class AIUpscaleJob:
             self._log(f"ffprobe failed: {e}", 'ERROR')
             return None, None, None, None
 
-    def _extract_frames(self, out_dir, fps):
+    def _extract_frames(self, out_dir, fps, total_frames):
         """Extract all frames from the video as PNG images."""
         cmd = [
             'ffmpeg', '-y', '-i', self.input_path,
             '-vsync', '0',
             '-frame_pts', '1',
+            '-compression_level', '1',  # fast PNG: ~half the CPU vs default, still lossless
             os.path.join(out_dir, f'frame_%08d.{FRAME_FORMAT}'),
         ]
         self._log(f"Extracting frames to {out_dir}...")
@@ -446,13 +672,34 @@ class AIUpscaleJob:
                 if m:
                     frame_num = int(m.group(1))
                     # Extraction is 2-15% of total progress
-                    pct = 2 + min(13, frame_num / max(1, fps * 10) * 13)
+                    pct = 2 + min(13, (frame_num / max(1, total_frames)) * 13)
                     self._progress(pct, f"Extracting frame {frame_num}...")
             self._process.wait()
             return self._process.returncode == 0
         except Exception as e:
             self._log(f"Frame extraction failed: {e}", 'ERROR')
             return False
+
+    def _gpu_args(self):
+        """Build Real-ESRGAN -g/-j args.
+
+        -g selects the GPU(s) (comma list for multi). -j load:proc:save tunes
+        threads: load/save do the CPU-side PNG decode/encode — the REAL
+        bottleneck (with too few, the GPUs starve waiting on frames). We scale
+        load/save to the core count so both cards stay fed; proc = per-GPU workers.
+        Measured ~4x faster than the old 2:2,2:2 on a 16-core/32-thread box.
+            2 GPUs, 32 threads -> -g 0,1  -j 16:4,4:16
+            1 GPU              -> -g 0     -j 16:4:16
+            CPU                -> -g -1
+        """
+        ids = self.gpu_ids or [0]
+        args = ['-g', ','.join(str(i) for i in ids)]
+        if -1 not in ids:
+            cores = os.cpu_count() or 8
+            io = min(16, max(4, cores // 2))      # load == save (PNG codec threads)
+            proc = ','.join(['4'] * len(ids))     # GPU worker threads per card
+            args += ['-j', f'{io}:{proc}:{io}']
+        return args
 
     def _upscale_frames(self, binary, in_dir, out_dir, model_info, total_frames):
         """Run Real-ESRGAN on extracted frames."""
@@ -466,8 +713,10 @@ class AIUpscaleJob:
             '-n', model_id,
             '-s', str(scale),
             '-f', FRAME_FORMAT,
-            '-g', str(self.gpu_id),
         ]
+        cmd += self._gpu_args()
+        if self.tta:
+            cmd.append('-x')  # TTA: 8-orientation averaging — higher quality, ~8x slower
 
         # Add model path if using local install
         models_dir = INSTALL_DIR / 'models'
@@ -478,36 +727,38 @@ class AIUpscaleJob:
         self._log(f"  Command: {' '.join(cmd)}")
 
         try:
+            # Progress is driven by the OUTPUT frame count (monotonic + accurate),
+            # NOT Real-ESRGAN's stdout %, which cycles per-thread under multi-GPU
+            # and makes the bar appear to loop. stdout/stderr are discarded so the
+            # pipe can't fill and stall the process.
             self._process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
 
-            processed = 0
             t0 = time.monotonic()
-            for line in self._process.stdout:
+            processed = 0
+            while self._process.poll() is None:
                 if self._cancelled:
                     self._process.kill()
                     return False
+                processed = len([f for f in os.listdir(out_dir)
+                                 if f.endswith(f'.{FRAME_FORMAT}')])
+                elapsed = time.monotonic() - t0
+                fps_rate = processed / elapsed if elapsed > 0 else 0
+                remaining = (total_frames - processed) / fps_rate if fps_rate > 0 else 0
+                # Upscaling is 15-90% of total progress
+                pct = 15 + (min(processed, total_frames) / max(1, total_frames)) * 75
+                self._progress(pct, self._format_eta(
+                    processed, total_frames, fps_rate, remaining,
+                ))
+                time.sleep(0.5)
 
-                # Real-ESRGAN outputs progress like "frame_00000001.png -> ..."
-                if f'.{FRAME_FORMAT}' in line:
-                    processed += 1
-                    elapsed = time.monotonic() - t0
-                    fps_rate = processed / elapsed if elapsed > 0 else 0
-                    remaining = (total_frames - processed) / fps_rate if fps_rate > 0 else 0
-
-                    # Upscaling is 15-90% of total progress
-                    pct = 15 + (processed / max(1, total_frames)) * 75
-                    self._progress(pct, self._format_eta(
-                        processed, total_frames, fps_rate, remaining,
-                    ))
-
-            self._process.wait()
             if self._process.returncode != 0:
                 self._log("Real-ESRGAN exited with error", 'ERROR')
                 return False
 
+            processed = len([f for f in os.listdir(out_dir)
+                             if f.endswith(f'.{FRAME_FORMAT}')])
             self._log(
                 f"Upscaled {processed} frames in {time.monotonic() - t0:.1f}s "
                 f"({processed / max(1, time.monotonic() - t0):.1f} fps)"
