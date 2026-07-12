@@ -45,6 +45,7 @@ TOOL_CMDS=(
     "docflix-scale:video_scaler"
     "docflix-whisper:whisper_transcriber"
     "docflix-info:media_info"
+    "docflix-trailer:trailer_downloader"
 )
 
 #───────────────────────────────────────────────────────────────────────────────

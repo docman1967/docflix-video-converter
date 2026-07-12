@@ -9,6 +9,10 @@ logs/
 preferences.json
 PROJECT_SUMMARY.md
 
+# Transient encode logs / progress files
+tuner2026_encode.log
+tuner2026.progress
+
 # Generated assets (derived from logo.png)
 logo_transparent.png
 

@@ -4996,6 +4996,8 @@ class VideoConverterApp:
                                command=self.open_whisper_transcriber)
         tools_menu.add_command(label="Docflix Sub Extractor...",
                                command=self.open_sub_ripper)
+        tools_menu.add_command(label="Docflix Trailer Grabber...",
+                               command=self.open_trailer_downloader)
         # Help menu
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
@@ -7137,6 +7139,24 @@ class VideoConverterApp:
             else:
                 messagebox.showerror("Sub Extractor",
                                      "modules/sub_ripper.py not found.")
+
+    def open_trailer_downloader(self):
+        """Open the Docflix Trailer Grabber tool."""
+        try:
+            from modules.trailer_downloader import open_trailer_downloader
+            open_trailer_downloader(self)
+        except ImportError:
+            import importlib.util
+            _td_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     'modules', 'trailer_downloader.py')
+            if os.path.exists(_td_path):
+                spec = importlib.util.spec_from_file_location('trailer_downloader', _td_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                mod.open_trailer_downloader(self)
+            else:
+                messagebox.showerror("Trailer Grabber",
+                                     "modules/trailer_downloader.py not found.")
 
     def open_tv_renamer(self):
         """Open the File Renamer tool."""

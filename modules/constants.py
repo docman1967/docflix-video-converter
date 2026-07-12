@@ -19,6 +19,13 @@ MAX_CHARS_PER_LINE = 42
 PREFS_DIR = "~/.local/share/docflix"
 PREFS_FILENAME = "preferences.json"
 
+# ── BETA-ONLY default API key ──
+# Convenience so beta testers don't re-enter a key every launch. Used by the
+# Trailer Grabber (and available to any tool that wants an out-of-the-box key).
+# ⚠️  REMOVE AT GA:  set both to ""  →  tools then require the user's own free keys.
+BETA_DEFAULT_TMDB_KEY = "9375eb1401938b7615afd69988611a74"
+BETA_DEFAULT_TVDB_KEY = "8903a14b-8b71-436e-a48a-d553884f2991"
+
 # ── Edition presets for container title tagging ──
 EDITION_PRESETS = [
     '',                     # (no edition)
