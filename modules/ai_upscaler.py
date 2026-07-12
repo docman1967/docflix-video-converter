@@ -449,7 +449,7 @@ class AIUpscaleJob:
             # ── Step 4: Reassemble ──
             self._progress(90, "Reassembling video...")
             if not self._reassemble(frames_out, fps, model_info['scale'],
-                                     src_w, src_h):
+                                     src_w, src_h, frame_count):
                 return False
 
             self._progress(100, "Complete!")
@@ -784,7 +784,8 @@ class AIUpscaleJob:
                 parts.append(f"~{int(remaining_secs)}s left")
         return ' — '.join(parts)
 
-    def _reassemble(self, frames_dir, fps, scale_factor, src_w, src_h):
+    def _reassemble(self, frames_dir, fps, scale_factor, src_w, src_h,
+                    total_frames):
         """Reassemble upscaled frames with original audio/subs into output video."""
         # Calculate output resolution
         out_w = src_w * scale_factor
@@ -885,8 +886,13 @@ class AIUpscaleJob:
                 m = re.search(r'frame=\s*(\d+)', line)
                 if m:
                     frame_num = int(m.group(1))
-                    pct = 90 + min(9.9, frame_num / max(1, fps * 10) * 9.9)
-                    self._progress(pct, f"Encoding frame {frame_num}...")
+                    frac = min(1.0, frame_num / max(1, total_frames))
+                    pct = 90 + frac * 9  # 90 → 99 across the whole encode
+                    if frac >= 0.99:
+                        self._progress(
+                            pct, "Finalizing — writing file to disk…")
+                    else:
+                        self._progress(pct, f"Encoding frame {frame_num}...")
             self._process.wait()
             return self._process.returncode == 0
         except Exception as e:
