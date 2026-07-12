@@ -1205,6 +1205,54 @@ def open_tv_renamer(app):
             except Exception:
                 return None
 
+        # ── Content-based SDH detection ──────────────────────────────────
+        # SDH (deaf/hard-of-hearing) subtitles carry non-speech cues that
+        # regular subs lack: bracketed sound descriptions ([door creaks]),
+        # music notes (♪), ALL-CAPS speaker labels (MAN:), standalone
+        # parentheticals. Regular dialogue subs sit near 0% of these.
+        _SDH_BRACKET_RE = re.compile(r'\[[^\]]{2,}\]')
+        _SDH_PAREN_RE = re.compile(r'^\s*\([^)]{2,}\)\s*$')
+        _SDH_SPEAKER_RE = re.compile(r"^\s*-?\s*[A-Z][A-Z0-9 .'\-]{1,24}:\s")
+
+        def _detect_sdh_from_content(filepath, threshold=0.06):
+            """True if a subtitle's non-speech-cue density meets `threshold`
+            (default 6%). Regular subs sit near 0%; SDH sits well above."""
+            ext = os.path.splitext(filepath)[1].lower()
+            if ext not in ('.srt', '.ass', '.ssa', '.vtt', '.sub'):
+                return False
+            text = None
+            for enc in ('utf-8', 'latin-1', 'cp1252'):
+                try:
+                    with open(filepath, 'r', encoding=enc) as f:
+                        text = f.read(200000)  # up to ~200 KB — plenty
+                    break
+                except (UnicodeDecodeError, UnicodeError):
+                    continue
+            if not text:
+                return False
+            total = sdh = 0
+            for raw in text.splitlines():
+                line = raw.strip()
+                if not line or line.isdigit():
+                    continue
+                if '-->' in line and re.match(r'\d{1,2}:\d{2}:\d{2}', line):
+                    continue
+                if line.startswith(('WEBVTT', '[Script Info]', '[V4',
+                                    'Style:', 'Format:', 'ScriptType')):
+                    continue
+                if line.startswith('Dialogue:'):
+                    line = line.split(',', 9)[-1]  # ASS: text after the fields
+                total += 1
+                probe = re.sub(r'<[^>]+>|\{[^}]+\}', '', line)
+                if (_SDH_BRACKET_RE.search(probe)
+                        or '♪' in probe or '♫' in probe
+                        or _SDH_PAREN_RE.match(probe)
+                        or _SDH_SPEAKER_RE.match(probe)):
+                    sdh += 1
+            if total < 10:
+                return False  # too little text to judge confidently
+            return (sdh / total) >= threshold
+
         def _detect_sub_tags(filename):
             """Detect language, forced, and SDH tags from a subtitle filename.
             Returns a string like '.eng.forced' or '.eng.sdh' to insert
@@ -1238,6 +1286,15 @@ def open_tv_renamer(app):
                     filename_lang = p
                 else:
                     break  # stop at first non-tag token
+
+            # Content-based SDH: if the filename didn't already declare a type
+            # (sdh/cc/forced), scan the file — a "subs.srt" full of [sound] cues,
+            # ♪ music, or SPEAKER: labels is SDH even when the name doesn't say so.
+            if not ({'sdh', 'cc', 'forced'} & set(found_tags)):
+                if _detect_sdh_from_content(filename):
+                    found_tags.append('sdh')
+                    _log(f"  SDH detected from content: "
+                         f"{os.path.basename(filename)} → .sdh")
 
             # Normalize 2-letter filename codes to 3-letter
             if filename_lang and len(filename_lang) == 2:
@@ -3315,6 +3372,17 @@ def open_tv_renamer(app):
 
         template_var = tk.StringVar(value=_saved_template)
         movie_template_var = tk.StringVar(value=_saved_movie_template)
+        # Opt-in cleanup of leftover scene-pack source folders (→ Trash).
+        _cleanup_source = tk.BooleanVar(
+            value=bool(getattr(app, '_renamer_cleanup_source', False)))
+
+        def _on_cleanup_toggle(*_a):
+            app._renamer_cleanup_source = _cleanup_source.get()
+            try:
+                app.save_preferences()
+            except Exception:
+                pass
+        _cleanup_source.trace_add('write', _on_cleanup_toggle)
 
         # Save templates on change
         def _on_template_change(*_):
@@ -3387,6 +3455,37 @@ def open_tv_renamer(app):
             # matched_show would be unset during _build_new_name.
             for item in _file_items:
                 item['matched_show'] = _match_file_to_show(item)
+
+            # Adopt loose/generic-named subtitles from a matched media sibling.
+            # A subtitle with no match of its own, alone in a folder with exactly
+            # ONE matched video, inherits that video's match (identity + episode)
+            # so it renames alongside it — e.g. English.srt -> <Movie>.eng.srt,
+            # Forced.eng.forced.srt -> <Movie>.eng.forced.srt. Pass 2 then builds
+            # the name and appends the lang/forced/sdh tags automatically.
+            # ADDITIVE + safe: gated on "UNMATCHED sub AND exactly one matched
+            # video sibling in the SAME folder". A standalone sub (matched by its
+            # own name, or with no video sibling) never enters this branch, so the
+            # solo-subtitle DB-lookup workflow is untouched. Ambiguous folders
+            # (2+ matched videos) are skipped rather than guessed.
+            for _sub in _file_items:
+                if (_sub.get('ext') not in SUBTITLE_EXTENSIONS
+                        or _sub.get('matched_show')):
+                    continue
+                _sub_dir = os.path.dirname(_sub['path'])
+                _sibs = [v for v in _file_items
+                         if v.get('ext') in VIDEO_EXTENSIONS
+                         and v.get('matched_show')
+                         and os.path.dirname(v['path']) == _sub_dir]
+                if len(_sibs) == 1:
+                    _vid = _sibs[0]
+                    _sub['matched_show'] = _vid['matched_show']
+                    # Inherit episode identity so a TV sub renders in pass 2
+                    # (movie siblings carry None here — harmless).
+                    _sub['season'] = _vid.get('season')
+                    _sub['episode'] = _vid.get('episode')
+                    _sub['air_date'] = _vid.get('air_date')
+                    _log(f"Adopted subtitle \"{os.path.basename(_sub['path'])}\""
+                         f" → {_vid['matched_show']}")
 
             # Second pass: build preview names
             for item in _file_items:
@@ -3609,6 +3708,15 @@ def open_tv_renamer(app):
 
         # ── Drag and drop ──
         _RENAME_EXTENSIONS = VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS
+        # Scene "sample" junk to skip on scan: a filename stem that is exactly
+        # "sample" or carries "sample" as a separator-bounded token (sample.mkv,
+        # Show.S01E01.sample.mkv, movie-sample.mkv). Conservative — it will NOT
+        # match a title that merely starts with "Sample" (e.g. "Sample.Show").
+        _SAMPLE_STEM_RE = re.compile(
+            r'[.\s_-]sample(?:[.\s_-]|$)'              # sample as an internal/trailing token
+            r'|^sample(?:$|[.\s_-])'                   # or leading "sample"/"sample-GRP"…
+            r'(?!.*(?:s\d{1,2}e\d{1,2}|(?:19|20)\d{2}))',  # …unless it carries SxxExx or a year (a real title)
+            re.IGNORECASE)
 
         _scanning_files = [False]  # guard against overlapping scans
 
@@ -3628,9 +3736,17 @@ def open_tv_renamer(app):
             for p in paths:
                 if os.path.isdir(p):
                     for root_dir, _dirs, files in os.walk(p):
-                        _dirs[:] = sorted(d for d in _dirs if not d.startswith('.'))
+                        # Skip hidden dirs AND scene "Sample" folders (junk — the
+                        # renamer must never try to match a sample clip).
+                        _dirs[:] = sorted(
+                            d for d in _dirs
+                            if not d.startswith('.')
+                            and d.lower() not in ('sample', 'samples'))
                         for f in sorted(files):
                             if f.startswith('.'):
+                                continue
+                            # Skip scene sample files (sample.mkv, *.sample.*, …)
+                            if _SAMPLE_STEM_RE.search(os.path.splitext(f)[0]):
                                 continue
                             ext = os.path.splitext(f)[1].lower()
                             if ext in _RENAME_EXTENSIONS:
@@ -3878,12 +3994,25 @@ def open_tv_renamer(app):
                         # by climbing past the episode subfolder, Subs, and Season.
                         current_parent = file_parent
                         in_season = False
+                        climbed_scene_pack = False
                         for _ in range(4):
                             cp_name = os.path.basename(current_parent)
-                            if (_SEASON_FOLDER_RE.match(cp_name)
-                                    or _SUBS_FOLDER_RE.match(cp_name)
-                                    or _SCENE_SEASON_RE.search(cp_name)):
+                            _clean_season = bool(
+                                _SEASON_FOLDER_RE.match(cp_name)
+                                or _SUBS_FOLDER_RE.match(cp_name))
+                            _scene_pack = bool(
+                                not _clean_season
+                                and _SCENE_SEASON_RE.search(cp_name))
+                            if _clean_season or _scene_pack:
                                 in_season = True
+                                if _scene_pack:
+                                    # Climbed PAST a scene-release pack folder
+                                    # (e.g. "After The Flood 2024 S01 720p..."):
+                                    # its container is a drop/inbox folder (like
+                                    # Acquisitions), NOT a dedicated show folder.
+                                    # Break the pack out into a NEW show folder and
+                                    # move into it — NEVER rename the container.
+                                    climbed_scene_pack = True
                                 current_parent = os.path.dirname(current_parent)
                             elif (item.get('ext', '') in SUBTITLE_EXTENSIONS
                                     and re.search(r'[Ss]\d{1,2}[Ee]\d', cp_name)):
@@ -3937,9 +4066,12 @@ def open_tv_renamer(app):
                                     is_loose = True
                                     break
 
-                        if is_loose:
-                            # Loose file: create a new show folder under
-                            # the show-level parent directory (current_parent)
+                        if is_loose or climbed_scene_pack:
+                            # Loose file OR a scene-release pack sitting in a
+                            # drop/inbox folder: create a NEW show folder under the
+                            # parent directory (current_parent) and move into it —
+                            # never rename the parent (which may be a shared inbox
+                            # like Acquisitions that other downloads flow into).
                             new_parent = os.path.join(
                                 current_parent, show_folder)
                             if not os.path.exists(new_parent):
@@ -4092,6 +4224,49 @@ def open_tv_renamer(app):
                 except OSError:
                     pass
 
+            # Opt-in: send a leftover scene-pack source folder (media already
+            # moved out, only junk remaining) to the Trash — recoverable, and
+            # only when the "Clean up emptied source folders" box is ticked.
+            # Conservative: any media / subtitle / unrecognized file leaves the
+            # whole folder untouched.
+            _JUNK_EXTS = {'.nfo', '.txt', '.sfv', '.md5', '.url', '.nzb',
+                          '.srr', '.jpg', '.jpeg', '.png', '.gif'}
+
+            def _folder_is_only_junk(path):
+                try:
+                    names = os.listdir(path)
+                except OSError:
+                    return False
+                if not names:
+                    return False  # empty is handled by _rmdir_empty_recursive
+                for name in names:
+                    p = os.path.join(path, name)
+                    if os.path.isdir(p):
+                        if not _folder_is_only_junk(p):
+                            return False
+                    else:
+                        stem, ext = os.path.splitext(name)
+                        # Junk = a junk extension OR a sample-named clip
+                        # (sample.mkv, *.sample.*) via the #12 scan-time detector.
+                        # So a "Sample" folder full of sample clips is cleanable,
+                        # but a real (non-sample) video still protects the folder.
+                        if (ext.lower() not in _JUNK_EXTS
+                                and not _SAMPLE_STEM_RE.search(stem)):
+                            return False
+                return True
+
+            def _trash_path(path):
+                try:
+                    subprocess.run(['gio', 'trash', '--', path],
+                                   check=True, capture_output=True, timeout=20)
+                    _removed_season_dirs.append(path)
+                    _log(f"  Cleaned source folder → Trash: "
+                         f"{os.path.basename(path)}")
+                except Exception as _e:
+                    _log(f"  Could not trash "
+                         f"{os.path.basename(path)}: {_e}", 'WARNING')
+
+            _cleanup_skipped = 0  # junk-only source folders left because box is off
             for check_dir in _cleanup_dirs:
                 if not os.path.isdir(check_dir):
                     continue
@@ -4107,6 +4282,15 @@ def open_tv_renamer(app):
                             or _SUBS_FOLDER_RE.match(entry)
                             or _SCENE_SEASON_RE.search(entry)):
                         _rmdir_empty_recursive(sub)
+                        if os.path.isdir(sub) and _folder_is_only_junk(sub):
+                            if _cleanup_source.get():
+                                _trash_path(sub)
+                            else:
+                                _cleanup_skipped += 1
+            if _cleanup_skipped and not _cleanup_source.get():
+                _log(f"  Left {_cleanup_skipped} emptied source folder(s) in "
+                     f"place — tick 'Clean up emptied source folders' to send "
+                     f"them to Trash.", 'INFO')
 
             # Save undo history (include created dirs and removed items for restore)
             renamed_items = [i.copy() for i in _file_items if i.get('_renamed')]
@@ -4395,6 +4579,16 @@ def open_tv_renamer(app):
                                 width=12)
         rename_btn.pack(side='left', padx=2)
         create_tooltip(rename_btn, "Rename all files to their new names")
+
+        _cleanup_cb = ttk.Checkbutton(
+            btn_f, text="Clean up emptied source folders",
+            variable=_cleanup_source)
+        _cleanup_cb.pack(side='left', padx=(12, 2))
+        create_tooltip(
+            _cleanup_cb,
+            "After moving files out, send a leftover scene-pack source folder "
+            "(only junk like .nfo/.txt remaining) to the Trash. Never touches "
+            "folders that still hold media or unrecognized files.")
 
         undo_btn = ttk.Button(btn_f, text="↩ Undo", command=_do_undo,
                               width=8, state='disabled')

@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.5.5"
+APP_VERSION = "3.6.0"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -8391,6 +8391,7 @@ class VideoConverterApp:
             'tv_rename_provider':    getattr(self, '_tv_rename_provider', 'TVDB'),
             'tv_rename_template':    getattr(self, '_tv_rename_template', '{show} S{season}E{episode} {title}'),
             'movie_rename_template': getattr(self, '_movie_rename_template', '{show} ({year})'),
+            'renamer_cleanup_source': getattr(self, '_renamer_cleanup_source', False),
             'custom_rename_templates': getattr(self, '_custom_rename_templates', []),
             'custom_tv_templates':    getattr(self, '_custom_tv_templates', []),
             'custom_movie_templates': getattr(self, '_custom_movie_templates', []),
@@ -8515,6 +8516,8 @@ class VideoConverterApp:
                                                   '{show} S{season}E{episode} {title}')
             self._movie_rename_template = prefs.get('movie_rename_template',
                                                      '{show} ({year})')
+            self._renamer_cleanup_source = bool(
+                prefs.get('renamer_cleanup_source', False))
             self._custom_rename_templates = prefs.get(
                 'custom_rename_templates', [])
             self._custom_tv_templates = prefs.get(
