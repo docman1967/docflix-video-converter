@@ -4946,6 +4946,27 @@ class VideoConverterApp:
         settings_menu.add_command(label="Reset to Defaults",
                                   command=self.reset_preferences)
 
+        # UI Scale submenu (high-DPI override). Lives in the MENU — always reachable even when
+        # the UI is too small/scrolled/hidden to use, since it's the control that FIXES that.
+        # 'Auto' = current auto-detect behavior; a fixed % is honored by the main app AND every
+        # standalone tool (read from prefs at startup). (Arthur 2026-07-13.)
+        self.ui_scale_var = tk.StringVar(value='Auto')
+        try:  # initialize from saved prefs directly (independent of load order)
+            _saved = (json.loads(self._prefs_path().read_text()).get('ui_scale', 'auto')
+                      if self._prefs_path().exists() else 'auto')
+            self.ui_scale_var.set('Auto' if str(_saved).lower() in ('auto', '', 'none')
+                                  else f"{str(_saved).rstrip('%')}%")
+        except Exception:
+            pass
+        uiscale_menu = tk.Menu(settings_menu, tearoff=0)
+        for _label in ('Auto', '100%', '125%', '150%', '175%', '200%'):
+            uiscale_menu.add_radiobutton(label=_label, value=_label,
+                                         variable=self.ui_scale_var,
+                                         command=self.on_ui_scale_change)
+        settings_menu.add_separator()
+        settings_menu.add_cascade(label="UI Scale  (fixes tiny/huge windows — restart to apply)",
+                                  menu=uiscale_menu)
+
         # View menu
         view_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="View", menu=view_menu)
@@ -5585,32 +5606,9 @@ class VideoConverterApp:
         ttk.Checkbutton(self.scale_frame, text="Convert HDR → SDR",
                         variable=self.hdr_to_sdr).pack(side='left', padx=(0, 5))
 
-        # UI Scale override (high-DPI / fractional-scaling fallback) — row 12.
-        # For displays whose scaling auto-detect can't read (e.g. GNOME/Zorin fractional
-        # launched standalone). 'Auto' = current behavior; a fixed % is honored by the main
-        # app AND every standalone tool. (Arthur 2026-07-13.)
-        row = 12
-        ttk.Label(settings_frame, text="UI Scale:").grid(
-            row=row, column=0, sticky='w', pady=(6, 0))
-        _uiscale_frame = ttk.Frame(settings_frame)
-        _uiscale_frame.grid(row=row, column=1, sticky='w', pady=(6, 0))
-        self.ui_scale_var = tk.StringVar(value='Auto')
-        try:  # initialize from saved prefs directly (independent of load order)
-            _saved = (json.loads(self._prefs_path().read_text()).get('ui_scale', 'auto')
-                      if self._prefs_path().exists() else 'auto')
-            self.ui_scale_var.set('Auto' if str(_saved).lower() in ('auto', '', 'none')
-                                  else f"{str(_saved).rstrip('%')}%")
-        except Exception:
-            pass
-        _uiscale_combo = ttk.Combobox(
-            _uiscale_frame, textvariable=self.ui_scale_var,
-            values=['Auto', '100%', '125%', '150%', '175%', '200%'],
-            width=8, state='readonly')
-        _uiscale_combo.pack(side='left')
-        _uiscale_combo.bind('<<ComboboxSelected>>', self.on_ui_scale_change)
-        ttk.Label(_uiscale_frame,
-                  text="  fixes tiny/oversized windows on scaled displays — restart to apply",
-                  foreground='gray').pack(side='left')
+        # (UI Scale moved to the Settings MENU — Settings → UI Scale — so it's always
+        # reachable even when this scrollable panel is too small, scrolled, or hidden via
+        # View → Show/Hide Settings Panel. It's the one control that fixes an unreadable UI.)
 
         # Bind mousewheel to all child widgets inside the scrollable settings
         def _bind_wheel_recursive(widget):
