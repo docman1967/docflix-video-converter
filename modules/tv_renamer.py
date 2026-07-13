@@ -1205,53 +1205,17 @@ def open_tv_renamer(app):
             except Exception:
                 return None
 
-        # ── Content-based SDH detection ──────────────────────────────────
-        # SDH (deaf/hard-of-hearing) subtitles carry non-speech cues that
-        # regular subs lack: bracketed sound descriptions ([door creaks]),
-        # music notes (♪), ALL-CAPS speaker labels (MAN:), standalone
-        # parentheticals. Regular dialogue subs sit near 0% of these.
-        _SDH_BRACKET_RE = re.compile(r'\[[^\]]{2,}\]')
-        _SDH_PAREN_RE = re.compile(r'^\s*\([^)]{2,}\)\s*$')
-        _SDH_SPEAKER_RE = re.compile(r"^\s*-?\s*[A-Z][A-Z0-9 .'\-]{1,24}:\s")
-
-        def _detect_sdh_from_content(filepath, threshold=0.06):
-            """True if a subtitle's non-speech-cue density meets `threshold`
-            (default 6%). Regular subs sit near 0%; SDH sits well above."""
-            ext = os.path.splitext(filepath)[1].lower()
-            if ext not in ('.srt', '.ass', '.ssa', '.vtt', '.sub'):
-                return False
-            text = None
-            for enc in ('utf-8', 'latin-1', 'cp1252'):
-                try:
-                    with open(filepath, 'r', encoding=enc) as f:
-                        text = f.read(200000)  # up to ~200 KB — plenty
-                    break
-                except (UnicodeDecodeError, UnicodeError):
-                    continue
-            if not text:
-                return False
-            total = sdh = 0
-            for raw in text.splitlines():
-                line = raw.strip()
-                if not line or line.isdigit():
-                    continue
-                if '-->' in line and re.match(r'\d{1,2}:\d{2}:\d{2}', line):
-                    continue
-                if line.startswith(('WEBVTT', '[Script Info]', '[V4',
-                                    'Style:', 'Format:', 'ScriptType')):
-                    continue
-                if line.startswith('Dialogue:'):
-                    line = line.split(',', 9)[-1]  # ASS: text after the fields
-                total += 1
-                probe = re.sub(r'<[^>]+>|\{[^}]+\}', '', line)
-                if (_SDH_BRACKET_RE.search(probe)
-                        or '♪' in probe or '♫' in probe
-                        or _SDH_PAREN_RE.match(probe)
-                        or _SDH_SPEAKER_RE.match(probe)):
-                    sdh += 1
-            if total < 10:
-                return False  # too little text to judge confidently
-            return (sdh / total) >= threshold
+        # Content-based SDH detection REMOVED 2026-07-13 (Arthur). It scanned a
+        # subtitle's body for non-speech cues (brackets, ♪, SPEAKER: labels) and tagged
+        # it .sdh above a 6% density. In the real world that FALSE-POSITIVED on regular
+        # English subs — an occasional [phone rings], song lyric, or speaker label clears
+        # 6% — mis-tagging them .sdh and colliding with the true SDH sub (both → the same
+        # name → "skipped (exists)"). Caught in Albert's v3.6.0 test. SDH is now known ONLY
+        # from reliable, DECLARED signals: the embedded disposition flag (internal subs)
+        # and an explicit 'sdh' token in the filename (external subs, handled below).
+        # Ambiguous subs are left for the user to tag — the same call FileBot makes, because
+        # content-guessing SDH is inherently unreliable (asymmetric cost: a false positive
+        # corrupts a good sub; a false negative is a 2-second manual fix).
 
         def _detect_sub_tags(filename):
             """Detect language, forced, and SDH tags from a subtitle filename.
@@ -1287,14 +1251,10 @@ def open_tv_renamer(app):
                 else:
                     break  # stop at first non-tag token
 
-            # Content-based SDH: if the filename didn't already declare a type
-            # (sdh/cc/forced), scan the file — a "subs.srt" full of [sound] cues,
-            # ♪ music, or SPEAKER: labels is SDH even when the name doesn't say so.
-            if not ({'sdh', 'cc', 'forced'} & set(found_tags)):
-                if _detect_sdh_from_content(filename):
-                    found_tags.append('sdh')
-                    _log(f"  SDH detected from content: "
-                         f"{os.path.basename(filename)} → .sdh")
+            # (Content-based SDH inference removed 2026-07-13 — see note above.
+            # SDH now comes only from an explicit 'sdh' token in the filename,
+            # already captured by the _TAG_WORDS scan above, or the embedded
+            # disposition flag on internal tracks.)
 
             # Normalize 2-letter filename codes to 3-letter
             if filename_lang and len(filename_lang) == 2:
@@ -3472,10 +3432,22 @@ def open_tv_renamer(app):
                         or _sub.get('matched_show')):
                     continue
                 _sub_dir = os.path.dirname(_sub['path'])
+                # A subtitle nested in a dedicated "Subs" subfolder belongs to the media
+                # in the folder ABOVE it — the common YTS/scene layout:
+                #   "Movie (2024)/Movie.mkv"  +  "Movie (2024)/Subs/English.srt".
+                # In that case look for the matched video sibling ONE LEVEL UP, so the sub
+                # is adopted and renamed from the real media folder (not "Subs"). Reuses the
+                # same _SUBS_FOLDER_RE the rename step uses to RELOCATE such subs up next to
+                # the video, so adoption and relocation always agree.
+                # (Arthur 2026-07-13 — expands the July 12 loose-sub adoption per Albert's
+                # real-world layout: subtitles live in a Subs/ folder next to the video.)
+                _media_dir = _sub_dir
+                if _SUBS_FOLDER_RE.match(os.path.basename(_sub_dir)):
+                    _media_dir = os.path.dirname(_sub_dir)
                 _sibs = [v for v in _file_items
                          if v.get('ext') in VIDEO_EXTENSIONS
                          and v.get('matched_show')
-                         and os.path.dirname(v['path']) == _sub_dir]
+                         and os.path.dirname(v['path']) == _media_dir]
                 if len(_sibs) == 1:
                     _vid = _sibs[0]
                     _sub['matched_show'] = _vid['matched_show']
