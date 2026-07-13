@@ -5168,6 +5168,35 @@ class VideoConverterApp:
         ttk.Button(toolbar, text="✖ Reset",
                    command=self.reset_output_folder).grid(row=0, column=4)
 
+    def _ui_scale_pref(self):
+        """UI-Scale override as stored in prefs: 'auto' or 'NNN' (percent, no '%').
+        Read by modules.utils._saved_ui_scale at startup on every launch path."""
+        var = getattr(self, 'ui_scale_var', None)
+        if var is None:
+            try:
+                return (json.loads(self._prefs_path().read_text()).get('ui_scale', 'auto')
+                        if self._prefs_path().exists() else 'auto')
+            except Exception:
+                return 'auto'
+        v = (var.get() or 'Auto').strip().rstrip('%')
+        return 'auto' if v.lower() in ('', 'auto', 'none') else v
+
+    def on_ui_scale_change(self, event=None):
+        """Persist the UI-Scale override. Scaling is applied at startup before any widgets
+        exist, so a live re-scale isn't reliable — a restart is the honest path (and the
+        setting is read by every standalone tool too, so it fixes 'Open with' launches)."""
+        try:
+            self.save_preferences()
+        except Exception:
+            pass
+        try:
+            messagebox.showinfo(
+                "UI Scale",
+                f"UI Scale set to {self.ui_scale_var.get()}.\n\n"
+                "Restart Docflix — and re-open any standalone tool windows — to apply.")
+        except Exception:
+            pass
+
     def setup_settings(self, parent):
         """Setup settings panel with scrollable canvas for small screens"""
         self.settings_frame = ttk.LabelFrame(parent, text="Settings", padding=(10, 5))
@@ -5555,6 +5584,33 @@ class VideoConverterApp:
 
         ttk.Checkbutton(self.scale_frame, text="Convert HDR → SDR",
                         variable=self.hdr_to_sdr).pack(side='left', padx=(0, 5))
+
+        # UI Scale override (high-DPI / fractional-scaling fallback) — row 12.
+        # For displays whose scaling auto-detect can't read (e.g. GNOME/Zorin fractional
+        # launched standalone). 'Auto' = current behavior; a fixed % is honored by the main
+        # app AND every standalone tool. (Arthur 2026-07-13.)
+        row = 12
+        ttk.Label(settings_frame, text="UI Scale:").grid(
+            row=row, column=0, sticky='w', pady=(6, 0))
+        _uiscale_frame = ttk.Frame(settings_frame)
+        _uiscale_frame.grid(row=row, column=1, sticky='w', pady=(6, 0))
+        self.ui_scale_var = tk.StringVar(value='Auto')
+        try:  # initialize from saved prefs directly (independent of load order)
+            _saved = (json.loads(self._prefs_path().read_text()).get('ui_scale', 'auto')
+                      if self._prefs_path().exists() else 'auto')
+            self.ui_scale_var.set('Auto' if str(_saved).lower() in ('auto', '', 'none')
+                                  else f"{str(_saved).rstrip('%')}%")
+        except Exception:
+            pass
+        _uiscale_combo = ttk.Combobox(
+            _uiscale_frame, textvariable=self.ui_scale_var,
+            values=['Auto', '100%', '125%', '150%', '175%', '200%'],
+            width=8, state='readonly')
+        _uiscale_combo.pack(side='left')
+        _uiscale_combo.bind('<<ComboboxSelected>>', self.on_ui_scale_change)
+        ttk.Label(_uiscale_frame,
+                  text="  fixes tiny/oversized windows on scaled displays — restart to apply",
+                  foreground='gray').pack(side='left')
 
         # Bind mousewheel to all child widgets inside the scrollable settings
         def _bind_wheel_recursive(widget):
@@ -8397,6 +8453,7 @@ class VideoConverterApp:
             'custom_movie_templates': getattr(self, '_custom_movie_templates', []),
             'wizard_geometry':        getattr(self, '_wizard_geometry', ''),
             'app_geometry':           getattr(self, '_app_geometry', ''),
+            'ui_scale':               self._ui_scale_pref(),
         }
         # Preserve sub-tool preferences that are saved independently
         for key in ('media_processor', 'video_scaler', 'whisper_transcriber',
@@ -10636,6 +10693,17 @@ def _configure_dpi_scaling(root):
                     real_dpi = fpx
             except Exception:
                 pass
+
+        # Manual UI-Scale override — shares modules.utils._saved_ui_scale so the main app and
+        # every standalone tool honor the SAME Settings value and the override can't drift.
+        # Wins over auto-detect; 100% forces no scaling. (Arthur 2026-07-13.)
+        try:
+            from modules.utils import _saved_ui_scale
+            _manual = _saved_ui_scale()
+        except Exception:
+            _manual = None
+        if _manual:
+            real_dpi = 96.0 * _manual
 
         if real_dpi and real_dpi > 96:
             # Tk scaling factor: 1.0 = 72 DPI (Tk's internal unit)
