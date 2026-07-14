@@ -3392,14 +3392,22 @@ def open_tv_renamer(app):
         tree.heading('current', text='Current Filename')
         tree.heading('type', text='Type')
         tree.heading('new_name', text='New Filename')
-        tree.column('current', width=320, minwidth=150)
-        tree.column('type', width=55, minwidth=45, anchor='center')
-        tree.column('new_name', width=380, minwidth=150)
+        # stretch=False + generous widths so long names are NOT truncated to fit the window —
+        # the horizontal scrollbar (below) lets you reach the full New Filename without wrestling
+        # the columns or resizing the whole app (Albert's "I can't slide over to see the end
+        # result"). Arthur 2026-07-14.
+        tree.column('current', width=340, minwidth=150, stretch=False)
+        tree.column('type', width=60, minwidth=45, anchor='center', stretch=False)
+        tree.column('new_name', width=620, minwidth=200, stretch=False)
 
         tree_scroll = ttk.Scrollbar(tree_f, orient='vertical', command=tree.yview)
-        tree.configure(yscrollcommand=tree_scroll.set)
-        tree.pack(side='left', fill='both', expand=True)
+        tree_hscroll = ttk.Scrollbar(tree_f, orient='horizontal', command=tree.xview)
+        tree.configure(yscrollcommand=tree_scroll.set, xscrollcommand=tree_hscroll.set)
+        # Pack order matters: the bottom hscroll claims the full-width strip first, then the
+        # right vscroll above it, then the tree fills the rest.
+        tree_hscroll.pack(side='bottom', fill='x')
         tree_scroll.pack(side='right', fill='y')
+        tree.pack(side='left', fill='both', expand=True)
 
         def _refresh_preview():
             """Update the treeview with current/new filenames."""
