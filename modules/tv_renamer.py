@@ -3539,6 +3539,28 @@ def open_tv_renamer(app):
 
             tree.tag_configure('nomatch', foreground='#999')
             tree.tag_configure('ep_missing', foreground='#cc3333')
+            # Auto-size the text columns to their LONGEST value so the horizontal
+            # scrollbar can actually reach the full New Filename. A fixed column
+            # width caps what's visible no matter how far you scroll (long
+            # "ReGenesis (2004) {tvdb-…}/Season …" names got clipped at [1080p x…);
+            # sizing the column to its content gives the hscroll somewhere to go.
+            # stretch=False (set at creation) keeps these widths from collapsing.
+            try:
+                import tkinter.font as _tkfont
+                _style = ttk.Style(tree)
+                _fnt = _style.lookup('Treeview', 'font') or 'TkDefaultFont'
+                _msr = (_tkfont.nametofont(_fnt) if isinstance(_fnt, str)
+                        else _tkfont.Font(root=tree, font=_fnt))
+                for _col, _hdr, _floor in (('current', 'Current Filename', 240),
+                                           ('new_name', 'New Filename', 320)):
+                    _w = _msr.measure(_hdr) + 28
+                    for _iid in tree.get_children():
+                        _pw = _msr.measure(tree.set(_iid, _col)) + 28
+                        if _pw > _w:
+                            _w = _pw
+                    tree.column(_col, width=min(max(_w, _floor), 4000))
+            except Exception:
+                pass
             # Update undo button state
             try:
                 undo_btn.configure(
