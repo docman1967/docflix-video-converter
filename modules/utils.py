@@ -706,6 +706,31 @@ def configure_dpi_scaling(root):
 
     # Scale ttk checkbox / radiobutton indicators to match font size
     _scale_check_radio_indicators(root)
+    # Scale ttk.Treeview rows — the ONE widget that ignores `tk scaling`, so on a scaled UI the
+    # file grid clips into unreadable cramped rows (Albert's v3.7.0 report — the real bug).
+    _scale_treeview_rows(root)
+
+
+def _scale_treeview_rows(root):
+    """Scale ttk.Treeview row height + font to the current (already-scaled) default font.
+
+    ttk.Treeview does NOT follow `tk scaling`: its rowheight is a fixed ~20px and its cell font
+    doesn't grow, so on a high-DPI / UI-Scaled display the file-list rows stay tiny and the text
+    clips into the next row — the renamer's preview becomes unreadable even at 150% (Tony's tester
+    Albert, v3.7.0: "they're all forced together… the field is so tiny"). Set rowheight from the
+    default font's actual line height (which DOES reflect tk scaling) plus padding, and pin the
+    cell + heading fonts to the scaled default. (Arthur 2026-07-14 — the widget the UI-Scale
+    override missed; the menus/buttons scaled, the grid he actually reads didn't.)"""
+    try:
+        import tkinter.font as tkfont
+        from tkinter import ttk
+        f = tkfont.nametofont('TkDefaultFont')
+        linespace = f.metrics('linespace')          # pixel height AT the current tk scaling
+        style = ttk.Style(root)
+        style.configure('Treeview', rowheight=max(20, int(linespace * 1.4)), font='TkDefaultFont')
+        style.configure('Treeview.Heading', font='TkDefaultFont')
+    except Exception:
+        pass
 
 
 def _scale_check_radio_indicators(root):

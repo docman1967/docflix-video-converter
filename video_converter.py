@@ -10735,6 +10735,12 @@ def _configure_dpi_scaling(root):
         _scale_check_radio_indicators(root)
     except Exception:
         pass
+    # Scale ttk.Treeview rows too — the one widget that ignores tk scaling (Albert's v3.7.0 grid bug)
+    try:
+        from modules.utils import _scale_treeview_rows
+        _scale_treeview_rows(root)
+    except Exception:
+        pass
 
 
 def main():
