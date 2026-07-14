@@ -81,15 +81,15 @@ _VERSION_PATTERNS = [
 
 
 def _probe_media_tags(filepath):
-    """Probe a video file for resolution, codecs, HDR, source, and version.
-    Returns a dict with keys: resolution, vcodec, acodec, hdr, source, version."""
-    tags = {'resolution': '', 'vcodec': '', 'acodec': '', 'hdr': '', 'source': '',
-            'version': ''}
+    """Probe a video file for resolution, codecs, audio channels, HDR, source, and version.
+    Returns a dict with keys: resolution, vcodec, acodec, channels, hdr, source, version."""
+    tags = {'resolution': '', 'vcodec': '', 'acodec': '', 'channels': '',
+            'hdr': '', 'source': '', 'version': ''}
     try:
         cmd = [
             'ffprobe', '-v', 'quiet', '-print_format', 'json',
             '-show_streams', '-show_entries',
-            'stream=codec_type,codec_name,width,height,color_transfer,color_primaries',
+            'stream=codec_type,codec_name,width,height,color_transfer,color_primaries,channels,profile',
             filepath,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
@@ -128,6 +128,12 @@ def _probe_media_tags(filepath):
             elif s.get('codec_type') == 'audio' and not tags['acodec']:
                 codec = s.get('codec_name', '').lower()
                 tags['acodec'] = _ACODEC_MAP.get(codec, codec.upper() if codec else '')
+                # Audio channel COUNT (Albert's ask: 2=stereo, 6=5.1, 8=7.1) — from the
+                # first audio stream, so you can see at a glance if you grabbed stereo
+                # when 5.1 was available.
+                ch = s.get('channels')
+                if ch:
+                    tags['channels'] = str(ch)
                 # Check for Atmos (TrueHD with object audio)
                 if codec == 'truehd':
                     profile = s.get('profile', '')
@@ -1392,6 +1398,7 @@ def open_tv_renamer(app):
                 'resolution': mt.get('resolution', ''),
                 'vcodec': mt.get('vcodec', ''),
                 'acodec': mt.get('acodec', ''),
+                'channels': mt.get('channels', ''),
                 'hdr': mt.get('hdr', ''),
                 'source': mt.get('source', ''),
                 'version': '',  # keep empty — inserted separately below
@@ -4925,6 +4932,7 @@ def open_tv_renamer(app):
                 "{resolution} — Auto-detected (e.g. 1080p)\n"
                 "{vcodec}     — Auto-detected (e.g. x265)\n"
                 "{acodec}     — Auto-detected (e.g. AAC)\n"
+                "{channels}   — Audio channel count (2/6/8)\n"
                 "{source}     — From filename (e.g. BluRay)\n"
                 "{hdr}        — Auto-detected (e.g. HDR10)\n"
                 "{version}    — From filename (e.g. Remastered)"
@@ -5158,6 +5166,7 @@ def open_tv_renamer(app):
             _extra_resolution = tk.BooleanVar(value=False)
             _extra_vcodec = tk.BooleanVar(value=False)
             _extra_acodec = tk.BooleanVar(value=False)
+            _extra_channels = tk.BooleanVar(value=False)
             _extra_source = tk.BooleanVar(value=False)
             _extra_hdr = tk.BooleanVar(value=False)
             _extra_version = tk.BooleanVar(value=False)
@@ -5260,6 +5269,8 @@ def open_tv_renamer(app):
                     extras.append('{vcodec}')
                 if _extra_acodec.get():
                     extras.append('{acodec}')
+                if _extra_channels.get():
+                    extras.append('{channels}')
                 if _extra_source.get():
                     extras.append('{source}')
                 if _extra_hdr.get():
@@ -5330,7 +5341,7 @@ def open_tv_renamer(app):
                         tvdb='tvdb-81189', tmdb='tmdb-1396',
                         tvdb_ep='tvdb-349232', tmdb_ep='tmdb-62085',
                         resolution='1080p', vcodec='x265', acodec='AAC',
-                        source='BluRay', hdr='HDR10', version='Remastered')
+                        channels='6', source='BluRay', hdr='HDR10', version='Remastered')
                 except (KeyError, IndexError):
                     return '(preview unavailable)'
 
@@ -5343,7 +5354,7 @@ def open_tv_renamer(app):
             for var in (_type, _style, _mv_style, _folders, _provider,
                         _prov_location, _episode_id,
                         _extra_resolution, _extra_vcodec,
-                        _extra_acodec, _extra_source, _extra_hdr,
+                        _extra_acodec, _extra_channels, _extra_source, _extra_hdr,
                         _extra_version, _extra_custom,
                         _tv_year, _tv_year_style):
                 var.trace_add('write', _update_preview)
@@ -5573,7 +5584,7 @@ def open_tv_renamer(app):
                     grid_f.pack(fill='x', padx=10)
 
                     _tag_vars = [_extra_resolution, _extra_vcodec,
-                                  _extra_acodec, _extra_source, _extra_hdr,
+                                  _extra_acodec, _extra_channels, _extra_source, _extra_hdr,
                                   _extra_version]
 
                     def _check_all_tags():
@@ -5594,6 +5605,7 @@ def open_tv_renamer(app):
                         (_extra_resolution, 'Resolution',   '{resolution}', 'e.g. 1080p, 2160p'),
                         (_extra_vcodec,     'Video codec',  '{vcodec}',     'e.g. x265, x264, AV1'),
                         (_extra_acodec,     'Audio codec',  '{acodec}',     'e.g. AAC, DTS, TrueHD'),
+                        (_extra_channels,   'Audio channels', '{channels}', 'e.g. 2 (stereo), 6 (5.1), 8 (7.1)'),
                         (_extra_source,     'Source',        '{source}',     'e.g. BluRay, WEB-DL (from filename)'),
                         (_extra_hdr,        'HDR',           '{hdr}',        'e.g. HDR10, SDR'),
                         (_extra_version,    'Version',       '{version}',    "e.g. Remastered, Director's Cut, Extended"),
@@ -5701,6 +5713,7 @@ def open_tv_renamer(app):
                 _extra_resolution.set(False)
                 _extra_vcodec.set(False)
                 _extra_acodec.set(False)
+                _extra_channels.set(False)
                 _extra_source.set(False)
                 _extra_hdr.set(False)
                 _extra_version.set(False)

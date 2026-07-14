@@ -245,6 +245,18 @@ def create_standalone_root(title, geometry="960x650", minsize=(800, 550)):
     except Exception:
         pass
 
+    # Re-apply Treeview row scaling AFTER the theme switch. theme_use('clam') resets
+    # ttk style options, wiping the rowheight configure_dpi_scaling had set — which left
+    # standalone tools (the "Open with" renamer) with scaled TEXT crammed into unscaled
+    # ~20px rows: Albert's "the text is larger but the field it's in is tiny" (v3.7.3).
+    # The main app already scales rows after its theme; this brings standalone in line.
+    # Arthur 2026-07-14.
+    try:
+        from .utils import _scale_treeview_rows
+        _scale_treeview_rows(root)
+    except Exception:
+        pass
+
     app = StandaloneContext(root)
 
     # Center on screen
