@@ -552,6 +552,34 @@ def scaled_minsize(widget, width, height):
     return (mw, mh)
 
 
+def _saved_ui_scale():
+    """Read the user's manual UI-Scale override from prefs, if any.
+
+    Returns a float scale factor (1.25 == 125%) or None for 'auto'. Read straight from the
+    prefs FILE (not an app object) so that EVERY launch path honors the same setting — the
+    main app AND every standalone tool ("Open with" a renamer, subtitle editor, etc.) — since
+    this runs at startup before any app object exists. This is the reliable fallback for
+    desktops whose scaling none of the auto-detect methods can read (e.g. GNOME/Zorin
+    fractional scaling launched standalone). Accepts either 1.5 or 150 (percent).
+    (Arthur 2026-07-13.)
+    """
+    try:
+        from .constants import PREFS_DIR, PREFS_FILENAME
+        path = os.path.join(os.path.expanduser(PREFS_DIR), PREFS_FILENAME)
+        with open(path) as f:
+            val = json.load(f).get('ui_scale', 'auto')
+        if val in (None, '', 'auto', 'Auto'):
+            return None
+        s = float(val)
+        if s > 10:                 # a percentage like 150 → 1.5
+            s = s / 100.0
+        if 0.5 <= s <= 4.0:        # sane bounds
+            return s
+    except Exception:
+        pass
+    return None
+
+
 def configure_dpi_scaling(root):
     """Configure Tk scaling for high-DPI displays.
 
@@ -640,6 +668,14 @@ def configure_dpi_scaling(root):
             except Exception:
                 pass
 
+        # Manual UI-Scale override (Settings) WINS over anything auto-detect found — the
+        # reliable path for displays the auto methods can't read. A value of 100% (1.0)
+        # explicitly forces NO scaling even if auto-detect wanted some (lets a user turn
+        # off a bad auto-guess). 'auto'/unset → leaves auto-detect's result in place.
+        _manual = _saved_ui_scale()
+        if _manual:
+            real_dpi = 96.0 * _manual
+
         if real_dpi and real_dpi > 96:
             # Tk scaling factor: 1.0 = 72 DPI (Tk's internal unit)
             # Default Tk scaling on 96 DPI display = 96/72 = 1.333...
@@ -670,6 +706,31 @@ def configure_dpi_scaling(root):
 
     # Scale ttk checkbox / radiobutton indicators to match font size
     _scale_check_radio_indicators(root)
+    # Scale ttk.Treeview rows — the ONE widget that ignores `tk scaling`, so on a scaled UI the
+    # file grid clips into unreadable cramped rows (Albert's v3.7.0 report — the real bug).
+    _scale_treeview_rows(root)
+
+
+def _scale_treeview_rows(root):
+    """Scale ttk.Treeview row height + font to the current (already-scaled) default font.
+
+    ttk.Treeview does NOT follow `tk scaling`: its rowheight is a fixed ~20px and its cell font
+    doesn't grow, so on a high-DPI / UI-Scaled display the file-list rows stay tiny and the text
+    clips into the next row — the renamer's preview becomes unreadable even at 150% (Tony's tester
+    Albert, v3.7.0: "they're all forced together… the field is so tiny"). Set rowheight from the
+    default font's actual line height (which DOES reflect tk scaling) plus padding, and pin the
+    cell + heading fonts to the scaled default. (Arthur 2026-07-14 — the widget the UI-Scale
+    override missed; the menus/buttons scaled, the grid he actually reads didn't.)"""
+    try:
+        import tkinter.font as tkfont
+        from tkinter import ttk
+        f = tkfont.nametofont('TkDefaultFont')
+        linespace = f.metrics('linespace')          # pixel height AT the current tk scaling
+        style = ttk.Style(root)
+        style.configure('Treeview', rowheight=max(20, int(linespace * 1.4)), font='TkDefaultFont')
+        style.configure('Treeview.Heading', font='TkDefaultFont')
+    except Exception:
+        pass
 
 
 def _scale_check_radio_indicators(root):

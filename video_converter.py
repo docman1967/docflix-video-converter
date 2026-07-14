@@ -49,7 +49,7 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.6.0"
+APP_VERSION = "3.7.1"
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -4946,6 +4946,27 @@ class VideoConverterApp:
         settings_menu.add_command(label="Reset to Defaults",
                                   command=self.reset_preferences)
 
+        # UI Scale submenu (high-DPI override). Lives in the MENU — always reachable even when
+        # the UI is too small/scrolled/hidden to use, since it's the control that FIXES that.
+        # 'Auto' = current auto-detect behavior; a fixed % is honored by the main app AND every
+        # standalone tool (read from prefs at startup). (Arthur 2026-07-13.)
+        self.ui_scale_var = tk.StringVar(value='Auto')
+        try:  # initialize from saved prefs directly (independent of load order)
+            _saved = (json.loads(self._prefs_path().read_text()).get('ui_scale', 'auto')
+                      if self._prefs_path().exists() else 'auto')
+            self.ui_scale_var.set('Auto' if str(_saved).lower() in ('auto', '', 'none')
+                                  else f"{str(_saved).rstrip('%')}%")
+        except Exception:
+            pass
+        uiscale_menu = tk.Menu(settings_menu, tearoff=0)
+        for _label in ('Auto', '100%', '125%', '150%', '175%', '200%'):
+            uiscale_menu.add_radiobutton(label=_label, value=_label,
+                                         variable=self.ui_scale_var,
+                                         command=self.on_ui_scale_change)
+        settings_menu.add_separator()
+        settings_menu.add_cascade(label="UI Scale  (fixes tiny/huge windows — restart to apply)",
+                                  menu=uiscale_menu)
+
         # View menu
         view_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="View", menu=view_menu)
@@ -5167,6 +5188,35 @@ class VideoConverterApp:
                    command=self.change_output_folder).grid(row=0, column=3, padx=(4, 4))
         ttk.Button(toolbar, text="✖ Reset",
                    command=self.reset_output_folder).grid(row=0, column=4)
+
+    def _ui_scale_pref(self):
+        """UI-Scale override as stored in prefs: 'auto' or 'NNN' (percent, no '%').
+        Read by modules.utils._saved_ui_scale at startup on every launch path."""
+        var = getattr(self, 'ui_scale_var', None)
+        if var is None:
+            try:
+                return (json.loads(self._prefs_path().read_text()).get('ui_scale', 'auto')
+                        if self._prefs_path().exists() else 'auto')
+            except Exception:
+                return 'auto'
+        v = (var.get() or 'Auto').strip().rstrip('%')
+        return 'auto' if v.lower() in ('', 'auto', 'none') else v
+
+    def on_ui_scale_change(self, event=None):
+        """Persist the UI-Scale override. Scaling is applied at startup before any widgets
+        exist, so a live re-scale isn't reliable — a restart is the honest path (and the
+        setting is read by every standalone tool too, so it fixes 'Open with' launches)."""
+        try:
+            self.save_preferences()
+        except Exception:
+            pass
+        try:
+            messagebox.showinfo(
+                "UI Scale",
+                f"UI Scale set to {self.ui_scale_var.get()}.\n\n"
+                "Restart Docflix — and re-open any standalone tool windows — to apply.")
+        except Exception:
+            pass
 
     def setup_settings(self, parent):
         """Setup settings panel with scrollable canvas for small screens"""
@@ -5555,6 +5605,10 @@ class VideoConverterApp:
 
         ttk.Checkbutton(self.scale_frame, text="Convert HDR → SDR",
                         variable=self.hdr_to_sdr).pack(side='left', padx=(0, 5))
+
+        # (UI Scale moved to the Settings MENU — Settings → UI Scale — so it's always
+        # reachable even when this scrollable panel is too small, scrolled, or hidden via
+        # View → Show/Hide Settings Panel. It's the one control that fixes an unreadable UI.)
 
         # Bind mousewheel to all child widgets inside the scrollable settings
         def _bind_wheel_recursive(widget):
@@ -8397,6 +8451,7 @@ class VideoConverterApp:
             'custom_movie_templates': getattr(self, '_custom_movie_templates', []),
             'wizard_geometry':        getattr(self, '_wizard_geometry', ''),
             'app_geometry':           getattr(self, '_app_geometry', ''),
+            'ui_scale':               self._ui_scale_pref(),
         }
         # Preserve sub-tool preferences that are saved independently
         for key in ('media_processor', 'video_scaler', 'whisper_transcriber',
@@ -10637,6 +10692,17 @@ def _configure_dpi_scaling(root):
             except Exception:
                 pass
 
+        # Manual UI-Scale override — shares modules.utils._saved_ui_scale so the main app and
+        # every standalone tool honor the SAME Settings value and the override can't drift.
+        # Wins over auto-detect; 100% forces no scaling. (Arthur 2026-07-13.)
+        try:
+            from modules.utils import _saved_ui_scale
+            _manual = _saved_ui_scale()
+        except Exception:
+            _manual = None
+        if _manual:
+            real_dpi = 96.0 * _manual
+
         if real_dpi and real_dpi > 96:
             # Tk scaling factor: 1.0 = 72 DPI (Tk's internal unit)
             # Default Tk scaling on 96 DPI display = 96/72 = 1.333...
@@ -10667,6 +10733,12 @@ def _configure_dpi_scaling(root):
     try:
         from modules.utils import _scale_check_radio_indicators
         _scale_check_radio_indicators(root)
+    except Exception:
+        pass
+    # Scale ttk.Treeview rows too — the one widget that ignores tk scaling (Albert's v3.7.0 grid bug)
+    try:
+        from modules.utils import _scale_treeview_rows
+        _scale_treeview_rows(root)
     except Exception:
         pass
 
