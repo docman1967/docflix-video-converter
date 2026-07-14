@@ -3417,11 +3417,14 @@ def open_tv_renamer(app):
         # measure. Arthur 2026-07-14.
         _col_fit = {'name': 320}
 
-        def _apply_fill(*_):
+        def _apply_fill(event=None):
             """Grow New Filename to fill leftover window width — never below its
             content width, so horizontal scroll stays usable for long names."""
             try:
-                viewport = tree.winfo_width()
+                # Use the <Configure> event's width: during a live resize
+                # winfo_width() lags one event behind, so filling to it left a
+                # gutter after enlarging the window. event.width is the NEW size.
+                viewport = event.width if event is not None else tree.winfo_width()
                 if viewport <= 1:
                     return   # not realized yet; the <Configure> on map re-runs this
                 cur_w = tree.column('current', 'width')
