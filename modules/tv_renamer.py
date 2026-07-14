@@ -3409,6 +3409,58 @@ def open_tv_renamer(app):
         tree_scroll.pack(side='right', fill='y')
         tree.pack(side='left', fill='both', expand=True)
 
+        # Column sizing: content-fit + fill-to-window. New Filename grows to its
+        # LONGEST value (so the hscroll can reach the end of a long name) AND
+        # stretches to fill any leftover window width (so there's no dead gutter on
+        # the right when the grid is empty / names are short). Split in two so the
+        # <Configure> resize handler only redoes the cheap fill, not the per-row
+        # measure. Arthur 2026-07-14.
+        _col_fit = {'name': 320}
+
+        def _apply_fill(*_):
+            """Grow New Filename to fill leftover window width — never below its
+            content width, so horizontal scroll stays usable for long names."""
+            try:
+                viewport = tree.winfo_width()
+                if viewport <= 1:
+                    return   # not realized yet; the <Configure> on map re-runs this
+                cur_w = tree.column('current', 'width')
+                type_w = tree.column('type', 'width')
+                name_w = _col_fit['name']
+                fill_w = viewport - cur_w - type_w - 2   # -2 avoids a 1px spurious hscroll
+                if fill_w > name_w:
+                    name_w = fill_w
+                tree.column('new_name', width=min(name_w, 4000))
+            except Exception:
+                pass
+
+        def _fit_tree_columns():
+            """Measure Current/New Filename to their content (called on populate),
+            cache New Filename's content width, then apply the window-fill."""
+            try:
+                import tkinter.font as _tkfont
+                _style = ttk.Style(tree)
+                _fnt = _style.lookup('Treeview', 'font') or 'TkDefaultFont'
+                _msr = (_tkfont.nametofont(_fnt) if isinstance(_fnt, str)
+                        else _tkfont.Font(root=tree, font=_fnt))
+
+                def _content_w(_col, _hdr, _floor):
+                    _w = _msr.measure(_hdr) + 28
+                    for _iid in tree.get_children():
+                        _pw = _msr.measure(tree.set(_iid, _col)) + 28
+                        if _pw > _w:
+                            _w = _pw
+                    return max(_w, _floor)
+
+                tree.column('current', width=_content_w('current', 'Current Filename', 240))
+                _col_fit['name'] = _content_w('new_name', 'New Filename', 320)
+            except Exception:
+                pass
+            _apply_fill()
+
+        # Re-fill on window/pane resize (and on first map, which realizes the width).
+        tree.bind('<Configure>', _apply_fill)
+
         def _refresh_preview():
             """Update the treeview with current/new filenames."""
             tree.delete(*tree.get_children())
@@ -3539,28 +3591,9 @@ def open_tv_renamer(app):
 
             tree.tag_configure('nomatch', foreground='#999')
             tree.tag_configure('ep_missing', foreground='#cc3333')
-            # Auto-size the text columns to their LONGEST value so the horizontal
-            # scrollbar can actually reach the full New Filename. A fixed column
-            # width caps what's visible no matter how far you scroll (long
-            # "ReGenesis (2004) {tvdb-…}/Season …" names got clipped at [1080p x…);
-            # sizing the column to its content gives the hscroll somewhere to go.
-            # stretch=False (set at creation) keeps these widths from collapsing.
-            try:
-                import tkinter.font as _tkfont
-                _style = ttk.Style(tree)
-                _fnt = _style.lookup('Treeview', 'font') or 'TkDefaultFont'
-                _msr = (_tkfont.nametofont(_fnt) if isinstance(_fnt, str)
-                        else _tkfont.Font(root=tree, font=_fnt))
-                for _col, _hdr, _floor in (('current', 'Current Filename', 240),
-                                           ('new_name', 'New Filename', 320)):
-                    _w = _msr.measure(_hdr) + 28
-                    for _iid in tree.get_children():
-                        _pw = _msr.measure(tree.set(_iid, _col)) + 28
-                        if _pw > _w:
-                            _w = _pw
-                    tree.column(_col, width=min(max(_w, _floor), 4000))
-            except Exception:
-                pass
+            # Size the text columns to their longest value (so the hscroll can reach
+            # the full New Filename) and fill any leftover window width.
+            _fit_tree_columns()
             # Update undo button state
             try:
                 undo_btn.configure(
