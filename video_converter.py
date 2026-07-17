@@ -3991,13 +3991,26 @@ class VideoConverter:
                         if scale_resolution != 'Original':
                             target_dims = RESOLUTION_MAP.get(scale_resolution)
                             if target_dims is not None:
-                                _, target_h = target_dims
+                                # WIDTH-LOCK (2026-07-17, Arthur): lock the target WIDTH and let the
+                                # height follow the source aspect — matches Tony's library convention
+                                # (1920 wide → 1080/816/960 tall for 16:9 / 2.35:1 / 2:1). Was: locked
+                                # height, which blew scope sources out to non-standard widths (2536×1080).
+                                target_w, _ = target_dims
+                                # Per-file custom width override (Override Settings → Target width).
+                                ovr_w = settings.get('target_width')
+                                if ovr_w:
+                                    try:
+                                        target_w = int(ovr_w)
+                                    except (ValueError, TypeError):
+                                        pass
                                 src_w, src_h, _, _, _ = _probe_video_info(input_path)
-                                if src_w and src_h and src_h > 0:
-                                    target_w = round(src_w * target_h / src_h)
+                                if src_w and src_h and src_w > 0:
                                     if target_w % 2 != 0:
                                         target_w += 1
-                                    if src_h == target_h and src_w == target_w:
+                                    target_h = round(src_h * target_w / src_w)
+                                    if target_h % 2 != 0:
+                                        target_h += 1
+                                    if src_w == target_w and src_h == target_h:
                                         self.log(f"Source already {src_w}×{src_h} — skipping scale", 'INFO')
                                     else:
                                         if hdr_to_sdr or not effective_hw:
@@ -6403,6 +6416,47 @@ class VideoConverterApp:
         ttk.Checkbutton(scale_frame, text="Convert HDR → SDR",
                         variable=v_hdr_sdr).pack(side='left', padx=(0, 4))
 
+        # ── Per-file CUSTOM WIDTH override (height auto-fills from the source aspect) ──
+        # Blank = use the Target-Resolution width above (width-locked). Type a width and
+        # the height follows the source aspect, snapped even. (2026-07-17, Arthur)
+        _cw_src_w = _cw_src_h = 0
+        try:
+            from modules.video_scaler import _probe_video_info as _cw_probe
+            _cw_pw, _cw_ph, *_cw_rest = _cw_probe(file_info['path'])
+            _cw_src_w, _cw_src_h = (_cw_pw or 0), (_cw_ph or 0)
+        except Exception:
+            pass
+        v_target_width = tk.StringVar(value=str(ov('target_width', '') or ''))
+        width_frame = ttk.Frame(f)
+        width_frame.grid(row=row, column=0, columnspan=2, sticky='w', **pad); row += 1
+        ttk.Label(width_frame, text="Custom width (px):").pack(side='left', padx=(4, 2))
+        ttk.Entry(width_frame, textvariable=v_target_width, width=8).pack(side='left', padx=(0, 6))
+        _cw_preview = ttk.Label(width_frame, text="")
+        _cw_preview.pack(side='left', padx=(0, 4))
+
+        def _update_cw_preview(*_a):
+            txt = v_target_width.get().strip()
+            if not txt:
+                _cw_preview.configure(text="→ blank = use target-resolution width")
+                return
+            try:
+                w = int(txt)
+            except ValueError:
+                _cw_preview.configure(text="→ enter a number")
+                return
+            if w % 2:
+                w += 1
+            if _cw_src_w and _cw_src_h:
+                h = round(_cw_src_h * w / _cw_src_w)
+                if h % 2:
+                    h += 1
+                _cw_preview.configure(text=f"→ {w}×{h}   (source {_cw_src_w}×{_cw_src_h})")
+            else:
+                _cw_preview.configure(text=f"→ width {w}  (source size unknown)")
+
+        v_target_width.trace_add('write', _update_cw_preview)
+        _update_cw_preview()
+
         # ── Dynamic update helpers ──
         def _update_presets():
             info = VIDEO_CODEC_MAP.get(v_video_codec.get(), VIDEO_CODEC_MAP['H.265 / HEVC'])
@@ -6481,6 +6535,7 @@ class VideoConverterApp:
                 'edition_tag':         v_edition.get(),
                 'edition_in_filename': v_edition_fn.get(),
                 'scale_resolution':    v_scale_res.get(),
+                'target_width':        (v_target_width.get().strip() or None),
                 'hdr_to_sdr':          v_hdr_sdr.get(),
             }
             file_info['overrides'] = overrides
@@ -10264,6 +10319,7 @@ class VideoConverterApp:
                 'edition_tag':         ov.get('edition_tag',         settings['edition_tag']),
                 'edition_in_filename': ov.get('edition_in_filename', settings['edition_in_filename']),
                 'scale_resolution':    ov.get('scale_resolution',    settings['scale_resolution']),
+                'target_width':        ov.get('target_width'),
                 'hdr_to_sdr':          ov.get('hdr_to_sdr',          settings['hdr_to_sdr']),
             }
 

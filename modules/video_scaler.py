@@ -942,7 +942,14 @@ def open_video_scaler(app):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _get_target(f):
-        """Get target resolution (w, h) for a file, or None for Original."""
+        """Get target (width, nominal_height) for a file, or None for Original. A per-file
+        width override (double-click) wins; the height is width-locked downstream from aspect."""
+        ovr = f.get('target_width_override')
+        if ovr:
+            try:
+                return (int(ovr), 0)          # width-lock; 0 = compute height from source aspect
+            except (ValueError, TypeError):
+                pass
         res = opt_resolution.get()
         if res == 'Original':
             return None
@@ -961,15 +968,17 @@ def open_video_scaler(app):
         target = _get_target(f)
         if target is None:
             return 'Original'
-        _, th = target
+        tw, _ = target
+        if tw % 2 != 0:
+            tw += 1
         src_w, src_h = f.get('width'), f.get('height')
-        # Calculate actual output width preserving aspect ratio
-        if src_w and src_h and src_h > 0:
-            actual_w = int(round(src_w * th / src_h))
-            if actual_w % 2 != 0:
-                actual_w += 1
-            return f"{actual_w}x{th}"
-        return f"?x{th}"
+        # WIDTH-LOCK: height follows the source aspect ratio
+        if src_w and src_h and src_w > 0:
+            actual_h = int(round(src_h * tw / src_w))
+            if actual_h % 2 != 0:
+                actual_h += 1
+            return f"{tw}x{actual_h}"
+        return f"{tw}x?"
 
     def _is_upscale(f):
         """Check if target is larger than source."""
@@ -1013,6 +1022,93 @@ def open_video_scaler(app):
     # Bind custom entry changes to update targets
     opt_custom_w.trace_add('write', lambda *a: _update_targets())
     opt_custom_h.trace_add('write', lambda *a: _update_targets())
+
+    # ── Double-click a file → per-file CUSTOM WIDTH override (height auto-fills from aspect) ──
+    def _open_width_override_dialog(f):
+        src_w, src_h = f.get('width') or 0, f.get('height') or 0
+        if not (src_w and src_h):          # not probed yet (e.g. just drag-dropped) — probe now
+            try:
+                _pw, _ph, *_r = _probe_video_info(f['path'])
+                src_w, src_h = _pw or 0, _ph or 0
+            except Exception:
+                pass
+        dlg = tk.Toplevel(win)
+        dlg.title(f"Custom Width - {f['name']}")
+        dlg.transient(win)
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill='both', expand=True)
+        ttk.Label(frm, text=f"Source: {src_w or '?'}x{src_h or '?'}   (height auto-fills from aspect)").grid(
+            row=0, column=0, columnspan=2, sticky='w', pady=(0, 10))
+        ttk.Label(frm, text="Target width (px):").grid(row=1, column=0, sticky='w')
+        # Pre-fill so the box is NEVER blank: override -> target-res width -> source -> 1920.
+        _pref = f.get('target_width_override')
+        if not _pref:
+            _t = _get_target(f)
+            _pref = (_t[0] if (_t and _t[0]) else src_w) or 1920
+        wv = tk.StringVar(value=str(_pref or ''))
+        ent = ttk.Entry(frm, textvariable=wv, width=10)
+        ent.grid(row=1, column=1, sticky='w', padx=(6, 0))
+        prev = ttk.Label(frm, text='')
+        prev.grid(row=2, column=0, columnspan=2, sticky='w', pady=(6, 0))
+
+        def _upd(*_a):
+            t = wv.get().strip()
+            if not t:
+                prev.configure(text="Blank = use the Target Resolution above")
+                return
+            try:
+                w = int(t)
+            except ValueError:
+                prev.configure(text="→ enter a number")
+                return
+            if w % 2:
+                w += 1
+            if src_w and src_h:
+                h = int(round(src_h * w / src_w))
+                if h % 2:
+                    h += 1
+                prev.configure(text=f"→ {w}×{h}")
+            else:
+                prev.configure(text=f"→ width {w}")
+        wv.trace_add('write', _upd)
+        _upd()
+
+        def _apply():
+            t = wv.get().strip()
+            if t.isdigit():
+                f['target_width_override'] = int(t)
+            else:
+                f.pop('target_width_override', None)
+            _update_targets()
+            dlg.destroy()
+
+        def _clear():
+            f.pop('target_width_override', None)
+            _update_targets()
+            dlg.destroy()
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=3, column=0, columnspan=2, sticky='e', pady=(12, 0))
+        ttk.Button(btns, text="Clear", command=_clear).pack(side='left', padx=4)
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side='left', padx=4)
+        ttk.Button(btns, text="Apply", command=_apply).pack(side='left', padx=4)
+        ent.focus()
+        ent.bind('<Return>', lambda e: _apply())
+        # Make it modal AFTER the window is mapped — grab_set on an unviewable window fails.
+        try:
+            dlg.wait_visibility()
+            dlg.grab_set()
+        except Exception:
+            pass
+
+    def _on_tree_double_click(event):
+        item = tree.identify_row(event.y)
+        if not item:
+            return
+        idx = tree.index(item)
+        if 0 <= idx < len(files):
+            _open_width_override_dialog(files[idx])
+    tree.bind('<Double-1>', _on_tree_double_click)
 
     def _clear_files():
         files.clear()
@@ -1067,7 +1163,9 @@ def open_video_scaler(app):
         if target is None:
             return None, None  # no scaling needed
 
-        _, target_h = target
+        target_w, nominal_h = target
+        if target_w % 2 != 0:
+            target_w += 1
 
         # Encoder setup
         enc_label = opt_encoder.get()
@@ -1085,7 +1183,7 @@ def open_video_scaler(app):
                 bid = 'cpu'
 
         # Output path
-        res_tag = f"{target_h}p"
+        res_tag = f"{nominal_h}p" if nominal_h else f"{target_w}w"
         if opt_output_mode.get() == 'folder' and opt_output_folder.get():
             out_dir = opt_output_folder.get()
             os.makedirs(out_dir, exist_ok=True)
@@ -1093,17 +1191,16 @@ def open_video_scaler(app):
         else:
             out_path = str(Path(input_path).parent / f"{base}-{res_tag}{ext}")
 
-        # Calculate exact target dimensions from actual content aspect ratio
-        # (probed via 1-frame decode which respects H.264 SPS crop metadata)
+        # WIDTH-LOCK: lock the width, height follows the actual content aspect ratio
+        # (probed via 1-frame decode which respects H.264 SPS crop metadata).
         src_w = f.get('width') or 1920
         src_h = f.get('height') or 1080
-        if src_h > 0:
-            target_w = int(round(src_w * target_h / src_h))
-            # Ensure even
-            if target_w % 2 != 0:
-                target_w += 1
+        if src_w > 0:
+            target_h = int(round(src_h * target_w / src_w))
+            if target_h % 2 != 0:
+                target_h += 1
         else:
-            target_w = int(round(target_h * 16 / 9))
+            target_h = nominal_h or int(round(target_w * 9 / 16))
 
         # HDR → SDR tone mapping requested and file is actually HDR?
         do_tonemap = opt_hdr_to_sdr.get() and bool(f.get('hdr'))
