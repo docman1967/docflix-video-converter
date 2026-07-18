@@ -220,9 +220,9 @@ def open_video_scaler(app):
     win = tk.Toplevel(app.root)
     win.withdraw()
     win.title("Docflix Media Rescale")
-    geom_str = scaled_geometry(win, 920, 750)
+    geom_str = scaled_geometry(win, 1260, 780)
     win.geometry(geom_str)
-    win.minsize(*scaled_minsize(win, 750, 550))
+    win.minsize(*scaled_minsize(win, 1150, 600))
     win.update_idletasks()
     try:
         import re as _re
@@ -453,8 +453,17 @@ def open_video_scaler(app):
     settings_frame = ttk.Frame(main_frame, padding=(0, 4))
     settings_frame.grid(row=2, column=0, sticky='ew', pady=(0, 4))
 
+    # Two columns: encode/output settings (left) | the Upscale group (right, with a divider).
+    # Both always visible; the divider sits where the left content ends.
+    left_col = ttk.Frame(settings_frame)
+    left_col.pack(side='left', fill='x', anchor='n')
+    sep_v = ttk.Separator(settings_frame, orient='vertical')
+    sep_v.pack(side='left', fill='y', padx=12)
+    right_col = ttk.Frame(settings_frame)
+    right_col.pack(side='left', fill='both', anchor='n')
+
     # Row 1: Resolution
-    row1 = ttk.Frame(settings_frame)
+    row1 = ttk.Frame(left_col)
     row1.pack(fill='x', pady=2)
 
     ttk.Label(row1, text="Resolution:").pack(side='left', padx=(0, 4))
@@ -529,71 +538,72 @@ def open_video_scaler(app):
                 crf_label.configure(text="CQ:")
     enc_combo.bind('<<ComboboxSelected>>', _on_encoder_change)
 
-    # Row 1b: Upscale Method (only visible when upscaling)
-    row1b = ttk.Frame(settings_frame)
-    # Initially hidden — shown/hidden by _on_method_change
-
+    # ── The Upscale group (right column): 3 compact rows, always visible. Controls
+    #    gray out when the loaded media can't upscale, or when Method isn't AI. ──
     upscale_methods = ['Standard (ffmpeg)', 'AI (Real-ESRGAN)']
-    ttk.Label(row1b, text="Upscale Method:").pack(side='left', padx=(0, 4))
-    method_combo = ttk.Combobox(row1b, textvariable=opt_upscale_method,
-                                 values=upscale_methods, width=18, state='readonly')
-    method_combo.pack(side='left', padx=(0, 8))
 
-    ttk.Separator(row1b, orient='vertical').pack(side='left', fill='y', padx=4)
+    rowA = ttk.Frame(right_col)
+    rowA.pack(fill='x', pady=1, anchor='w')
+    ttk.Label(rowA, text="Method:").pack(side='left', padx=(0, 4))
+    method_combo = ttk.Combobox(rowA, textvariable=opt_upscale_method,
+                                 values=upscale_methods, width=17, state='readonly')
+    method_combo.pack(side='left', padx=(0, 10))
+    ai_model_label = ttk.Label(rowA, text="AI Model:")
+    ai_model_label.pack(side='left', padx=(0, 4))
+    ai_model_combo = ttk.Combobox(rowA, textvariable=opt_ai_model,
+                                   values=list(ai_upscaler.MODELS.keys()),
+                                   width=18, state='readonly')
+    ai_model_combo.pack(side='left')
 
-    ai_model_label = ttk.Label(row1b, text="AI Model:")
-    ai_model_label.pack(side='left', padx=(8, 4))
-    ai_model_combo = ttk.Combobox(row1b, textvariable=opt_ai_model,
-                                    values=list(ai_upscaler.MODELS.keys()),
-                                    width=20, state='readonly')
-    ai_model_combo.pack(side='left', padx=(0, 8))
-
-    ai_gpu_label = ttk.Label(row1b, text="GPU:")
-    ai_gpu_label.pack(side='left', padx=(8, 4))
-    ai_gpu_combo = ttk.Combobox(row1b, textvariable=opt_ai_gpu,
-                                 values=list(_ai_gpu_choices.keys()),
-                                 width=16, state='readonly')
-    ai_gpu_combo.pack(side='left', padx=(0, 8))
-
-    # Quick 30s side-by-side preview (original | AI-upscaled)
-    ai_preview_frame = ttk.Frame(row1b)
-    ai_preview_frame.pack(side='left', padx=(6, 4))
-    ai_preview_btn = ttk.Button(ai_preview_frame, text="👁 Preview 30s")
-    ai_preview_btn.pack(side='left', padx=(0, 2))
-    ttk.Label(ai_preview_frame, text="@").pack(side='left')
-    ttk.Entry(ai_preview_frame, textvariable=opt_ai_preview_start,
-              width=4).pack(side='left', padx=(2, 1))
-    ttk.Label(ai_preview_frame, text="s").pack(side='left')
-
-    ai_tta_check = ttk.Checkbutton(row1b, text="Max Quality (~8× slower)",
-                                   variable=opt_ai_tta)
-    ai_tta_check.pack(side='left', padx=(6, 4))
-
-    # Strength — how much of the AI upscale to keep vs. the original's grain.
-    # Lower = more of the original film noise survives ("freshen, don't redraw").
-    ttk.Label(row1b, text="Strength:").pack(side='left', padx=(8, 2))
-    ai_strength_val = ttk.Label(row1b, text=f"{opt_ai_strength.get()}%", width=4)
+    rowB = ttk.Frame(right_col)
+    rowB.pack(fill='x', pady=1, anchor='w')
+    ai_gpu_label = ttk.Label(rowB, text="GPU:")
+    ai_gpu_label.pack(side='left', padx=(0, 4))
+    ai_gpu_combo = ttk.Combobox(rowB, textvariable=opt_ai_gpu,
+                                values=list(_ai_gpu_choices.keys()),
+                                width=15, state='readonly')
+    ai_gpu_combo.pack(side='left', padx=(0, 10))
+    ai_strength_label = ttk.Label(rowB, text="Strength:")
+    ai_strength_label.pack(side='left', padx=(0, 4))
+    ai_strength_val = ttk.Label(rowB, text=f"{opt_ai_strength.get()}%", width=4)
     def _on_strength(v):
         try:
             opt_ai_strength.set(int(round(float(v))))
             ai_strength_val.configure(text=f"{opt_ai_strength.get()}%")
         except Exception:
             pass
-    _ai_strength_scale = ttk.Scale(row1b, from_=0, to=100, orient='horizontal',
-                                   length=110, command=_on_strength)
-    _ai_strength_scale.set(opt_ai_strength.get())
-    _ai_strength_scale.pack(side='left', padx=(0, 2))
-    ai_strength_val.pack(side='left', padx=(0, 6))
+    ai_strength_scale = ttk.Scale(rowB, from_=0, to=100, orient='horizontal',
+                                  length=110, command=_on_strength)
+    ai_strength_scale.set(opt_ai_strength.get())
+    ai_strength_scale.pack(side='left', padx=(0, 4))
+    ai_strength_val.pack(side='left')
 
-    # AI status label (shows installed/not installed)
+    rowC = ttk.Frame(right_col)
+    rowC.pack(fill='x', pady=1, anchor='w')
+    ai_preview_btn = ttk.Button(rowC, text="👁 Preview 30s")
+    ai_preview_btn.pack(side='left', padx=(0, 2))
+    ttk.Label(rowC, text="@").pack(side='left')
+    ai_preview_entry = ttk.Entry(rowC, textvariable=opt_ai_preview_start, width=4)
+    ai_preview_entry.pack(side='left', padx=(2, 1))
+    ttk.Label(rowC, text="s").pack(side='left', padx=(0, 10))
+    ai_tta_check = ttk.Checkbutton(rowC, text="Max Quality", variable=opt_ai_tta)
+    ai_tta_check.pack(side='left', padx=(0, 10))
     ai_status_var = tk.StringVar(value='')
-    ai_status_label = ttk.Label(row1b, textvariable=ai_status_var,
-                                 font=('', 9))
-    ai_status_label.pack(side='left', padx=(0, 4))
+    ai_status_label = ttk.Label(rowC, textvariable=ai_status_var, font=('', 9))
+    ai_status_label.pack(side='left', padx=(0, 6))
+    ai_download_btn = ttk.Button(rowC, text="Download Real-ESRGAN")
 
-    # Download/Install button
-    ai_download_btn = ttk.Button(row1b, text="Download Real-ESRGAN")
-    ai_download_btn.pack(side='left', padx=(0, 4))
+    def _set_ai_enabled(on):
+        """Enable/gray the AI-specific controls together."""
+        for c in (ai_model_combo, ai_gpu_combo):
+            c.configure(state='readonly' if on else 'disabled')
+        for w in (ai_strength_scale, ai_preview_btn, ai_preview_entry, ai_tta_check):
+            w.configure(state='normal' if on else 'disabled')
+        for lb in (ai_model_label, ai_gpu_label, ai_strength_label, ai_status_label):
+            try:
+                lb.state(['!disabled'] if on else ['disabled'])
+            except Exception:
+                pass
 
     def _update_ai_status():
         """Update AI status label and button visibility."""
@@ -729,43 +739,28 @@ def open_video_scaler(app):
     ai_preview_btn.configure(command=_preview_selected)
 
     def _on_method_change(*args):
-        """Show/hide AI-specific controls based on upscale method."""
-        method = opt_upscale_method.get()
-        if method == 'AI (Real-ESRGAN)':
-            ai_model_label.pack(side='left', padx=(8, 4))
-            ai_model_combo.pack(side='left', padx=(0, 8))
-            ai_gpu_label.pack(side='left', padx=(8, 4))
-            ai_gpu_combo.pack(side='left', padx=(0, 8))
-            ai_preview_frame.pack(side='left', padx=(6, 4))
-            ai_tta_check.pack(side='left', padx=(6, 4))
-            ai_status_label.pack(side='left', padx=(0, 4))
+        """Gray the AI-specific controls unless Method = AI."""
+        is_ai = opt_upscale_method.get() == 'AI (Real-ESRGAN)'
+        _set_ai_enabled(is_ai)
+        if is_ai:
             _update_ai_status()
             # Use lower CRF for AI upscale (more detail to preserve)
             if opt_crf.get() in ('23', '28'):
                 opt_crf.set('18')
-        else:
-            ai_model_label.pack_forget()
-            ai_model_combo.pack_forget()
-            ai_gpu_label.pack_forget()
-            ai_gpu_combo.pack_forget()
-            ai_preview_frame.pack_forget()
-            ai_tta_check.pack_forget()
-            ai_status_label.pack_forget()
-            ai_download_btn.pack_forget()
 
     method_combo.bind('<<ComboboxSelected>>', _on_method_change)
 
     def _check_show_method_row():
-        """Show the method row when any file would be upscaled."""
+        """The Upscale column is always visible; enable it only when a file can upscale."""
         any_upscale = any(_is_upscale(f) for f in files) if files else False
+        method_combo.configure(state='readonly' if any_upscale else 'disabled')
         if any_upscale:
-            row1b.pack(fill='x', pady=2, after=row1)
             _on_method_change()
         else:
-            row1b.pack_forget()
+            _set_ai_enabled(False)
 
     # Row 2: Codec, CRF, Audio, Container, Output
-    row2 = ttk.Frame(settings_frame)
+    row2 = ttk.Frame(left_col)
     row2.pack(fill='x', pady=2)
 
     ttk.Label(row2, text="Codec:").pack(side='left', padx=(0, 2))
@@ -794,7 +789,7 @@ def open_video_scaler(app):
                     variable=opt_hdr_to_sdr).pack(side='left', padx=(0, 6))
 
     # Row 3: Output
-    row3 = ttk.Frame(settings_frame)
+    row3 = ttk.Frame(left_col)
     row3.pack(fill='x', pady=2)
 
     ttk.Label(row3, text="Output:").pack(side='left', padx=(0, 4))
@@ -811,6 +806,8 @@ def open_video_scaler(app):
 
     # Initialize presets
     _on_encoder_change()
+    # Gray the Upscale panel on open until upscale-able media is loaded
+    _check_show_method_row()
 
     # ── Progress bar + status ──
     progress_frame = ttk.Frame(main_frame)
