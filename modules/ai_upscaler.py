@@ -343,7 +343,8 @@ class AIUpscaleJob:
     def __init__(self, input_path, output_path, model_name=None,
                  target_height=None, video_encoder='libx265',
                  crf='18', preset='medium', audio_codec='copy',
-                 gpu_id=0, tta=False, log_callback=None, progress_callback=None):
+                 gpu_id=0, tta=False, strength=100,
+                 log_callback=None, progress_callback=None):
         """
         Args:
             input_path: source video file
@@ -370,6 +371,7 @@ class AIUpscaleJob:
         self.gpu_ids = normalize_gpu_ids(gpu_id)
         self.gpu_id = self.gpu_ids[0] if self.gpu_ids else -1  # primary (back-compat)
         self.tta = bool(tta)
+        self.strength = strength   # 0-100: how much AI vs. original grain to keep at reassembly
         self._log_cb = log_callback
         self._progress_cb = progress_callback
         self._cancelled = False
@@ -816,28 +818,41 @@ class AIUpscaleJob:
 
         self._log(f"Reassembling: {out_w}x{out_h} @ {fps:.2f} fps")
 
-        # Build ffmpeg reassembly command
-        cmd = [
-            'ffmpeg', '-y',
-            # Input 1: upscaled frames
-            '-framerate', str(fps),
-            '-i', os.path.join(frames_dir, f'frame_%08d.{FRAME_FORMAT}'),
-            # Input 2: original file (for audio/subs/chapters)
-            '-i', self.input_path,
-            # Map video from frames, everything else from original
-            '-map', '0:v:0',      # video from upscaled frames
-            '-map', '1:a?',       # all audio from original
-            '-map', '1:s?',       # all subtitles from original
-        ]
-
-        # Video encoder + quality settings
+        # Video encoder + pixel format (needed up-front for the filter graph)
         is_nvenc = self.video_encoder in self.NVENC_ENCODERS
         nvenc_cfg = self.NVENC_ENCODERS.get(self.video_encoder, {})
-
-        # Video filter (format conversion + optional downscale)
         pix_fmt = nvenc_cfg.get('pix_fmt', 'yuv420p') if is_nvenc else 'yuv420p'
-        vf = f'format={pix_fmt}{scale_filter}'
-        cmd.extend(['-vf', vf])
+
+        # "Strength" — blend the AI result back over a plain Lanczos upscale of the
+        # ORIGINAL frames, so cartoons keep some native grain/texture instead of being
+        # fully scrubbed ("freshen, don't redraw"). 100 = full AI (default, unchanged).
+        blend = max(0, min(100, int(getattr(self, 'strength', 100)))) / 100.0
+        use_blend = blend < 0.999
+
+        cmd = [
+            'ffmpeg', '-y',
+            # Input 0: upscaled (AI) frames
+            '-framerate', str(fps),
+            '-i', os.path.join(frames_dir, f'frame_%08d.{FRAME_FORMAT}'),
+            # Input 1: original file (for audio/subs/chapters)
+            '-i', self.input_path,
+        ]
+        if use_blend:
+            ai_w, ai_h = src_w * scale_factor, src_h * scale_factor
+            # Input 2: the original extracted frames (still on disk) — Lanczos up to AI
+            # resolution, then weighted-blend with the AI frames.
+            cmd += ['-framerate', str(fps),
+                    '-i', os.path.join(self._temp_dir, 'frames_in',
+                                       f'frame_%08d.{FRAME_FORMAT}')]
+            fc = (f"[2:v]scale={ai_w}:{ai_h}:flags=lanczos,setsar=1[orig];"
+                  f"[0:v][orig]blend=all_expr=A*{blend:.4f}+B*{1.0 - blend:.4f}[mix];"
+                  f"[mix]format={pix_fmt}{scale_filter}[vout]")
+            cmd += ['-filter_complex', fc,
+                    '-map', '[vout]', '-map', '1:a?', '-map', '1:s?']
+            self._log(f"  Strength {int(round(blend * 100))}% — blending AI over original grain")
+        else:
+            cmd += ['-map', '0:v:0', '-map', '1:a?', '-map', '1:s?',
+                    '-vf', f'format={pix_fmt}{scale_filter}']
 
         cmd.extend(['-c:v', self.video_encoder])
 

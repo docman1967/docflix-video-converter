@@ -292,6 +292,7 @@ def open_video_scaler(app):
     opt_ai_gpu       = tk.StringVar(value=_sp.get('ai_gpu', 'Auto (all GPUs)'))
     opt_ai_preview_start = tk.StringVar(value=_sp.get('ai_preview_start', '120'))
     opt_ai_tta       = tk.BooleanVar(value=_sp.get('ai_tta', False))
+    opt_ai_strength  = tk.IntVar(value=_sp.get('ai_strength', 65))
 
     # Real-ESRGAN GPU choices — label -> value accepted by ai_upscaler.normalize_gpu_ids()
     _ai_gpu_choices = {'Auto (all GPUs)': 'auto'}
@@ -568,6 +569,22 @@ def open_video_scaler(app):
                                    variable=opt_ai_tta)
     ai_tta_check.pack(side='left', padx=(6, 4))
 
+    # Strength — how much of the AI upscale to keep vs. the original's grain.
+    # Lower = more of the original film noise survives ("freshen, don't redraw").
+    ttk.Label(row1b, text="Strength:").pack(side='left', padx=(8, 2))
+    ai_strength_val = ttk.Label(row1b, text=f"{opt_ai_strength.get()}%", width=4)
+    def _on_strength(v):
+        try:
+            opt_ai_strength.set(int(round(float(v))))
+            ai_strength_val.configure(text=f"{opt_ai_strength.get()}%")
+        except Exception:
+            pass
+    _ai_strength_scale = ttk.Scale(row1b, from_=0, to=100, orient='horizontal',
+                                   length=110, command=_on_strength)
+    _ai_strength_scale.set(opt_ai_strength.get())
+    _ai_strength_scale.pack(side='left', padx=(0, 2))
+    ai_strength_val.pack(side='left', padx=(0, 6))
+
     # AI status label (shows installed/not installed)
     ai_status_var = tk.StringVar(value='')
     ai_status_label = ttk.Label(row1b, textvariable=ai_status_var,
@@ -676,6 +693,7 @@ def open_video_scaler(app):
                     preset=opt_preset.get(), audio_codec=opt_audio.get(),
                     gpu_id=_resolve_ai_gpu(),
                     tta=opt_ai_tta.get(),
+                    strength=opt_ai_strength.get(),
                     log_callback=lambda m, l: win.after(
                         0, lambda m=m, l=l: _log(f"  [preview] {m}", l)),
                     progress_callback=lambda p, s: win.after(
@@ -852,6 +870,7 @@ def open_video_scaler(app):
             'ai_gpu':        opt_ai_gpu.get(),
             'ai_preview_start': opt_ai_preview_start.get(),
             'ai_tta':        opt_ai_tta.get(),
+            'ai_strength':   opt_ai_strength.get(),
         }
         app._scaler_prefs = sp
         try:
@@ -1548,6 +1567,7 @@ def open_video_scaler(app):
             audio_codec=opt_audio.get(),
             gpu_id=(gpu if gpu is not None else _resolve_ai_gpu()),
             tta=opt_ai_tta.get(),
+            strength=opt_ai_strength.get(),
             log_callback=lambda m, l: _log(f"  {m}", l),
             progress_callback=lambda p, s: (
                 _update_progress(p, f"File {i + 1}/{len(files)}: {s}"),

@@ -4669,7 +4669,8 @@ class VideoConverter:
                 if self.is_stopped:
                     try:
                         self.current_process.kill()
-                    except OSError:
+                        self.current_process.wait(timeout=5)   # reap now — no lingering <defunct>
+                    except Exception:
                         pass
                     self.log("Conversion stopped by user", "WARNING")
                     return False
@@ -5134,14 +5135,18 @@ class VideoConverterApp:
             gpu_name = self.gpu_backends[bid]
 
             if bid == 'nvenc' and len(nvidia_gpus) > 1:
-                # Multi-GPU NVIDIA: create a separate entry per GPU
+                # Multi-GPU NVIDIA: an "All GPUs" entry (parallel encode) first, then one
+                # per card so the user can reserve a card by picking it specifically.
+                _short0 = nvidia_gpus[0]['name'].replace('NVIDIA ', '').replace('Generation ', '').strip()
+                all_lbl = f"{_short0} All GPUs ({backend['short']})"
+                self._encoder_labels[all_lbl] = bid
+                self._encoder_gpu_index[all_lbl] = -1        # -1 = use every card (parallel)
+                self._encoder_ids[bid] = all_lbl             # default nvenc → All GPUs
                 for g in nvidia_gpus:
                     short = g['name'].replace('NVIDIA ', '').replace('Generation ', '').strip()
                     lbl_text = f"{short} GPU {g['index']} ({backend['short']})"
                     self._encoder_labels[lbl_text] = bid
                     self._encoder_gpu_index[lbl_text] = g['index']
-                    if g['index'] == 0:
-                        self._encoder_ids[bid] = lbl_text  # default to GPU 0
             else:
                 # Single GPU or non-NVIDIA backend
                 if gpu_name and gpu_name is not True:
@@ -5168,7 +5173,7 @@ class VideoConverterApp:
         self.encoder_combo.bind('<<ComboboxSelected>>', lambda e: self._on_encoder_combo())
 
         # Multi-GPU support: gpu_index IntVar for settings, _encoder_gpu_index populated above
-        self.gpu_index = tk.IntVar(value=0)
+        self.gpu_index = tk.IntVar(value=self._encoder_gpu_index.get(self.encoder_combo.get(), -1))
 
         # Hardware decode checkbox
         self.hw_decode_check = tk.Checkbutton(
@@ -10277,6 +10282,7 @@ class VideoConverterApp:
             nonlocal completed, failed, skipped
             if not self.is_converting:
                 return
+            _lane_frac[id(engine)] = 0.0   # this lane's new file starts at 0% (live batch ETA)
 
             self.current_file_index = i
             input_path = file_info['path']
@@ -10424,8 +10430,8 @@ class VideoConverterApp:
             import time as _time
 
             # Convert — track timing for batch ETA
-            self._file_start_time = _time.monotonic()
-            self.current_output_path = output_path
+            _file_start = self._file_start_time = _time.monotonic()  # LOCAL copy: the other GPU lane shares self._file_start_time and would null it mid-run
+            engine.current_output = output_path
             success = engine.convert_file(input_path, output_path, file_settings)
 
             # ── GPU → CPU fallback ──
@@ -10464,15 +10470,15 @@ class VideoConverterApp:
                     output_path = str(out_dir / f"{base_name} {{edition-{edition}}}{output_ext}")
                 else:
                     output_path = str(out_dir / f"{base_name}{new_suffix}{output_ext}")
-                self.current_output_path = output_path
+                engine.current_output = output_path
                 success = engine.convert_file(input_path, output_path, cpu_settings)
                 if success:
                     self.add_log(f"CPU fallback succeeded: {os.path.basename(output_path)}",
                                  'SUCCESS')
 
-            file_wall_secs = _time.monotonic() - self._file_start_time
+            file_wall_secs = _time.monotonic() - _file_start
             self._file_start_time = None
-            self.current_output_path = None
+            engine.current_output = None
 
             # Record speed sample for batch ETA (only for successfully encoded files)
             file_dur = file_info.get('duration_secs') or 0
@@ -10561,22 +10567,55 @@ class VideoConverterApp:
         except Exception:
             gpu_list = []
         batch_is_gpu = settings.get('encoder', 'cpu') != 'cpu'
-        if batch_is_gpu and len(gpu_list) > 1:
-            lanes = gpu_list                      # one job per card
+        gi = self.gpu_index.get()   # -1 = All GPUs (parallel); >=0 = that card only
+        if batch_is_gpu and gpu_list:
+            if gi is None or gi < 0:
+                lanes = gpu_list                  # All GPUs — one job per card
+            elif gi in gpu_list:
+                lanes = [gi]                      # user reserved a specific card
+            else:
+                lanes = [gpu_list[0]]
         else:
-            lanes = [gpu_list[0] if (batch_is_gpu and gpu_list) else None]
+            lanes = [None]                        # CPU or no GPUs → single lane
         n_workers = len(lanes)
         self.add_log(f"Encoding across {n_workers} GPU{'s' if n_workers > 1 else ''}", 'INFO')
 
         # One engine per lane, each pinned to its GPU. In parallel mode each engine
         # reports its file's % to that file's own tree row; single mode keeps the rich bar.
+        # Live batch progress for parallel mode: each lane reports its file's %, and we
+        # extrapolate a whole-batch ETA from overall progress vs. elapsed (self-correcting
+        # for two lanes — progress accrues ~2x fast, so the estimate halves on its own).
+        _lane_frac = {}   # id(engine) -> current file fraction 0..1
+        _lane_fps = {}    # id(engine) -> current file fps
+
+        def _par_progress(eng, pct, fps=None):
+            self.update_file_status(getattr(eng, 'ui_index', 0), f"⏳ {int(pct)}%")
+            _lane_frac[id(eng)] = max(0.0, min(1.0, pct / 100.0))
+            if fps is not None:
+                _lane_fps[id(eng)] = fps
+            with _clk:
+                _done = completed + failed + skipped
+            _tot = len(self.files) or 1
+            frac = max(0.0, min(1.0, (_done + sum(_lane_frac.values())) / _tot))
+            cf = sum(_lane_fps.values())
+            def _ui():
+                if self.start_time is not None:
+                    el = (datetime.now() - self.start_time).total_seconds()
+                    self.time_label.configure(text=f"Elapsed: {format_time(el)}")
+                    if 0.02 < frac < 0.999:
+                        self.batch_eta_label.configure(
+                            text=f"Batch: {format_time(el * (1 - frac) / frac)} left")
+                if cf > 0:
+                    self.fps_label.configure(text=f"⚡ {cf:.1f} fps")
+            self.root.after(0, _ui)
+
         self._engines = []
         for _gi in lanes:
             if n_workers > 1:
                 _eng = VideoConverter(log_callback=self.add_log, gpu=_gi)
                 _eng.progress_callback = (
                     lambda pct, details='', fps=None, eta=None, pass_label=None, e=_eng:
-                    self.update_file_status(getattr(e, 'ui_index', 0), f"⏳ {int(pct)}%"))
+                    _par_progress(e, pct, fps))
             else:
                 _eng = VideoConverter(log_callback=self.add_log,
                                       progress_callback=self.update_progress, gpu=_gi)
@@ -10688,8 +10727,11 @@ class VideoConverterApp:
         """Stop conversion"""
         if messagebox.askyesno("Stop Conversion",
                                "Are you sure you want to stop the conversion?"):
-            # Snapshot the output path before stopping (background thread clears it)
-            partial_file = self.current_output_path
+            # Snapshot EVERY lane's in-flight output before stopping (each GPU engine
+            # tracks its own; the worker clears it as it exits)
+            partials = [getattr(e, 'current_output', None)
+                        for e in (getattr(self, '_engines', None) or [self.converter])]
+            partials = [p for p in partials if p]
             self.is_converting = False
             for _eng in (getattr(self, '_engines', None) or [self.converter]):
                 try:
@@ -10702,22 +10744,25 @@ class VideoConverterApp:
             self.fps_label.configure(text="")
             self.eta_label.configure(text="")
 
-            # Offer to delete the incomplete output file
+            # Offer to delete ALL incomplete output files (one per GPU lane)
             def check_partial():
-                if partial_file and os.path.exists(partial_file):
+                leftover = [p for p in partials if os.path.exists(p)]
+                if leftover:
+                    names = "\n".join(os.path.basename(p) for p in leftover)
                     if messagebox.askyesno(
-                        "Delete Incomplete File",
-                        f"An incomplete output file was left on disk:\n\n"
-                        f"{os.path.basename(partial_file)}\n\n"
-                        f"Delete it?"
+                        "Delete Incomplete Files",
+                        f"{len(leftover)} incomplete output file(s) were left on disk:\n\n"
+                        f"{names}\n\n"
+                        f"Delete them?"
                     ):
-                        try:
-                            os.remove(partial_file)
-                            self.add_log(f"Deleted incomplete file: {os.path.basename(partial_file)}", 'INFO')
-                        except Exception as e:
-                            self.add_log(f"Failed to delete incomplete file: {e}", 'ERROR')
+                        for p in leftover:
+                            try:
+                                os.remove(p)
+                                self.add_log(f"Deleted incomplete file: {os.path.basename(p)}", 'INFO')
+                            except Exception as e:
+                                self.add_log(f"Failed to delete incomplete file: {e}", 'ERROR')
                     else:
-                        self.add_log(f"Incomplete file kept: {os.path.basename(partial_file)}", 'WARNING')
+                        self.add_log(f"Incomplete files kept: {len(leftover)}", 'WARNING')
 
             # Delay slightly to let ffmpeg finish terminating and flush the file
             self.root.after(1500, check_partial)
