@@ -244,7 +244,29 @@ def open_video_scaler(app):
     files = []          # list of dicts: path, name, width, height, duration, codec, target, status
     processing = [False]
     stop_flag = [False]
-    current_proc = [None]  # hold reference to running ffmpeg subprocess
+    current_proc = [None]  # legacy single-proc slot (kept for safety; unused by the pool)
+    active_procs = set()   # all in-flight ffmpeg procs / AI jobs — parallel-safe
+    procs_lock = threading.Lock()
+    parallel_mode = [False]  # True while running >1 job across multiple GPUs
+
+    def _reg_proc(p):
+        with procs_lock:
+            active_procs.add(p)
+
+    def _unreg_proc(p):
+        with procs_lock:
+            active_procs.discard(p)
+
+    def _set_overall(completed, total):
+        """Drive the shared progress bar by OVERALL completion (parallel mode)."""
+        pct = (completed / total * 100.0) if total else 0.0
+        def _do():
+            try:
+                progress_var.set(min(100.0, pct))
+                progress_label.configure(text=f"{completed}/{total} files done")
+            except Exception:
+                pass
+        win.after(0, _do)
 
     # ── Load saved preferences ──
     _sp = getattr(app, '_scaler_prefs', {})
@@ -1123,6 +1145,8 @@ def open_video_scaler(app):
 
     def _update_progress(pct, eta_str=''):
         """Update progress bar and label from any thread."""
+        if parallel_mode[0]:
+            return  # in parallel mode the bar shows OVERALL progress (see _set_overall)
         def _do():
             progress_var.set(min(100.0, pct))
             progress_label.configure(text=eta_str)
@@ -1306,8 +1330,8 @@ def open_video_scaler(app):
         cmd.append(out_path)
         return cmd, out_path
 
-    def _process_one(i, f):
-        """Process a single file. Returns True on success."""
+    def _process_one(i, f, gpu=None):
+        """Process a single file. Returns True on success. gpu = CUDA device index to pin to."""
         if stop_flag[0]:
             return False
 
@@ -1326,7 +1350,7 @@ def open_video_scaler(app):
         win.after(0, lambda: _update_status(i, 'Processing...'))
 
         if use_ai:
-            return _process_one_ai(i, f, target)
+            return _process_one_ai(i, f, target, gpu)
 
         hdr_note = f" (HDR → SDR)" if opt_hdr_to_sdr.get() and f.get('hdr') else ''
         _log(f"  Scaling: {f['name']} -> {_target_str(f)}{hdr_note}", 'INFO')
@@ -1346,10 +1370,14 @@ def open_video_scaler(app):
             duration = f.get('duration') or 0
             last_update = [0.0]  # throttle UI updates
 
+            _env = None
+            if gpu is not None:
+                _dev = gpu[0] if isinstance(gpu, (list, tuple)) else gpu
+                _env = {**os.environ, 'CUDA_VISIBLE_DEVICES': str(_dev)}
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1)
-            current_proc[0] = proc
+                text=True, bufsize=1, env=_env)
+            _reg_proc(proc)
 
             # ffmpeg outputs progress with \r (carriage return), not \n
             # Read character by character and split on \r or \n
@@ -1408,7 +1436,7 @@ def open_video_scaler(app):
                     line_buf.append(ch)
 
             proc.wait()
-            current_proc[0] = None
+            _unreg_proc(proc)
             elapsed = _time.monotonic() - file_start_time
 
             # If stopped by user, clean up partial file and return
@@ -1468,8 +1496,8 @@ def open_video_scaler(app):
             _log(f"  Error: {e}", 'ERROR')
             return False
 
-    def _process_one_ai(i, f, target):
-        """Process a single file using AI upscaling. Returns True on success."""
+    def _process_one_ai(i, f, target, gpu=None):
+        """Process a single file using AI upscaling. Returns True on success. gpu = CUDA device index."""
         import time as _time
 
         if not ai_upscaler.is_installed():
@@ -1518,7 +1546,7 @@ def open_video_scaler(app):
             crf=opt_crf.get(),
             preset=opt_preset.get(),
             audio_codec=opt_audio.get(),
-            gpu_id=_resolve_ai_gpu(),
+            gpu_id=(gpu if gpu is not None else _resolve_ai_gpu()),
             tta=opt_ai_tta.get(),
             log_callback=lambda m, l: _log(f"  {m}", l),
             progress_callback=lambda p, s: (
@@ -1527,7 +1555,7 @@ def open_video_scaler(app):
                 if not stop_flag[0] else None
             ),
         )
-        current_proc[0] = job  # store for cancel
+        _reg_proc(job)  # track for stop (parallel-safe)
 
         # Check for stop
         def _check_stop():
@@ -1542,7 +1570,7 @@ def open_video_scaler(app):
                 win.after_cancel(stop_check_id)
             except Exception:
                 pass
-            current_proc[0] = None
+            _unreg_proc(job)
 
         elapsed = _time.monotonic() - file_start_time
 
@@ -1610,19 +1638,61 @@ def open_video_scaler(app):
 
         def _run():
             total = len(files)
-            done = 0
-            failed = 0
-            _log(f"Processing {total} file(s)...", 'INFO')
+            # One worker per NVIDIA GPU when a GPU encoder is selected; else a single lane.
+            try:
+                from .gpu import enumerate_nvidia_gpus
+                gpu_list = [g['index'] for g in enumerate_nvidia_gpus()]
+            except Exception:
+                gpu_list = []
+            is_gpu = encoder_ids.get(opt_encoder.get(), 'cpu') != 'cpu'
+            ai_mode = (opt_upscale_method.get() == 'AI (Real-ESRGAN)')
+            if ai_mode and len(gpu_list) > 1:
+                # AI upscale already splits ONE job across both cards (Real-ESRGAN -g 0,1),
+                # so run one job at a time using every card — no doubled CPU frame-extraction.
+                lanes = [gpu_list]                     # single lane; gpu = the full list [0, 1]
+            elif is_gpu and len(gpu_list) > 1:
+                lanes = gpu_list                       # NVENC scale: one job per card
+            else:
+                lanes = [gpu_list[0] if (is_gpu and gpu_list) else None]
+            n = len(lanes)
+            parallel_mode[0] = (n > 1)
+            if ai_mode and len(gpu_list) > 1:
+                _log(f"Processing {total} file(s) — AI upscale: 1 job across {len(gpu_list)} GPUs...", 'INFO')
+            else:
+                _log(f"Processing {total} file(s) across {n} GPU{'s' if n > 1 else ''}...", 'INFO')
+            if parallel_mode[0]:
+                _set_overall(0, total)
 
-            for i, f in enumerate(files):
-                if stop_flag[0]:
-                    _log("Stopped by user.", 'WARNING')
-                    break
-                if _process_one(i, f):
-                    done += 1
-                else:
-                    failed += 1
+            counters = {'done': 0, 'failed': 0, 'next': 0}
+            clock = threading.Lock()
 
+            def _worker(gpu):
+                while True:
+                    if stop_flag[0]:
+                        return
+                    with clock:
+                        idx = counters['next']
+                        if idx >= total:
+                            return
+                        counters['next'] += 1
+                    ok = _process_one(idx, files[idx], gpu)
+                    with clock:
+                        if ok:
+                            counters['done'] += 1
+                        else:
+                            counters['failed'] += 1
+                        completed = counters['done'] + counters['failed']
+                    if parallel_mode[0]:
+                        _set_overall(completed, total)
+
+            threads = [threading.Thread(target=_worker, args=(g,), daemon=True) for g in lanes]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            done, failed = counters['done'], counters['failed']
+            parallel_mode[0] = False
             _log(f"Complete: {done} done, {failed} failed, "
                  f"{total - done - failed} skipped", 'INFO')
             _update_progress(100.0 if done > 0 else 0.0,
@@ -1636,15 +1706,16 @@ def open_video_scaler(app):
 
     def _stop():
         stop_flag[0] = True
-        # Kill running process immediately
-        proc = current_proc[0]
-        if proc:
+        # Kill ALL in-flight jobs immediately (one per GPU in parallel mode)
+        with procs_lock:
+            procs = list(active_procs)
+        for proc in procs:
             try:
                 if isinstance(proc, ai_upscaler.AIUpscaleJob):
                     proc.cancel()
                 else:
                     proc.kill()
-            except OSError:
+            except Exception:
                 pass
 
     # ── Drag and drop ──

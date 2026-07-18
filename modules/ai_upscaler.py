@@ -650,8 +650,14 @@ class AIUpscaleJob:
 
     def _extract_frames(self, out_dir, fps, total_frames):
         """Extract all frames from the video as PNG images."""
-        cmd = [
-            'ffmpeg', '-y', '-i', self.input_path,
+        cmd = ['ffmpeg', '-y']
+        # GPU-accelerated decode (NVDEC) when a CUDA GPU is selected — offloads the heavy
+        # HEVC/H.264 decode off the CPU. PNG writing still happens on the CPU.
+        _dec_ids = [i for i in (self.gpu_ids or []) if i is not None and int(i) >= 0]
+        if _dec_ids:
+            cmd += ['-hwaccel', 'cuda', '-hwaccel_device', str(_dec_ids[0])]
+        cmd += [
+            '-i', self.input_path,
             '-vsync', '0',
             '-frame_pts', '1',
             '-compression_level', '1',  # fast PNG: ~half the CPU vs default, still lossless

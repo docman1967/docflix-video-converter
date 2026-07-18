@@ -3718,9 +3718,10 @@ def _short_gpu_name(raw_name, backend_id):
 class VideoConverter:
     """Handles video conversion using ffmpeg"""
     
-    def __init__(self, log_callback=None, progress_callback=None):
+    def __init__(self, log_callback=None, progress_callback=None, gpu=None):
         self.log_callback = log_callback
         self.progress_callback = progress_callback
+        self.gpu = gpu            # CUDA device index to pin this engine's ffmpeg to (None = default)
         self.current_process = None
         self.is_paused = False
         self.is_stopped = False
@@ -4619,12 +4620,16 @@ class VideoConverter:
         """Run an ffmpeg subprocess, parse progress, handle pause/stop. Returns True on success."""
         import time
         try:
+            _env = None
+            if self.gpu is not None:
+                _env = {**os.environ, 'CUDA_VISIBLE_DEVICES': str(self.gpu)}
             self.current_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                bufsize=1
+                bufsize=1,
+                env=_env
             )
 
             duration = get_video_duration(input_path)
@@ -10232,6 +10237,7 @@ class VideoConverterApp:
         completed = 0
         failed = 0
         skipped = 0
+        _clk = threading.Lock()   # guards the shared counters across the GPU workers
         
         settings = {
             'transcode_mode': self.transcode_mode.get(),
@@ -10267,9 +10273,10 @@ class VideoConverterApp:
 
         renamed_candidates = []  # (output_path, original_input_path) for files whose originals were deleted
 
-        for i, file_info in enumerate(self.files):
+        def _do_file(i, file_info, engine):
+            nonlocal completed, failed, skipped
             if not self.is_converting:
-                break
+                return
 
             self.current_file_index = i
             input_path = file_info['path']
@@ -10403,9 +10410,10 @@ class VideoConverterApp:
             # Check if output exists
             if skip_existing and os.path.exists(output_path):
                 self.add_log(f"Skipping (exists): {file_info['name']}", 'WARNING')
-                skipped += 1
+                with _clk:
+                    skipped += 1
                 self.update_file_status(i, "⏭️ Skipped")
-                continue
+                return
 
             # Update UI
             self.update_file_status(i, "⏳ Converting")
@@ -10418,11 +10426,11 @@ class VideoConverterApp:
             # Convert — track timing for batch ETA
             self._file_start_time = _time.monotonic()
             self.current_output_path = output_path
-            success = self.converter.convert_file(input_path, output_path, file_settings)
+            success = engine.convert_file(input_path, output_path, file_settings)
 
             # ── GPU → CPU fallback ──
             # If GPU encoding failed (but NOT stopped by user), retry with CPU
-            if (not success and not self.converter.is_stopped
+            if (not success and not engine.is_stopped
                     and file_settings.get('encoder', 'cpu') != 'cpu'):
                 gpu_encoder = file_settings['encoder']
                 gpu_label = GPU_BACKENDS.get(gpu_encoder, {}).get('label', gpu_encoder)
@@ -10457,7 +10465,7 @@ class VideoConverterApp:
                 else:
                     output_path = str(out_dir / f"{base_name}{new_suffix}{output_ext}")
                 self.current_output_path = output_path
-                success = self.converter.convert_file(input_path, output_path, cpu_settings)
+                success = engine.convert_file(input_path, output_path, cpu_settings)
                 if success:
                     self.add_log(f"CPU fallback succeeded: {os.path.basename(output_path)}",
                                  'SUCCESS')
@@ -10485,9 +10493,10 @@ class VideoConverterApp:
                         self.add_log(f"Verification FAILED: {os.path.basename(output_path)}", 'ERROR')
                         for issue in issues:
                             self.add_log(f"  • {issue}", 'ERROR')
-                        failed += 1
+                        with _clk:
+                            failed += 1
                         self.update_file_status(i, '⚠️ Verify Failed')
-                        continue
+                        return
 
                 # Strip MKV Tag elements (Global tags + per-track Tags
                 # containing BPS, DURATION, NUMBER_OF_FRAMES, ENCODER, etc.)
@@ -10509,7 +10518,8 @@ class VideoConverterApp:
                     except Exception as _e:
                         self.add_log(f"  mkvpropedit error: {_e}", 'WARNING')
 
-                completed += 1
+                with _clk:
+                    completed += 1
                 # Store output path on file_info for "Play Output File"
                 file_info['output_path'] = output_path
                 # Show actual output file size
@@ -10527,21 +10537,69 @@ class VideoConverterApp:
                     except Exception as e:
                         self.add_log(f"Failed to delete original: {e}", 'ERROR')
             else:
-                if self.converter.is_stopped:
+                if engine.is_stopped:
                     self.update_file_status(i, '⏹️ Stopped')
                 else:
-                    failed += 1
+                    with _clk:
+                        failed += 1
                     self.update_file_status(i, '❌ Failed')
 
             # Update overall progress
             total = len(self.files)
-            processed = completed + failed + skipped
+            with _clk:
+                processed = completed + failed + skipped
             percent = (processed / total) * 100 if total > 0 else 0
             self.root.after(0, lambda p=processed, t=total, pc=percent: (
                 self.progress_var.set(pc),
                 self.progress_label.configure(text=f"{p} / {t} files ({pc:.0f}%)")
             ))
         
+        # ── Dispatch across GPUs: one worker (engine) per card ──
+        try:
+            from modules.gpu import enumerate_nvidia_gpus
+            gpu_list = [g['index'] for g in enumerate_nvidia_gpus()]
+        except Exception:
+            gpu_list = []
+        batch_is_gpu = settings.get('encoder', 'cpu') != 'cpu'
+        if batch_is_gpu and len(gpu_list) > 1:
+            lanes = gpu_list                      # one job per card
+        else:
+            lanes = [gpu_list[0] if (batch_is_gpu and gpu_list) else None]
+        n_workers = len(lanes)
+        self.add_log(f"Encoding across {n_workers} GPU{'s' if n_workers > 1 else ''}", 'INFO')
+
+        # One engine per lane, each pinned to its GPU. In parallel mode each engine
+        # reports its file's % to that file's own tree row; single mode keeps the rich bar.
+        self._engines = []
+        for _gi in lanes:
+            if n_workers > 1:
+                _eng = VideoConverter(log_callback=self.add_log, gpu=_gi)
+                _eng.progress_callback = (
+                    lambda pct, details='', fps=None, eta=None, pass_label=None, e=_eng:
+                    self.update_file_status(getattr(e, 'ui_index', 0), f"⏳ {int(pct)}%"))
+            else:
+                _eng = VideoConverter(log_callback=self.add_log,
+                                      progress_callback=self.update_progress, gpu=_gi)
+            self._engines.append(_eng)
+
+        _next = {'i': 0}
+        def _worker(engine):
+            while self.is_converting:
+                with _clk:
+                    if _next['i'] >= len(self.files):
+                        return
+                    idx = _next['i']
+                    _next['i'] += 1
+                engine.ui_index = idx
+                _do_file(idx, self.files[idx], engine)
+
+        _threads = [threading.Thread(target=_worker, args=(e,), daemon=True)
+                    for e in self._engines]
+        for _t in _threads:
+            _t.start()
+        for _t in _threads:
+            _t.join()
+
         # Conversion complete
         elapsed = datetime.now() - self.start_time
         self.is_converting = False
@@ -10633,7 +10691,11 @@ class VideoConverterApp:
             # Snapshot the output path before stopping (background thread clears it)
             partial_file = self.current_output_path
             self.is_converting = False
-            self.converter.stop()
+            for _eng in (getattr(self, '_engines', None) or [self.converter]):
+                try:
+                    _eng.stop()
+                except Exception:
+                    pass
             self.pause_btn.configure(state='disabled')
             self.stop_btn.configure(state='disabled')
             self.status_label.configure(text="Stopped by user")
