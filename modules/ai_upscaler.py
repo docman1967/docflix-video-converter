@@ -47,26 +47,28 @@ RELEASE_URLS = {
     ),
 }
 
-# Available upscaling models (bundled with the release)
+# Available upscaling models. Labels are written to GUIDE the choice: the compact
+# video model is first and default because it's the right pick for cartoon/anime
+# VIDEO (fast + temporally trained); the heavy 6B model is clearly marked slow.
 MODELS = {
-    'General (x4)': {
+    'Cartoon/Anime Video (fast)': {
+        'id': 'realesr-animevideov3',
+        'scale': 4,
+        'description': 'Compact video-trained model — best for cartoons/anime video; fastest',
+    },
+    'Photo / Live-action': {
         'id': 'realesrgan-x4plus',
         'scale': 4,
         'description': 'Best for live-action video and photos',
     },
-    'General (x4) Fast': {
-        'id': 'realesr-animevideov3',
-        'scale': 4,
-        'description': 'Faster, good for most content (video-optimized)',
-    },
-    'Anime (x4)': {
+    'Anime Stills (slow, best)': {
         'id': 'realesrgan-x4plus-anime',
         'scale': 4,
-        'description': 'Optimized for anime and animation',
+        'description': 'Heavy model tuned for anime artwork/stills — max detail, ~4x slower',
     },
 }
 
-DEFAULT_MODEL = 'General (x4) Fast'
+DEFAULT_MODEL = 'Cartoon/Anime Video (fast)'
 
 # Supported image formats for frame extraction
 FRAME_FORMAT = 'png'  # lossless intermediate frames
@@ -349,7 +351,7 @@ class AIUpscaleJob:
         Args:
             input_path: source video file
             output_path: output video file
-            model_name: key from MODELS dict (default: 'General (x4) Fast')
+            model_name: key from MODELS dict (default: 'Cartoon/Anime Video (fast)')
             target_height: if set, scale DOWN after upscale (e.g., 480p→4x→1920p→1080p)
             video_encoder: ffmpeg encoder name (libx265, libx264, etc.)
             crf: quality setting
@@ -948,7 +950,7 @@ def detect_best_encoder():
     return ('libx265', 'medium', 'CPU x265')
 
 
-def upscale_video(input_path, output_path, model='General (x4) Fast',
+def upscale_video(input_path, output_path, model='Cartoon/Anime Video (fast)',
                   target_height=None, encoder=None, crf='18',
                   preset=None, gpu_id=0):
     """Upscale a video file using AI. Simple wrapper for scripts/CLI.

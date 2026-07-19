@@ -271,8 +271,9 @@ def open_video_scaler(app):
     # ── Load saved preferences ──
     _sp = getattr(app, '_scaler_prefs', {})
 
-    # ── AI upscaler import ──
+    # ── AI upscaler imports (ncnn-vulkan = universal default; torch = NVIDIA fast) ──
     from . import ai_upscaler
+    from . import torch_upscaler
 
     # ── Options ──
     opt_resolution   = tk.StringVar(value=_sp.get('resolution', '1080p'))
@@ -289,10 +290,47 @@ def open_video_scaler(app):
     opt_hdr_to_sdr   = tk.BooleanVar(value=_sp.get('hdr_to_sdr', False))
     opt_upscale_method = tk.StringVar(value=_sp.get('upscale_method', 'Standard (ffmpeg)'))
     opt_ai_model     = tk.StringVar(value=_sp.get('ai_model', ai_upscaler.DEFAULT_MODEL))
+    # Migrate an old/renamed saved model key to the current default so it stays valid.
+    if opt_ai_model.get() not in ai_upscaler.MODELS:
+        opt_ai_model.set(ai_upscaler.DEFAULT_MODEL)
     opt_ai_gpu       = tk.StringVar(value=_sp.get('ai_gpu', 'Auto (all GPUs)'))
     opt_ai_preview_start = tk.StringVar(value=_sp.get('ai_preview_start', '120'))
     opt_ai_tta       = tk.BooleanVar(value=_sp.get('ai_tta', False))
     opt_ai_strength  = tk.IntVar(value=_sp.get('ai_strength', 65))
+    opt_ai_engine    = tk.StringVar(value=_sp.get('ai_engine', 'ncnn-vulkan'))
+
+    # Upscale engines. ncnn-vulkan is the universal default (any Vulkan GPU, zero deps).
+    # The PyTorch/CUDA "fast" engine is offered ONLY when an NVIDIA GPU is present — on
+    # any other host the selector never appears and the panel looks exactly as before.
+    _ai_engines = ['ncnn-vulkan']
+    if torch_upscaler.detect_gpus():
+        _ai_engines.append('PyTorch (fast)')
+    if opt_ai_engine.get() not in _ai_engines:
+        opt_ai_engine.set('ncnn-vulkan')
+
+    def _ai_is_torch():
+        return opt_ai_engine.get().startswith('PyTorch')
+
+    def _ai_installed():
+        """Is the ACTIVE engine ready to run (for the selected model)?"""
+        if _ai_is_torch():
+            return torch_upscaler.is_available(opt_ai_model.get())
+        return ai_upscaler.is_installed()
+
+    def _ai_encoder_for(codec_name, cpu_gpu_encoder):
+        """The video encoder to hand the active engine. The torch engine streams raw
+        frames into NVENC, so it always needs an nvenc encoder for the chosen codec —
+        regardless of whether the user's encoder pick was CPU or GPU."""
+        if _ai_is_torch():
+            return {'H.265 / HEVC': 'hevc_nvenc', 'H.264 / AVC': 'h264_nvenc',
+                    'AV1': 'av1_nvenc'}.get(codec_name, 'hevc_nvenc')
+        return cpu_gpu_encoder
+
+    def _make_ai_job(**kw):
+        """Construct an upscale job on the active engine (identical call surface)."""
+        if _ai_is_torch():
+            return torch_upscaler.TorchUpscaleJob(**kw)
+        return ai_upscaler.AIUpscaleJob(**kw)
 
     # Real-ESRGAN GPU choices — label -> value accepted by ai_upscaler.normalize_gpu_ids()
     _ai_gpu_choices = {'Auto (all GPUs)': 'auto'}
@@ -539,29 +577,42 @@ def open_video_scaler(app):
     enc_combo.bind('<<ComboboxSelected>>', _on_encoder_change)
 
     # ── The Upscale group (right column): 3 compact rows, always visible. Controls
-    #    gray out when the loaded media can't upscale, or when Method isn't AI. ──
-    upscale_methods = ['Standard (ffmpeg)', 'AI (Real-ESRGAN)']
+    #    gray out when the loaded media can't upscale, or when AI is switched off. ──
+    # "Use AI upscaling" is the on/off master: unchecked = a plain ffmpeg rescale
+    # (all AI controls grayed); checked = AI upscale. It drives opt_upscale_method,
+    # which the rest of the code still reads ('Standard (ffmpeg)' / 'AI (Real-ESRGAN)').
+    opt_ai_enabled = tk.BooleanVar(
+        value=(opt_upscale_method.get() == 'AI (Real-ESRGAN)'))
 
     rowA = ttk.Frame(right_col)
     rowA.pack(fill='x', pady=1, anchor='w')
-    ttk.Label(rowA, text="Method:").pack(side='left', padx=(0, 4))
-    method_combo = ttk.Combobox(rowA, textvariable=opt_upscale_method,
-                                 values=upscale_methods, width=17, state='readonly')
-    method_combo.pack(side='left', padx=(0, 10))
+    ai_enable_check = ttk.Checkbutton(
+        rowA, text="Use AI upscaling", variable=opt_ai_enabled,
+        command=lambda: _on_ai_toggle())
+    ai_enable_check.pack(side='left', padx=(0, 12))
     ai_model_label = ttk.Label(rowA, text="AI Model:")
     ai_model_label.pack(side='left', padx=(0, 4))
     ai_model_combo = ttk.Combobox(rowA, textvariable=opt_ai_model,
                                    values=list(ai_upscaler.MODELS.keys()),
-                                   width=18, state='readonly')
+                                   width=24, state='readonly')
     ai_model_combo.pack(side='left')
 
     rowB = ttk.Frame(right_col)
     rowB.pack(fill='x', pady=1, anchor='w')
+    # Engine selector — shown only when the fast (NVIDIA) engine is also available.
+    ai_engine_label = None
+    ai_engine_combo = None
+    if len(_ai_engines) > 1:
+        ai_engine_label = ttk.Label(rowB, text="Engine:")
+        ai_engine_label.pack(side='left', padx=(0, 4))
+        ai_engine_combo = ttk.Combobox(rowB, textvariable=opt_ai_engine,
+                                        values=_ai_engines, width=13, state='readonly')
+        ai_engine_combo.pack(side='left', padx=(0, 10))
     ai_gpu_label = ttk.Label(rowB, text="GPU:")
     ai_gpu_label.pack(side='left', padx=(0, 4))
     ai_gpu_combo = ttk.Combobox(rowB, textvariable=opt_ai_gpu,
                                 values=list(_ai_gpu_choices.keys()),
-                                width=15, state='readonly')
+                                width=13, state='readonly')
     ai_gpu_combo.pack(side='left', padx=(0, 10))
     ai_strength_label = ttk.Label(rowB, text="Strength:")
     ai_strength_label.pack(side='left', padx=(0, 4))
@@ -595,55 +646,94 @@ def open_video_scaler(app):
 
     def _set_ai_enabled(on):
         """Enable/gray the AI-specific controls together."""
-        for c in (ai_model_combo, ai_gpu_combo):
+        combos = [ai_model_combo, ai_gpu_combo]
+        if ai_engine_combo is not None:
+            combos.append(ai_engine_combo)
+        for c in combos:
             c.configure(state='readonly' if on else 'disabled')
         for w in (ai_strength_scale, ai_preview_btn, ai_preview_entry, ai_tta_check):
             w.configure(state='normal' if on else 'disabled')
-        for lb in (ai_model_label, ai_gpu_label, ai_strength_label, ai_status_label):
+        # "Max Quality" (TTA) is a ncnn-only feature — grayed on the torch engine.
+        if on and _ai_is_torch():
+            ai_tta_check.configure(state='disabled')
+        labels = [ai_model_label, ai_gpu_label, ai_strength_label, ai_status_label]
+        if ai_engine_label is not None:
+            labels.append(ai_engine_label)
+        for lb in labels:
             try:
                 lb.state(['!disabled'] if on else ['disabled'])
             except Exception:
                 pass
 
     def _update_ai_status():
-        """Update AI status label and button visibility."""
-        if ai_upscaler.is_installed():
-            ver = ai_upscaler.get_version() or ''
-            ai_status_var.set(f"✓ Installed ({ver})" if ver else "✓ Installed")
-            ai_status_label.configure(foreground='green')
-            ai_download_btn.pack_forget()
+        """Update AI status label + install-button text/visibility for the active engine."""
+        if _ai_is_torch():
+            st = torch_upscaler.engine_status()
+            have_model = torch_upscaler.models_present(opt_ai_model.get())
+            ai_download_btn.configure(text="Install Fast Engine")
+            if st['ready'] and have_model:
+                ai_status_var.set("✓ Fast engine ready")
+                ai_status_label.configure(foreground='green')
+                ai_download_btn.pack_forget()
+            else:
+                missing = list(st['missing'])
+                if not have_model and 'model weights' not in missing:
+                    missing.append('model weights')
+                # No NVIDIA runtime at all = red (install can't fix a missing GPU);
+                # just weights/venv = orange (one click fixes it).
+                blocked = (not st['python']) or (not st['gpus'])
+                ai_status_var.set("Fast engine — needs: " + (', '.join(missing) or 'setup'))
+                ai_status_label.configure(foreground='red' if blocked else 'orange')
+                ai_download_btn.pack(side='left', padx=(0, 4))
         else:
-            ai_status_var.set("Not installed")
-            ai_status_label.configure(foreground='red')
-            ai_download_btn.pack(side='left', padx=(0, 4))
+            ai_download_btn.configure(text="Download Real-ESRGAN")
+            if ai_upscaler.is_installed():
+                ver = ai_upscaler.get_version() or ''
+                ai_status_var.set(f"✓ Installed ({ver})" if ver else "✓ Installed")
+                ai_status_label.configure(foreground='green')
+                ai_download_btn.pack_forget()
+            else:
+                ai_status_var.set("Not installed")
+                ai_status_label.configure(foreground='red')
+                ai_download_btn.pack(side='left', padx=(0, 4))
 
-    def _download_realesrgan():
-        """Download Real-ESRGAN in a background thread."""
-        ai_download_btn.configure(state='disabled', text="Downloading...")
+    def _install_engine():
+        """Install the ACTIVE engine (ncnn download, or the torch venv+weights) in a
+        background thread. Both stream progress to the bar and messages to the log."""
+        is_torch = _ai_is_torch()
+        ai_download_btn.configure(state='disabled',
+                                  text="Installing…" if is_torch else "Downloading...")
+        prog = lambda p, s: win.after(0, lambda p=p, s=s: _update_progress(p, s))
+        log = lambda m, l='INFO': win.after(0, lambda m=m, l=l: _log(f"  [AI] {m}", l))
 
         def _worker():
             try:
-                ai_upscaler.download_and_install(
-                    progress_callback=lambda p, s: win.after(0, lambda: (
-                        _update_progress(p, s)
-                    )),
-                    log_callback=lambda m, l: _log(f"  [AI] {m}", l),
-                )
+                if is_torch:
+                    torch_upscaler.install(model_names=[opt_ai_model.get()],
+                                           progress_callback=prog, log_callback=log)
+                    torch_upscaler.find_torch_python(force=True)   # re-probe after install
+                    done_msg = "Fast engine ready!"
+                else:
+                    ai_upscaler.download_and_install(progress_callback=prog,
+                                                     log_callback=log)
+                    done_msg = "Real-ESRGAN installed successfully!"
                 win.after(0, lambda: (
+                    ai_download_btn.configure(state='normal'),
                     _update_ai_status(),
                     _reset_progress(),
-                    _log("Real-ESRGAN installed successfully!", 'SUCCESS'),
+                    _log(done_msg, 'SUCCESS'),
                 ))
             except Exception as e:
-                win.after(0, lambda: (
-                    _log(f"Download failed: {e}", 'ERROR'),
-                    ai_download_btn.configure(state='normal', text="Download Real-ESRGAN"),
+                win.after(0, lambda e=e: (
+                    _log(f"Install failed: {e}", 'ERROR'),
+                    ai_download_btn.configure(state='normal'),
+                    _update_ai_status(),
                     _reset_progress(),
                 ))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    ai_download_btn.configure(command=_download_realesrgan)
+    ai_download_btn.configure(command=_install_engine)
 
     _preview_job = [None]  # holds the running preview AIUpscaleJob (or None)
 
@@ -656,8 +746,8 @@ def open_video_scaler(app):
     def _preview_selected():
         """Generate a quick 30s side-by-side (original | AI-upscaled) preview of
         the selected file using the CURRENT AI settings, then open it."""
-        if not ai_upscaler.is_installed():
-            _log("Real-ESRGAN not installed — use the Download button first.", 'ERROR')
+        if not _ai_installed():
+            _log("Selected engine isn't ready — use the Install button first.", 'ERROR')
             return
         if not files:
             _log("Add a file first, then Preview.", 'ERROR')
@@ -679,6 +769,7 @@ def open_video_scaler(app):
         else:
             video_enc = (GPU_BACKENDS.get(bid, {}).get('encoders', {}).get(codec_name)
                          or codec_info['cpu_encoder'])
+        video_enc = _ai_encoder_for(codec_name, video_enc)  # torch → nvenc for this codec
 
         try:
             start = float(opt_ai_preview_start.get())
@@ -696,7 +787,7 @@ def open_video_scaler(app):
             ok = False
             was_cancelled = False
             try:
-                job = ai_upscaler.AIUpscaleJob(
+                job = _make_ai_job(
                     input_path=f['path'], output_path=out_path,
                     model_name=opt_ai_model.get(), target_height=target_h,
                     video_encoder=video_enc, crf=opt_crf.get(),
@@ -739,7 +830,7 @@ def open_video_scaler(app):
     ai_preview_btn.configure(command=_preview_selected)
 
     def _on_method_change(*args):
-        """Gray the AI-specific controls unless Method = AI."""
+        """Gray the AI-specific controls unless AI upscaling is switched on."""
         is_ai = opt_upscale_method.get() == 'AI (Real-ESRGAN)'
         _set_ai_enabled(is_ai)
         if is_ai:
@@ -748,12 +839,27 @@ def open_video_scaler(app):
             if opt_crf.get() in ('23', '28'):
                 opt_crf.set('18')
 
-    method_combo.bind('<<ComboboxSelected>>', _on_method_change)
+    def _on_ai_toggle():
+        """The 'Use AI upscaling' checkbox — the master AI on/off switch."""
+        opt_upscale_method.set('AI (Real-ESRGAN)' if opt_ai_enabled.get()
+                               else 'Standard (ffmpeg)')
+        _on_method_change()
+
+    def _on_engine_change(*_a):
+        """Re-gray controls (TTA is ncnn-only) and refresh the install/status line."""
+        is_ai = opt_upscale_method.get() == 'AI (Real-ESRGAN)'
+        _set_ai_enabled(is_ai)
+        _update_ai_status()
+
+    if ai_engine_combo is not None:
+        ai_engine_combo.bind('<<ComboboxSelected>>', _on_engine_change)
+    # Torch readiness is per-model (weights downloaded or not) — refresh on model change.
+    ai_model_combo.bind('<<ComboboxSelected>>', lambda _e: _update_ai_status())
 
     def _check_show_method_row():
         """The Upscale column is always visible; enable it only when a file can upscale."""
         any_upscale = any(_is_upscale(f) for f in files) if files else False
-        method_combo.configure(state='readonly' if any_upscale else 'disabled')
+        ai_enable_check.configure(state='normal' if any_upscale else 'disabled')
         if any_upscale:
             _on_method_change()
         else:
@@ -868,6 +974,7 @@ def open_video_scaler(app):
             'ai_preview_start': opt_ai_preview_start.get(),
             'ai_tta':        opt_ai_tta.get(),
             'ai_strength':   opt_ai_strength.get(),
+            'ai_engine':     opt_ai_engine.get(),
         }
         app._scaler_prefs = sp
         try:
@@ -1516,14 +1623,15 @@ def open_video_scaler(app):
         """Process a single file using AI upscaling. Returns True on success. gpu = CUDA device index."""
         import time as _time
 
-        if not ai_upscaler.is_installed():
-            _log("  Real-ESRGAN not installed — use the Download button", 'ERROR')
+        if not _ai_installed():
+            _log("  Selected upscale engine isn't ready — use the Install button", 'ERROR')
             win.after(0, lambda: _update_status(i, 'Error'))
             return False
 
         _, target_h = target
         model_name = opt_ai_model.get()
-        _log(f"  AI upscaling: {f['name']} -> {_target_str(f)} ({model_name})", 'INFO')
+        eng = 'PyTorch/CUDA' if _ai_is_torch() else 'ncnn-vulkan'
+        _log(f"  AI upscaling ({eng}): {f['name']} -> {_target_str(f)} ({model_name})", 'INFO')
         _update_progress(0.0, f"File {i + 1}/{len(files)}: AI upscale — {f['name']}")
 
         # Build output path
@@ -1550,10 +1658,11 @@ def open_video_scaler(app):
             video_enc = backend.get('encoders', {}).get(codec_name)
             if not video_enc:
                 video_enc = codec_info['cpu_encoder']
+        video_enc = _ai_encoder_for(codec_name, video_enc)  # torch → nvenc for this codec
 
         file_start_time = _time.monotonic()
 
-        job = ai_upscaler.AIUpscaleJob(
+        job = _make_ai_job(
             input_path=input_path,
             output_path=out_path,
             model_name=model_name,
@@ -1664,8 +1773,9 @@ def open_video_scaler(app):
             is_gpu = encoder_ids.get(opt_encoder.get(), 'cpu') != 'cpu'
             ai_mode = (opt_upscale_method.get() == 'AI (Real-ESRGAN)')
             if ai_mode and len(gpu_list) > 1:
-                # AI upscale already splits ONE job across both cards (Real-ESRGAN -g 0,1),
-                # so run one job at a time using every card — no doubled CPU frame-extraction.
+                # Both AI engines split ONE job across all cards internally (ncnn via
+                # -g 0,1; torch via per-GPU frame-range workers), so run one job at a
+                # time using every card — no doubled CPU frame-extraction.
                 lanes = [gpu_list]                     # single lane; gpu = the full list [0, 1]
             elif is_gpu and len(gpu_list) > 1:
                 lanes = gpu_list                       # NVENC scale: one job per card
@@ -1728,7 +1838,8 @@ def open_video_scaler(app):
             procs = list(active_procs)
         for proc in procs:
             try:
-                if isinstance(proc, ai_upscaler.AIUpscaleJob):
+                if isinstance(proc, (ai_upscaler.AIUpscaleJob,
+                                     torch_upscaler.TorchUpscaleJob)):
                     proc.cancel()
                 else:
                     proc.kill()
