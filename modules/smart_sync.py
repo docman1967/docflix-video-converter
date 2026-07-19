@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 
 from .subtitle_filters import srt_ts_to_ms, ms_to_srt_ts
+from .utils import get_video_duration
 
 
 def smart_sync(video_path, cues, model_size='base', language=None,
