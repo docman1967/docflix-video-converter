@@ -14,7 +14,7 @@ import textwrap
 from datetime import timedelta
 from pathlib import Path
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 # ── dependency checks ────────────────────────────────────────────────────────
 
@@ -292,17 +292,206 @@ def regroup_words_into_segments(segments, max_chars: int = 42):
     return new_segments
 
 
+# ── broadcast-style cue segmentation ─────────────────────────────────────────
+
+# Function words that should not be left dangling at the end of a subtitle
+# line — the eye expects them to lead into the next word (subtitling convention).
+_NO_BREAK_AFTER = frozenset({
+    "a", "an", "the", "and", "but", "or", "nor", "for", "so", "yet",
+    "to", "of", "in", "on", "at", "by", "with", "from", "as", "if",
+    "into", "onto", "upon", "per", "via", "than", "that", "this", "these",
+    "those", "my", "your", "his", "her", "its", "our", "their",
+    "is", "are", "was", "were", "be", "been", "being", "am",
+    "will", "would", "can", "could", "should", "shall", "may", "might",
+    "must", "do", "does", "did", "not", "no",
+})
+
+_SENTENCE_END = ("." , "!", "?", "…")
+_CLAUSE_END = (",", ";", ":", "—", "–")
+
+
+def _ends_sentence(token: str) -> bool:
+    """True if a word token ends a sentence (ignoring trailing quotes/brackets)."""
+    t = token.rstrip('"\'’”)]}»').rstrip()
+    return t.endswith(_SENTENCE_END)
+
+
+def balance_lines(text: str, max_len: int = 42, max_lines: int = 2) -> str:
+    """Wrap a cue's text into at most *max_lines* visually balanced lines.
+
+    Prefers to break after punctuation and avoids leaving a short function
+    word (article/preposition/conjunction) stranded at the end of a line —
+    the same conventions professional subtitles follow.
+    """
+    text = " ".join(text.split())
+    if len(text) <= max_len:
+        return text
+
+    words = text.split(" ")
+    best = None  # (score, line1, line2)
+    for k in range(1, len(words)):
+        l1 = " ".join(words[:k])
+        l2 = " ".join(words[k:])
+        if len(l1) > max_len or len(l2) > max_len:
+            continue
+        score = abs(len(l1) - len(l2))          # favour balance
+        if _ends_sentence(l1):
+            score -= 12                          # great place to break
+        elif l1[-1:] in _CLAUSE_END:
+            score -= 6                           # good place to break
+        last = words[k - 1].strip(".,!?;:—–\"'").lower()
+        if last in _NO_BREAK_AFTER:
+            score += 10                          # don't strand a function word
+        first_next = words[k].strip(".,!?;:—–\"'").lower()
+        if first_next in _NO_BREAK_AFTER:
+            score -= 3                            # nice: function word leads line 2
+        if best is None or score < best[0]:
+            best = (score, l1, l2)
+
+    if best is None:
+        # No single split fits within max_len — fall back to a greedy wrap.
+        wrapped = textwrap.wrap(text, width=max_len)
+        return "\n".join(wrapped[:max_lines])
+    return best[1] + "\n" + best[2]
+
+
+def _pseudo_words(seg):
+    """Split a wordless segment's text into evenly-timed pseudo-words.
+
+    Used when word-level timestamps are unavailable, so the same cue-building
+    logic (punctuation, length, reading-speed) still applies. Timing within
+    the segment is interpolated by character length; real pauses only exist at
+    the segment boundaries, which are preserved.
+    """
+    txt = (getattr(seg, "text", "") or "").strip()
+    toks = txt.split()
+    if not toks:
+        return []
+    start = float(getattr(seg, "start", 0.0) or 0.0)
+    end = float(getattr(seg, "end", start) or start)
+    dur = max(0.01, end - start)
+    total = sum(len(t) for t in toks) or len(toks)
+    out = []
+    t0 = start
+    for tk in toks:
+        share = len(tk) / total if total else 1.0 / len(toks)
+        t1 = min(end, t0 + dur * share)
+        out.append((t0, t1, tk))
+        t0 = t1
+    return out
+
+
+def _word_stream(segments):
+    """Flatten segments into a (start, end, token) stream, using real word
+    timings where present and interpolated pseudo-words otherwise."""
+    stream = []
+    for seg in segments:
+        words = getattr(seg, "words", None)
+        if words:
+            for w in words:
+                tok = (getattr(w, "word", None) or getattr(w, "text", "") or "").strip()
+                if not tok:
+                    continue
+                ws = getattr(w, "start", None)
+                we = getattr(w, "end", None)
+                ws = float(seg.start if ws is None else ws)
+                we = float(seg.end if we is None else we)
+                if we < ws:
+                    we = ws
+                stream.append((ws, we, tok))
+        else:
+            stream.extend(_pseudo_words(seg))
+    return stream
+
+
+def segment_into_cues(segments, *, max_line_length: int = 42, max_lines: int = 2,
+                      reading_speed: float = 17.0, split_gap: float = 0.5,
+                      min_duration: float = 0.8, max_duration: float = 7.0):
+    """Re-cut transcript segments into broadcast-style subtitle cues.
+
+    A new cue is started when any of these happen (checked before each word):
+      • the previous word ends a sentence (. ! ? …)
+      • a pause of >= *split_gap* seconds precedes the next word (natural break —
+        lines up with scene cuts and speaker hand-offs)
+      • adding the word would exceed the character budget (max_lines × width)
+      • the cue would exceed *max_duration* seconds
+
+    Afterwards each cue's duration is stretched (without overlapping the next)
+    so it never reads faster than *reading_speed* chars/sec and never flashes
+    shorter than *min_duration*. Text is wrapped into balanced lines.
+    """
+    max_chars = max(1, max_line_length) * max_lines
+    stream = _word_stream(segments)
+    if not stream:
+        return []
+
+    cues = []          # list of [start, end, [tokens]]
+    for ws, we, tok in stream:
+        if not cues:
+            cues.append([ws, we, [tok]])
+            continue
+
+        cur = cues[-1]
+        prev_end = cur[1]
+        cur_text = " ".join(cur[2])
+        gap = ws - prev_end
+        would_len = len(cur_text) + 1 + len(tok)
+
+        force_break = (
+            _ends_sentence(cur[2][-1])
+            or gap >= split_gap
+            or would_len > max_chars
+            or (we - cur[0]) > max_duration
+        )
+        if force_break:
+            cues.append([ws, we, [tok]])
+        else:
+            cur[1] = we
+            cur[2].append(tok)
+
+    # Build SubSegments with wrapped text, then polish timing for readability.
+    result = []
+    n = len(cues)
+    for i, (start, end, toks) in enumerate(cues):
+        text = balance_lines(" ".join(toks), max_len=max_line_length,
+                             max_lines=max_lines)
+        chars = len(text.replace("\n", " "))
+        dur = end - start
+        need = max(min_duration, chars / reading_speed if reading_speed > 0 else 0)
+        if dur < need:
+            new_end = start + min(need, max_duration)
+            if i + 1 < n:
+                new_end = min(new_end, cues[i + 1][0] - 0.04)  # ~1 frame gap
+            if new_end > end:
+                end = new_end
+        if end <= start:
+            end = start + 0.04
+        result.append(SubSegment(start=start, end=end, text=text))
+    return result
+
+
 def post_process_segments(segments, *, word_timestamps: bool = False,
                           max_line_length: int = 0, offset: float = 0.0,
                           max_chars_per_group: int = 42,
-                          max_lead: float = 0.0):
+                          max_lead: float = 0.0,
+                          reading_speed: float = 17.0, split_gap: float = 0.5,
+                          min_duration: float = 0.8, max_duration: float = 7.0):
     """Apply all post-processing steps to a list of segments."""
     result = segments
     if max_lead > 0:
         result = trim_lead_time(result, max_lead=max_lead)
     if word_timestamps:
-        result = regroup_words_into_segments(result, max_chars=max_chars_per_group)
-    if max_line_length > 0:
+        # Broadcast-style re-segmentation (pauses + punctuation + reading speed)
+        result = segment_into_cues(
+            result,
+            max_line_length=max_line_length or 42,
+            reading_speed=reading_speed,
+            split_gap=split_gap,
+            min_duration=min_duration,
+            max_duration=max_duration,
+        )
+    elif max_line_length > 0:
+        # No word timing — best we can do is balance long segments' lines.
         result = apply_line_wrap(result, max_width=max_line_length)
     if offset != 0:
         result = apply_offset(result, offset)

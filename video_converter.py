@@ -49,7 +49,12 @@ except ImportError:
 # ============================================================================
 
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.8.0"
+# Version lives in modules/constants.py (which install.sh also reads) — import it
+# so the app title and the installer can never drift out of sync again.
+try:
+    from modules.constants import APP_VERSION
+except Exception:
+    APP_VERSION = "3.9.0"   # defensive fallback only
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -5760,6 +5765,12 @@ class VideoConverterApp:
         self.file_tree.bind('<Double-1>', on_file_double_click)
         self.file_tree.bind('<Delete>', lambda e: self.remove_selected_file())
 
+        # ── Drag-to-reorder the queue ──
+        self._queue_drag_index = None
+        self.file_tree.bind('<ButtonPress-1>', self._on_queue_drag_start, add='+')
+        self.file_tree.bind('<B1-Motion>', self._on_queue_drag_motion, add='+')
+        self.file_tree.bind('<ButtonRelease-1>', self._on_queue_drag_end, add='+')
+
         # ── Shift+Arrow multi-select ──
         def _shift_arrow(evt, direction):
             items = self.file_tree.get_children()
@@ -9186,6 +9197,71 @@ class VideoConverterApp:
 
         self.add_log(f"Cleared {len(remove_indices)} finished file(s) from queue.", 'INFO')
 
+    # ── Drag-to-reorder the encode queue ─────────────────────────────────────
+    def _on_queue_drag_start(self, event):
+        """Record the row where a potential drag begins (cells only)."""
+        if self.file_tree.identify_region(event.x, event.y) != 'cell':
+            self._queue_drag_index = None
+            return
+        row = self.file_tree.identify_row(event.y)
+        self._queue_drag_index = self.file_tree.index(row) if row else None
+
+    def _on_queue_drag_motion(self, event):
+        """Live-reorder: move the grabbed row to the row under the cursor."""
+        src = getattr(self, '_queue_drag_index', None)
+        if src is None:
+            return
+        row = self.file_tree.identify_row(event.y)
+        if not row:
+            return 'break'
+        tgt = self.file_tree.index(row)
+        if tgt != src:
+            new_pos = self._reorder_queue(src, tgt)
+            if new_pos is not None:
+                self._queue_drag_index = new_pos
+        return 'break'   # suppress the default rubber-band selection while dragging
+
+    def _on_queue_drag_end(self, event):
+        self._queue_drag_index = None
+
+    def _reorder_queue(self, src, tgt):
+        """Move self.files[src] to position tgt, mirroring the tree row.
+
+        During a live batch only the not-yet-started ('waiting') region may
+        move: a done or currently-encoding row is locked in place, and a drop
+        above that region is clamped to just below it. Returns the final index,
+        or None if the move was rejected/no-op.
+        """
+        lock = getattr(self, '_batch_lock', None) if self.is_converting else None
+        if lock:
+            lock.acquire()
+        try:
+            n = len(self.files)
+            if not (0 <= src < n):
+                return None
+            if self.is_converting:
+                floor = getattr(self, '_batch_next', 0)
+                if src < floor:
+                    return None            # locked: already done or encoding
+                if tgt < floor:
+                    tgt = floor            # clamp to the top of the waiting region
+            tgt = max(0, min(tgt, n - 1))
+            if tgt == src:
+                return None
+            items = self.file_tree.get_children()
+            if src >= len(items):
+                return None
+            iid = items[src]
+            self.file_tree.move(iid, '', tgt)
+            fi = self.files.pop(src)
+            self.files.insert(tgt, fi)
+        finally:
+            if lock:
+                lock.release()
+        self.file_tree.selection_set(iid)
+        self.file_tree.focus(iid)
+        return tgt
+
     def refresh_files(self):
         """Refresh file list from working directory.
         Phase 1 (instant): filesystem scan, populate tree immediately.
@@ -10242,7 +10318,11 @@ class VideoConverterApp:
         completed = 0
         failed = 0
         skipped = 0
-        _clk = threading.Lock()   # guards the shared counters across the GPU workers
+        # Shared batch lock + position cursor. Also used by drag-to-reorder, so
+        # the waiting queue can be shuffled live without racing the workers.
+        self._batch_lock = threading.Lock()
+        self._batch_next = 0
+        _clk = self._batch_lock   # alias for the counter guards below
         
         settings = {
             'transcode_mode': self.transcode_mode.get(),
@@ -10621,14 +10701,13 @@ class VideoConverterApp:
                                       progress_callback=self.update_progress, gpu=_gi)
             self._engines.append(_eng)
 
-        _next = {'i': 0}
         def _worker(engine):
             while self.is_converting:
                 with _clk:
-                    if _next['i'] >= len(self.files):
+                    if self._batch_next >= len(self.files):
                         return
-                    idx = _next['i']
-                    _next['i'] += 1
+                    idx = self._batch_next
+                    self._batch_next += 1
                 engine.ui_index = idx
                 _do_file(idx, self.files[idx], engine)
 

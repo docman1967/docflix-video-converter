@@ -949,6 +949,21 @@ def open_whisper_transcriber(app):
                textvariable=_max_lead_var, width=5).pack(side='left', padx=(0, 4))
     ttk.Label(adv2, text="(0=off, 0.5 rec.)").pack(side='left')
 
+    # Row 2b: readability — reading speed + pause-split threshold (cue segmenter)
+    adv2b = ttk.Frame(adv_frame)
+    adv2b.pack(fill='x', padx=4, pady=2)
+
+    ttk.Label(adv2b, text="Reading (cps):").pack(side='left', padx=(0, 4))
+    _cps_var = tk.DoubleVar(value=_wp.get('reading_speed', 17.0))
+    tk.Spinbox(adv2b, from_=5, to=30, increment=0.5,
+               textvariable=_cps_var, width=5).pack(side='left', padx=(0, 10))
+
+    ttk.Label(adv2b, text="Split gap (s):").pack(side='left', padx=(0, 4))
+    _gap_var = tk.DoubleVar(value=_wp.get('split_gap', 0.5))
+    tk.Spinbox(adv2b, from_=0.1, to=3.0, increment=0.05,
+               textvariable=_gap_var, width=5).pack(side='left', padx=(0, 4))
+    ttk.Label(adv2b, text="(needs word timestamps)").pack(side='left')
+
     # Row 3: WhisperX batch size
     adv3 = ttk.Frame(adv_frame)
     adv3.pack(fill='x', padx=4, pady=2)
@@ -963,8 +978,9 @@ def open_whisper_transcriber(app):
     adv4 = ttk.Frame(adv_frame)
     adv4.pack(fill='x', padx=4, pady=(2, 4))
 
-    _word_ts_var = tk.BooleanVar(value=_wp.get('word_timestamps', False))
-    ttk.Checkbutton(adv4, text="Word timestamps",
+    # On by default — word timing drives the scene-aware cue segmenter.
+    _word_ts_var = tk.BooleanVar(value=_wp.get('word_timestamps', True))
+    ttk.Checkbutton(adv4, text="Word timestamps (scene-aware cues)",
                     variable=_word_ts_var).pack(side='left', padx=(0, 16))
 
     _skip_existing_var = tk.BooleanVar(value=_wp.get('skip_existing', False))
@@ -1300,6 +1316,8 @@ def open_whisper_transcriber(app):
             "skip_existing": _skip_existing_var.get(),
             "max_lead": _max_lead_var.get(),
             "batch_size": _batch_size_var.get(),
+            "reading_speed": _cps_var.get(),
+            "split_gap": _gap_var.get(),
         }
 
     def _apply_settings(settings: dict):
@@ -1337,6 +1355,10 @@ def open_whisper_transcriber(app):
             _max_lead_var.set(float(settings["max_lead"]))
         if "batch_size" in settings:
             _batch_size_var.set(int(settings["batch_size"]))
+        if "reading_speed" in settings:
+            _cps_var.set(float(settings["reading_speed"]))
+        if "split_gap" in settings:
+            _gap_var.set(float(settings["split_gap"]))
 
     def _save_whisper_prefs():
         sp = _gather_settings()
@@ -1481,6 +1503,8 @@ def open_whisper_transcriber(app):
             max_line_length=_max_width_var.get(),
             offset=_offset_var.get(),
             max_lead=_max_lead_var.get(),
+            reading_speed=_cps_var.get(),
+            split_gap=_gap_var.get(),
         )
         _results[idx] = segments
 
