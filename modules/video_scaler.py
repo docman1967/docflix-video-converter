@@ -297,16 +297,20 @@ def open_video_scaler(app):
     opt_ai_preview_start = tk.StringVar(value=_sp.get('ai_preview_start', '120'))
     opt_ai_tta       = tk.BooleanVar(value=_sp.get('ai_tta', False))
     opt_ai_strength  = tk.IntVar(value=_sp.get('ai_strength', 65))
-    opt_ai_engine    = tk.StringVar(value=_sp.get('ai_engine', 'ncnn-vulkan'))
-
-    # Upscale engines. ncnn-vulkan is the universal default (any Vulkan GPU, zero deps).
+    # Upscale engines. ncnn-vulkan is the universal fallback (any Vulkan GPU, zero deps).
     # The PyTorch/CUDA "fast" engine is offered ONLY when an NVIDIA GPU is present — on
     # any other host the selector never appears and the panel looks exactly as before.
     _ai_engines = ['ncnn-vulkan']
     if torch_upscaler.detect_gpus():
         _ai_engines.append('PyTorch (fast)')
-    if opt_ai_engine.get() not in _ai_engines:
-        opt_ai_engine.set('ncnn-vulkan')
+    # Default to the FAST engine whenever it's actually usable and the user hasn't picked
+    # one — so it never silently falls back to the slow ncnn path (the setting used to be
+    # forgotten on launch, quietly costing ~4x speed). A saved preference always wins.
+    _engine_default = _sp.get('ai_engine')
+    if not _engine_default or _engine_default not in _ai_engines:
+        _engine_default = ('PyTorch (fast)' if ('PyTorch (fast)' in _ai_engines
+                                                and torch_upscaler.is_available()) else 'ncnn-vulkan')
+    opt_ai_engine    = tk.StringVar(value=_engine_default)
 
     def _ai_is_torch():
         return opt_ai_engine.get().startswith('PyTorch')

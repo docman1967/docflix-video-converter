@@ -8,7 +8,7 @@ All shared constants, codec maps, extension sets, and GPU backend definitions.
 # Single source of truth for the app version — video_converter.py imports this,
 # and install.sh greps it. Bump here only.
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.9.0"
+APP_VERSION = "3.9.1"
 
 # ── Defaults ──
 DEFAULT_BITRATE = "2M"
