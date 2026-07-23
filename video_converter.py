@@ -7153,11 +7153,19 @@ class VideoConverterApp:
 
     def show_subtitle_editor(self, filepath, stream_index, file_info,
                                 external_sub_path=None):
-        """Show subtitle text editor for a subtitle stream or external file."""
+        """Open the subtitle editor for a subtitle stream or external file.
+        Routes into the single menu-bar editor (open_standalone_subtitle_editor);
+        the separate stream editor was retired 2026-07-23 in favor of this one.
+        file_info is accepted for call-compatibility; the editor re-probes the video."""
+        def _open(mod):
+            if external_sub_path:
+                mod.open_standalone_subtitle_editor(self, auto_external=external_sub_path)
+            else:
+                mod.open_standalone_subtitle_editor(
+                    self, auto_video=filepath, auto_stream=stream_index)
         try:
-            from modules.subtitle_editor import show_subtitle_editor
-            show_subtitle_editor(self, filepath, stream_index, file_info,
-                                  external_sub_path=external_sub_path)
+            from modules import subtitle_editor as _se
+            _open(_se)
         except ImportError:
             import importlib.util
             _se_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -7166,8 +7174,7 @@ class VideoConverterApp:
                 spec = importlib.util.spec_from_file_location('subtitle_editor', _se_path)
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
-                mod.show_subtitle_editor(self, filepath, stream_index, file_info,
-                                          external_sub_path=external_sub_path)
+                _open(mod)
             else:
                 messagebox.showerror("Docflix Subtitle Editor", "modules/subtitle_editor.py not found.")
 
