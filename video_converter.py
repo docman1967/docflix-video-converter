@@ -8193,7 +8193,10 @@ class VideoConverterApp:
             f"powered by ffmpeg.\n\n"
             f"Supports H.265, H.264, AV1, VP9, MPEG-4, ProRes encoding\n"
             f"with NVIDIA NVENC GPU acceleration.\n\n"
-            f"Built with Python + Tkinter."
+            f"Built with Python + Tkinter.\n\n"
+            f"In memory of Ellie Mae — a little Chihuahua with a\n"
+            f"big heart that sat in the chair next to me through\n"
+            f"every line of code and never complained. \U0001F43E"
         )
 
     def setup_status_bar(self, parent):
