@@ -162,7 +162,7 @@ def find_allcaps_words(cues, tree, tag_caps, parent_widget):
         tree.selection_set(str(first))
 
 
-def open_standalone_subtitle_editor(app):
+def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto_external=None):
         import tempfile
 
         editor = tk.Toplevel(app.root)
@@ -4687,6 +4687,16 @@ def open_standalone_subtitle_editor(app):
                     load_file(_start_path)
             editor.after(100, _auto_open)
             app._open_file_on_start = None  # only open once
+
+        # Direct entry: opened with a specific subtitle to edit — the path the
+        # double-click→edit callers will use once redirected here (Stage 2). Reuses
+        # editor 1's own loaders; purely additive — a no-op when no params are passed.
+        # (auto_stream is accepted for caller-signature compatibility; the loader's
+        #  own picker handles multi-stream selection.)
+        if auto_external and os.path.isfile(auto_external):
+            editor.after(120, lambda p=auto_external: load_file(p))
+        elif auto_video and os.path.isfile(auto_video):
+            editor.after(120, lambda p=auto_video: load_video_subtitle(p))
 
         if not getattr(app, '_standalone_mode', False):
             editor.wait_window()
