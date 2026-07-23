@@ -7924,6 +7924,12 @@ class VideoConverterApp:
             _alt['custom_ad_patterns'] = self.custom_ad_patterns
             _alt['custom_cap_words'] = self.custom_cap_words
             _alt['custom_spell_words'] = self.custom_spell_words
+            # Write BOTH keys so neither goes stale: custom_replacements is the
+            # canonical one the standalone editor now reads first; search_replace_
+            # pairs is the legacy mirror. Keeping both fresh makes deletions
+            # propagate (a stale copy can't linger under the other key).
+            _alt['custom_replacements'] = getattr(
+                self, 'custom_replacements', [])
             _alt['search_replace_pairs'] = getattr(
                 self, 'custom_replacements', [])
             _alt_path.parent.mkdir(parents=True, exist_ok=True)
