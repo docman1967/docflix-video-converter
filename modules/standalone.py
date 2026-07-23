@@ -65,7 +65,11 @@ class StandaloneContext:
         self.use_names_db = prefs.get('use_names_db', False)
         self.custom_spell_words = prefs.get('custom_spell_words', [])
         self.custom_ad_patterns = prefs.get('custom_ad_patterns', [])
-        self.search_replace_pairs = prefs.get('search_replace_pairs', [])
+        # Canonical name is custom_replacements — the same attribute the main
+        # app, batch filter, and editor UI all use. (The legacy standalone key
+        # was search_replace_pairs; still read it as a fallback for old files.)
+        self.custom_replacements = prefs.get(
+            'custom_replacements', prefs.get('search_replace_pairs', []))
 
         # Merge subtitle editor settings from main app prefs file
         # so patterns added via the main app are available in standalone
@@ -77,7 +81,7 @@ class StandaloneContext:
                     ('custom_ad_patterns', 'custom_ad_patterns'),
                     ('custom_cap_words', 'custom_cap_words'),
                     ('custom_spell_words', 'custom_spell_words'),
-                    ('custom_replacements', 'search_replace_pairs'),
+                    ('custom_replacements', 'custom_replacements'),
                 ):
                     main_list = _main.get(key, [])
                     cur_list = getattr(self, attr)
@@ -135,8 +139,12 @@ class StandaloneContext:
             self, 'custom_spell_words', [])
         prefs['custom_ad_patterns'] = getattr(
             self, 'custom_ad_patterns', [])
+        # Write the canonical key, and mirror to the legacy search_replace_pairs
+        # key so the main app's standalone-file sync keeps finding it.
+        prefs['custom_replacements'] = getattr(
+            self, 'custom_replacements', [])
         prefs['search_replace_pairs'] = getattr(
-            self, 'search_replace_pairs', [])
+            self, 'custom_replacements', [])
 
         self._prefs = prefs
 
@@ -160,7 +168,7 @@ class StandaloneContext:
             _main['custom_spell_words'] = getattr(
                 self, 'custom_spell_words', [])
             _main['custom_replacements'] = getattr(
-                self, 'search_replace_pairs', [])
+                self, 'custom_replacements', [])
             _main_path.parent.mkdir(parents=True, exist_ok=True)
             _main_path.write_text(json.dumps(_main, indent=2))
         except Exception:
