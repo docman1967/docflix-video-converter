@@ -310,6 +310,41 @@ def srt_ts_to_ms(ts):
     return (h * 3600 + m * 60 + s) * 1000 + ms
 
 
+# ── cue sort keys (view-only sorting in the subtitle editor) ──────────────────
+
+def cue_char_len(cue):
+    """Visible character count of a cue (newlines excluded) — the junk-finder key.
+    A lone '#' or '.' or '-' sorts straight to the top."""
+    return len(cue.get('text', '').replace('\n', ''))
+
+
+def cue_start_ms(cue):
+    """Cue start time in milliseconds — the canonical timeline order."""
+    try:
+        return srt_ts_to_ms(cue['start'])
+    except Exception:
+        return 0
+
+
+def cue_duration_ms(cue):
+    """Cue on-screen duration in milliseconds."""
+    try:
+        return max(0, srt_ts_to_ms(cue['end']) - srt_ts_to_ms(cue['start']))
+    except Exception:
+        return 0
+
+
+def cue_cps(cue):
+    """Reading speed in characters per second (chars / duration). Cues that flash
+    too fast sort high; a zero-duration cue with text returns infinity so it
+    surfaces as a problem to fix."""
+    dur = cue_duration_ms(cue) / 1000.0
+    chars = cue_char_len(cue)
+    if dur <= 0:
+        return float('inf') if chars else 0.0
+    return chars / dur
+
+
 def ms_to_srt_ts(ms):
     """Convert milliseconds to SRT timestamp string 'HH:MM:SS,mmm'."""
     if ms < 0:

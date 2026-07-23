@@ -34,6 +34,7 @@ from .utils import (
 )
 from .subtitle_filters import (
     parse_srt, write_srt, srt_ts_to_ms, ms_to_srt_ts,
+    cue_char_len, cue_start_ms, cue_duration_ms, cue_cps,
     filter_remove_hi, filter_remove_caps_hi,
     filter_remove_music_notes, filter_fix_caps,
     filter_remove_tags, filter_remove_ads,
@@ -60,6 +61,48 @@ try:
     HAS_DND = True
 except ImportError:
     HAS_DND = False
+
+
+def install_cue_sort(tree, cues_getter):
+    """Wire VIEW-ONLY column sorting onto a subtitle-editor cue tree.
+
+    The tree's row iids ARE the cue indices (iid == str(index)), so sorting only
+    reorders the *displayed* rows via tree.move() — the underlying cues list is
+    never touched and stays in timeline order. Clickable headers:
+        #          → reset to timeline order
+        Timestamp  → sort by duration  (toggles asc/desc)
+        Text       → sort by length    (toggles asc/desc; clusters junk cues at top)
+    Deletes/edits still map iid→cue correctly and saving re-numbers, so the whole
+    workflow is: sort → select the junk → delete → done. No re-sort, no restamp.
+    """
+    state = {"key": "timeline", "reverse": False}
+    keyfns = {"length": cue_char_len, "duration": cue_duration_ms}
+
+    def apply(key, toggle=True):
+        cues = cues_getter() or []
+        if key == "timeline":
+            state["key"], state["reverse"] = "timeline", False
+            order = list(range(len(cues)))
+        else:
+            if toggle:
+                state["reverse"] = (not state["reverse"]) if state["key"] == key else False
+                state["key"] = key
+            order = sorted(range(len(cues)),
+                           key=lambda i: keyfns[key](cues[i]),
+                           reverse=state["reverse"])
+        for pos, idx in enumerate(order):
+            try:
+                tree.move(str(idx), "", pos)
+            except Exception:
+                pass
+        arrow = " ▾" if state["reverse"] else " ▴"
+        tree.heading("num",  text="#" + (arrow if state["key"] == "timeline" else ""))
+        tree.heading("time", text="Timestamp" + (arrow if state["key"] == "duration" else ""))
+        tree.heading("text", text="Text" + (arrow if state["key"] == "length" else ""))
+
+    tree.heading("num",  command=lambda: apply("timeline"))
+    tree.heading("time", command=lambda: apply("duration"))
+    tree.heading("text", command=lambda: apply("length"))
 
 
 def find_allcaps_words(cues, tree, tag_caps, parent_widget):
@@ -4175,6 +4218,7 @@ def open_standalone_subtitle_editor(app):
         tree.heading('num', text='#')
         tree.heading('time', text='Timestamp')
         tree.heading('text', text='Text')
+        install_cue_sort(tree, lambda: cues)
         tree.column('num', width=40, minwidth=30, stretch=False)
         tree.column('time', width=260, minwidth=220, stretch=False)
         tree.column('text', width=500, minwidth=200, stretch=True)
@@ -7194,6 +7238,7 @@ def show_subtitle_editor(app, filepath, stream_index, file_info,
         tree.heading('num', text='#')
         tree.heading('time', text='Timestamp')
         tree.heading('text', text='Text')
+        install_cue_sort(tree, lambda: cues)
         tree.column('num', width=40, minwidth=30, stretch=False)
         tree.column('time', width=260, minwidth=220, stretch=False)
         tree.column('text', width=500, minwidth=200, stretch=True)
