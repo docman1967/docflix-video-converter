@@ -3517,14 +3517,39 @@ class VideoConverter:
                                     "original stream (Atmos transcoding is "
                                     "not supported at this time)", 'ERROR')
                                 break
-                        # Copy instead of re-encoding if source already matches target
+                        # Copy instead of re-encoding ONLY if source already matches the target
+                        # codec AND bitrate. Matching codec alone is NOT enough: AC3 448k → AC3 384k
+                        # (or AC3 192k → 384k) must re-encode to honor the bitrate the user chose.
                         if audio_codec != 'copy' and src_streams:
                             src_codec = src_streams[0].get('codec_name', '')
-                            if src_codec == audio_codec:
+                            codec_aliases = {
+                                'ac3': ('ac3', 'eac3'), 'eac3': ('eac3',), 'aac': ('aac',),
+                                'mp3': ('mp3',), 'opus': ('opus',), 'flac': ('flac',),
+                            }
+                            match_set = codec_aliases.get(audio_codec, (audio_codec,))
+                            src_br_raw = src_streams[0].get('bit_rate', '')
+                            try:
+                                src_kbps = int(src_br_raw) // 1000 if src_br_raw else 0
+                            except (ValueError, TypeError):
+                                src_kbps = 0
+                            try:
+                                tgt_kbps = int(str(audio_bitrate).lower().rstrip('k'))
+                            except (ValueError, TypeError):
+                                tgt_kbps = 0
+                            # Bitrate "matches" only if unknown, or within 10% of target.
+                            bitrate_matches = (
+                                src_kbps == 0 or tgt_kbps == 0
+                                or abs(src_kbps - tgt_kbps) <= tgt_kbps * 0.10
+                            )
+                            if src_codec in match_set and bitrate_matches:
                                 audio_codec = 'copy'
                                 self.log(
-                                    f"Audio already {src_codec} — copying "
-                                    f"(no re-encode needed)", 'INFO')
+                                    f"Audio already {src_codec} @ {src_kbps}k "
+                                    f"(≈ target {tgt_kbps}k) — copying, no re-encode needed", 'INFO')
+                            else:
+                                self.log(
+                                    f"Audio {src_codec} @ {src_kbps}k → re-encoding to "
+                                    f"{audio_codec} @ {tgt_kbps}k (honoring chosen bitrate)", 'INFO')
                     except Exception:
                         pass
                 # Undecodable-audio fallback: if the source audio can't be
