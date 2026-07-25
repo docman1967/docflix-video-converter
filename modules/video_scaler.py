@@ -18,6 +18,39 @@ from tkinter import ttk, messagebox
 from .constants import VIDEO_EXTENSIONS, GPU_BACKENDS, VIDEO_CODEC_MAP
 from .utils import scaled_geometry, scaled_minsize, ask_open_files, ask_directory
 
+
+def _scaler_sub_codec(input_path, out_path):
+    """Pick a `-c:s` value compatible with the OUTPUT container instead of a blanket copy.
+    MKV can't hold mov_text (MP4's subtitle format) via copy — that made rescaling MP4 sources
+    into .mkv fail (ffmpeg returned 218 / 'Function not implemented': the muxer rejected the
+    subtitle stream and collapsed the whole pipeline). Fix: convert MP4 text subs to srt for
+    MKV, use mov_text for MP4 output, and copy everything else (already-compatible or image
+    subs). Returns a codec string, or None if the source has no subtitles (so -c:s is omitted)."""
+    try:
+        probe = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 's',
+             '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', input_path],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+    except Exception:
+        return 'copy'
+    codecs = [c.strip().lower() for c in probe.splitlines() if c.strip()]
+    if not codecs:
+        return None
+    ext = os.path.splitext(out_path)[1].lower()
+    IMAGE = {'hdmv_pgs_subtitle', 'pgssub', 'dvd_subtitle', 'dvdsub', 'xsub'}
+    if ext in ('.mkv', '.webm'):
+        if all(c in IMAGE for c in codecs):
+            return 'copy'                       # image subs (PGS/VobSub) copy fine into MKV
+        if any(c in ('mov_text', 'tx3g') for c in codecs):
+            return 'srt'                        # MP4 text subs → MKV-native srt
+        return 'copy'                           # srt/ass/ssa/webvtt copy fine into MKV
+    if ext in ('.mp4', '.m4v', '.mov'):
+        TEXT = {'subrip', 'srt', 'ass', 'ssa', 'webvtt', 'text', 'mov_text', 'tx3g'}
+        if any(c in TEXT for c in codecs):
+            return 'mov_text'                   # MP4's native text subtitle codec
+        return 'copy'
+    return 'copy'
+
 try:
     from tkinterdnd2 import DND_FILES
     HAS_DND = True
@@ -1451,8 +1484,12 @@ def open_video_scaler(app):
             if audio not in ('flac',):
                 cmd.extend(['-b:a', '128k'])
 
-        # Copy subtitles
-        cmd.extend(['-c:s', 'copy'])
+        # Subtitles — pick a codec the OUTPUT container can actually hold, not a blanket copy.
+        # (mov_text→MKV copy failed with ffmpeg 218: the muxer rejected the stream and the whole
+        # pipeline collapsed, surfacing as a bogus scale-filter error.)
+        _sub_c = _scaler_sub_codec(input_path, out_path)
+        if _sub_c:
+            cmd.extend(['-c:s', _sub_c])
 
         cmd.append(out_path)
         return cmd, out_path
