@@ -206,6 +206,14 @@ def create_standalone_root(title, geometry="960x650", minsize=(800, 550)):
     except ImportError:
         root = tk.Tk(className='docflix')
 
+    # Crash guard: a raised exception in ANY Tk callback (esp. tkinterdnd2 folder drops) used to
+    # silently kill the whole app. Log it (flushed) and stay alive instead.
+    def _docflix_cb_exc(exc, val, tb):
+        import traceback as _t, sys as _s
+        _s.stderr.write("\n=== [Docflix] callback exception — app kept alive ===\n")
+        _t.print_exception(exc, val, tb); _s.stderr.flush()
+    root.report_callback_exception = _docflix_cb_exc
+
     # Apply high-DPI scaling before any widgets are created
     configure_dpi_scaling(root)
 

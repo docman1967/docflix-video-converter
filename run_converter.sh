@@ -48,7 +48,7 @@ echo ""
 # Uses the monolith directly (video_converter.py) for now.
 # After full migration, this will change to:
 #   python3 -m video_converter "$@"
-nohup python3 "$SCRIPT_DIR/video_converter.py" "$@" >> "$LOG_FILE" 2>&1 &
+nohup python3 -u "$SCRIPT_DIR/video_converter.py" "$@" >> "$LOG_FILE" 2>&1 &
 APP_PID=$!
 
 echo "Running in background (PID $APP_PID)"

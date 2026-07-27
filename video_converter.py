@@ -5048,8 +5048,9 @@ class VideoConverterApp:
         control_frame = ttk.Frame(file_frame)
         control_frame.grid(row=0, column=0, sticky='ew', pady=(0, 5))
         
-        ttk.Button(control_frame, text="▶️ Start Conversion",
-                  command=self.start_conversion).pack(side='left', padx=2)
+        self.start_btn = ttk.Button(control_frame, text="▶️ Start Conversion",
+                  command=self.start_conversion)
+        self.start_btn.pack(side='left', padx=2)
         
         self.pause_btn = ttk.Button(control_frame, text="⏸️ Pause",
                                    command=self.toggle_pause, state='disabled')
@@ -9576,6 +9577,16 @@ class VideoConverterApp:
 
     def start_conversion(self):
         """Start batch conversion"""
+        # Re-entry guard: hitting Start while a conversion is already running used to spawn
+        # a SECOND worker set — e.g. 4 concurrent encodes when the GPU cap is 2 (1 per GPU),
+        # blowing past the concurrency limit. One batch at a time. (fix 2026-07-27)
+        if self.is_converting:
+            messagebox.showinfo(
+                "Already Converting",
+                "A conversion is already in progress.\n\n"
+                "Use Pause or Stop to control the current run before starting another.")
+            return
+
         if not self.files:
             messagebox.showinfo("No Files", "No video files found in the selected folder.")
             return
@@ -9629,6 +9640,7 @@ class VideoConverterApp:
 
         # Disable controls
         self.is_converting = True
+        self.start_btn.configure(state='disabled')   # grey out — also confirms the click during startup lag
         self.pause_btn.configure(state='normal')
         self.stop_btn.configure(state='normal')
         
@@ -10123,6 +10135,7 @@ class VideoConverterApp:
         elapsed = datetime.now() - self.start_time
         self.is_converting = False
         self.root.after(0, lambda: (
+            self.start_btn.configure(state='normal'),
             self.pause_btn.configure(state='disabled'),
             self.stop_btn.configure(state='disabled'),
             self.status_label.configure(text=f"Complete! {completed} converted, {failed} failed, {skipped} skipped"),
@@ -10218,6 +10231,7 @@ class VideoConverterApp:
                     _eng.stop()
                 except Exception:
                     pass
+            self.start_btn.configure(state='normal')
             self.pause_btn.configure(state='disabled')
             self.stop_btn.configure(state='disabled')
             self.status_label.configure(text="Stopped by user")
@@ -10403,6 +10417,14 @@ def main():
         print("*** GPU TEST MODE ENABLED — skipping GPU test encodes, detection only ***")
 
     root = TkinterDnD.Tk(className='docflix') if HAS_DND else tk.Tk(className='docflix')
+
+    # Crash guard: a raised exception in ANY Tk callback (esp. tkinterdnd2 folder drops) used to
+    # silently kill the whole app. Log it (flushed) and stay alive instead.
+    def _docflix_cb_exc(exc, val, tb):
+        import traceback as _t, sys as _s
+        _s.stderr.write("\n=== [Docflix] callback exception — app kept alive ===\n")
+        _t.print_exception(exc, val, tb); _s.stderr.flush()
+    root.report_callback_exception = _docflix_cb_exc
 
     # Apply high-DPI scaling before any widgets are created
     _configure_dpi_scaling(root)
