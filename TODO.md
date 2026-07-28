@@ -1,5 +1,18 @@
 # Docflix Media Suite — TODO
 
+## ✅ DONE — Source pre-clean pass before AI upscale (2026-07-28, v3.10.0)
+Optional **"Clean source" (Off/Light/Heavy)** in the Rescaler's AI panel — an ffmpeg
+deblock→*light* hqdn3d→deband pass run BEFORE the upscale so the model works on honest pixels
+instead of amplifying compression/film artifacts. **Engine-agnostic:** cleans to a near-lossless
+H.264 temp (NVDEC-decodable → the PyTorch stream stays intact) carrying audio+subs, feeds it to
+whichever engine, auto-deletes it after; falls back to the original on any failure. Grays with the
+AI controls, persists to prefs (`source_clean`). Code: `video_scaler.py` `_apply_source_clean()`
++ rowD combo + wiring in `_process_one_ai()`.
+**Proven on The Ruff and Reddy Show (1957).** The restoration recipe for soft vintage cartoons:
+**Clean source → Light + "Anime Stills (best)" model + Strength ~80–85%.** (Heavy preset is
+deblock-forward for genuinely blocky 352×240 DivX; may retune it denoise-forward later, since Tony's
+library skews film-grain-soft over DivX-blocky.)
+
 ## ✅ DONE — Subtitle editor view-only column sorting (2026-07-23, `31d5ecc`)
 Clickable cue-tree headers, display-only (cues stay time-ordered): **Text → length**
 (junk-finder), **Timestamp → duration**, **# → timeline reset**; toggles asc/desc with an

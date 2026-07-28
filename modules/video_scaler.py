@@ -330,6 +330,10 @@ def open_video_scaler(app):
     opt_ai_preview_start = tk.StringVar(value=_sp.get('ai_preview_start', '120'))
     opt_ai_tta       = tk.BooleanVar(value=_sp.get('ai_tta', False))
     opt_ai_strength  = tk.IntVar(value=_sp.get('ai_strength', 65))
+    # Optional source pre-clean before AI upscale (Off/Light/Heavy) — deblock/denoise/deband
+    # for rough old sources (e.g. 352x240 DivX cartoons) so the upscaler works on honest pixels
+    # instead of sharpening the compression artifacts.
+    opt_source_clean = tk.StringVar(value=_sp.get('source_clean', 'Off'))
     # Upscale engines. ncnn-vulkan is the universal fallback (any Vulkan GPU, zero deps).
     # The PyTorch/CUDA "fast" engine is offered ONLY when an NVIDIA GPU is present — on
     # any other host the selector never appears and the panel looks exactly as before.
@@ -368,6 +372,44 @@ def open_video_scaler(app):
         if _ai_is_torch():
             return torch_upscaler.TorchUpscaleJob(**kw)
         return ai_upscaler.AIUpscaleJob(**kw)
+
+    def _apply_source_clean(src, mode, log):
+        """Optional pre-clean run BEFORE the AI upscale: deblock -> light denoise -> deband.
+        Written to a near-lossless H.264 temp (crf 12, yuv420p) so the torch engine's NVDEC
+        GPU-decode still works (a lossless CPU codec would break the hardware stream); the tiny
+        recompression is nothing next to the DivX artifacts being removed. Carries the source's
+        audio + subtitles so nothing is lost downstream. Returns the temp path, or None on any
+        failure (caller then just uses the original source). Denoise stays gentle even on
+        'Heavy' — animation's flat cel colors smear if over-cleaned."""
+        chains = {
+            'Light': 'deblock=filter=weak:block=8,hqdn3d=1:1:2:2,gradfun=0.7:16',
+            'Heavy': 'deblock=filter=strong:block=8,hqdn3d=3:2:3:3,gradfun=1.2:16',
+        }
+        vf = chains.get(mode)
+        if not vf:
+            return None
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(prefix='docflix_clean_', suffix='.mkv')
+            os.close(fd)
+            log(f"  Pre-cleaning source ({mode}: deblock + denoise + deband)…", 'INFO')
+            cmd = ['ffmpeg', '-y', '-i', src,
+                   '-map', '0:v:0', '-map', '0:a?', '-map', '0:s?',
+                   '-c:a', 'copy', '-c:s', 'copy',
+                   '-c:v', 'libx264', '-crf', '12', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
+                   '-vf', vf, tmp]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
+                return tmp
+            log(f"  Pre-clean skipped (ffmpeg rc={r.returncode}) — using original source", 'WARNING')
+        except Exception as e:
+            log(f"  Pre-clean error ({e}) — using original source", 'WARNING')
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        return None
 
     # Real-ESRGAN GPU choices — label -> value accepted by ai_upscaler.normalize_gpu_ids()
     _ai_gpu_choices = {'Auto (all GPUs)': 'auto'}
@@ -681,9 +723,19 @@ def open_video_scaler(app):
     ai_status_label.pack(side='left', padx=(0, 6))
     ai_download_btn = ttk.Button(rowC, text="Download Real-ESRGAN")
 
+    rowD = ttk.Frame(right_col)
+    rowD.pack(fill='x', pady=1, anchor='w')
+    ai_clean_label = ttk.Label(rowD, text="Clean source:")
+    ai_clean_label.pack(side='left', padx=(0, 4))
+    ai_clean_combo = ttk.Combobox(rowD, textvariable=opt_source_clean,
+                                  values=['Off', 'Light', 'Heavy'], width=8, state='readonly')
+    ai_clean_combo.pack(side='left', padx=(0, 8))
+    ttk.Label(rowD, text="deblock + denoise for rough/old sources (runs before upscale)",
+              font=('', 8)).pack(side='left')
+
     def _set_ai_enabled(on):
         """Enable/gray the AI-specific controls together."""
-        combos = [ai_model_combo, ai_gpu_combo]
+        combos = [ai_model_combo, ai_gpu_combo, ai_clean_combo]
         if ai_engine_combo is not None:
             combos.append(ai_engine_combo)
         for c in combos:
@@ -693,7 +745,7 @@ def open_video_scaler(app):
         # "Max Quality" (TTA) is a ncnn-only feature — grayed on the torch engine.
         if on and _ai_is_torch():
             ai_tta_check.configure(state='disabled')
-        labels = [ai_model_label, ai_gpu_label, ai_strength_label, ai_status_label]
+        labels = [ai_model_label, ai_gpu_label, ai_strength_label, ai_status_label, ai_clean_label]
         if ai_engine_label is not None:
             labels.append(ai_engine_label)
         for lb in labels:
@@ -1012,6 +1064,7 @@ def open_video_scaler(app):
             'ai_tta':        opt_ai_tta.get(),
             'ai_strength':   opt_ai_strength.get(),
             'ai_engine':     opt_ai_engine.get(),
+            'source_clean':  opt_source_clean.get(),
         }
         app._scaler_prefs = sp
         try:
@@ -1687,6 +1740,17 @@ def open_video_scaler(app):
         else:
             out_path = str(Path(input_path).parent / f"{base}-{res_tag}{ext}")
 
+        # ── Optional source pre-clean (deblock/denoise/deband) BEFORE the AI upscale ──
+        # Feeds a cleaned temp to whichever engine so the upscaler works on honest pixels
+        # instead of sharpening DivX/Xvid artifacts. None on failure → the original is used.
+        cleaned_tmp = None
+        ai_input = input_path
+        clean_mode = opt_source_clean.get()
+        if clean_mode and clean_mode != 'Off' and not stop_flag[0]:
+            cleaned_tmp = _apply_source_clean(input_path, clean_mode, _log)
+            if cleaned_tmp:
+                ai_input = cleaned_tmp
+
         # Determine encoder
         enc_label = opt_encoder.get()
         bid = encoder_ids.get(enc_label, 'cpu')
@@ -1704,7 +1768,7 @@ def open_video_scaler(app):
         file_start_time = _time.monotonic()
 
         job = _make_ai_job(
-            input_path=input_path,
+            input_path=ai_input,
             output_path=out_path,
             model_name=model_name,
             target_height=target_h,
@@ -1738,6 +1802,11 @@ def open_video_scaler(app):
             except Exception:
                 pass
             _unreg_proc(job)
+            if cleaned_tmp and os.path.exists(cleaned_tmp):
+                try:
+                    os.remove(cleaned_tmp)
+                except OSError:
+                    pass
 
         elapsed = _time.monotonic() - file_start_time
 
