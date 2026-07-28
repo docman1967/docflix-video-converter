@@ -53,6 +53,16 @@ MODELS = {
         'url': ('https://github.com/xinntao/Real-ESRGAN/releases/download/'
                 'v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth'),
     },
+    'APISR Anime Restore (fast)': {
+        'file': '4x_APISR_RRDB_GAN_generator.pth', 'scale': 4,
+        'url': ('https://github.com/Kiteretsu77/APISR/releases/download/'
+                'v0.2.0/4x_APISR_RRDB_GAN_generator.pth'),
+    },
+    'APISR Anime Restore (best)': {
+        'file': '4x_APISR_DAT_GAN_generator.pth', 'scale': 4,
+        'url': ('https://github.com/Kiteretsu77/APISR/releases/download/'
+                'v0.3.0/4x_APISR_DAT_GAN_generator.pth'),
+    },
 }
 DEFAULT_MODEL = 'Cartoon/Anime Video (fast)'
 

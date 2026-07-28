@@ -4417,6 +4417,8 @@ class VideoConverterApp:
         tools_menu.add_command(label="Docflix Media Processor...",
                                accelerator="Ctrl+M",
                                command=self.open_media_processor)
+        tools_menu.add_command(label="🔊 Docflix Audio Tools...",
+                               command=self.open_audio_tools)
         tools_menu.add_command(label="Docflix Media Renamer...",
                                command=self.open_tv_renamer)
         tools_menu.add_command(label="Docflix Media Rescale...",
@@ -6601,6 +6603,14 @@ class VideoConverterApp:
                 mod.open_media_processor(self)
             else:
                 messagebox.showerror("Docflix Media Processor", "modules/media_processor.py not found.")
+
+    def open_audio_tools(self):
+        """Open the Audio Tools window (fix botched audio / batch-normalize / downconvert)."""
+        try:
+            from modules.audio_tools import open_audio_tools
+            open_audio_tools(self)
+        except Exception as e:
+            messagebox.showerror("Docflix Audio Tools", f"Could not open Audio Tools:\n{e}")
 
     # ── File Renamer ────────────────────────────────────────────────────
     def open_video_scaler(self):

@@ -354,6 +354,9 @@ def open_video_scaler(app):
 
     def _ai_installed():
         """Is the ACTIVE engine ready to run (for the selected model)?"""
+        # torch-only models (e.g. APISR) have no ncnn .bin/.param — they can't run on ncnn.
+        if ai_upscaler.MODELS.get(opt_ai_model.get(), {}).get('torch_only') and not _ai_is_torch():
+            return False
         if _ai_is_torch():
             return torch_upscaler.is_available(opt_ai_model.get())
         return ai_upscaler.is_installed()
@@ -775,6 +778,12 @@ def open_video_scaler(app):
                 ai_status_label.configure(foreground='red' if blocked else 'orange')
                 ai_download_btn.pack(side='left', padx=(0, 4))
         else:
+            # torch-only model (e.g. APISR) selected on the ncnn engine — guide to switch.
+            if ai_upscaler.MODELS.get(opt_ai_model.get(), {}).get('torch_only'):
+                ai_status_var.set("APISR needs the PyTorch engine — switch Engine")
+                ai_status_label.configure(foreground='orange')
+                ai_download_btn.pack_forget()
+                return
             ai_download_btn.configure(text="Download Real-ESRGAN")
             if ai_upscaler.is_installed():
                 ver = ai_upscaler.get_version() or ''
@@ -946,10 +955,12 @@ def open_video_scaler(app):
     ai_model_combo.bind('<<ComboboxSelected>>', lambda _e: _update_ai_status())
 
     def _check_show_method_row():
-        """The Upscale column is always visible; enable it only when a file can upscale."""
-        any_upscale = any(_is_upscale(f) for f in files) if files else False
-        ai_enable_check.configure(state='normal' if any_upscale else 'disabled')
-        if any_upscale:
+        """The Upscale column is always visible; enable AI whenever a target resolution is set —
+        not only for a size INCREASE. Same-res (1080->1080) or a downscale is a valid AI *clean-up*
+        pass: the model still runs (denoise/restore), then scales to the target. (2026-07-28)"""
+        any_target = any(_get_target(f) is not None for f in files) if files else False
+        ai_enable_check.configure(state='normal' if any_target else 'disabled')
+        if any_target:
             _on_method_change()
         else:
             _set_ai_enabled(False)
@@ -1558,8 +1569,10 @@ def open_video_scaler(app):
             _log(f"  Skipped (Original): {f['name']}", 'WARNING')
             return True
 
-        use_ai = (_is_upscale(f)
-                  and opt_upscale_method.get() == 'AI (Real-ESRGAN)')
+        # AI runs whenever it's explicitly selected and there's a target (target is non-None
+        # here — None was skipped above). NOT gated on a size increase: same-res or downscale
+        # is a valid AI clean-up pass — the model runs, then output scales to target. (2026-07-28)
+        use_ai = (opt_upscale_method.get() == 'AI (Real-ESRGAN)')
 
         if _is_upscale(f) and not use_ai:
             _log(f"  Warning: upscaling {f['name']} ({f['height']}p -> {target[1]}p)", 'WARNING')

@@ -66,6 +66,18 @@ MODELS = {
         'scale': 4,
         'description': 'Heavy model tuned for anime artwork/stills — max detail, ~4x slower',
     },
+    'APISR Anime Restore (fast)': {
+        'id': 'apisr-rrdb-4x',
+        'scale': 4,
+        'torch_only': True,
+        'description': 'APISR RRDB — rebuilds aging hand-drawn lines + compression damage; fast. PyTorch engine only.',
+    },
+    'APISR Anime Restore (best)': {
+        'id': 'apisr-dat-4x',
+        'scale': 4,
+        'torch_only': True,
+        'description': 'APISR DAT — best quality for degraded vintage cartoons; slower. PyTorch engine only.',
+    },
 }
 
 DEFAULT_MODEL = 'Cartoon/Anime Video (fast)'
