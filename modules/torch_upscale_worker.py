@@ -111,27 +111,85 @@ def main(job_path):
                "-c:v", encoder, "-preset", preset, "-cq", cq,
                "-pix_fmt", pix_fmt, "-f", "mpegts", out]
 
+    # ── Model forward, with optional spatial tiling to bound VRAM ──
+    # A full 4x pass on a 1080p frame peaks ~12 GB; tiling caps peak memory to a
+    # single tile regardless of frame size, so a large source or a congested GPU
+    # doesn't OOM. tile_state[0] == 0 means "no tiling" (fastest path); the warmup
+    # below auto-picks the largest tile that fits.
+    tile_state = [0]
+
+    def _forward_tiled(x, tile, pad):
+        # Run the model tile-by-tile with `pad` px of context (trimmed after) to
+        # avoid visible seams, assembling the full model_scale-x output.
+        b, c, h, w = x.shape
+        s = model_scale
+        out = torch.zeros((b, c, h * s, w * s), dtype=torch.float32, device=x.device)
+        for y0 in range(0, h, tile):
+            for x0 in range(0, w, tile):
+                y1, x1 = min(y0 + tile, h), min(x0 + tile, w)
+                ry0, rx0 = max(y0 - pad, 0), max(x0 - pad, 0)
+                ry1, rx1 = min(y1 + pad, h), min(x1 + pad, w)
+                with torch.autocast("cuda", dtype=torch.float16):
+                    o = model(x[:, :, ry0:ry1, rx0:rx1]).float()
+                ct, cl = (y0 - ry0) * s, (x0 - rx0) * s
+                out[:, :, y0 * s:y1 * s, x0 * s:x1 * s] = \
+                    o[:, :, ct:ct + (y1 - y0) * s, cl:cl + (x1 - x0) * s]
+                del o
+        return out
+
+    def _forward(x):
+        if tile_state[0] > 0:
+            t = tile_state[0]
+            return _forward_tiled(x, t, max(16, t // 8))
+        with torch.autocast("cuda", dtype=torch.float16):
+            return model(x).float()
+
     def upscale(batch_np):
         # (B,H,W,3) uint8 → GPU fp16 → model → (optional blend/downscale) → (B,Ho,Wo,3) uint8
         x = torch.from_numpy(batch_np).cuda().permute(0, 3, 1, 2).float().div_(255.0)
-        with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
-            y = model(x).float()
-            if use_blend:
-                base = F.interpolate(x, size=(up_h, up_w), mode="bicubic",
-                                     align_corners=False)
-                y = y.mul_(strength).add_(base.mul_(1.0 - strength))
-            if do_downscale:
-                y = F.interpolate(y, size=(out_h, out_w), mode="bicubic",
-                                  align_corners=False)
+        with torch.no_grad():
+            y = _forward(x)
+            with torch.autocast("cuda", dtype=torch.float16):
+                if use_blend:
+                    base = F.interpolate(x, size=(up_h, up_w), mode="bicubic",
+                                         align_corners=False)
+                    y = y.mul_(strength).add_(base.mul_(1.0 - strength))
+                if do_downscale:
+                    y = F.interpolate(y, size=(out_h, out_w), mode="bicubic",
+                                      align_corners=False)
         return (y.clamp_(0, 1).mul_(255).round_().byte()
                 .permute(0, 2, 3, 1).contiguous().cpu().numpy())
 
-    # Warmup (untimed) — pays cudnn autotune + kernel compile once.
-    try:
-        upscale(np.zeros((1, in_h, in_w, 3), np.uint8))
-        torch.cuda.synchronize()
-    except Exception as e:  # noqa: BLE001
-        emit({"t": "error", "msg": f"warmup/inference failed: {e}"})
+    # Warmup (untimed) — pays cudnn autotune + kernel compile once, AND auto-selects
+    # a tile size that fits VRAM: try full-frame first, then progressively smaller
+    # tiles on CUDA OOM. Warms with the real batch so the decision matches the run.
+    _OOM = getattr(torch.cuda, "OutOfMemoryError", RuntimeError)
+
+    def _is_oom(err):
+        return isinstance(err, _OOM) or "out of memory" in str(err).lower()
+
+    warm_frame = np.zeros((batch, in_h, in_w, 3), np.uint8)
+    warmed = False
+    for candidate in (0, 1024, 768, 512, 384, 256):
+        tile_state[0] = candidate
+        try:
+            torch.cuda.empty_cache()
+            upscale(warm_frame)
+            torch.cuda.synchronize()
+            warmed = True
+            if candidate:
+                emit({"t": "log",
+                      "msg": f"VRAM-limited: auto-tiling at {candidate}px to fit"})
+            break
+        except RuntimeError as e:  # OutOfMemoryError subclasses RuntimeError
+            if _is_oom(e):
+                torch.cuda.empty_cache()
+                continue
+            emit({"t": "error", "msg": f"warmup/inference failed: {e}"})
+            return 3
+    if not warmed:
+        emit({"t": "error", "msg": "warmup/inference failed: out of memory even at "
+              "256px tiles — close other GPU apps (or free VRAM) and retry"})
         return 3
 
     dec = subprocess.Popen(dec_cmd, stdout=subprocess.PIPE)
