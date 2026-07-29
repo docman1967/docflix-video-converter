@@ -21,7 +21,8 @@ from tkinter import ttk, messagebox
 
 from .constants import (APP_NAME, VIDEO_EXTENSIONS, BITMAP_SUB_CODECS,
                         SUBTITLE_LANGUAGES, LANG_CODE_TO_NAME)
-from .gpu import detect_closed_captions, extract_closed_captions_to_srt
+from .gpu import (detect_closed_captions, detect_cc_types,
+                  extract_closed_captions_to_srt)
 from .utils import (format_size, get_subtitle_streams, scaled_geometry,
                     scaled_minsize, center_window_on_parent, ask_open_files,
                     ask_directory)
@@ -233,7 +234,15 @@ def open_sub_ripper(app):
         name = os.path.basename(filepath)
         size = os.path.getsize(filepath)
         subs = get_subtitle_streams(filepath)
-        has_cc = detect_closed_captions(filepath)
+        # Authoritative CC probe (ccextractor report; internally falls back to the
+        # ffprobe A53 scan). The fast scan alone misses EIA-608 carried in H.264 SEI
+        # user-data — common in .mp4 HDTV rips. This runs in the tool's background
+        # scan thread, so the ~1s/file cost is covered by the progress bar.
+        try:
+            _cc = detect_cc_types(filepath)
+            has_cc = bool(_cc.get('eia_608') or _cc.get('eia_708'))
+        except Exception:
+            has_cc = detect_closed_captions(filepath)
         sr_files.append({
             'path':       filepath,
             'name':       name,

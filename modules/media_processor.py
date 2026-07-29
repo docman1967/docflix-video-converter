@@ -399,6 +399,7 @@ def open_media_processor(app):
             if not to_add:
                 return
             _scanning[0] = True
+            process_btn.configure(state='disabled')   # no Process All mid-scan — it'd skip unscanned files
             total = len(to_add)
 
             def _worker():
@@ -430,6 +431,9 @@ def open_media_processor(app):
                 win.after(0, lambda: mp_progress_label.configure(text="Ready"))
                 _log(f"Added {added} {source_label} ({elapsed:.1f}s)", 'INFO')
                 _scanning[0] = False
+                # scan complete → re-enable Process All (unless a job is already running)
+                win.after(0, lambda: process_btn.configure(state='normal')
+                          if not mp_processing[0] else None)
 
             threading.Thread(target=_worker, daemon=True).start()
 

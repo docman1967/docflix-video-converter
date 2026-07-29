@@ -162,6 +162,40 @@ def find_allcaps_words(cues, tree, tag_caps, parent_widget):
         tree.selection_set(str(first))
 
 
+def _vtt_to_srt(vtt_text):
+    """Native WebVTT → SRT text. Robust where ffmpeg's demuxer silently emits an EMPTY
+    file: HLS/broadcast .vtt with an `X-TIMESTAMP-MAP` header, BOM, CRLF, missing cue IDs,
+    or cue-setting suffixes on the timestamp line. Keeps <i>/<b>/<u> (SRT-valid), strips
+    other WebVTT tags (<c...>, <00:00:00.000>, etc.)."""
+    import re as _re
+    text = (vtt_text or "").replace("\r\n", "\n").replace("\r", "\n")
+    ts = _re.compile(r"(?:(\d+):)?(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*"
+                     r"(?:(\d+):)?(\d{2}):(\d{2})[.,](\d{3})")
+
+    def _fmt(h, m, s, ms):
+        return f"{int(h or 0):02d}:{int(m):02d}:{int(s):02d},{int(ms):03d}"
+
+    lines = text.split("\n")
+    cues, i = [], 0
+    while i < len(lines):
+        m = ts.search(lines[i])
+        if not m:
+            i += 1
+            continue
+        start = _fmt(m.group(1), m.group(2), m.group(3), m.group(4))
+        end = _fmt(m.group(5), m.group(6), m.group(7), m.group(8))
+        i += 1
+        body = []
+        while i < len(lines) and lines[i].strip() != "":
+            ln = _re.sub(r"</?c[^>]*>|<\d{2}:\d{2}:\d{2}[.,]\d{3}>|</?v[^>]*>", "", lines[i])
+            ln = _re.sub(r"<(?!/?[biu]\b)[^>]*>", "", ln)  # drop non-i/b/u tags
+            body.append(ln.rstrip())
+            i += 1
+        if body:
+            cues.append((start, end, "\n".join(body).strip("\n")))
+    return "\n".join(f"{n}\n{s} --> {e}\n{txt}\n" for n, (s, e, txt) in enumerate(cues, 1))
+
+
 def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto_external=None):
         import tempfile
 
@@ -284,6 +318,17 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         srt_text = f.read()
                 except Exception as e:
                     messagebox.showerror("Error", f"Failed to read file:\n{e}",
+                                         parent=editor)
+                    return
+            elif ext == '.vtt':
+                # Native WebVTT parse. ffmpeg's webvtt demuxer silently emits an EMPTY
+                # SRT for HLS/broadcast .vtt carrying an `X-TIMESTAMP-MAP` header (common
+                # in captured captions) — so parse it ourselves. utf-8-sig drops the BOM.
+                try:
+                    with open(sub_path, 'r', encoding='utf-8-sig', errors='replace') as f:
+                        srt_text = _vtt_to_srt(f.read())
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to read .vtt:\n{e}",
                                          parent=editor)
                     return
             else:
@@ -1209,84 +1254,27 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             def _run_extract():
                 try:
                     if is_cc:
-                        # Three-tier CC extraction:
-                        #   1. ccextractor direct (fast)
-                        #   2. ffmpeg pipe → ccextractor (fast,
-                        #      works around MKV parser crash)
-                        #   3. ffmpeg movie[subcc] (slow, last resort)
-                        import shutil as _shutil
-                        from .gpu import (_clean_cc_srt,
-                                          _run_ccx_pipe,
-                                          _run_ffmpeg_subcc,
-                                          _have_cc_output,
-                                          _cleanup_ccx_side_files)
+                        # Delegate to the shared, verified CC engine
+                        # (gpu.extract_closed_captions_to_srt): a 3-tier
+                        # ccextractor → ffmpeg-pipe → lavfi[subcc] cascade,
+                        # every tier timeout-guarded. This block used to
+                        # re-implement those tiers inline and had drifted —
+                        # notably a Tier-1 `proc.wait()` with NO timeout that
+                        # could hang the whole extraction if ccextractor wedged
+                        # on a file. One source of truth now; no hang.
                         from .utils import get_video_duration
-                        has_ccx = bool(
-                            _shutil.which('ccextractor'))
                         dur = get_video_duration(video_path)
                         t_out = (max(120, int(dur * 0.5) + 60)
                                  if dur else 600)
-
-                        def _on_progress(pct):
-                            """Thread-safe progress update."""
-                            editor.after(0, lambda p=pct: (
-                                prog_var.set(p),
-                                prog_status.configure(
-                                    text=f"Extracting closed "
-                                         f"captions… {int(p)}%")))
-
-                        # Tier 1: ccextractor direct
-                        if has_ccx and not cancel_flag[0]:
-                            cmd = [
-                                'ccextractor', video_path,
-                                '-o', tmp_srt.name,
-                                '--no_progress_bar',
-                            ]
-                            if cc_type == 'eia_708':
-                                cmd += ['--svc', '1']
-                            try:
-                                proc = subprocess.Popen(
-                                    cmd,
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.PIPE,
-                                    text=True)
-                                proc_ref[0] = proc
-                                proc.wait()
-                            except Exception:
-                                pass
-                            _cleanup_ccx_side_files(
-                                tmp_srt.name)
-
-                        # Tier 2: ffmpeg pipe → ccextractor stdin
-                        if (has_ccx
-                                and not _have_cc_output(tmp_srt.name)
-                                and not cancel_flag[0]):
-                            try:
-                                _run_ccx_pipe(video_path,
-                                              tmp_srt.name,
-                                              cc_type, t_out,
-                                              duration=dur,
-                                              progress_callback=
-                                              _on_progress)
-                            except Exception:
-                                pass
-                            _cleanup_ccx_side_files(
-                                tmp_srt.name)
-
-                        # Tier 3: ffmpeg movie[subcc] (slow)
-                        if (not _have_cc_output(tmp_srt.name)
-                                and not cancel_flag[0]):
-                            try:
-                                _run_ffmpeg_subcc(video_path,
-                                                  tmp_srt.name,
-                                                  t_out)
-                            except Exception:
-                                pass
+                        try:
+                            ok = extract_closed_captions_to_srt(
+                                video_path, tmp_srt.name, cc_type, t_out)
+                        except Exception:
+                            ok = False
 
                         if cancel_flag[0]:
                             extract_result[0] = ('ok', 1, 'Cancelled')
-                        elif _have_cc_output(tmp_srt.name):
-                            _clean_cc_srt(tmp_srt.name)
+                        elif ok:
                             extract_result[0] = ('ok', 0, '')
                         else:
                             extract_result[0] = ('ok', 1,

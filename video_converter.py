@@ -5974,6 +5974,20 @@ class VideoConverterApp:
         # ── Add CC as a virtual subtitle track if detected ──
         cc_temp_srt = [None]  # mutable container for on-demand extraction
         has_cc = file_info.get('has_closed_captions', False)
+        if not has_cc:
+            # The fast add-time scan (detect_closed_captions / ffprobe first-30-frames)
+            # only sees CC exposed as ATSC A53 frame side-data. EIA-608 that rides in
+            # H.264 SEI user-data — common in .mp4 HDTV rips — slips right past it. This
+            # is the "extract subs from THIS file" moment, so pay for the authoritative
+            # ccextractor probe (bounded by its own 60s timeout) before hiding the track.
+            try:
+                from modules.gpu import detect_cc_types
+                _cc = detect_cc_types(filepath)
+                if _cc.get('eia_608') or _cc.get('eia_708'):
+                    has_cc = True
+                    file_info['has_closed_captions'] = True
+            except Exception:
+                pass
         if has_cc:
             # Add virtual stream entry — extraction is deferred until needed
             cc_stream = {
