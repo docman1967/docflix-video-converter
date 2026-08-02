@@ -126,6 +126,7 @@ def open_media_processor(app):
         _edition_custom_sv = tk.StringVar(value='')
         opt_add_chapters   = tk.BooleanVar(value=_mp.get('add_chapters', False))
         opt_ch_interval    = tk.IntVar(value=_mp.get('chapter_interval', 5))
+        opt_notify_sound   = tk.BooleanVar(value=_mp.get('notify_sound', True))
 
         # Track naming templates
         opt_name_tracks    = tk.BooleanVar(value=_mp.get('name_tracks', False))
@@ -369,6 +370,9 @@ def open_media_processor(app):
             ttk.Label(pr, text="Jobs:").pack(side='left', padx=(0, 2))
             ttk.Spinbox(pr, textvariable=opt_max_jobs, from_=1, to=32,
                         width=3).pack(side='left')
+            ttk.Separator(pr, orient='vertical').pack(side='left', padx=12, fill='y')
+            ttk.Checkbutton(pr, text="Play sound when done",
+                            variable=opt_notify_sound).pack(side='left', padx=(4, 0))
 
             # ── Close button ──
             btn_fr = ttk.Frame(fr)
@@ -1915,7 +1919,7 @@ def open_media_processor(app):
                         _reprobe_file(i)
 
             # Play completion notification sound
-            if completed[0] > 0 and not mp_stop[0]:
+            if completed[0] > 0 and not mp_stop[0] and opt_notify_sound.get():
                 _play_notification_sound()
 
             win.after(0, lambda c=completed[0], t=total: messagebox.showinfo(
@@ -2028,6 +2032,7 @@ def open_media_processor(app):
                 'name_video':     opt_name_video.get(),
                 'name_audio':     opt_name_audio.get(),
                 'name_sub':       opt_name_sub.get(),
+                'notify_sound':   opt_notify_sound.get(),
             }
             app._media_proc_prefs = mp_prefs
             # Write to shared preferences file

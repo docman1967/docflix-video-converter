@@ -297,10 +297,11 @@ def open_sub_ripper(app):
     def _add_files():
         paths = ask_open_files(
             parent=win,
-            title="Select Video Files",
+            title="Select Video or Subtitle Files",
             filetypes=[
                 ("Video files",
                  "*.mkv *.mp4 *.avi *.mov *.wmv *.flv *.webm *.ts *.m2ts *.mts"),
+                ("VobSub files", "*.idx"),
                 ("All files", "*.*")])
         if paths:
             _add_files_threaded(list(paths), "file(s)")
@@ -311,14 +312,14 @@ def open_sub_ripper(app):
         if not folder:
             return
         file_paths = []
-        for ext in VIDEO_EXTENSIONS:
+        for ext in list(VIDEO_EXTENSIONS) + ['.idx']:
             for fp in Path(folder).rglob(f'*{ext}'):
                 if fp.is_file() and not any(
                         part.startswith('.')
                         for part in fp.relative_to(folder).parts):
                     file_paths.append(str(fp))
         if file_paths:
-            _add_files_threaded(file_paths, "video file(s) from folder")
+            _add_files_threaded(file_paths, "file(s) from folder")
 
     def _remove_selected():
         sel = tree.selection()
@@ -1445,12 +1446,12 @@ def open_sub_ripper(app):
 
             file_paths = []
             for p in paths:
-                if (os.path.isfile(p)
-                        and os.path.splitext(p)[1].lower()
-                        in VIDEO_EXTENSIONS):
-                    file_paths.append(p)
+                if os.path.isfile(p):
+                    fext = os.path.splitext(p)[1].lower()
+                    if fext in VIDEO_EXTENSIONS or fext == '.idx':
+                        file_paths.append(p)
                 elif os.path.isdir(p):
-                    for ext in VIDEO_EXTENSIONS:
+                    for ext in list(VIDEO_EXTENSIONS) + ['.idx']:
                         for fp in Path(p).rglob(f'*{ext}'):
                             if fp.is_file() and not any(
                                     part.startswith('.')

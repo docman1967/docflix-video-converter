@@ -305,8 +305,46 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
 
         def load_file(sub_path):
             """Load a subtitle file into the editor by path."""
-            sub_exts = {'.srt', '.ass', '.ssa', '.vtt', '.sub'}
+            sub_exts = {'.srt', '.ass', '.ssa', '.vtt', '.sub', '.idx'}
             ext = Path(sub_path).suffix.lower()
+            if ext in ('.idx', '.sub'):
+                # .sub can be text (MicroDVD) or bitmap (VobSub).
+                # .idx is always VobSub. Probe to detect bitmap codec.
+                is_vobsub = (ext == '.idx')
+                if ext == '.sub':
+                    try:
+                        probe = subprocess.run(
+                            ['ffprobe', '-v', 'quiet', '-print_format', 'json',
+                             '-show_streams', sub_path],
+                            capture_output=True, text=True, timeout=15)
+                        import json as _json
+                        streams = _json.loads(probe.stdout).get('streams', [])
+                        is_vobsub = any(s.get('codec_name') == 'dvd_subtitle'
+                                        for s in streams)
+                    except Exception:
+                        pass
+                if is_vobsub:
+                    # Find the IDX file (needed for timing; ffmpeg reads
+                    # the pair from whichever one you point it at)
+                    stem = sub_path[:-4]
+                    idx_path = stem + '.idx'
+                    if not os.path.exists(idx_path):
+                        idx_path = stem + '.IDX'
+                    sub_pair = stem + '.sub'
+                    if not os.path.exists(sub_pair):
+                        sub_pair = stem + '.SUB'
+                    if not os.path.exists(idx_path) or not os.path.exists(sub_pair):
+                        missing = '.idx' if not os.path.exists(idx_path) else '.sub'
+                        messagebox.showerror("Missing File",
+                            f"Cannot find matching {missing} file for:\n"
+                            f"{os.path.basename(sub_path)}\n\n"
+                            f"IDX/SUB files must be in the same folder "
+                            f"with the same name.",
+                            parent=editor)
+                        return
+                    load_video_subtitle(idx_path)
+                    return
+                # Not VobSub — fall through to text subtitle handling
             if ext not in sub_exts:
                 messagebox.showwarning("Unsupported Format",
                     f"Not a recognised subtitle file:\n{os.path.basename(sub_path)}",
@@ -1370,7 +1408,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 parent=editor,
                 title="Open Subtitle or Video File",
                 filetypes=[
-                    ('Subtitle files', '*.srt *.ass *.ssa *.vtt *.sub'),
+                    ('Subtitle files', '*.srt *.ass *.ssa *.vtt *.sub *.idx'),
                     ('Video files', '*.mkv *.mp4 *.avi *.mov *.wmv *.flv *.webm *.ts *.m2ts *.mts'),
                     ('All files', '*.*'),
                 ]
@@ -1378,7 +1416,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             if not path:
                 return
             ext = Path(path).suffix.lower()
-            if ext in VIDEO_EXTENSIONS:
+            if ext in VIDEO_EXTENSIONS or ext == '.idx':
                 load_video_subtitle(path)
             else:
                 video_source[0] = None  # clear video mode
@@ -1444,7 +1482,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                             return  # no supported files in folder
 
                 ext = Path(path).suffix.lower()
-                if ext in VIDEO_EXTENSIONS:
+                if ext in VIDEO_EXTENSIONS or ext == '.idx':
                     load_video_subtitle(path)
                 else:
                     video_source[0] = None  # clear video mode

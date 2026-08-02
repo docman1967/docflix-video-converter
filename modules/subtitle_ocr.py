@@ -30,6 +30,11 @@ LANG_MAP = {
     'kor': 'kor', 'chi': 'chi_sim', 'zho': 'chi_sim', 'ara': 'ara',
     'hin': 'hin', 'und': 'eng', 'nld': 'nld', 'pol': 'pol', 'tur': 'tur',
     'swe': 'swe', 'nor': 'nor', 'dan': 'dan', 'fin': 'fin',
+    # ISO 639-1 (2-letter) codes — VobSub IDX files use these
+    'en': 'eng', 'fr': 'fra', 'de': 'deu', 'es': 'spa', 'it': 'ita',
+    'pt': 'por', 'ru': 'rus', 'ja': 'jpn', 'ko': 'kor', 'zh': 'chi_sim',
+    'ar': 'ara', 'hi': 'hin', 'nl': 'nld', 'pl': 'pol', 'tr': 'tur',
+    'sv': 'swe', 'no': 'nor', 'da': 'dan', 'fi': 'fin',
 }
 
 
@@ -257,6 +262,7 @@ def _ocr_overlay_approach(filepath, stream_index, language, tess_lang,
         pass  # probe failed — fall through to render attempt
 
     # ── Get video resolution and duration ──
+    has_video_stream = False
     try:
         probe_cmd = [
             'ffprobe', '-v', 'quiet', '-print_format', 'json',
@@ -272,10 +278,24 @@ def _ocr_overlay_approach(filepath, stream_index, language, tess_lang,
             if s.get('codec_type') == 'video':
                 vid_w = s.get('width', vid_w)
                 vid_h = s.get('height', vid_h)
+                has_video_stream = True
                 break
         duration = float(probe_data.get('format', {}).get('duration', 0))
     except Exception:
+        probe_data = {}
         vid_w, vid_h, duration = 1920, 1080, 0
+    if not has_video_stream:
+        sub_w, sub_h = 0, 0
+        for s in probe_data.get('streams', []):
+            if s.get('codec_type') == 'subtitle':
+                sub_w = s.get('width', 0)
+                sub_h = s.get('height', 0)
+                if sub_w and sub_h:
+                    break
+        vid_w = sub_w or 720
+        vid_h = sub_h or 480
+        if duration <= 0:
+            duration = 10800
 
     if progress_callback:
         progress_callback(
