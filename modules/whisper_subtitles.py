@@ -14,7 +14,7 @@ import textwrap
 from datetime import timedelta
 from pathlib import Path
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 # ── dependency checks ────────────────────────────────────────────────────────
 
@@ -631,6 +631,376 @@ def transcribe(
 
     print(f"\n✅  {len(collected)} subtitle segments generated.")
     return collected
+
+
+# ── forced-subtitle detection (mixed-language media) ─────────────────────────
+#
+# The problem: Whisper detects ONE language for a whole file. A documentary that's
+# 95% English with a 40-second Spanish interview gives you two bad options —
+# transcribe mode mangles the Spanish, or translate mode round-trips the English
+# through a translator. Neither produces a FORCED track, which is what that film
+# actually needs: a sub shown by default that covers only the foreign dialogue.
+#
+# The approach: transcribe normally, then find where the model was GUESSING.
+# Foreign speech decoded as English scores a poor avg_logprob, so that's a cheap
+# first-pass filter — only those windows pay for a real language-detection call.
+# Confirmed foreign spans get re-run with task="translate" and are emitted twice:
+# merged into the main track, and alone as the forced track.
+#
+# KNOWN LIMIT — audio only. A real forced track also translates ON-SCREEN text
+# (signs, chyrons, location cards). Whisper can't see, so this covers the
+# foreign-DIALOGUE half. For documentaries that's most of the value, but it is
+# not the whole job and shouldn't be described as if it were.
+#     -- Arthur & Tony, 2026-08-03
+
+FORCED_SUSPECT_LOGPROB = -0.75   # below this the decoder was guessing -> worth checking
+FORCED_MIN_SPAN = 2.5            # seconds; shorter than this and detection is a coin flip
+FORCED_LANG_CONFIDENCE = 0.60    # detect_language probability floor
+FORCED_MERGE_GAP = 3.0           # stitch spans separated by less than this
+FORCED_MAX_COVERAGE = 0.60       # beyond this it's a foreign FILM, not forced subs
+FORCED_MIN_GAP = 8.0             # a transcription hole this long is worth investigating
+FORCED_SCAN_WIDTH = 10.0         # detector window — wide enough to ID, narrow enough not to mix
+FORCED_SCAN_HOP = 4.0            # slide step; overlapping so a clip can't fall between windows
+FORCED_SCAN_PAD = 4.0            # look this far outside a candidate (speech starts before the cue)
+FORCED_NATIVE_MAX = 0.50         # foreign when confidence in the NATIVE language drops below this
+
+
+def _suspect_windows(segments, *, logprob_threshold=FORCED_SUSPECT_LOGPROB,
+                     merge_gap=FORCED_MERGE_GAP, min_span=FORCED_MIN_SPAN):
+    """Contiguous runs of low-confidence segments, merged into candidate windows.
+
+    Cheap pre-filter: running detect_language on every segment of a 50-minute
+    documentary is wasteful, and avg_logprob already tells us where the decoder
+    struggled. Missing a window here only costs recall, never correctness.
+    """
+    runs, cur = [], None
+    for seg in segments:
+        lp = getattr(seg, "avg_logprob", 0.0)
+        if lp is not None and lp < logprob_threshold:
+            if cur and seg.start - cur[1] <= merge_gap:
+                cur[1] = seg.end
+            else:
+                if cur:
+                    runs.append(cur)
+                cur = [seg.start, seg.end]
+        elif cur and seg.start - cur[1] > merge_gap:
+            runs.append(cur)
+            cur = None
+    if cur:
+        runs.append(cur)
+    return [(a, b) for a, b in runs if (b - a) >= min_span]
+
+
+def _gap_windows(segments, audio, *, sample_rate=16000, min_gap=FORCED_MIN_GAP,
+                 min_span=FORCED_MIN_SPAN):
+    """Transcription HOLES that actually contain speech.
+
+    This is the failure mode that matters most, and the one the logprob filter is
+    structurally blind to. Whisper doesn't always mangle foreign speech into bad
+    English — often it emits NOTHING for it. No segment means no avg_logprob means
+    nothing to be suspicious of, so the foreign dialogue is invisible to a filter
+    that only looks at what was transcribed.
+
+    Found 2026-08-03 in Tony's own WhisperX output on "Dogs: The Untold Story":
+    E03 had SEVENTEEN gaps of 15s+ in a continuously-narrated documentary. He'd
+    described it as "foreign languages that didn't get picked up" — literally true.
+
+    Silero VAD separates "nobody is talking" (music bed, wind, b-roll) from
+    "someone is talking and we transcribed none of it". Only the latter is a lead.
+    """
+    try:
+        from faster_whisper.vad import get_speech_timestamps, VadOptions
+    except ImportError:
+        return []
+
+    covered = sorted((s.start, s.end) for s in segments)
+    total = len(audio) / sample_rate
+    holes, cursor = [], 0.0
+    for start, end in covered:
+        if start - cursor >= min_gap:
+            holes.append((cursor, start))
+        cursor = max(cursor, end)
+    if total - cursor >= min_gap:
+        holes.append((cursor, total))
+
+    out = []
+    for start, end in holes:
+        chunk = audio[int(start * sample_rate):int(end * sample_rate)]
+        if len(chunk) < sample_rate:
+            continue
+        try:
+            speech = get_speech_timestamps(
+                chunk, VadOptions(min_speech_duration_ms=int(min_span * 1000)))
+        except Exception:
+            continue
+        for sp in speech:
+            a = start + sp["start"] / sample_rate
+            b = start + sp["end"] / sample_rate
+            if b - a >= min_span:
+                out.append((a, b))
+    return out
+
+
+def _stretched_windows(segments, *, min_span=FORCED_MIN_SPAN, min_cps=5.0):
+    """Audio INSIDE a cue that produced no words — the sneakiest failure mode.
+
+    Tony's observation, 2026-08-03: *"whisperx gets confused. If there are foreign
+    languages, it tends to attribute that to the next English part — the subtitle
+    for the English part just after gets stretched to include the foreign language."*
+
+    This one leaves no evidence for the other two detectors. There's no HOLE (a cue
+    covers the span) and no bad avg_logprob (the English text is correct). Only the
+    TIMING is wrong, and wrong timing looks like nothing at all.
+
+    Word timestamps expose it: a cue starting at 400s whose first word lands at 418s
+    has 18 seconds inside it that produced no words. That's the foreign speech.
+
+    Without word timestamps, fall back to characters-per-second — normal speech runs
+    ~12-20 cps, so a cue under `min_cps` is covering audio it never transcribed.
+    """
+    out = []
+    for seg in segments:
+        words = [w for w in (getattr(seg, "words", None) or [])
+                 if getattr(w, "start", None) is not None]
+        if words:
+            # Silence before the first word, and any wide gap between words.
+            edges = [(seg.start, words[0].start)]
+            for a, b in zip(words, words[1:]):
+                edges.append((a.end, b.start))
+            for a, b in edges:
+                if b - a >= min_span:
+                    out.append((a, b))
+        else:
+            text = (getattr(seg, "text", "") or "").strip()
+            dur = seg.end - seg.start
+            if dur >= min_span and text and (len(text) / dur) < min_cps:
+                # Can't localise it without words; hand over the whole cue.
+                out.append((seg.start, seg.end))
+    return out
+
+
+def detect_foreign_spans(model, audio, segments, *, native_lang="en",
+                         sample_rate=16000, confidence=FORCED_LANG_CONFIDENCE,
+                         progress=None, full_sweep=True):
+    """Return [(start, end, lang, prob), ...] for spans NOT in `native_lang`.
+
+    `audio` is the decoded float32 mono array (faster_whisper.audio.decode_audio).
+
+    Two candidate sources, because foreign speech fails in two different ways:
+      1. transcribed as nonsense English -> poor avg_logprob  (_suspect_windows)
+      2. not transcribed at all          -> a speech-bearing hole (_gap_windows)
+    """
+    total = len(audio) / sample_rate
+    if full_sweep:
+        # SWEEP THE WHOLE FILE. No candidate windows at all.
+        #
+        # We used to derive candidates from three heuristics (bad avg_logprob,
+        # transcription holes, cues containing no words). All three depend on
+        # Whisper's SEGMENTATION, which is not stable across runs or settings —
+        # and on 2026-08-03 that cost us a real miss: ten seconds of Shona at 6:33
+        # in "Dogs: The Untold Story" E01. A probe found a clean 9.6s hole there,
+        # but in the full run (word timestamps + VAD) a segment covered it, so no
+        # candidate window was generated and 393s was NEVER EXAMINED.
+        #
+        # That's a whole class of invisible failure, and it existed only to avoid
+        # a cost nobody measured: ~660 detect_language calls for a 44-minute file,
+        # against a transcribe that already takes minutes. If we never choose where
+        # to look, we can never fail to look somewhere.
+        padded = [(0.0, total)]
+    else:
+        windows = sorted(set(_suspect_windows(segments))
+                         | set(_gap_windows(segments, audio, sample_rate=sample_rate))
+                         | set(_stretched_windows(segments)))
+        padded = []
+        for start, end in windows:
+            a, b = max(0.0, start - FORCED_SCAN_PAD), min(total, end + FORCED_SCAN_PAD)
+            if padded and a <= padded[-1][1]:
+                padded[-1] = (padded[-1][0], max(padded[-1][1], b))
+            else:
+                padded.append((a, b))
+
+    hits = []
+    scanned = 0
+    for i, (start, end) in enumerate(padded):
+        # SLIDE a short detector rather than asking once about the whole span.
+        # Measured 2026-08-03 on "Dogs: The Untold Story" E01 @ 6:33 — Shona speech
+        # surrounded by English narration:
+        #     393-403s -> sn 39%     <- the truth, only at this exact cut
+        #     393-413s -> en 98%     <- ten seconds wider and it's gone
+        #     380-410s -> en 100%
+        # One question about a contaminated window always returns the majority
+        # language. A short window can't be outvoted by narration it doesn't contain.
+        t = start
+        while t < end - 1.0:
+            w_end = min(t + FORCED_SCAN_WIDTH, end)
+            chunk = audio[int(t * sample_rate):int(w_end * sample_rate)]
+            if len(chunk) >= sample_rate:
+                try:
+                    lang, prob, all_probs = model.detect_language(audio=chunk)
+                except Exception:
+                    lang, prob, all_probs = native_lang, 0.0, []
+                # Don't use an absolute floor on the WINNER — Whisper's language ID is
+                # far less certain on low-resource languages (Shona topped out at 39%,
+                # under the old 0.60 floor, and was still correct). Ask the better
+                # question: has confidence in the NATIVE language collapsed?
+                p_native = dict(all_probs or []).get(native_lang, 1.0 if lang == native_lang else 0.0)
+                if lang != native_lang and p_native < FORCED_NATIVE_MAX:
+                    hits.append((t, w_end, lang, prob))
+            scanned += 1
+            if progress and scanned % 50 == 0:
+                progress(f"  scanned {scanned} windows ({t:.0f}s/{total:.0f}s)…")
+            t += FORCED_SCAN_HOP
+
+    # Stitch overlapping/adjacent hits of the same language back into spans.
+    spans = []
+    for start, end, lang, prob in sorted(hits):
+        if spans and spans[-1][2] == lang and start - spans[-1][1] <= FORCED_SCAN_WIDTH:
+            prev = spans[-1]
+            spans[-1] = (prev[0], max(prev[1], end), lang, max(prev[3], prob))
+        else:
+            spans.append((start, end, lang, prob))
+    return spans
+
+
+def _merge_spans(spans, gap=FORCED_MERGE_GAP):
+    """Stitch adjacent same-language spans separated by a short gap."""
+    out = []
+    for start, end, lang, prob in sorted(spans):
+        if out and out[-1][2] == lang and start - out[-1][1] <= gap:
+            prev = out[-1]
+            out[-1] = (prev[0], max(prev[1], end), lang, max(prev[3], prob))
+        else:
+            out.append((start, end, lang, prob))
+    return out
+
+
+def transcribe_with_forced(
+    audio_path: Path,
+    model_size: str,
+    language: str | None,
+    device: str,
+    beam_size: int,
+    vad: bool,
+    word_timestamps: bool = False,
+    native_lang: str = "en",
+    progress=None,
+):
+    """Transcribe, then find + translate foreign-language spans.
+
+    Returns (main_segments, forced_segments, report). `main_segments` is the full
+    track with foreign spans replaced by their translations; `forced_segments` is
+    just those translations, suitable for a track flagged `forced`.
+
+    The model is loaded ONCE and reused for detection and the translate pass —
+    reloading per span would dominate the runtime.
+    """
+    from faster_whisper import WhisperModel
+    from faster_whisper.audio import decode_audio
+
+    def say(msg):
+        if progress:
+            progress(msg)
+        else:
+            print(msg)
+
+    say(f"Loading model {model_size} (device={device})…")
+    model = WhisperModel(model_size, device=device, compute_type="auto")
+
+    segments, info = model.transcribe(
+        str(audio_path),
+        beam_size=beam_size,
+        language=language or native_lang,
+        vad_filter=vad,
+        vad_parameters=dict(min_silence_duration_ms=500),
+        task="transcribe",
+        # Word timestamps are NOT optional here: the "stretched cue" failure mode
+        # is only visible as audio inside a cue that produced no words.
+        word_timestamps=True,
+    )
+    main = list(segments)
+    duration = info.duration or 0.0
+    say(f"Transcribed {len(main)} segments ({duration:.0f}s).")
+
+    report = {
+        "duration": duration,
+        "segments": len(main),
+        "windows_checked": 0,
+        "spans": [],
+        "languages": [],
+        "coverage": 0.0,
+        "by_source": {},
+        "skipped_reason": None,
+    }
+    if not main:
+        return main, [], report
+
+    audio = decode_audio(str(audio_path), sampling_rate=16000)
+    # Break the candidates out by source — which detector earns its keep is the
+    # whole tuning question, and on real documentary audio the answer surprised us
+    # (see the module notes: the logprob filter found literally nothing).
+    w_suspect = set(_suspect_windows(main))
+    w_gap = set(_gap_windows(main, audio))
+    w_stretch = set(_stretched_windows(main))
+    windows = sorted(w_suspect | w_gap | w_stretch)
+    report["windows_checked"] = len(windows)
+    report["by_source"] = {"logprob": len(w_suspect), "gap": len(w_gap),
+                           "stretched": len(w_stretch)}
+    say("candidate windows: %d total (logprob=%d, gaps=%d, stretched=%d)"
+        % (len(windows), len(w_suspect), len(w_gap), len(w_stretch)))
+
+    spans = _merge_spans(detect_foreign_spans(
+        model, audio, main, native_lang=native_lang, progress=progress))
+    spans = [s for s in spans if (s[1] - s[0]) >= FORCED_MIN_SPAN]
+    if not spans:
+        say("No foreign-language spans found — no forced track needed.")
+        return main, [], report
+
+    covered = sum(e - s for s, e, _, _ in spans)
+    report["coverage"] = covered / duration if duration else 0.0
+    # A file that's mostly non-native isn't an English doc with foreign clips —
+    # it's a foreign film, and a "forced" track covering 80% of it is nonsense.
+    if report["coverage"] > FORCED_MAX_COVERAGE:
+        report["skipped_reason"] = (
+            "%.0f%% of the audio is non-%s — this looks like a foreign-language "
+            "film, not forced subtitles. Transcribe it with language=%s instead."
+            % (report["coverage"] * 100, native_lang, spans[0][2])
+        )
+        say(report["skipped_reason"])
+        return main, [], report
+
+    forced = []
+    for i, (start, end, lang, prob) in enumerate(spans):
+        say(f"Translating {lang} span {i + 1}/{len(spans)} "
+            f"({start:.0f}s–{end:.0f}s, {prob:.0%} confident)…")
+        chunk = audio[int(start * 16000):int(end * 16000)]
+        try:
+            segs, _ = model.transcribe(
+                chunk, beam_size=beam_size, task="translate",
+                language=lang, vad_filter=False,
+                word_timestamps=word_timestamps,
+            )
+        except Exception as exc:
+            say(f"  ! translate failed for {start:.0f}s–{end:.0f}s: {exc}")
+            continue
+        for s in segs:
+            # Chunk-relative -> absolute. Slicing the audio ourselves (rather than
+            # using clip_timestamps) keeps this offset explicit and predictable.
+            forced.append(SubSegment(s.start + start, s.end + start, s.text.strip()))
+        report["spans"].append({"start": start, "end": end,
+                                "lang": lang, "prob": prob})
+
+    report["languages"] = sorted({s["lang"] for s in report["spans"]})
+
+    # Main track = everything, with the foreign stretches replaced by translations.
+    kept = [s for s in main
+            if not any(s.start < e and s.end > st for st, e, _, _ in spans)]
+    merged = sorted(
+        [SubSegment(s.start, s.end, s.text.strip()) for s in kept] + forced,
+        key=lambda s: s.start,
+    )
+    say(f"Found {len(spans)} foreign span(s): {', '.join(report['languages'])} "
+        f"→ {len(forced)} forced cue(s).")
+    return merged, forced, report
 
 
 def transcribe_whisperx(

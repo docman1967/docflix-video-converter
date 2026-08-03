@@ -3457,6 +3457,31 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         editor.bind('<Control-t>', lambda e: _toggle_timeline_menu())
         editor.bind('<Control-T>', lambda e: _toggle_timeline_menu())
 
+        def _open_forced_subs():
+            """Forced Subtitle Editor — build a forced track for mixed-language media.
+
+            Deliberately its OWN window with its OWN span list. This editor's cue
+            model IS the live editing session; a bug in the forced-subs work must
+            never be able to corrupt an edit in progress. It shares the
+            WaveformTimeline widget, not the state.
+            """
+            try:
+                from .forced_subs_panel import open_forced_subs_panel
+            except Exception as exc:
+                messagebox.showerror(
+                    "Unavailable",
+                    f"Forced Subtitle Editor could not load:\n{exc}", parent=editor)
+                return
+            try:
+                vpath = _find_video_for_subtitle()
+            except Exception:
+                vpath = None
+            open_forced_subs_panel(editor, video_path=vpath)
+
+        view_menu.add_separator()
+        view_menu.add_command(label="Forced Subtitle Editor...",
+                              command=_open_forced_subs)
+
         def _find_video_for_subtitle():
             """Try to find the video file for the current subtitle."""
             vpath = None

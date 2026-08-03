@@ -4413,6 +4413,8 @@ class VideoConverterApp:
                                command=self.open_standalone_subtitle_editor)
         tools_menu.add_command(label="Batch Filter Subtitles...",
                                command=self.open_batch_filter)
+        tools_menu.add_command(label="Forced Subtitle Editor...",
+                               command=self.open_forced_subtitle_editor)
         tools_menu.add_separator()
         tools_menu.add_command(label="Docflix Media Processor...",
                                accelerator="Ctrl+M",
@@ -6600,6 +6602,32 @@ class VideoConverterApp:
                 mod.open_standalone_subtitle_editor(self)
             else:
                 messagebox.showerror("Docflix Subtitle Editor", "modules/subtitle_editor.py not found.")
+
+    def open_forced_subtitle_editor(self):
+        """Open the Forced Subtitle Editor directly from Tools.
+
+        It's also under the Subtitle Editor's View menu, but this tool never needs
+        a subtitle file — only a video — so making someone open a *subtitle* editor
+        to reach it was a step invented by the menu layout, not by the task.
+        If a video is selected in the file list, hand it straight over.
+        """
+        try:
+            from modules.forced_subs_panel import open_forced_subs_panel
+        except Exception as exc:
+            messagebox.showerror("Forced Subtitle Editor",
+                                 f"Could not load the panel:\n{exc}")
+            return
+
+        preset = None
+        try:
+            sel = self.file_tree.selection() if hasattr(self, 'file_tree') else None
+            if sel:
+                info = self.file_data.get(sel[0]) if hasattr(self, 'file_data') else None
+                if isinstance(info, dict):
+                    preset = info.get('path')
+        except Exception:
+            preset = None
+        open_forced_subs_panel(self, video_path=preset)
 
     def open_media_processor(self):
         """Open the Media Processor window."""
