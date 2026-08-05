@@ -284,8 +284,29 @@ def open_sub_ripper(app):
             return GLYPH_NA
         return GLYPH_ON if _wants(f).get(t) else GLYPH_OFF
 
+    # Anchor for shift-click range setting: the last plain click on a type cell.
+    # Cleared whenever the tree is rebuilt, because row indices stop meaning the
+    # same file after a sort or a re-add.
+    _range_anchor = {'col': None, 'idx': None, 'state': None}
+
+    def _set_type(idx, col, state):
+        """Set one file's type flag and repaint its cell. No-op if unavailable."""
+        f = sr_files[idx]
+        if col not in _available_types(f):
+            return False
+        _wants(f)[col] = state
+        items = tree.get_children()
+        if idx < len(items):
+            tree.set(items[idx], col, _type_glyph(f, col))
+        return True
+
     def _on_tree_click(event):
-        """Toggle a type cell. Ignores clicks on absent types and other columns."""
+        """Toggle a type cell; shift-click extends the last toggle over a range.
+
+        Semantics match a file manager: a plain click sets a state and becomes the
+        anchor, then shift-click applies THAT SAME state to everything between.
+        Rows that don't have the type are skipped, not forced.
+        """
         if tree.identify_region(event.x, event.y) != 'cell':
             return None
         col_id = tree.identify_column(event.x)
@@ -303,12 +324,26 @@ def open_sub_ripper(app):
             idx = items.index(row)
         except ValueError:
             return None
+
+        shift = bool(event.state & 0x0001)
+        anchor = _range_anchor
+        if (shift and anchor['col'] == col and anchor['idx'] is not None
+                and anchor['idx'] < len(sr_files)):
+            lo, hi = sorted((anchor['idx'], idx))
+            changed = sum(1 for i in range(lo, hi + 1)
+                          if _set_type(i, col, anchor['state']))
+            # Anchor deliberately NOT moved — repeated shift-clicks keep extending
+            # from the original click, which is what every file manager does.
+            _log(f"{'Selected' if anchor['state'] else 'Deselected'} {col.upper()} "
+                 f"on {changed} file(s)", 'INFO')
+            return 'break'
+
         f = sr_files[idx]
         if col not in _available_types(f):
             return 'break'          # nothing to toggle; don't start a drag-select
-        w = _wants(f)
-        w[col] = not w.get(col)
-        tree.set(row, col, _type_glyph(f, col))
+        new_state = not _wants(f).get(col)
+        _set_type(idx, col, new_state)
+        _range_anchor.update(col=col, idx=idx, state=new_state)
         return 'break'              # swallow the click so it doesn't reselect
 
     # NOTE: tree.bind for _on_tree_click lives just after the Treeview is created,
@@ -881,6 +916,9 @@ def open_sub_ripper(app):
     tree.configure(yscrollcommand=scrollbar.set)
 
     def _rebuild_tree():
+        # Row indices stop pointing at the same file after a sort or a re-add, so
+        # a stale shift-click anchor would silently set the wrong range.
+        _range_anchor.update(col=None, idx=None, state=None)
         _refresh_lang_dropdown()
         tree.delete(*tree.get_children())
         for f in sr_files:
