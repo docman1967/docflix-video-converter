@@ -8,7 +8,7 @@ All shared constants, codec maps, extension sets, and GPU backend definitions.
 # Single source of truth for the app version — video_converter.py imports this,
 # and install.sh greps it. Bump here only.
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.12.0"
+APP_VERSION = "3.12.1"
 
 # ── Defaults ──
 DEFAULT_BITRATE = "2M"
@@ -17,9 +17,18 @@ DEFAULT_PRESET = "ultrafast"
 DEFAULT_GPU_PRESET = "p4"
 MAX_CHARS_PER_LINE = 42
 
-# ── Preferences path ──
+# ── Preferences paths ──
+# There are TWO prefs files, on purpose:
+#   PREFS_*       the STANDALONE store. Every "Open with" / standalone tool reads
+#                 and writes this one, and it exists before any app object does.
+#   MAIN_PREFS_*  the MAIN app's own full store (VideoConverterApp._prefs_path).
+# The main app mirrors shared lists (ad patterns, cap words, replacements) into the
+# standalone file in both directions so the two stay in step. Anything a tool can be
+# launched BOTH ways needs to be written to both — see utils.save_module_prefs().
 PREFS_DIR = "~/.local/share/docflix"
 PREFS_FILENAME = "preferences.json"
+MAIN_PREFS_DIR = "~/.config/docflix_video_converter"
+MAIN_PREFS_FILENAME = "prefs.json"
 
 # ── BETA-ONLY default API key ──
 # Convenience so beta testers don't re-enter a key every launch. Used by the

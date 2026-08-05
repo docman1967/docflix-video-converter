@@ -552,6 +552,78 @@ def scaled_minsize(widget, width, height):
     return (mw, mh)
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Per-module preference blocks
+# ═══════════════════════════════════════════════════════════════════
+
+def _all_prefs_paths():
+    """Both prefs files, in READ-precedence order (main app first).
+
+    See constants.py for why there are two. Returns absolute paths; neither is
+    guaranteed to exist.
+    """
+    from .constants import (PREFS_DIR, PREFS_FILENAME,
+                            MAIN_PREFS_DIR, MAIN_PREFS_FILENAME)
+    return [
+        os.path.join(os.path.expanduser(MAIN_PREFS_DIR), MAIN_PREFS_FILENAME),
+        os.path.join(os.path.expanduser(PREFS_DIR), PREFS_FILENAME),
+    ]
+
+
+def load_module_prefs(section, default=None):
+    """Return the saved settings block for one module, e.g. 'batch_filter'.
+
+    Reads the prefs FILES directly rather than an ``app._prefs`` attribute.
+    That attribute is only ever set by standalone.py — the main app never sets
+    it — so any module that trusts it silently starts from defaults every time
+    it's opened from the Suite. Reading the file works on every launch path.
+    (Arthur 2026-08-05, after finding exactly that dead restore in two modules.)
+
+    Both files are consulted so a tool that can run standalone AND from the
+    Suite sees one set of settings instead of two. First hit wins.
+    """
+    for path in _all_prefs_paths():
+        try:
+            with open(path) as f:
+                block = json.load(f).get(section)
+            if isinstance(block, dict):
+                return block
+        except Exception:
+            continue
+    return {} if default is None else default
+
+
+def save_module_prefs(section, data):
+    """Write one module's settings block to BOTH prefs files.
+
+    Writing both is what keeps a dual-launch tool consistent: save only to the
+    main store and the standalone copy of the same tool starts blank, which
+    reads as "it forgot again". Each file is merged, never replaced, so the
+    other modules' blocks survive.
+
+    Returns True if at least one file was written — callers that care can log
+    it. Failing silently on BOTH would be indistinguishable from success.
+    """
+    ok = False
+    for path in _all_prefs_paths():
+        try:
+            try:
+                with open(path) as f:
+                    prefs = json.load(f)
+            except Exception:
+                prefs = {}
+            if not isinstance(prefs, dict):
+                prefs = {}
+            prefs[section] = data
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w') as f:
+                json.dump(prefs, f, indent=2)
+            ok = True
+        except Exception:
+            continue
+    return ok
+
+
 def _saved_ui_scale():
     """Read the user's manual UI-Scale override from prefs, if any.
 

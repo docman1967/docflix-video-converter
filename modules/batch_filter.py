@@ -12,7 +12,8 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from .utils import scaled_geometry, scaled_minsize, ask_open_files, ask_directory
+from .utils import (scaled_geometry, scaled_minsize, ask_open_files,
+                    ask_directory, load_module_prefs, save_module_prefs)
 
 from .subtitle_filters import (
     parse_srt, write_srt,
@@ -642,6 +643,12 @@ def open_batch_filter(app):
                                            app, 'use_names_db', False))),
         ]
 
+        # Restore the last-used selections. Tony runs the same handful of filters
+        # nearly every time, so starting blank meant re-ticking them on every
+        # open. Unknown/renamed keys just fall back to False. (2026-08-05)
+        _bf_prefs = load_module_prefs('batch_filter')
+        _saved_filters = _bf_prefs.get('filters', {})
+
         filter_vars = {}
         # Two-column grid layout for filters
         cols_frame = ttk.Frame(filters_frame)
@@ -653,7 +660,7 @@ def open_batch_filter(app):
 
         mid = (len(filter_defs) + 1) // 2  # split point
         for i, (key, label, _) in enumerate(filter_defs):
-            var = tk.BooleanVar(value=False)
+            var = tk.BooleanVar(value=bool(_saved_filters.get(key, False)))
             filter_vars[key] = var
             col = left_col if i < mid else right_col
             if key == 'fix_caps':
@@ -666,7 +673,8 @@ def open_batch_filter(app):
                 ttk.Checkbutton(col, text=label, variable=var).pack(anchor='w')
 
         # Search & replace checkbox (pairs managed via Settings menu)
-        opt_apply_sr = tk.BooleanVar(value=False)
+        opt_apply_sr = tk.BooleanVar(
+            value=bool(_saved_filters.get('search_replace', False)))
 
         def _update_sr_label():
             n = len(app.custom_replacements)
@@ -700,8 +708,10 @@ def open_batch_filter(app):
         ttk.Button(sel_frame, text="Deselect All", command=deselect_all_filters).pack(side='left')
 
         # Output options (inline in filters section)
-        output_mode = tk.StringVar(value='overwrite')
-        subfolder_name = tk.StringVar(value='filtered')
+        output_mode = tk.StringVar(
+            value=_bf_prefs.get('output_mode', 'overwrite'))
+        subfolder_name = tk.StringVar(
+            value=_bf_prefs.get('subfolder_name', 'filtered') or 'filtered')
 
         out_row = ttk.Frame(filters_frame)
         out_row.pack(fill='x', pady=(6, 0))
@@ -866,10 +876,33 @@ def open_batch_filter(app):
                 foreground='green' if errors == 0 else 'orange')
             app.add_log(f"Batch filter complete: {success}/{total} files processed. "
                          f"Filters: {filters_used}", 'SUCCESS')
+            # Save here too, not just on close: the selection that actually ran a
+            # job is the one worth keeping, and it survives a crash or a kill.
+            _save_bf_prefs()
 
         apply_btn = ttk.Button(action_frame, text="Apply Filters", command=do_batch_apply)
         apply_btn.pack(side='right', padx=(4, 0))
+
+        def _save_bf_prefs():
+            """Persist the current selections. Never let this break the window."""
+            try:
+                save_module_prefs('batch_filter', {
+                    'filters': {**{k: v.get() for k, v in filter_vars.items()},
+                                'search_replace': opt_apply_sr.get()},
+                    'output_mode': output_mode.get(),
+                    'subfolder_name': subfolder_name.get(),
+                })
+            except Exception as e:
+                # Loud, not silent — a save that quietly does nothing is
+                # indistinguishable from one that worked.
+                try:
+                    app.add_log(f"Batch Filter: could not save settings: {e}",
+                                'WARNING')
+                except Exception:
+                    pass
+
         def _close_window():
+            _save_bf_prefs()
             win.destroy()
             if getattr(app, '_standalone_mode', False):
                 app.root.destroy()
