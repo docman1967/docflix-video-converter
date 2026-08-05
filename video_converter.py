@@ -5219,34 +5219,70 @@ class VideoConverterApp:
         else:
             self.add_log(f"Removed {len(names)} files from list", 'INFO')
 
-    def _center_on_main(self, dlg):
+    def _center_on_main(self, dlg, size=None):
         """Position a dialog centered over the main window.  Uses
         winfo_rootx/rooty for reliable absolute coordinates on
-        multi-monitor setups."""
+        multi-monitor setups.
+
+        ── ON THE "draws top-left, then jumps to centre" FLASH ──────────────
+        Tk gives you no way to learn a pending dialog's requested size without
+        also showing it. Measured 2026-08-05:
+
+            d.geometry("520x640")   -> d.geometry() still reports "1x1+0+0"
+            d.update_idletasks()    -> reports "520x640+0+0"  ...and MAPS it
+            withdraw() first        -> stays "1x1" forever; the request is lost
+
+        So update_idletasks() is simultaneously what realises the size and what
+        puts the window on screen at the WM's default spot — which is the flash.
+        (Setting '-alpha' 0 to hide it doesn't work here; the compositor ignores
+        it and reads straight back as 1.0.)
+
+        The only clean escape is for the CALLER to withdraw the dialog at
+        creation and tell us its size, since the caller knows it:
+
+            dlg = tk.Toplevel(self.root)
+            dlg.withdraw()                       # build it hidden
+            ...                                  # widgets, title, etc.
+            self._center_on_main(dlg, size=(520, 640))
+            dlg.deiconify()                      # shown ONCE, already in place
+
+        A dialog that is already withdrawn is left withdrawn — visibility stays
+        the caller's business. Every other caller behaves exactly as before.
+        """
+        pre_withdrawn = dlg.wm_state() == 'withdrawn'
         # Hide dialog before positioning to prevent flash on wrong
         # monitor — but only if it's currently visible (mapped).
-        # Newly created dialogs that haven't been shown yet don't
-        # need withdraw, and withdrawing them can reset geometry.
         was_visible = dlg.winfo_viewable()
         if was_visible:
             dlg.withdraw()
         self.root.update_idletasks()
-        dlg.update_idletasks()
+        if not pre_withdrawn:
+            # Skipped when withdrawn: it can't realise geometry then anyway,
+            # and the caller has given us `size` instead.
+            dlg.update_idletasks()
         rx = self.root.winfo_rootx()
         ry = self.root.winfo_rooty()
         rw = self.root.winfo_width()
         rh = self.root.winfo_height()
-        # Use actual window size if available, fall back to requested size
-        dw = dlg.winfo_width()
-        dh = dlg.winfo_height()
-        if dw <= 1 or dh <= 1:
-            # Window not yet mapped — parse from geometry string if set
-            geo = dlg.geometry()
-            try:
-                size_part = geo.split('+')[0]
-                if 'x' in size_part:
-                    dw, dh = map(int, size_part.split('x'))
-            except (ValueError, IndexError):
+        if size:
+            dw, dh = size
+        else:
+            # Use actual window size if available, fall back to requested size
+            dw = dlg.winfo_width()
+            dh = dlg.winfo_height()
+            if dw <= 1 or dh <= 1:
+                # Window not yet mapped — parse from geometry string if set
+                geo = dlg.geometry()
+                try:
+                    size_part = geo.split('+')[0]
+                    if 'x' in size_part:
+                        dw, dh = map(int, size_part.split('x'))
+                except (ValueError, IndexError):
+                    pass
+            if dw <= 1 or dh <= 1:
+                # "1x1+0+0" PARSES FINE, so this has to be rejected on the
+                # value rather than caught as an exception — otherwise a dialog
+                # that never called .geometry() centres as if it were one pixel.
                 dw = dlg.winfo_reqwidth()
                 dh = dlg.winfo_reqheight()
         x = rx + (rw - dw) // 2
@@ -5577,13 +5613,19 @@ class VideoConverterApp:
         file_info = self.files[index]
         existing = file_info.get('overrides', {})
 
+        DLG_W, DLG_H = 520, 640
         dlg = tk.Toplevel(self.root)
+        # Build it hidden and show it ONCE, already positioned — otherwise the
+        # window manager maps it at its default spot (top-left, or whichever
+        # monitor it fancies) and you watch it jump to centre. See the note in
+        # _center_on_main for why this can't be fixed inside that helper alone.
+        dlg.withdraw()
         dlg.title(f"Override Settings — {os.path.basename(file_info['name'])}")
-        dlg.geometry("520x640")
+        dlg.geometry(f"{DLG_W}x{DLG_H}")
         dlg.minsize(480, 400)
-        dlg.grab_set()
-        self._center_on_main(dlg)
         dlg.resizable(True, True)
+        # Centred + deiconified at the BOTTOM of this method, once every widget
+        # exists — revealing it here would show an empty box that then fills in.
 
         pad = {'padx': 10, 'pady': 4}
 
@@ -5960,6 +6002,10 @@ class VideoConverterApp:
         ttk.Button(btn_frame, text="Save Override", command=on_save).pack(side='right', padx=(4, 0))
         ttk.Button(btn_frame, text="Cancel", command=on_cancel).pack(side='right')
 
+        # Fully built — now place it and show it, in that order and once only.
+        self._center_on_main(dlg, size=(DLG_W, DLG_H))
+        dlg.deiconify()
+        dlg.grab_set()
         dlg.wait_window()
 
     def show_subtitle_dialog(self):
