@@ -1,7 +1,7 @@
 # Docflix Media Suite — Project Summary
 
-**Last Updated:** 2026-07-14 (rev 103)  
-**Version:** 3.7.4  
+**Last Updated:** 2026-08-05 (rev 104)  
+**Version:** 3.13.0  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/`  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -10,6 +10,68 @@
 ---
 
 ## Recent Changes
+
+> ⚠️ **Gap in this log: 3.8.0 → 3.12.x (2026-07-15 → 2026-08-04) are not written up here.**
+> The entries below jump from 3.7.4 straight to 3.13.0. Real work shipped in between —
+> the Forced Subtitle Editor (3.12.0), VobSub IDX/SUB support (3.11.3), AI-upscaler
+> auto-tiling (3.11.2), APISR restore models and the Audio Tools suite (3.11.0) — see
+> `git log` for those. Noted rather than backfilled, so nobody reads this as complete.
+
+### 2026-08-05 → 3.13.0 — A morning of small friction fixes (seven patch releases, rolled up)
+
+**Batch Filter remembers your selections (3.12.1)** (`modules/batch_filter.py`, `modules/utils.py`)
+Tony runs the same handful of filters nearly every time; opening the window meant re-ticking
+them all. Now restores the filter checkboxes, the search-and-replace toggle, output mode and
+subfolder name — saved on Close *and* after a successful batch, so the selection that actually
+ran a job survives a crash. **The interesting part:** the obvious move was to copy
+`sub_ripper.py`'s existing implementation, and that implementation is DEAD. It reads
+`getattr(app, '_prefs', {})`, but `_prefs` is only ever assigned in `standalone.py` — the main
+app never sets it. So Sub Extractor and Whisper Transcriber both save their settings correctly
+and silently never restore them when opened from the Suite. Copying the pattern would have
+shipped a third dead restore that *looked* implemented. Added `load_module_prefs()` /
+`save_module_prefs()` in `utils.py` instead: they read the prefs FILES directly, and write
+**both** of them (there are two by design — main-app store and standalone store — and Batch
+Filter runs both ways, so saving to one would mean "remembered in the Suite, forgotten
+standalone"). ⚠️ Sub Extractor and Whisper Transcriber are still broken; not fixed here.
+
+**Override Settings no longer flashes top-left then jumps (3.12.2)** (`video_converter.py`)
+Right-click → Override Settings drew at the window manager's default spot (often the second
+monitor) then snapped to centre. Measured, not guessed: `dlg.geometry("520x640")` leaves
+`dlg.geometry()` still reporting `1x1+0+0`; `update_idletasks()` is what realises the size —
+**and simultaneously what maps the window.** So `_center_on_main()` had to show the dialog
+before it could measure it. Its guard skipped the `withdraw()` for exactly the case that needed
+it, because `winfo_viewable()` reads 0 for a map-pending dialog *and* a deliberately withdrawn
+one; `wm_state()` distinguishes them. **Two dead ends, recorded so nobody retries them:**
+withdraw-then-read loses the pending geometry, and `-alpha 0` is ignored by this compositor
+(reads back 1.0). Fix: the caller knows its own size, so build withdrawn → position via
+`_center_on_main(dlg, size=(520, 640))` → `deiconify()` once at the end. Also hardened the size
+fallback — `"1x1+0+0"` parses fine, so it had to be rejected on value, not caught as an
+exception.
+
+**Audio Tools bitrate is a dropdown (3.12.3)** (`modules/audio_tools.py`, `modules/constants.py`)
+Was a free-text box next to a perfectly good Codec dropdown. The bitrate list was hardcoded in
+three places; now one `constants.AUDIO_BITRATES`. A previously-typed non-standard value is
+appended to the list rather than dropped, so the switch can't silently change a saved setting.
+
+**Menu tidy-up (3.12.4, 3.12.5)** (`video_converter.py`)
+Dropped the speaker emoji from the Audio Tools item — it was the only emoji in the whole Tools
+menu. Removed Forced Subtitle Editor from Tools: it belongs to the Subtitle Editor workflow,
+not the encode queue. (`VideoConverterApp.open_forced_subtitle_editor` is now unreferenced,
+left in place deliberately.)
+
+**User Manual brought back in line (3.12.6)** (`modules/manual_viewer.py`)
+Set out to fix a stale reference and found the opposite: the Forced Subtitle Editor was never
+documented at all, and neither were **Audio Tools, Whisper Transcriber, Sub Extractor or
+Trailer Grabber** — five shipped tools with no manual entry. All added, described from each
+module's own docstring rather than from memory. Also renamed "Video Scaler" → "Media Rescale"
+and "TV Show Renamer" → "Media Renamer" in 7 places, and rewrote the stale Menu Bar summary row.
+
+**View menu available without loading a file (3.12.7)** (`modules/subtitle_editor.py`)
+`_set_menus_state()` disabled Tools/Edit/Timing/**View** until a subtitle was open. Harmless
+until 3.12.5 made View the Forced editor's only door — then you had to open an unrelated
+subtitle just to reach a tool that doesn't need one. View is now exempt; the other three stay
+disabled since they genuinely operate on loaded cues.
+
 
 ### 2026-07-14 → 3.7.4 — Renamer: `{channels}` audio-channel-count template variable (`modules/tv_renamer.py`) [Albert feature request ×2]
 Albert asked twice for the **audio channel count** in the filename — *"two for stereo, six for 5.1, eight for 7.1… you realize too late you grabbed stereo when 5.1 was available."* Added it as a first-class tech tag alongside resolution/vcodec/acodec: `_probe_media_tags()` now ffprobes the first audio stream's `channels` and stores the raw count (2/6/8); new `{channels}` template variable (wired into `media_vars`), a **"Audio channels"** wizard checkbox (hint "2 (stereo), 6 (5.1), 8 (7.1)"), plus preview/help/check-all/reset. Verified live: Watchmen 5.1 → `6`, Jimmy Neutron stereo → `2`; template `[{resolution} {acodec} {channels}ch]` → `[1080p EAC3 2ch]`. **Bonus fix:** the probe read `s.get('profile')` for Atmos/DTS-HD but never *requested* `profile` in the ffprobe `-show_entries` — so that detection was silently dead; added `profile` (and `channels`) to the query, so Atmos/DTS-HD now actually resolve.
