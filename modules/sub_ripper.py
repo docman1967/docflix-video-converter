@@ -23,7 +23,8 @@ from .constants import (APP_NAME, VIDEO_EXTENSIONS, BITMAP_SUB_CODECS,
                         SUBTITLE_LANGUAGES, LANG_CODE_TO_NAME)
 from .gpu import (detect_closed_captions, detect_cc_types,
                   extract_closed_captions_to_srt)
-from .utils import (format_size, get_subtitle_streams, scaled_geometry,
+from .utils import (load_module_prefs, save_module_prefs,
+                    format_size, get_subtitle_streams, scaled_geometry,
                     scaled_minsize, center_window_on_parent, ask_open_files,
                     ask_directory)
 
@@ -149,7 +150,19 @@ def open_sub_ripper(app):
     _ocr_semaphore = threading.Semaphore(1)  # limit concurrent OCR to 1
 
     # ── Load preferences ──
-    _sr_prefs = getattr(app, '_prefs', {}).get('sub_ripper', {})
+    # ⚠️ Read the app's OWN attribute first, then fall back to the prefs files.
+    #
+    # This used to be `getattr(app, '_prefs', {}).get('sub_ripper', {})` — and
+    # `_prefs` is only ever assigned by StandaloneContext. VideoConverterApp loads
+    # the same data into `_sub_ripper_prefs` instead and never sets `_prefs`, so
+    # launched from the Suite this returned {} and every saved setting was silently
+    # discarded. It saved correctly the whole time, which is why it looked fine:
+    # prefs.json had a populated sub_ripper block that nothing ever read back.
+    # Verified 2026-08-05 by simulating both app objects. (Same class of bug as the
+    # dead restore in batch_filter — see utils.load_module_prefs.)
+    _sr_prefs = (getattr(app, '_sub_ripper_prefs', None)
+                 or getattr(app, '_prefs', {}).get('sub_ripper')
+                 or load_module_prefs('sub_ripper'))
 
     opt_language    = tk.StringVar(value=_sr_prefs.get('language', 'English'))
     opt_main        = tk.BooleanVar(value=_sr_prefs.get('main', True))
@@ -1537,21 +1550,13 @@ def open_sub_ripper(app):
             'filters':     {**{k: v.get() for k, v in filter_vars.items()},
                             'search_replace': opt_apply_sr.get()},
         }
+        # Write BOTH prefs files (main-app store and standalone store) so the same
+        # settings come back whichever way this tool is launched, and refresh the
+        # app's in-memory copy so a later save_preferences() can't write back the
+        # stale one.
         try:
-            prefs_path = getattr(app, '_prefs_path', None)
-            if prefs_path:
-                if isinstance(prefs_path, str):
-                    p = Path(prefs_path)
-                else:
-                    p = prefs_path() if callable(prefs_path) else Path(
-                        str(prefs_path))
-                if p.exists():
-                    prefs = json.loads(p.read_text())
-                else:
-                    prefs = {}
-                prefs['sub_ripper'] = sr_prefs
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(json.dumps(prefs, indent=2))
+            save_module_prefs('sub_ripper', sr_prefs)
+            app._sub_ripper_prefs = sr_prefs
         except Exception:
             pass
 
