@@ -26,13 +26,16 @@ subfolder name — saved on Close *and* after a successful batch, so the selecti
 ran a job survives a crash. **The interesting part:** the obvious move was to copy
 `sub_ripper.py`'s existing implementation, and that implementation is DEAD. It reads
 `getattr(app, '_prefs', {})`, but `_prefs` is only ever assigned in `standalone.py` — the main
-app never sets it. So Sub Extractor and Whisper Transcriber both save their settings correctly
-and silently never restore them when opened from the Suite. Copying the pattern would have
+app never sets it. So Sub Extractor saves its settings correctly and silently never restores
+them when opened from the Suite. **⚠️ CORRECTION (3.13.2): this paragraph originally named
+Whisper Transcriber as having the same bug. IT DOES NOT** — Whisper reads `app._whisper_prefs`,
+which BOTH `VideoConverterApp` (video_converter.py:8028) and `StandaloneContext`
+(standalone.py:101) set. Checked before touching it. Sub Extractor was fixed in 3.13.2. Copying the pattern would have
 shipped a third dead restore that *looked* implemented. Added `load_module_prefs()` /
 `save_module_prefs()` in `utils.py` instead: they read the prefs FILES directly, and write
 **both** of them (there are two by design — main-app store and standalone store — and Batch
 Filter runs both ways, so saving to one would mean "remembered in the Suite, forgotten
-standalone"). ⚠️ Sub Extractor and Whisper Transcriber are still broken; not fixed here.
+standalone"). ⚠️ Sub Extractor was still broken at this point — fixed in 3.13.2. (Whisper Transcriber was never broken; see the correction above.)
 
 **Override Settings no longer flashes top-left then jumps (3.12.2)** (`video_converter.py`)
 Right-click → Override Settings drew at the window manager's default spot (often the second
