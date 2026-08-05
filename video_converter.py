@@ -52,9 +52,11 @@ APP_NAME = "Docflix Media Suite"
 # Version lives in modules/constants.py (which install.sh also reads) — import it
 # so the app title and the installer can never drift out of sync again.
 try:
-    from modules.constants import APP_VERSION
+    from modules.constants import APP_VERSION, AUDIO_BITRATES
 except Exception:
     APP_VERSION = "3.9.0"   # defensive fallback only
+    AUDIO_BITRATES = ('32k', '48k', '64k', '96k', '128k', '160k', '192k',
+                      '256k', '320k', '384k', '448k', '512k', '640k')
 DEFAULT_BITRATE = "2M"
 DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
@@ -4875,7 +4877,7 @@ class VideoConverterApp:
         
         self.audio_bitrate_combo = ttk.Combobox(self.audio_frame, textvariable=self.audio_bitrate,
                                                 width=8, state='readonly')
-        self.audio_bitrate_combo['values'] = ('32k', '48k', '64k', '96k', '128k', '160k', '192k', '256k', '320k', '384k', '448k', '512k', '640k')
+        self.audio_bitrate_combo['values'] = AUDIO_BITRATES
         self.audio_bitrate_combo.set('128k')  # Default
         self.audio_bitrate_combo.pack(side='left', padx=5)
         
@@ -5753,8 +5755,7 @@ class VideoConverterApp:
                                          width=22, state='readonly')
         audio_codec_combo.pack(side='left')
         audio_br_combo = ttk.Combobox(audio_frame, textvariable=v_audio_br,
-                                      values=('32k','48k','64k','96k','128k','160k',
-                                              '192k','256k','320k','384k','448k','512k','640k'),
+                                      values=AUDIO_BITRATES,
                                       width=7, state='readonly')
         audio_br_combo.pack(side='left', padx=6)
         audio_row = row; row += 1

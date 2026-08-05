@@ -181,6 +181,14 @@ def open_audio_tools(app):
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
     import threading
+    try:
+        from .constants import AUDIO_BITRATES
+    except ImportError:
+        # This file is also runnable directly (python3 modules/audio_tools.py),
+        # where there's no parent package for a relative import. Keep the list
+        # in constants.py canonical; this is only a last-resort fallback.
+        AUDIO_BITRATES = ('32k', '48k', '64k', '96k', '128k', '160k', '192k',
+                          '256k', '320k', '384k', '448k', '512k', '640k')
 
     win = tk.Toplevel(app.root)
     win.title("🔊 Docflix Audio Tools")
@@ -331,7 +339,15 @@ def open_audio_tools(app):
     ttk.Combobox(o, textvariable=codec, values=["aac", "ac3", "eac3", "mp3", "opus", "flac"],
                  width=7, state="readonly").grid(row=0, column=1, padx=4)
     ttk.Label(o, text="Bitrate:").grid(row=0, column=2, sticky='w')
-    ttk.Entry(o, textvariable=bitrate, width=7).grid(row=0, column=3, padx=4)
+    # Dropdown, not a free-text box — matches the Codec combo beside it and every
+    # other bitrate control in the Suite. Any previously-typed custom value is kept
+    # in the list, so moving to a dropdown can't silently change a saved setting.
+    # (2026-08-05)
+    _br_values = list(AUDIO_BITRATES)
+    if bitrate.get() and bitrate.get() not in _br_values:
+        _br_values.append(bitrate.get())
+    ttk.Combobox(o, textvariable=bitrate, values=_br_values,
+                 width=7, state="readonly").grid(row=0, column=3, padx=4)
     ttk.Label(o, text="Target LUFS:").grid(row=0, column=4, sticky='w')
     ttk.Entry(o, textvariable=target, width=6).grid(row=0, column=5, padx=4)
     ttk.Checkbutton(o, text="Presence lift", variable=presence).grid(row=1, column=0, columnspan=2, sticky='w', pady=2)

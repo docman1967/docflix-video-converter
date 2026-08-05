@@ -8,7 +8,7 @@ All shared constants, codec maps, extension sets, and GPU backend definitions.
 # Single source of truth for the app version — video_converter.py imports this,
 # and install.sh greps it. Bump here only.
 APP_NAME = "Docflix Media Suite"
-APP_VERSION = "3.12.2"
+APP_VERSION = "3.12.3"
 
 # ── Defaults ──
 DEFAULT_BITRATE = "2M"
@@ -16,6 +16,13 @@ DEFAULT_CRF = 23
 DEFAULT_PRESET = "ultrafast"
 DEFAULT_GPU_PRESET = "p4"
 MAX_CHARS_PER_LINE = 42
+
+# Audio bitrate choices offered in every dropdown. One list so the main app,
+# the per-file Override dialog and Audio Tools can't drift apart. Covers the
+# whole useful range: low end for mp3/opus stereo, 640k for AC3 5.1.
+# (Media Processor deliberately offers a shorter 128k-640k subset.)
+AUDIO_BITRATES = ('32k', '48k', '64k', '96k', '128k', '160k', '192k',
+                  '256k', '320k', '384k', '448k', '512k', '640k')
 
 # ── Preferences paths ──
 # There are TWO prefs files, on purpose:
