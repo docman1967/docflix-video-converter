@@ -4415,8 +4415,6 @@ class VideoConverterApp:
                                command=self.open_standalone_subtitle_editor)
         tools_menu.add_command(label="Batch Filter Subtitles...",
                                command=self.open_batch_filter)
-        tools_menu.add_command(label="Forced Subtitle Editor...",
-                               command=self.open_forced_subtitle_editor)
         tools_menu.add_separator()
         tools_menu.add_command(label="Docflix Media Processor...",
                                accelerator="Ctrl+M",
