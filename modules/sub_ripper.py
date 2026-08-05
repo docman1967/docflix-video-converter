@@ -33,6 +33,13 @@ try:
 except ImportError:
     HAS_DND = False
 
+# How many files to probe at once when scanning a drop. These are short ffprobe
+# header reads (~0.1 s each), so they overlap well. Deliberately modest: the
+# probes are I/O-bound on spinning disks, and stacking dozens of concurrent reads
+# trades throughput for seek thrashing. 8 is comfortably past the point where
+# scan time stops being the complaint.
+_SCAN_WORKERS = min(8, (os.cpu_count() or 4))
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Output format settings
@@ -226,24 +233,43 @@ def open_sub_ripper(app):
                    if _normalize_lang(s.get('language', 'und'))
                    in (target, 'und'))
 
-    def _add_one_file(filepath):
-        """Probe a single file and append to sr_files."""
+    def _probe_one_file(filepath):
+        """Probe a single file. Returns its dict, or None if already present.
+
+        ⚠️ FAST PROBE ONLY — do not put ccextractor back in here.
+
+        This used to call detect_cc_types() (ccextractor in report mode) on every
+        file at scan time. Measured 2026-08-05 on Tony's library: ccextractor reads
+        the WHOLE file and averaged 5.3 s/file against ffprobe's 0.10 s — **98% of
+        all scan time** — because its cost scales with file size (45 MB cartoon
+        0.45 s, 1.7 GB documentary 12 s). A 200-file drag-and-drop spent ~18 minutes
+        before the list was usable.
+
+        And it was buying almost nothing: `has_cc` feeds only the 'CC' column and
+        the `want_cc and has_cc` extraction gate — and `want_cc` is off unless the
+        CC box is ticked (Tony's saved pref: cc=False). So every file was read cover
+        to cover to populate a column that was not being read. 11 files sampled
+        across hdd1/2/3 turned up zero CC.
+
+        The authoritative probe still runs — just later, in _extract_one(), only for
+        files actually being extracted and only when CC is wanted. Correctness where
+        it matters is unchanged; the cost moved off the critical path.
+
+        Consequence, and it is a real one: this fast scan misses EIA-608 riding in
+        H.264 SEI user-data (common in .mp4 HDTV rips), so the 'CC' column is a HINT,
+        not a verdict. 'cc_deep_probed' records which files have had the real probe.
+        """
         for f in sr_files:
             if f['path'] == filepath:
-                return
+                return None
         name = os.path.basename(filepath)
         size = os.path.getsize(filepath)
         subs = get_subtitle_streams(filepath)
-        # Authoritative CC probe (ccextractor report; internally falls back to the
-        # ffprobe A53 scan). The fast scan alone misses EIA-608 carried in H.264 SEI
-        # user-data — common in .mp4 HDTV rips. This runs in the tool's background
-        # scan thread, so the ~1s/file cost is covered by the progress bar.
         try:
-            _cc = detect_cc_types(filepath)
-            has_cc = bool(_cc.get('eia_608') or _cc.get('eia_708'))
+            has_cc = bool(detect_closed_captions(filepath))
         except Exception:
-            has_cc = detect_closed_captions(filepath)
-        sr_files.append({
+            has_cc = False
+        return {
             'path':       filepath,
             'name':       name,
             'size':       format_size(size),
@@ -251,8 +277,16 @@ def open_sub_ripper(app):
             'sub_streams': subs,
             'sub_count':  len(subs),
             'has_cc':     has_cc,
+            'cc_deep_probed': False,
             'status':     'Pending',
-        })
+        }
+
+    def _safe_probe(fp):
+        """_probe_one_file that never lets one bad file kill the scan."""
+        try:
+            return _probe_one_file(fp)
+        except Exception:
+            return None
 
     def _add_files_threaded(file_paths, source_label="files"):
         """Probe and add files in a background thread with progress."""
@@ -268,22 +302,25 @@ def open_sub_ripper(app):
         def _worker():
             start = _time.monotonic()
             added = 0
-            for i, fp in enumerate(to_add):
-                elapsed = _time.monotonic() - start
-                rate = (i + 1) / elapsed if elapsed > 0.1 else 0
-                eta = f" — ETA {int((total - i - 1) / rate)}s" if rate > 0 else ""
-                pct = ((i + 1) / total) * 100
-                win.after(0, lambda p=pct: progress_var.set(p))
-                win.after(0, lambda n=i+1, t=total, e=eta:
-                          progress_label.configure(
-                              text=f"Scanning {n}/{t}{e}"))
-                try:
-                    _add_one_file(fp)
-                    added += 1
-                except Exception:
-                    pass
-                if added > 0 and added % 20 == 0:
-                    win.after(0, _rebuild_tree)
+            # Probe concurrently. These are short ffprobe header reads now that the
+            # whole-file ccextractor pass has moved to extraction time, so they
+            # overlap well instead of fighting the disk. ex.map yields IN INPUT
+            # ORDER, so the list still builds in the order files were dropped.
+            with ThreadPoolExecutor(max_workers=_SCAN_WORKERS) as ex:
+                for i, result in enumerate(ex.map(_safe_probe, to_add)):
+                    elapsed = _time.monotonic() - start
+                    rate = (i + 1) / elapsed if elapsed > 0.1 else 0
+                    eta = f" — ETA {int((total - i - 1) / rate)}s" if rate > 0 else ""
+                    pct = ((i + 1) / total) * 100
+                    win.after(0, lambda p=pct: progress_var.set(p))
+                    win.after(0, lambda n=i+1, t=total, e=eta:
+                              progress_label.configure(
+                                  text=f"Scanning {n}/{t}{e}"))
+                    if result is not None:
+                        sr_files.append(result)
+                        added += 1
+                    if added > 0 and added % 20 == 0:
+                        win.after(0, _rebuild_tree)
 
             elapsed = _time.monotonic() - start
             win.after(0, _rebuild_tree)
@@ -1058,6 +1095,22 @@ def open_sub_ripper(app):
             filepath = fdata['path']
             name = fdata['name']
             has_cc = fdata.get('has_cc', False)
+
+            # ── Authoritative CC probe, deferred from scan time ──────────────
+            # The scan only does the cheap ffprobe A53 check (see _probe_one_file),
+            # which misses EIA-608 in H.264 SEI user-data. Run the real ccextractor
+            # probe HERE: only when CC is actually wanted, only for the files being
+            # processed, and inside this worker so it parallelises with the rest.
+            # That keeps CC detection exactly as accurate as before while taking a
+            # whole-file read off the drag-and-drop path.
+            if want_cc and not fdata.get('cc_deep_probed'):
+                try:
+                    _cc = detect_cc_types(filepath)
+                    has_cc = bool(_cc.get('eia_608') or _cc.get('eia_708'))
+                except Exception:
+                    pass          # keep the fast-scan answer
+                fdata['has_cc'] = has_cc
+                fdata['cc_deep_probed'] = True
 
             matches = _get_matching_streams(fdata)
             cc_job = 1 if (want_cc and has_cc) else 0
