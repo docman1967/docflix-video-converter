@@ -4421,7 +4421,7 @@ class VideoConverterApp:
         tools_menu.add_command(label="Docflix Media Processor...",
                                accelerator="Ctrl+M",
                                command=self.open_media_processor)
-        tools_menu.add_command(label="🔊 Docflix Audio Tools...",
+        tools_menu.add_command(label="Docflix Audio Tools...",
                                command=self.open_audio_tools)
         tools_menu.add_command(label="Docflix Media Renamer...",
                                command=self.open_tv_renamer)
