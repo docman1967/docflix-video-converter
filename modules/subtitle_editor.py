@@ -4675,8 +4675,17 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         editor.bind('<Delete>', lambda e: None if isinstance(e.widget, tk.Text) else delete_selected())
 
         # ── Disable menus until a file is loaded ──
+        # View is deliberately NOT in this list. Tools/Edit/Timing all act on the
+        # loaded cues and are meaningless without them, but every View item works
+        # on an empty editor:
+        #   Load Waveform...        prompts for a video when there's no subtitle
+        #   Show/Hide Timeline      just toggles the pane
+        #   Forced Subtitle Editor  its own window, accepts video_path=None
+        # And since 3.12.5 the Forced Subtitle Editor is reachable ONLY from here,
+        # so greying View out made it unreachable until you loaded an unrelated
+        # subtitle first. (2026-08-05)
         def _set_menus_state(state):
-            for menu_label in ('Tools', 'Edit', 'Timing', 'View'):
+            for menu_label in ('Tools', 'Edit', 'Timing'):
                 try:
                     idx = menubar.index(menu_label)
                     menubar.entryconfigure(idx, state=state)
