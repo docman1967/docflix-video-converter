@@ -236,6 +236,84 @@ def open_sub_ripper(app):
         if current not in values:
             opt_language.set('English')
 
+    # ══════════════════════════════════════════════════════════════════
+    # Per-file, per-type selection
+    # ══════════════════════════════════════════════════════════════════
+    # The Main/SDH/Forced checkboxes at the top are BULK DEFAULTS — they say what
+    # you normally want. The three tree columns are the per-file override, for the
+    # 87% of real files that carry more than one type. A file only ever offers a
+    # type it actually has; everything else shows an em-dash and can't be clicked.
+
+    def _available_types(f):
+        """Which of main/sdh/forced this file actually has, in the chosen language."""
+        cached = f.get('_avail_for')
+        lang = opt_language.get()
+        if cached == lang and '_avail' in f:
+            return f['_avail']
+        avail = set()
+        for stream in f.get('sub_streams', []):
+            if _matches_language(stream):
+                avail.add(_classify_stream(stream))
+        f['_avail'] = avail
+        f['_avail_for'] = lang
+        return avail
+
+    def _wants(f):
+        """This file's per-type selection, seeded from the global checkboxes.
+
+        Seeded lazily rather than at scan time so that changing the global
+        checkboxes BEFORE adding files still does the obvious thing.
+        """
+        w = f.get('want_types')
+        if w is None:
+            w = {'main': opt_main.get(),
+                 'sdh': opt_sdh.get(),
+                 'forced': opt_forced.get()}
+            f['want_types'] = w
+        return w
+
+    def _reseed_wants():
+        """Push the global checkboxes down onto every file (bulk set)."""
+        for f in sr_files:
+            f['want_types'] = {'main': opt_main.get(),
+                               'sdh': opt_sdh.get(),
+                               'forced': opt_forced.get()}
+
+    def _type_glyph(f, t):
+        if t not in _available_types(f):
+            return GLYPH_NA
+        return GLYPH_ON if _wants(f).get(t) else GLYPH_OFF
+
+    def _on_tree_click(event):
+        """Toggle a type cell. Ignores clicks on absent types and other columns."""
+        if tree.identify_region(event.x, event.y) != 'cell':
+            return None
+        col_id = tree.identify_column(event.x)
+        try:
+            col = columns[int(col_id.lstrip('#')) - 1]
+        except (ValueError, IndexError):
+            return None
+        if col not in _TYPE_COLS:
+            return None
+        row = tree.identify_row(event.y)
+        if not row:
+            return None
+        items = tree.get_children()
+        try:
+            idx = items.index(row)
+        except ValueError:
+            return None
+        f = sr_files[idx]
+        if col not in _available_types(f):
+            return 'break'          # nothing to toggle; don't start a drag-select
+        w = _wants(f)
+        w[col] = not w.get(col)
+        tree.set(row, col, _type_glyph(f, col))
+        return 'break'              # swallow the click so it doesn't reselect
+
+    # NOTE: tree.bind for _on_tree_click lives just after the Treeview is created,
+    # further down — binding here would run before `tree` exists.
+
     def _count_matching_subs(subs):
         """Count subtitle streams matching the currently selected language."""
         lang_name = opt_language.get()
@@ -428,7 +506,13 @@ def open_sub_ripper(app):
             chk_forced.configure(state='normal')
             chk_sdh.configure(state='normal')
             chk_cc.configure(state='normal')
-        # Refresh the Match column counts
+        # Language changed → which types each file offers changes with it, so drop
+        # the cached availability and re-seed the per-file selection from the
+        # (possibly just-forced) global checkboxes.
+        for _f in sr_files:
+            _f.pop('_avail', None)
+            _f.pop('_avail_for', None)
+        _reseed_wants()
         _rebuild_tree()
 
     # Language dropdown
@@ -439,12 +523,25 @@ def open_sub_ripper(app):
     lang_combo.pack(side='left', padx=(0, 12))
     lang_combo.bind('<<ComboboxSelected>>', _on_language_change)
 
-    chk_main = ttk.Checkbutton(chk_frame, text="Main", variable=opt_main)
+    def _on_bulk_toggle():
+        """A global checkbox is a BULK SET — push it onto every loaded file.
+
+        Without this the top checkboxes and the per-file columns would disagree
+        silently: you'd untick SDH up top, see the tree still showing SDH ticked,
+        and have no idea which one the extractor believed.
+        """
+        _reseed_wants()
+        _rebuild_tree()
+
+    chk_main = ttk.Checkbutton(chk_frame, text="Main", variable=opt_main,
+                               command=_on_bulk_toggle)
     chk_main.pack(side='left', padx=4)
     chk_forced = ttk.Checkbutton(chk_frame, text="Forced",
-                                  variable=opt_forced)
+                                  variable=opt_forced,
+                                  command=_on_bulk_toggle)
     chk_forced.pack(side='left', padx=4)
-    chk_sdh = ttk.Checkbutton(chk_frame, text="SDH", variable=opt_sdh)
+    chk_sdh = ttk.Checkbutton(chk_frame, text="SDH", variable=opt_sdh,
+                              command=_on_bulk_toggle)
     chk_sdh.pack(side='left', padx=4)
     chk_cc = ttk.Checkbutton(chk_frame, text="CC", variable=opt_cc)
     chk_cc.pack(side='left', padx=4)
@@ -691,7 +788,15 @@ def open_sub_ripper(app):
     tree_frame.columnconfigure(0, weight=1)
     tree_frame.rowconfigure(0, weight=1)
 
-    columns = ('name', 'subs', 'match', 'cc', 'size', 'status')
+    # 'match' used to be a bare count of language-matching streams, which told you
+    # HOW MANY but not WHAT — so an SDH track looked identical to a main one and
+    # you only found out after extracting. Measured on Tony's actual processing
+    # queue (129 unprocessed episodes, 2026-08-05): 93.8% carry SDH, 34.9% carry
+    # forced, and 86.8% have MORE THAN ONE type, i.e. a real choice to make. (His
+    # finished library shows 0.3% SDH — but that's the OUTPUT of stripping it, the
+    # wrong population to measure.) Three per-type columns instead: they show what
+    # is actually there, and double as the per-file extract toggle.
+    columns = ('name', 'subs', 'main', 'sdh', 'forced', 'cc', 'size', 'status')
     tree = ttk.Treeview(tree_frame, columns=columns, show='headings',
                         height=8, selectmode='extended')
     tree.grid(row=0, column=0, sticky='nsew')
@@ -700,9 +805,12 @@ def open_sub_ripper(app):
     _sort_col = [None]
     _sort_reverse = [False]
     _col_labels = {
-        'name': 'Filename', 'subs': 'Subs', 'match': 'Match',
+        'name': 'Filename', 'subs': 'Subs',
+        'main': 'Main', 'sdh': 'SDH', 'forced': 'Forced',
         'cc': 'CC', 'size': 'Size', 'status': 'Status',
     }
+    _TYPE_COLS = ('main', 'sdh', 'forced')
+    GLYPH_ON, GLYPH_OFF, GLYPH_NA = '\u2611', '\u2610', '\u2014'   # checked / empty / em-dash
 
     def _sort_by_column(col):
         if _sort_col[0] == col:
@@ -716,8 +824,11 @@ def open_sub_ripper(app):
                 return f.get('name', '').lower()
             elif col == 'subs':
                 return f.get('sub_count', 0)
-            elif col == 'match':
-                return _count_matching_subs(f.get('sub_streams', []))
+            elif col in _TYPE_COLS:
+                # available-and-selected sorts above available, above absent
+                if col not in _available_types(f):
+                    return 0
+                return 2 if _wants(f).get(col) else 1
             elif col == 'cc':
                 return 1 if f.get('has_cc') else 0
             elif col == 'size':
@@ -738,8 +849,12 @@ def open_sub_ripper(app):
                  command=lambda: _sort_by_column('name'))
     tree.heading('subs',    text='Subs',
                  command=lambda: _sort_by_column('subs'))
-    tree.heading('match',   text='Match',
-                 command=lambda: _sort_by_column('match'))
+    tree.heading('main',    text='Main',
+                 command=lambda: _sort_by_column('main'))
+    tree.heading('sdh',     text='SDH',
+                 command=lambda: _sort_by_column('sdh'))
+    tree.heading('forced',  text='Forced',
+                 command=lambda: _sort_by_column('forced'))
     tree.heading('cc',      text='CC',
                  command=lambda: _sort_by_column('cc'))
     tree.heading('size',    text='Size',
@@ -749,10 +864,16 @@ def open_sub_ripper(app):
 
     tree.column('name',    width=330, minwidth=200)
     tree.column('subs',    width=50,  minwidth=40,  anchor='center')
-    tree.column('match',   width=60,  minwidth=45,  anchor='center')
+    tree.column('main',    width=52,  minwidth=44,  anchor='center')
+    tree.column('sdh',     width=52,  minwidth=44,  anchor='center')
+    tree.column('forced',  width=58,  minwidth=48,  anchor='center')
     tree.column('cc',      width=40,  minwidth=30,  anchor='center')
     tree.column('size',    width=80,  minwidth=60,  anchor='e')
     tree.column('status',  width=140, minwidth=80,  anchor='center')
+
+    # Click a Main/SDH/Forced cell to toggle it for that file. add='+' so the
+    # Treeview's own selection handling still runs for every other column.
+    tree.bind('<Button-1>', _on_tree_click, add='+')
 
     scrollbar = ttk.Scrollbar(tree_frame, orient='vertical',
                                command=tree.yview)
@@ -764,9 +885,11 @@ def open_sub_ripper(app):
         tree.delete(*tree.get_children())
         for f in sr_files:
             cc_label = 'CC' if f.get('has_cc') else ''
-            match_count = _count_matching_subs(f.get('sub_streams', []))
             tree.insert('', 'end', values=(
-                f['name'], f['sub_count'], match_count,
+                f['name'], f['sub_count'],
+                _type_glyph(f, 'main'),
+                _type_glyph(f, 'sdh'),
+                _type_glyph(f, 'forced'),
                 cc_label, f['size'], f['status'],
             ))
 
@@ -965,9 +1088,12 @@ def open_sub_ripper(app):
         When OCR Bitmap is enabled, bitmap streams matching the language
         are included regardless of the main/forced/sdh checkboxes."""
         all_langs   = opt_language.get() == _ALL_LANGUAGES
-        want_main   = opt_main.get()
-        want_forced = opt_forced.get()
-        want_sdh    = opt_sdh.get()
+        # Per-file selection wins over the global checkboxes — the checkboxes are
+        # the bulk default, the tree columns are the override for this one file.
+        _w          = _wants(file_dict)
+        want_main   = _w.get('main', opt_main.get())
+        want_forced = _w.get('forced', opt_forced.get())
+        want_sdh    = _w.get('sdh', opt_sdh.get())
         want_ocr    = opt_ocr.get()
 
         matches = []
