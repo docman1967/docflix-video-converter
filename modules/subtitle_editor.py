@@ -410,6 +410,14 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             _orig_texts.update(c['text'] for c in original_cues)
             undo_stack.clear()
             redo_stack.clear()
+            # Highlight state belongs to the file that was open, not to the
+            # window. Without this you load a fresh subtitle and it arrives
+            # pre-highlighted from the last one — the marks would be real (the
+            # scan re-runs) but you never asked for them, and for spelling they'd
+            # be plain wrong: stale row indices pointing into a different file.
+            # (Tony, 2026-08-06.)
+            caps_highlight_on[0] = False
+            spell_error_indices.clear()
             current_path[0] = source_path
             editor.title(title)
 
