@@ -2283,20 +2283,20 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         filter_menu.add_command(label="Highlight Spelling Errors",
                                 command=lambda: _highlight_spelling())
         def _find_allcaps():
-            """Turn ALL CAPS highlighting on (or refresh it), and report."""
+            """Toggle ALL CAPS highlighting: on if any are found, off if none."""
             if not cues:
                 messagebox.showinfo("Find ALL CAPS", "No subtitle loaded.",
                                     parent=editor)
                 return
-            indices, details = scan_allcaps_words(cues)
+            indices = scan_allcaps_words(cues)[0]
+            # No modal on success — the highlighted rows ARE the result, and a
+            # dialog you have to dismiss before you can look at them is pure
+            # friction. The count goes to the status bar instead, so turning the
+            # mode on with zero matches still says something rather than looking
+            # like nothing happened. (Tony, 2026-08-06.)
             if not indices:
-                was_on = caps_highlight_on[0]
                 caps_highlight_on[0] = False
                 refresh_tree(cues)
-                messagebox.showinfo(
-                    "Find ALL CAPS",
-                    "No ALL CAPS words left." if was_on
-                    else "No ALL CAPS words found.", parent=editor)
                 return
             caps_highlight_on[0] = True
             refresh_tree(cues)
@@ -2305,17 +2305,6 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             if first < len(items):
                 tree.see(items[first])
                 tree.selection_set(items[first])
-            words = sorted({w for s in details.values() for w in s})
-            sample = ', '.join(words[:30])
-            if len(words) > 30:
-                sample += f', ... (+{len(words) - 30} more)'
-            messagebox.showinfo(
-                "Find ALL CAPS",
-                f"{len(indices)} line(s) contain ALL CAPS words "
-                f"({len(words)} distinct).\n\n{sample}\n\n"
-                "Highlighting stays on and updates as you edit — "
-                "run this again to clear it once they're all fixed.",
-                parent=editor)
 
         filter_menu.add_command(label="Find ALL CAPS Words...",
                                 command=_find_allcaps)
@@ -4713,6 +4702,8 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             ]
             if long_count:
                 stats_parts.append(f"{long_count} long lines")
+            if caps_highlight_on[0]:
+                stats_parts.append(f"{len(caps_set)} ALL CAPS")
             stats_label.configure(text=" │ ".join(stats_parts))
             # Refresh waveform timeline cue blocks and live subtitles
             if timeline.is_loaded:
