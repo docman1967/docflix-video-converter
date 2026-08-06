@@ -105,61 +105,52 @@ def install_cue_sort(tree, cues_getter):
     tree.heading("text", command=lambda: apply("length"))
 
 
-def find_allcaps_words(cues, tree, tag_caps, parent_widget):
-    """Scan cues for ALL CAPS words and highlight matching rows.
+# Words to exclude — common short caps, pronouns, roman numerals
+_CAPS_EXCLUDE = {'OK', 'I', 'A', 'TV', 'AM', 'PM', 'II', 'III',
+                 'IV', 'VI', 'VII', 'VIII', 'IX', 'XI', 'XII',
+                 'DJ', 'MC', 'ID'}
+_CAPS_TAG_RE = re.compile(r'<[^>]+>')
+_CAPS_RE = re.compile(r'\b([A-Z]{2,})\b')          # 2+ uppercase letters, no digits
 
-    Excludes common short words (OK, I, A, etc.), words with periods
-    (U.S., U.K.), and single characters.  Highlights matching treeview
-    rows with the given tag and shows a summary dialog.
+
+def scan_allcaps_words(cues):
+    """Pure scan: return (indices, details) for cues containing ALL CAPS words.
+
+    Skips only the common-short-word list (_CAPS_EXCLUDE).
+
+    ⚠️ THE PERIOD-ADJACENCY CHECK WAS REMOVED 2026-08-06, and it matters.
+    The old code skipped any match with a '.' immediately before or after it, to
+    avoid flagging acronyms like U.S. / U.K. Measured: the regex is
+    ``\\b([A-Z]{2,})\\b``, and a dotted acronym is single letters separated by
+    periods — so U.S., U.K., F.B.I. and U.S.A. produce NO MATCH in the first
+    place. The check therefore protected against nothing, while silently dropping
+    every caps word at the END OF A SENTENCE:
+
+        "Go to the HOSPITAL now."   ->  flagged
+        "He went to the HOSPITAL."  ->  MISSED
+
+    On UK-style SDH, where most lines end in a period, that was a large blind spot
+    in the exact tool being used to catch what the filter leaves behind. Cost of
+    removing it: a real acronym written without periods and followed by a period
+    ("Call the USA.") now gets flagged. That's one glance to dismiss, against
+    missing genuine words — recall over precision, on a review tool.
+
+    Deliberately has NO side effects and touches no widget — the caller decides
+    what to do with the result. It used to paint the Treeview directly and keep
+    its findings in a local, which is why the highlighting vanished the moment
+    anything rebuilt the tree. See refresh_tree(). (2026-08-06)
     """
-    if not cues:
-        messagebox.showinfo("Find ALL CAPS", "No subtitle loaded.",
-                            parent=parent_widget)
-        return
-
-    # Words to exclude — common short caps, pronouns, prepositions
-    EXCLUDE = {'OK', 'I', 'A', 'TV', 'AM', 'PM', 'II', 'III',
-               'IV', 'VI', 'VII', 'VIII', 'IX', 'XI', 'XII',
-               'DJ', 'MC', 'ID'}
-    TAG_RE = re.compile(r'<[^>]+>')
-    # Match words: 2+ uppercase letters, no digits
-    CAPS_RE = re.compile(r'\b([A-Z]{2,})\b')
-
-    caps_indices = set()
-    caps_details = {}  # index -> set of caps words
-
+    indices = set()
+    details = {}
     for i, cue in enumerate(cues):
-        text = TAG_RE.sub('', cue['text'])
-        for m in CAPS_RE.finditer(text):
+        text = _CAPS_TAG_RE.sub('', cue['text'])
+        for m in _CAPS_RE.finditer(text):
             word = m.group(1)
-            if word in EXCLUDE:
+            if word in _CAPS_EXCLUDE:
                 continue
-            # Skip words adjacent to periods (acronyms like U.S., U.K.)
-            pos = m.start()
-            end = m.end()
-            if pos > 0 and text[pos - 1] == '.':
-                continue
-            if end < len(text) and text[end] == '.':
-                continue
-            caps_indices.add(i)
-            if i not in caps_details:
-                caps_details[i] = set()
-            caps_details[i].add(word)
-
-    # Highlight matching rows, clear previous caps highlights
-    for item in tree.get_children():
-        idx = int(item)
-        current_tags = tree.item(item, 'tags')
-        if idx in caps_indices:
-            tree.item(item, tags=(tag_caps,))
-        elif tag_caps in current_tags:
-            tree.item(item, tags=())
-
-    # Scroll to first match
-    if caps_indices:
-        first = min(caps_indices)
-        tree.see(str(first))
-        tree.selection_set(str(first))
+            indices.add(i)
+            details.setdefault(i, set()).add(word)
+    return indices, details
 
 
 def _vtt_to_srt(vtt_text):
@@ -244,6 +235,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
 
         # ── Spell check state ──
         spell_error_indices = set()
+
+        # ALL CAPS highlighting is a MODE, not a one-shot paint job.
+        # Storing a set of matching row indices would go stale the instant a cue
+        # is deleted — every index after it shifts by one. So keep only a flag and
+        # let refresh_tree() re-scan; the scan is a regex pass over the cue list
+        # and costs nothing next to rebuilding the Treeview itself.
+        caps_highlight_on = [False]
 
         # ── Undo / Redo ──
         def push_undo():
@@ -2276,9 +2274,43 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                 command=lambda: _show_spell_check())
         filter_menu.add_command(label="Highlight Spelling Errors",
                                 command=lambda: _highlight_spelling())
+        def _find_allcaps():
+            """Turn ALL CAPS highlighting on (or refresh it), and report."""
+            if not cues:
+                messagebox.showinfo("Find ALL CAPS", "No subtitle loaded.",
+                                    parent=editor)
+                return
+            indices, details = scan_allcaps_words(cues)
+            if not indices:
+                was_on = caps_highlight_on[0]
+                caps_highlight_on[0] = False
+                refresh_tree(cues)
+                messagebox.showinfo(
+                    "Find ALL CAPS",
+                    "No ALL CAPS words left." if was_on
+                    else "No ALL CAPS words found.", parent=editor)
+                return
+            caps_highlight_on[0] = True
+            refresh_tree(cues)
+            items = tree.get_children()
+            first = min(indices)
+            if first < len(items):
+                tree.see(items[first])
+                tree.selection_set(items[first])
+            words = sorted({w for s in details.values() for w in s})
+            sample = ', '.join(words[:30])
+            if len(words) > 30:
+                sample += f', ... (+{len(words) - 30} more)'
+            messagebox.showinfo(
+                "Find ALL CAPS",
+                f"{len(indices)} line(s) contain ALL CAPS words "
+                f"({len(words)} distinct).\n\n{sample}\n\n"
+                "Highlighting stays on and updates as you edit — "
+                "run this again to clear it once they're all fixed.",
+                parent=editor)
+
         filter_menu.add_command(label="Find ALL CAPS Words...",
-                                command=lambda: find_allcaps_words(
-                                    cues, tree, TAG_CAPS, editor))
+                                command=_find_allcaps)
         filter_menu.add_separator()
         filter_menu.add_command(label="Search/Replace List...",
                                 command=lambda: _show_saved_replacements())
@@ -4625,6 +4657,9 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             cues = new_cues
             tree.delete(*tree.get_children())
             search_set = set(search_indices or [])
+            # Re-scan for ALL CAPS on every rebuild while the mode is on, so the
+            # highlighting survives deletes, edits, undo and filtering.
+            caps_set = scan_allcaps_words(cues)[0] if caps_highlight_on[0] else set()
             for i, cue in enumerate(cues):
                 display = cue['text'].replace('\n', ' \\n ')
                 ts = f"{cue['start']} → {cue['end']}"
@@ -4639,6 +4674,11 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     row_tag = TAG_SEARCH
                 elif i in spell_error_indices:
                     row_tag = TAG_SPELL
+                elif i in caps_set:
+                    # Above MODIFIED on purpose: once you fix the caps word the
+                    # row stops matching and drops to yellow, which is a useful
+                    # "done" signal while working through them.
+                    row_tag = TAG_CAPS
                 elif TAG_MODIFIED in ctags:
                     row_tag = TAG_MODIFIED
                 elif TAG_HI in ctags:
