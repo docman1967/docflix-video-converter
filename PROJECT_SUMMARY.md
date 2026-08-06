@@ -9,6 +9,50 @@
 
 ---
 
+## ⚠️ THREE COPIES EXIST — and shipping is a THREE-STEP job
+
+Bit us 2026-08-06: Tony pulled, the pull failed on stale local edits, and even after
+fixing that the app he launches was still **three minor versions behind** (3.11.1 while
+dev and GitHub were both on 3.14.2). Nothing errored. It just quietly ran old code.
+
+| path | role | notes |
+|---|---|---|
+| `~/scripts/video_converter/` | **DEV — edit only here** | all work happens here |
+| `~/docflix-video-converter/` | GitHub clone | `git pull` only, never edit |
+| `~/.local/share/docflix/` | **INSTALLED — what actually runs** | written by `install.sh` |
+
+`docflix` execs `~/.local/share/docflix/run_converter.sh`, so the app menu and every
+`docflix-*` command run the INSTALLED copy. Editing dev and testing "the app" without
+installing means testing the old build.
+
+**The full ship sequence:**
+```
+1. edit + commit in  ~/scripts/video_converter
+2. Tony tests in the real app          <- see feedback_test-before-push
+3. git push                             (only when he says so)
+4. cd ~/docflix-video-converter && git pull
+5. ./install.sh                         <- THE STEP THAT GETS FORGOTTEN
+```
+
+**⚠️ `~/.local/share/docflix/` IS NOT DISPOSABLE.** It also holds live user data that
+`install.sh` deliberately preserves (it only replaces `modules/` and `docs/`):
+- `preferences.json` — the standalone prefs store (`constants.PREFS_DIR` points here)
+- `names/` — 15 MB names database
+- `realesrgan/` — 240 MB of upscale models
+- `logs/`
+
+**⚠️ `./install.sh --uninstall` does `rm -rf` on that whole directory** — prefs, names DB
+and 240 MB of models included. Not a command to run casually.
+
+**Quick check that all three agree:**
+```bash
+for d in ~/scripts/video_converter ~/docflix-video-converter ~/.local/share/docflix; do
+  printf "%-42s %s\n" "$d" "$(grep -oP 'APP_VERSION\s*=\s*"\K[^"]+' $d/modules/constants.py)"
+done
+```
+
+---
+
 ## Recent Changes
 
 > ⚠️ **Gap in this log: 3.8.0 → 3.12.x (2026-07-15 → 2026-08-04) are not written up here.**
