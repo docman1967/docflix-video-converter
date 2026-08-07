@@ -2676,6 +2676,46 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             # ── Current error state ──
             current_error = [None]  # (ci, word, candidates)
 
+            def _word_to_add():
+                """Which word the dictionary buttons will actually store.
+
+                ⚠️ "Replace with" WINS WHEN IT HAS CONTENT. Tony, 2026-08-07,
+                on a cue reading "kazahrusian": *"There should be a mechanism to
+                add unknown names to the name list. If it's already misspelled
+                in the subtitle, you can't add it to the name list."*
+
+                Exactly right. The scanned word is whatever the OCR produced —
+                often lowercase, often wrong. The name list exists to tell the
+                Fix ALL CAPS filter how a proper noun is really capitalised, so
+                storing the broken form is worse than storing nothing: it
+                teaches the filter the wrong answer.
+
+                This stays unambiguous only because the BUTTON LABEL always
+                shows the resolved word (see _update_add_labels). Do not add a
+                silent preference here without keeping the label honest — the
+                whole reason he had to ask which field the button used was that
+                the UI implied one thing and the code did another.
+                """
+                typed = replace_var.get().strip()
+                if typed:
+                    return typed
+                return current_error[0][1] if current_error[0] else ''
+
+            def _update_add_labels(*_):
+                """Keep the dictionary buttons showing the word they will add."""
+                word = _word_to_add()
+                if not word:
+                    add_dict_btn.configure(text="Add to Dict")
+                    add_name_btn.configure(text="Add as Name")
+                    return
+                shown = word if len(word) <= 12 else word[:11] + '…'
+                add_dict_btn.configure(text=f'Add "{shown}" to Dict')
+                add_name_btn.configure(text=f'Add "{shown}" as Name')
+
+            # NOTE: the trace that keeps these labels live is registered AFTER
+            # the buttons are created (see below) — _update_add_labels touches
+            # widgets that do not exist yet at this point in the build.
+
             def _show_next():
                 """Find and display the next error."""
                 result = _find_next()
@@ -2716,12 +2756,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # no-op (see _do_replace), so the safe action is now the default
                 # and picking a suggestion is a deliberate act. (2026-08-07)
                 replace_var.set('')
-                # Say WHICH word the dictionary buttons will add. They act on the
-                # scanned word, never on "Replace with" — but the field sits right
-                # above them, so the layout implied otherwise and Tony had to ask.
-                shown = w if len(w) <= 12 else w[:11] + '…'
-                add_dict_btn.configure(text=f'Add "{shown}" to Dict')
-                add_name_btn.configure(text=f'Add "{shown}" as Name')
+                _update_add_labels()
 
             def _do_replace():
                 if not current_error[0]:
@@ -2769,22 +2804,37 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     ignored.add(current_error[0][1].lower())
                 _show_next()
 
+            # ⚠️ BOTH HANDLERS STORE _word_to_add() (the typed correction when
+            # there is one) BUT IGNORE THE SCANNED WORD. Two different words on
+            # purpose: the dictionary should learn "Kazahrusian", while the
+            # scanner needs to stop stopping on "kazahrusian" — otherwise adding
+            # a correction leaves the broken spelling flagged forever and the
+            # button appears to have done nothing.
             def _do_add_dict():
                 if not current_error[0]:
                     return
-                w = current_error[0][1]
+                w = _word_to_add()
+                scanned = current_error[0][1]
+                if not w:
+                    return
                 if w.lower() not in [x.lower()
                                      for x in app.custom_spell_words]:
                     app.custom_spell_words.append(w)
-                    spell.word_frequency.load_words([w.lower()])
                     app.save_preferences()
-                ignored.add(w.lower())
+                spell.word_frequency.load_words([w.lower()])
+                ignored.add(scanned.lower())
                 _show_next()
 
             def _do_add_name():
                 if not current_error[0]:
                     return
-                w = current_error[0][1]
+                w = _word_to_add()
+                scanned = current_error[0][1]
+                if not w:
+                    return
+                # custom_cap_words is CASE-SENSITIVE on purpose — it is the
+                # record of how the proper noun is really written, which is the
+                # whole point of adding a corrected form rather than the OCR's.
                 if w not in app.custom_cap_words:
                     app.custom_cap_words.append(w)
                 if w.lower() not in [x.lower()
@@ -2792,7 +2842,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     app.custom_spell_words.append(w)
                 spell.word_frequency.load_words([w.lower()])
                 app.save_preferences()
-                ignored.add(w.lower())
+                ignored.add(scanned.lower())
                 _show_next()
 
             bf1 = ttk.Frame(bf)
@@ -2823,6 +2873,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             add_name_btn.pack(side='left', padx=2)
             ttk.Button(bf2, text="Close", command=sd.destroy,
                        width=6).pack(side='right', padx=2)
+
+            # Registered HERE, not where _update_add_labels is defined: the
+            # callback configures add_dict_btn / add_name_btn, so the trace must
+            # not be able to fire before they exist. Nothing writes replace_var
+            # in between today, but that is an accident of ordering rather than
+            # a guarantee, and a NameError inside a Tk trace fails quietly.
+            replace_var.trace_add('write', _update_add_labels)
 
             # Start scanning immediately
             _show_next()
