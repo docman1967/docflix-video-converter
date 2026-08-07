@@ -235,6 +235,46 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
 
         # ── Spell check state ──
         spell_error_indices = set()
+        # Has a spelling scan been run for the current file? Drives the status-bar
+        # count that replaced the old results popup, and distinguishes "scanned,
+        # found nothing" from "never scanned" — without it, a clean file and an
+        # unscanned file look identical.
+        spell_scanned = [False]
+
+        def _rebuild_stats():
+            """Repaint the status bar. ONE definition, called from every path.
+
+            ⚠️ There used to be two hand-copied versions of this — one in
+            refresh_tree() and one in save_edit() — and they drifted. The caps
+            count added 2026-08-06 went into refresh_tree only, so editing any
+            cue inline silently wiped "N ALL CAPS" from the status bar. The
+            highlighting stayed on; only the number vanished, which reads as
+            "the mode turned itself off". Today's spell count would have
+            inherited exactly the same bug. Duplicated display logic diverges;
+            it is only a question of when.
+            """
+            deleted_count.set(len(original_cues) - len(cues))
+            mod = sum(1 for i, c in enumerate(cues)
+                      if i < len(original_cues)
+                      and c['text'] != original_cues[i]['text'])
+            modified_count.set(mod)
+            long_count = sum(1 for c in cues
+                             if any(len(l) > MAX_CHARS_PER_LINE
+                                    for l in c['text'].split('\n')))
+            parts = [
+                f"{len(cues)} entries",
+                f"{modified_count.get()} modified",
+                f"{deleted_count.get()} removed",
+            ]
+            if long_count:
+                parts.append(f"{long_count} long lines")
+            if caps_highlight_on[0]:
+                parts.append(f"{len(scan_allcaps_words(cues)[0])} ALL CAPS")
+            # Shown only once a scan has run, so "0 misspelled" means
+            # checked-and-clean rather than never-checked.
+            if spell_scanned[0]:
+                parts.append(f"{len(spell_error_indices)} misspelled")
+            stats_label.configure(text=" │ ".join(parts))
 
         # ALL CAPS highlighting is a MODE, not a one-shot paint job.
         # Storing a set of matching row indices would go stale the instant a cue
@@ -418,6 +458,11 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             # (Tony, 2026-08-06.)
             caps_highlight_on[0] = False
             spell_error_indices.clear()
+            # Clear the SCANNED flag too, not just the results. Leaving it set
+            # would show "0 misspelled" on a brand-new file that was never
+            # checked — a clean bill of health nobody asked for and nobody
+            # earned. Same class of lie as a stale highlight.
+            spell_scanned[0] = False
             current_path[0] = source_path
             editor.title(title)
 
@@ -2743,32 +2788,24 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             errors_by_cue = run_spell_highlight_scan(
                 app, editor, cues, spell_error_indices)
             if errors_by_cue is None:
-                return
-            refresh_tree(cues)
-            if not errors_by_cue:
-                messagebox.showinfo("Highlight Spelling",
-                                    "No spelling errors found.",
-                                    parent=editor)
-                return
-            # Scroll to first error
-            first = min(errors_by_cue.keys())
-            items = tree.get_children()
-            if first < len(items):
-                tree.see(items[first])
-                tree.selection_set(items[first])
-            # Build summary of unique misspelled words
-            all_words = set()
-            for word_list in errors_by_cue.values():
-                all_words.update(w.lower() for w in word_list)
-            word_sample = sorted(all_words)[:30]
-            summary = ', '.join(word_sample)
-            if len(all_words) > 30:
-                summary += f', ... (+{len(all_words) - 30} more)'
-            messagebox.showinfo(
-                "Highlight Spelling",
-                f"Found {len(all_words)} unique misspelled words "
-                f"in {len(errors_by_cue)} cues.\n\n{summary}",
-                parent=editor)
+                return          # checker unavailable — it already said so
+            spell_scanned[0] = True
+            refresh_tree(cues)      # paints the rows AND updates the status bar
+            # NO RESULTS POPUP. Tony, 2026-08-07: "yes please remove that popup.
+            # It's not needed." Same call he made on the ALL CAPS highlighter the
+            # day before — this tool's whole job is to colour rows, and a modal
+            # you have to dismiss before you can look at them is working against
+            # the one thing it does. The count now lives in the status bar next
+            # to "N ALL CAPS", which is where the eye already goes.
+            # The "no errors found" popup went too: the status bar says
+            # "0 misspelled" instead, so a clean file still gives feedback
+            # without stealing focus.
+            if errors_by_cue:
+                first = min(errors_by_cue.keys())
+                items = tree.get_children()
+                if first < len(items):
+                    tree.see(items[first])
+                    tree.selection_set(items[first])
 
         # ── Edit menu ──
         edit_menu = tk.Menu(menubar, tearoff=0)
@@ -4364,33 +4401,37 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     tree.set(item, 'text', display)
                     orig_text = original_cues[idx]['text'] if idx < len(original_cues) else None
                     ctags = _classify_cue(cues[idx], orig_text)
-                    row_tag = ''
-                    for t in (TAG_MODIFIED, TAG_HI, TAG_TAGS, TAG_LONG):
-                        if t in ctags:
-                            row_tag = t
-                            break
+                    # ⚠️ MUST MATCH refresh_tree's PRIORITY CHAIN. This one used
+                    # to check only (MODIFIED, HI, TAGS, LONG) — so editing a cue
+                    # stripped its SPELL or CAPS highlight even when the row still
+                    # qualified, and it came back the moment anything triggered a
+                    # full refresh. A highlight that disappears on edit and
+                    # reappears later reads as a flaky feature, not a stale cache.
+                    # SEARCH is deliberately absent: the edit path has no access to
+                    # the live search set, and a stale green row would be worse
+                    # than none.
+                    if idx in spell_error_indices:
+                        row_tag = TAG_SPELL
+                    elif (caps_highlight_on[0]
+                          and idx in scan_allcaps_words(cues)[0]):
+                        row_tag = TAG_CAPS
+                    elif TAG_MODIFIED in ctags:
+                        row_tag = TAG_MODIFIED
+                    elif TAG_HI in ctags:
+                        row_tag = TAG_HI
+                    elif TAG_TAGS in ctags:
+                        row_tag = TAG_TAGS
+                    elif TAG_LONG in ctags:
+                        row_tag = TAG_LONG
+                    else:
+                        row_tag = ''
                     tree.item(item, tags=(row_tag,) if row_tag else ())
                 else:
                     del cues[idx]
                     refresh_tree(cues)
                 edit_entry.destroy()
                 edit_entry = None
-                # Update stats
-                deleted_count.set(len(original_cues) - len(cues))
-                mod = sum(1 for i, c in enumerate(cues) if i < len(original_cues)
-                          and c['text'] != original_cues[i]['text'])
-                modified_count.set(mod)
-                long_count = sum(1 for c in cues
-                                 if any(len(l) > MAX_CHARS_PER_LINE
-                                        for l in c['text'].split('\n')))
-                stats_parts = [
-                    f"{len(cues)} entries",
-                    f"{modified_count.get()} modified",
-                    f"{deleted_count.get()} removed",
-                ]
-                if long_count:
-                    stats_parts.append(f"{long_count} long lines")
-                stats_label.configure(text=" │ ".join(stats_parts))
+                _rebuild_stats()
 
             def cancel_edit(e=None):
                 nonlocal edit_entry
@@ -4689,22 +4730,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 tree.insert('', 'end', iid=str(i),
                             values=(i + 1, ts, display),
                             tags=(row_tag,) if row_tag else ())
-            deleted_count.set(len(original_cues) - len(cues))
-            mod = sum(1 for i, c in enumerate(cues) if i < len(original_cues)
-                      and c['text'] != original_cues[i]['text'])
-            modified_count.set(mod)
-            long_count = sum(1 for c in cues
-                             if any(len(l) > MAX_CHARS_PER_LINE for l in c['text'].split('\n')))
-            stats_parts = [
-                f"{len(cues)} entries",
-                f"{modified_count.get()} modified",
-                f"{deleted_count.get()} removed",
-            ]
-            if long_count:
-                stats_parts.append(f"{long_count} long lines")
-            if caps_highlight_on[0]:
-                stats_parts.append(f"{len(caps_set)} ALL CAPS")
-            stats_label.configure(text=" │ ".join(stats_parts))
+            _rebuild_stats()
             # Refresh waveform timeline cue blocks and live subtitles
             if timeline.is_loaded:
                 timeline.refresh()
