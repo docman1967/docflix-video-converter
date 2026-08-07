@@ -669,6 +669,22 @@ def open_batch_filter(app):
                 ttk.Checkbutton(caps_row, text=label, variable=var).pack(side='left')
                 ttk.Button(caps_row, text="Names...",
                            command=lambda: _open_names_dialog()).pack(side='left', padx=(4, 0))
+            elif key == 'remove_ads':
+                # Of the three pattern-backed filters this was the ONLY one without
+                # an inline editor: Fix ALL CAPS has "Names...", search & replace
+                # has "Edit...", ad patterns were reachable only via the Settings
+                # menu. Tony read the missing button as "this filter must use a
+                # different list than the subtitle editor's."
+                # It does not. Both dialogs read BUILTIN_AD_PATTERNS +
+                # app.custom_ad_patterns and both persist to the same prefs —
+                # verified identical on disk 2026-08-07 (6 patterns, same mtime).
+                # ⚠️ The data was shared all along; only the door was hidden, and
+                # a hidden editor made a shared list look like two separate ones.
+                ads_row = ttk.Frame(col)
+                ads_row.pack(fill='x', anchor='w')
+                ttk.Checkbutton(ads_row, text=label, variable=var).pack(side='left')
+                ttk.Button(ads_row, text="Edit...",
+                           command=lambda: _open_ad_patterns_dialog()).pack(side='left', padx=(4, 0))
             else:
                 ttk.Checkbutton(col, text=label, variable=var).pack(anchor='w')
 
