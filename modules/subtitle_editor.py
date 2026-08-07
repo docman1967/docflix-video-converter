@@ -2701,16 +2701,48 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     return typed
                 return current_error[0][1] if current_error[0] else ''
 
+            def _count_changes(scanned, corrected):
+                """How many cues would ACTUALLY change — not how many match.
+
+                ⚠️ Counting matches overstates it. A cue that already reads
+                "Kazahrusian" matches case-insensitively but rewrites to itself,
+                so a match count of 3 next to 2 real edits is a small lie in the
+                one place the user is deciding whether to click. Count the diff.
+                """
+                if not scanned or not corrected or scanned == corrected:
+                    return 0
+                return sum(1 for c in cues
+                           if replace_word(c['text'], scanned, corrected)
+                           != c['text'])
+
             def _update_add_labels(*_):
-                """Keep the dictionary buttons showing the word they will add."""
+                """Keep the dictionary buttons showing the word they will add,
+                and warn when adding will also rewrite the subtitle."""
                 word = _word_to_add()
                 if not word:
                     add_dict_btn.configure(text="Add to Dict")
                     add_name_btn.configure(text="Add as Name")
+                    fix_hint.configure(text='')
                     return
                 shown = word if len(word) <= 12 else word[:11] + '…'
                 add_dict_btn.configure(text=f'Add "{shown}" to Dict')
                 add_name_btn.configure(text=f'Add "{shown}" as Name')
+                # ⚠️ ADDING A CORRECTION REWRITES THE FILE. Say so, with a count.
+                # The buttons are labelled "Add", so a file-wide replace is a
+                # side effect the label cannot carry — it would need ~35
+                # characters. This line does the honest work instead, and it
+                # doubles as an answer to "how many will it fix?" BEFORE the
+                # click rather than after.
+                scanned = current_error[0][1] if current_error[0] else ''
+                n = _count_changes(scanned, word)
+                if not n:
+                    fix_hint.configure(text='')
+                else:
+                    verb = ('recase' if word.lower() == scanned.lower()
+                            else 'fix')
+                    fix_hint.configure(
+                        text=f'↳ will also {verb} {n} '
+                             f'cue{"" if n == 1 else "s"} of "{scanned}"')
 
             # NOTE: the trace that keeps these labels live is registered AFTER
             # the buttons are created (see below) — _update_add_labels touches
@@ -2810,6 +2842,32 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             # scanner needs to stop stopping on "kazahrusian" — otherwise adding
             # a correction leaves the broken spelling flagged forever and the
             # button appears to have done nothing.
+            def _apply_correction_everywhere(scanned, corrected):
+                """Rewrite every whole-word occurrence of `scanned`. Returns the
+                number of cues changed.
+
+                ⚠️ FILE-WIDE, NOT JUST THIS CUE, AND THAT IS THE SAFE CHOICE —
+                which is not obvious. Tony asked: "when the user adds a name does
+                it fix every other occurrence?" It has to. Adding also calls
+                ignored.add(scanned), so the scanner stops offering that word
+                again; if only the current cue were fixed, every OTHER broken
+                occurrence would stay wrong AND never be shown again. A partial
+                fix plus a permanent silence is worse than no fix at all.
+
+                Typing a correction is a definitional act — "this word is spelled
+                like this" — so it applies to the whole file, same as the name it
+                writes into custom_cap_words.
+                """
+                if not scanned or not corrected or scanned == corrected:
+                    return 0
+                changed = 0
+                for cue in cues:
+                    new = replace_word(cue['text'], scanned, corrected)
+                    if new != cue['text']:
+                        cue['text'] = new
+                        changed += 1
+                return changed
+
             def _do_add_dict():
                 if not current_error[0]:
                     return
@@ -2817,6 +2875,10 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 scanned = current_error[0][1]
                 if not w:
                     return
+                if w != scanned:
+                    push_undo()
+                    _apply_correction_everywhere(scanned, w)
+                    refresh_tree(cues)
                 if w.lower() not in [x.lower()
                                      for x in app.custom_spell_words]:
                     app.custom_spell_words.append(w)
@@ -2832,6 +2894,10 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 scanned = current_error[0][1]
                 if not w:
                     return
+                if w != scanned:
+                    push_undo()
+                    _apply_correction_everywhere(scanned, w)
+                    refresh_tree(cues)
                 # custom_cap_words is CASE-SENSITIVE on purpose — it is the
                 # record of how the proper noun is really written, which is the
                 # whole point of adding a corrected form rather than the OCR's.
@@ -2873,6 +2939,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             add_name_btn.pack(side='left', padx=2)
             ttk.Button(bf2, text="Close", command=sd.destroy,
                        width=6).pack(side='right', padx=2)
+
+            # Carries the side effect the "Add" labels cannot: adding a typed
+            # correction rewrites the whole file, and this says how many cues
+            # before the click.
+            fix_hint = ttk.Label(bf, text='', font=('Helvetica', 8),
+                                 foreground='#b35c00')
+            fix_hint.pack(fill='x', pady=(4, 0))
 
             # Registered HERE, not where _update_add_labels is defined: the
             # callback configures add_dict_btn / add_name_btn, so the trace must
