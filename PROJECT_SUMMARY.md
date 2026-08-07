@@ -1,7 +1,7 @@
 # Docflix Media Suite — Project Summary
 
-**Last Updated:** 2026-08-05 (rev 104)  
-**Version:** 3.13.0  
+**Last Updated:** 2026-08-07 (rev 105)  
+**Version:** 3.15.0  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/`  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
