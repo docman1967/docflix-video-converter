@@ -5113,6 +5113,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     # Don't scroll during drag — it shifts coordinates
                     if not timeline._drag:
                         timeline.scroll_to_cue(idx)
+                        # ...and take the video with it. Panning the view
+                        # without moving the playback position meant the
+                        # picture stayed where it was and you had to click the
+                        # waveform to catch it up — aiming by hand at a
+                        # timestamp the editor already knew. Also inside the
+                        # drag guard: seeking mid-drag fights the drag.
+                        timeline.seek_to_cue(idx)
                 except (ValueError, IndexError):
                     pass
 

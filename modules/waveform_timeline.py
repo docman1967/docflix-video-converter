@@ -1473,6 +1473,45 @@ class WaveformTimeline(tk.Frame):
         if cw > 0 and ch > 0:
             self._draw_cue_blocks(cw, ch)
 
+    def seek_to_cue(self, idx):
+        """Move the playback cursor — and mpv, if running — to a cue's start.
+
+        Tony, 2026-08-07: *"When I click on a subtitle cue the audio waveform
+        snaps to that timestamp just like it should. How hard would it be to
+        have the video do this as well? The only way to do it now is to click on
+        the waveform after it's snapped to the selected cue."*
+
+        Selecting a cue used to pan the VIEW (scroll_to_cue) without moving the
+        playback POSITION, so the video stayed wherever it was and you had to
+        click the waveform to bring it along — a second, redundant aim at a
+        target the editor already knew exactly.
+
+        Works whether or not mpv is running: with a player up it seeks live,
+        and with no player it sets the position Play will start from, so
+        select-then-play lands on the line you picked.
+        """
+        cues = self._cues_fn()
+        if idx is None or not cues or idx >= len(cues) or self._duration_ms <= 0:
+            return
+
+        from .subtitle_filters import srt_ts_to_ms
+
+        try:
+            start_ms = srt_ts_to_ms(cues[idx]['start'])
+        except (KeyError, ValueError):
+            return
+        start_ms = max(0, min(self._duration_ms, start_ms))
+        if self._playback_pos_ms == start_ms:
+            return
+
+        self._playback_pos_ms = start_ms
+        if self._mpv_proc and self._mpv_proc.poll() is None:
+            self._mpv_cmd(["seek", str(start_ms / 1000), "absolute+exact"])
+        cw = self._canvas.winfo_width()
+        ch = self._canvas.winfo_height()
+        if cw > 0 and ch > 0:
+            self._draw_playback_cursor(cw, ch)
+
     def scroll_to_cue(self, idx):
         """Pan the view so the given cue is visible and centered."""
         cues = self._cues_fn()
