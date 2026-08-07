@@ -88,8 +88,13 @@ class WaveformTimeline(tk.Frame):
 
     def __init__(self, parent, cues_fn=None, on_cue_modified=None,
                  on_selection_changed=None, push_undo=None, log_fn=None,
-                 video_frame=None, **kwargs):
+                 video_frame=None, on_video_start=None, **kwargs):
         super().__init__(parent, **kwargs)
+
+        # Fired when mpv is actually launched into video_frame. The host owns
+        # whatever placeholder sits in that frame and has to take it down at
+        # exactly this moment — the widget cannot know what it is.
+        self._on_video_start = on_video_start
 
         self._cues_fn = cues_fn or (lambda: [])
         self._on_cue_modified = on_cue_modified
@@ -230,6 +235,18 @@ class WaveformTimeline(tk.Frame):
         if not video_path or not os.path.isfile(video_path):
             self._log("Waveform: no video file", 'WARNING')
             return
+
+        # ⚠️ SWITCHING VIDEOS MUST TEAR DOWN THE OLD ONE FIRST. mpv holds the
+        # previous file open and keeps playing it, and the stale temp WAV is
+        # still on disk — so without this, "load a different episode" leaves a
+        # player running the wrong soundtrack behind a correct-looking waveform.
+        if self._video_path and self._video_path != video_path:
+            self._stop_mpv()
+            self._cleanup_temp()
+            self._raw_samples = None
+            self._playback_pos_ms = None
+            self._marker_a_ms = None
+            self._marker_b_ms = None
 
         self._video_path = video_path
         self._loading = True
@@ -1331,6 +1348,11 @@ class WaveformTimeline(tk.Frame):
                 self.after(500, lambda: self._load_live_subtitles(srt_path))
             # Start cursor polling
             self._poll_playback_position()
+            if self._on_video_start:
+                try:
+                    self._on_video_start()
+                except Exception as e:
+                    self._log(f"on_video_start failed: {e}", 'WARNING')
             return True
         except FileNotFoundError:
             self._log("mpv not found — install mpv for playback", 'ERROR')
@@ -1496,3 +1518,16 @@ class WaveformTimeline(tk.Frame):
     def is_loaded(self):
         """True if audio waveform data is loaded."""
         return self._raw_samples is not None
+
+    @property
+    def current_video(self):
+        """Path of the video the loaded waveform came from, or None.
+
+        ⚠️ CALLERS DECIDING WHETHER TO RELOAD MUST COMPARE AGAINST THIS, NOT
+        `is_loaded`. Guarding with `if not is_loaded` lets the FIRST video win
+        for the lifetime of the widget: open a second subtitle, ask for its
+        waveform, and you keep episode 1's audio under episode 8's cues. Nothing
+        errors and the waveform looks entirely plausible — you just sync every
+        line against the wrong soundtrack. Tony hit this for real, 2026-08-07.
+        """
+        return self._video_path if self._raw_samples is not None else None
