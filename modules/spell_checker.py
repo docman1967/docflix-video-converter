@@ -90,6 +90,67 @@ def is_ok_contraction(word, spell, extra_known=()):
     return False
 
 
+# ── Wrong-case proper nouns ──────────────────────────────────────────────────
+# Tony, 2026-08-07: *"I just found a name that is in the list but it didn't
+# repair it. Name is hirst and it's line #250."*
+#
+# ⚠️ ADDING A NAME TO THE LIST IS WHAT MAKES THE SPELL CHECKER BLIND TO IT.
+# custom_cap_words is loaded into pyspellchecker lowercased, and pyspellchecker
+# lowercases before lookup anyway, so once "Hirst" is a known name every one of
+# "Hirst" / "hirst" / "HIRST" is a correctly spelled word. The scanner walks
+# past all of them and reports "spell check complete". Measured on the episode
+# he found it in: 30 wrong-case names across 6 distinct names, all silent.
+#
+# The gap is that "hirst" is not a SPELLING error at all — it is a CAPITALISATION
+# error, and the only tool that looked at capitalisation was the bulk Fix ALL
+# CAPS filter. A name added to the list AFTER a file was filtered therefore fell
+# between the two tools permanently.
+#
+# Unlike a misspelling, this has exactly ONE right answer and it is already
+# stored — so the correction is authoritative rather than a guess.
+def name_case_lut(names):
+    """{lowercase: canonical} for the single-token names in `names`.
+
+    ⚠️ MULTI-WORD NAMES ARE DELIBERATELY EXCLUDED. Splitting "Van Gogh" into
+    van->Van and gogh->Gogh looks like a free win, but the same rule applied to
+    "New York" would make every ordinary "new" a wrong-case name. The Fix ALL
+    CAPS filter matches phrases and handles those correctly; this stays out of
+    the way rather than inventing a false positive the filter does not have.
+    """
+    return {n.lower(): n for n in names if n and ' ' not in n}
+
+
+def miscased_name(word, lut):
+    """The correctly-cased form of `word`, or None if there is nothing to fix.
+
+    Handles possessives too ("hirst's" -> "Hirst's"), for the same reason
+    is_ok_contraction exists: a name overwhelmingly appears in its possessive
+    form, so a check that only matched the bare token would miss the occurrences
+    that matter most.
+    """
+    if not word:
+        return None
+    # ALL CAPS is emphasis, signage or a hard-of-hearing tag — not something to
+    # correct word by word. Leave it to the Fix ALL CAPS filter.
+    if word.isupper():
+        return None
+    good = lut.get(word.lower())
+    if good is not None:
+        return good if good != word else None
+    # Possessive / contraction: correct the root, keep the suffix verbatim.
+    root, sep, suffix = word.replace('’', "'").rpartition("'")
+    if not sep or not root or root.isupper():
+        return None
+    if suffix and suffix.lower() not in _CONTRACTION_SUFFIXES:
+        return None
+    good = lut.get(root.lower())
+    if good is None or good == root:
+        return None
+    # Index into the ORIGINAL word so a curly apostrophe survives — the
+    # normalisation above is 1 char for 1 char, so the offsets still line up.
+    return good + word[len(root):]
+
+
 def run_spell_check_scan(app, parent_window, cues, spell_error_indices):
     """Scan all cues for spelling errors.
 

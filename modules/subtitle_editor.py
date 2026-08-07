@@ -185,7 +185,7 @@ def _match_case(src, repl):
     return repl
 
 
-def replace_word(text, word, repl, count=0):
+def replace_word(text, word, repl, count=0, exact=False):
     """Replace WHOLE-WORD occurrences of `word`. count=0 means all.
 
     ⚠️ THE SPELL CHECKER USED TO DO THIS WITH str.find() AND str.replace(),
@@ -204,9 +204,19 @@ def replace_word(text, word, repl, count=0):
     "don't". Matching is case-insensitive but the replacement inherits the case
     of what it replaced, so "Teh"->"The" and "WONT"->"WON'T" come out right
     instead of flattening a line's capitalisation.
+
+    ⚠️ exact=True IS REQUIRED FOR RECASING and only for that. Fixing "hirst" ->
+    "Hirst" the ordinary way is a no-op with a hole in it: the pattern also
+    matches the "Hirst" that is ALREADY correct, and _match_case then rewrites
+    it to itself. In a cue reading "Hirst said hirst" the count=1 replace is
+    spent on the correct one and the broken one survives — while the scanner
+    moves on, so it is never offered again. exact=True matches case-sensitively
+    and inserts `repl` verbatim, so only the wrong spellings are touched.
     """
     pat = re.compile(r"(?<![A-Za-z'])" + re.escape(word) + r"(?![A-Za-z'])",
-                     re.I)
+                     0 if exact else re.I)
+    if exact:
+        return pat.sub(lambda m: repl, text, count=count)
     return pat.sub(lambda m: _match_case(m.group(0), repl), text, count=count)
 
 
@@ -2699,12 +2709,18 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 else:
                     return
 
-            from modules.spell_checker import is_ok_contraction
+            from modules.spell_checker import (is_ok_contraction,
+                                               miscased_name, name_case_lut)
 
             spell = SpellChecker()
-            known = [w.lower() for w in app.custom_cap_words + app.custom_spell_words]
+            all_names = app.custom_cap_words + temp_cap_words
+            known = [w.lower() for w in all_names + app.custom_spell_words]
             if known:
                 spell.word_frequency.load_words(known)
+            # The authority for how each proper noun is really written. Rebuilt
+            # by _do_add_name so a name added mid-scan starts being enforced on
+            # the cues still ahead of the cursor.
+            cap_lut = name_case_lut(all_names)
 
             # ── Scan state ──
             scan_cue = [0]        # current cue index being scanned
@@ -2740,7 +2756,11 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                   font=('Helvetica', 9))
             stats_lbl.grid(row=0, column=0, columnspan=2, sticky='w', **_sp)
 
-            ttk.Label(sf, text="Not in dictionary:",
+            # Not a constant label any more: a wrong-case name is a different
+            # finding from an unknown word, and saying "Not in dictionary"
+            # over a word that IS in the dictionary would be a plain lie.
+            kind_var = tk.StringVar(value="Not in dictionary:")
+            ttk.Label(sf, textvariable=kind_var,
                       font=('Helvetica', 10, 'bold')).grid(
                           row=1, column=0, sticky='w', **_sp)
             word_var = tk.StringVar()
@@ -2791,7 +2811,20 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             # ── Incremental scanner ──
             def _find_next():
                 """Scan forward from current position for the next error.
-                Returns (cue_idx, word, candidates) or None."""
+                Returns (cue_idx, word, candidates, kind) or None.
+
+                `kind` is 'spelling' (the dictionary does not know the word) or
+                'caps' (the word IS known, as a name, but written in the wrong
+                case). They are different problems with different confidence:
+                a spelling candidate is a guess, a caps candidate is the exact
+                string Tony stored in the name list. The UI says which.
+
+                ⚠️ THE CAPS CHECK MUST RUN ON WORDS THE DICTIONARY ACCEPTS —
+                that is the entire point, and it is why the word loop is no
+                longer nested inside `if unknown:`. A name in custom_cap_words
+                is by construction a known word, so anything gated on being
+                unknown can never see it.
+                """
                 ci = scan_cue[0]
                 wi = scan_word[0]
                 while ci < len(cues):
@@ -2802,26 +2835,36 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                        clean)
                     if words:
                         unknown = spell.unknown(words)
-                        if unknown:
-                            for j in range(wi, len(words)):
-                                w = words[j]
-                                if ((w.lower() in unknown or w in unknown)
-                                        and w.lower() not in ignored):
-                                    # Valid contraction / possessive whose ROOT
-                                    # is known? Not an error. "Whatever's" is
-                                    # correct English, and once "Vanya" is in
-                                    # the dictionary "Vanya's" must stop being
-                                    # flagged too — otherwise adding a name
-                                    # never covers the form it usually appears
-                                    # in. See is_ok_contraction().
-                                    if is_ok_contraction(w, spell, known):
-                                        continue
-                                    cands = spell.candidates(w)
-                                    spell_error_indices.add(ci)
-                                    scan_cue[0] = ci
-                                    scan_word[0] = j + 1
-                                    return (ci, w,
-                                            sorted(cands) if cands else [])
+                        for j in range(wi, len(words)):
+                            w = words[j]
+                            # Ignore is per-word and covers BOTH kinds — the
+                            # user said "stop showing me this word".
+                            if w.lower() in ignored:
+                                continue
+                            # Valid contraction / possessive whose ROOT is
+                            # known? Not a spelling error. "Whatever's" is
+                            # correct English, and once "Vanya" is in the
+                            # dictionary "Vanya's" must stop being flagged too
+                            # — otherwise adding a name never covers the form
+                            # it usually appears in. See is_ok_contraction().
+                            # It may still be MIS-CASED, so fall through
+                            # rather than skipping the word entirely.
+                            if ((w.lower() in unknown or w in unknown)
+                                    and not is_ok_contraction(w, spell,
+                                                              known)):
+                                cands = spell.candidates(w)
+                                spell_error_indices.add(ci)
+                                scan_cue[0] = ci
+                                scan_word[0] = j + 1
+                                return (ci, w,
+                                        sorted(cands) if cands else [],
+                                        'spelling')
+                            good = miscased_name(w, cap_lut)
+                            if good:
+                                spell_error_indices.add(ci)
+                                scan_cue[0] = ci
+                                scan_word[0] = j + 1
+                                return (ci, w, [good], 'caps')
                     ci += 1
                     wi = 0
                     scan_cue[0] = ci
@@ -2917,7 +2960,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         parent=sd)
                     sd.destroy()
                     return
-                ci, w, ca = result
+                ci, w, ca, kind = result
                 error_count[0] += 1
                 items = tree.get_children()
                 if ci < len(items):
@@ -2933,6 +2976,19 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 sug_lb.delete(0, 'end')
                 for c in ca:
                     sug_lb.insert('end', c)
+                if kind == 'caps':
+                    # THE ONE DOCUMENTED EXCEPTION to the no-pre-fill rule
+                    # below, and it holds only because the suggestion is not a
+                    # suggestion: it is the exact string Tony put in the name
+                    # list, so there is nothing to guess and no wrong answer to
+                    # click. Narrow on purpose — if a future finding is ever
+                    # "probably X", it does NOT get to reuse this.
+                    kind_var.set("Wrong capitalization:")
+                    sug_lb.selection_set(0)
+                    replace_var.set(ca[0])
+                    _update_add_labels()
+                    return
+                kind_var.set("Not in dictionary:")
                 # ⚠️ DO NOT PRE-SELECT A SUGGESTION OR PRE-FILL "Replace with".
                 # This used to auto-fill the top candidate, which meant every
                 # proper noun arrived with a WRONG answer already loaded and the
@@ -2948,7 +3004,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             def _do_replace():
                 if not current_error[0]:
                     return
-                ci, w, _ = current_error[0]
+                ci, w, _, kind = current_error[0]
                 repl = replace_var.get().strip()
                 if not repl:
                     return
@@ -2957,8 +3013,11 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # find the rest. Repeated errors in one cue still resolve one
                 # click at a time, because each replace removes the match the
                 # next search would have found.
+                # exact=True for a recase, or the count=1 gets spent on an
+                # already-correct "Hirst" earlier in the same cue and the
+                # broken one survives unflagged — see replace_word().
                 cues[ci]['text'] = replace_word(cues[ci]['text'], w, repl,
-                                                count=1)
+                                                count=1, exact=(kind == 'caps'))
                 refresh_tree(cues)
                 # Re-check same cue from current word position
                 _show_next()
@@ -2966,7 +3025,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             def _do_replace_all():
                 if not current_error[0]:
                     return
-                _, w, _ = current_error[0]
+                _, w, _, kind = current_error[0]
                 repl = replace_var.get().strip()
                 if not repl:
                     return
@@ -2978,7 +3037,8 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # capitalisation onto each hit, so a sentence-initial "Teh"
                 # becomes "The" rather than "the".
                 for cue in cues:
-                    cue['text'] = replace_word(cue['text'], w, repl)
+                    cue['text'] = replace_word(cue['text'], w, repl,
+                                               exact=(kind == 'caps'))
                 ignored.add(w.lower())
                 refresh_tree(cues)
                 _show_next()
@@ -3062,6 +3122,11 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                      for x in app.custom_spell_words]:
                     app.custom_spell_words.append(w)
                 spell.word_frequency.load_words([w.lower()])
+                # Teach the wrong-case check the name too, or the cues still
+                # ahead of the cursor keep their broken capitalisation AND stop
+                # being flagged — the exact blind spot this pass exists to
+                # close, reopened one name at a time.
+                cap_lut[w.lower()] = w
                 app.save_preferences()
                 ignored.add(scanned.lower())
                 _show_next()
