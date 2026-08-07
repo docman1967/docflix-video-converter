@@ -113,6 +113,40 @@ _CAPS_TAG_RE = re.compile(r'<[^>]+>')
 _CAPS_RE = re.compile(r'\b([A-Z]{2,})\b')          # 2+ uppercase letters, no digits
 
 
+def _match_case(src, repl):
+    """Give `repl` the capitalisation of the text it is replacing."""
+    if src.isupper() and len(src) > 1:
+        return repl.upper()
+    if src[:1].isupper():
+        return repl[:1].upper() + repl[1:]
+    return repl
+
+
+def replace_word(text, word, repl, count=0):
+    """Replace WHOLE-WORD occurrences of `word`. count=0 means all.
+
+    ⚠️ THE SPELL CHECKER USED TO DO THIS WITH str.find() AND str.replace(),
+    i.e. plain substring matching, and it corrupted text. The scanner only ever
+    reports whole words, so the trap is a real word that also sits INSIDE a
+    longer word earlier in the same line — which is precisely what names do:
+
+        "Anastasia met Ana."  fixing Ana->Anna   gave  "Annastasia met Ana."
+        "Vanya, this is Van." fixing Van->Vance  gave  "Vanceya, this is Van."
+
+    Note both failures at once: it mangled a word that was never flagged AND
+    left the actual error untouched. Replace All was worse — str.replace()
+    across every cue in the file, so one click could chew through the lot.
+
+    Apostrophes count as word characters, or "dont" would half-match inside
+    "don't". Matching is case-insensitive but the replacement inherits the case
+    of what it replaced, so "Teh"->"The" and "WONT"->"WON'T" come out right
+    instead of flattening a line's capitalisation.
+    """
+    pat = re.compile(r"(?<![A-Za-z'])" + re.escape(word) + r"(?![A-Za-z'])",
+                     re.I)
+    return pat.sub(lambda m: _match_case(m.group(0), repl), text, count=count)
+
+
 def scan_allcaps_words(cues):
     """Pure scan: return (indices, details) for cues containing ALL CAPS words.
 
@@ -2697,13 +2731,12 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 if not repl:
                     return
                 push_undo()
-                txt = cues[ci]['text']
-                pos = txt.find(w)
-                if pos == -1:
-                    pos = txt.lower().find(w.lower())
-                if pos >= 0:
-                    cues[ci]['text'] = (txt[:pos] + repl
-                                       + txt[pos + len(w):])
+                # count=1: fix the first whole-word hit, then let the scanner
+                # find the rest. Repeated errors in one cue still resolve one
+                # click at a time, because each replace removes the match the
+                # next search would have found.
+                cues[ci]['text'] = replace_word(cues[ci]['text'], w, repl,
+                                                count=1)
                 refresh_tree(cues)
                 # Re-check same cue from current word position
                 _show_next()
@@ -2716,13 +2749,14 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 if not repl:
                     return
                 push_undo()
+                # Whole-word across every cue. The old version used
+                # str.replace() — substring, file-wide — which is the most
+                # destructive button in the editor pointed at the least precise
+                # matcher available. replace_word() also carries the original
+                # capitalisation onto each hit, so a sentence-initial "Teh"
+                # becomes "The" rather than "the".
                 for cue in cues:
-                    if w in cue['text']:
-                        cue['text'] = cue['text'].replace(w, repl)
-                    elif w.lower() in cue['text'].lower():
-                        cue['text'] = re.sub(re.escape(w), repl,
-                                             cue['text'],
-                                             flags=re.IGNORECASE)
+                    cue['text'] = replace_word(cue['text'], w, repl)
                 ignored.add(w.lower())
                 refresh_tree(cues)
                 _show_next()
