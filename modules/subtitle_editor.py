@@ -275,6 +275,30 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         # unscanned file look identical.
         spell_scanned = [False]
 
+        # ── Per-file character names ─────────────────────────────────────────
+        # Tony, 2026-08-07: *"a 'add temp name' that would be cleared once the
+        # file is saved. So the user gets a sub that has the name grace in it as
+        # the main character, the user could add that name to the temp list and
+        # not have to fix every instance of it."*
+        #
+        # ⚠️ THIS EXISTS BECAUSE SOME NAMES ARE ALSO COMMON WORDS, and no single
+        # permanent list can be right about them. Measured on FIX ALL CAPS:
+        #     without "Mark":  "I TOLD MARK"      -> "I told mark"        wrong
+        #     with    "Mark":  "LEAVE YOUR MARK"  -> "Leave your Mark"    wrong
+        # There is no setting that gets both. Grace, Bill, Art, Rose, Will,
+        # Frank, Hope, Faith — adding any of them permanently trades one error
+        # for another, and the common noun usually outnumbers the character.
+        #
+        # The ambiguity is scoped to the FILE — Grace is a character in this
+        # episode and a noun in the next — so the list is scoped to the file too.
+        #
+        # ⚠️ CLEARED ON LOAD, NOT ON SAVE. Tony's first instinct was save, but
+        # saving mid-session and carrying on is normal; wiping the list there
+        # means the next Fix ALL CAPS silently lowercases the character again.
+        # Load is the boundary that actually matches "different file, different
+        # meaning", and it is where every other per-file flag already resets.
+        temp_cap_words = []
+
         def _rebuild_stats():
             """Repaint the status bar. ONE definition, called from every path.
 
@@ -497,6 +521,9 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             # checked — a clean bill of health nobody asked for and nobody
             # earned. Same class of lie as a stale highlight.
             spell_scanned[0] = False
+            # Per-file character names die with the file they belonged to.
+            # "Grace" is a character here and a noun in the next episode.
+            temp_cap_words.clear()
             current_path[0] = source_path
             editor.title(title)
 
@@ -1857,7 +1884,8 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 app.add_log("Text is mostly ALL CAPS — running Fix ALL CAPS first "
                              "to avoid false HI detection", 'INFO')
                 push_undo()
-                cues = filter_fix_caps(cues, app.custom_cap_words,
+                cues = filter_fix_caps(cues,
+                                      app.custom_cap_words + temp_cap_words,
                                       use_names_db=getattr(
                                           app, 'use_names_db', False))
                 refresh_tree(cues)
@@ -2118,7 +2146,10 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         def show_fix_caps_dialog():
             cd = tk.Toplevel(editor)
             cd.title("Fix ALL CAPS")
-            cd.geometry("420x560")
+            # 720 not 560: the dialog now carries THREE sections — permanent
+            # names, this-file-only names, and the names database. It is
+            # resizable, but the default should not open pre-cramped.
+            cd.geometry("460x720")
             app._center_on_main(cd)
             cd.resizable(True, True)
             # Keep on top but don't grab — allows scrolling the subtitle list
@@ -2176,6 +2207,55 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
 
             ttk.Label(lf, text="Names are saved automatically and persist between sessions.",
                       font=('Helvetica', 8), foreground='gray').pack(anchor='w')
+
+            # ── This-file-only names ────────────────────────────────────────
+            # Deliberately sits directly under the permanent list: the two frame
+            # titles next to each other are the whole explanation of when to use
+            # which, with no help text to read.
+            tf = ttk.LabelFrame(cd, text="This File Only (cleared when you open another)",
+                                padding=8)
+            tf.pack(fill='both', expand=True, padx=10, pady=5)
+
+            temp_list = tk.Listbox(tf, height=5, font=('Courier', 10))
+            temp_list.pack(fill='both', expand=True)
+            for w in temp_cap_words:
+                temp_list.insert('end', w)
+
+            temp_add_frame = ttk.Frame(tf)
+            temp_add_frame.pack(fill='x', pady=(4, 0))
+            temp_var = tk.StringVar()
+            temp_entry = ttk.Entry(temp_add_frame, textvariable=temp_var)
+            temp_entry.pack(side='left', fill='x', expand=True, padx=(0, 4))
+            temp_entry.bind('<Button-3>',
+                            lambda e, m=_wm: m.tk_popup(e.x_root, e.y_root))
+
+            def add_temp():
+                word = temp_var.get().strip()
+                if not word:
+                    return
+                existing = [w.lower() for w in temp_cap_words + app.custom_cap_words]
+                if word.lower() not in existing:
+                    temp_cap_words.append(word)
+                    temp_list.insert('end', word)
+                temp_var.set('')
+
+            def remove_temp():
+                sel = temp_list.curselection()
+                if sel:
+                    temp_cap_words.pop(sel[0])
+                    temp_list.delete(sel[0])
+
+            ttk.Button(temp_add_frame, text="Add",
+                       command=add_temp).pack(side='right')
+            temp_entry.bind('<Return>', lambda e: add_temp())
+            ttk.Button(tf, text="Remove Selected",
+                       command=remove_temp).pack(anchor='w', pady=(4, 0))
+            ttk.Label(tf,
+                      text="For names that are also ordinary words — Grace, Mark, "
+                           "Bill, Rose.\nAdding those permanently would capitalise "
+                           "the noun too.",
+                      font=('Helvetica', 8), foreground='gray',
+                      justify='left').pack(anchor='w')
 
             # ── Names Database section ──
             nf = ttk.LabelFrame(cd, text="Names Database (optional)",
@@ -2272,7 +2352,8 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             ttk.Button(btn_frame, text="Apply",
                        command=lambda: (cd.destroy(), apply_filter(
                            lambda c: filter_fix_caps(
-                               c, app.custom_cap_words,
+                               # permanent + this-file-only, in that order
+                               c, app.custom_cap_words + temp_cap_words,
                                use_names_db=getattr(
                                    app, 'use_names_db', False)),
                            "Fix ALL CAPS"))).pack(side='right')
