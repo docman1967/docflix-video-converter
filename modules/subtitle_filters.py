@@ -848,6 +848,21 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
                 original = custom_single.get(word.lower())
                 if original:
                     return original
+                # ⚠️ THEN THE POSSESSIVE ROOT — "sho's" -> "Sho's".
+                # The whole-token lookup above cannot match a possessive,
+                # because the list holds "Sho" and the token is "sho's". Before
+                # the apostrophe went into the pattern below, "sho's" split
+                # into "sho" + "s" and the name half matched by accident; fixing
+                # O'Brien took that accident away and left every possessive of
+                # every custom name unfixed. 64 of them across 26 episodes,
+                # found the same afternoon by the spell checker — which catches
+                # them because miscased_name() does exactly this. Two lookups,
+                # not one, or the two features disagree about the same word.
+                root, sep, suffix = word.rpartition("'")
+                if sep and root and suffix.lower() in ('s', ''):
+                    original = custom_single.get(root.lower())
+                    if original:
+                        return original + word[len(root):]
                 return word
             # ⚠️ APOSTROPHES ARE PART OF THE WORD. This was r'\b[a-zA-Z]+\b',
             # which split "o'brien" into "o" and "brien" — so NO custom name
@@ -855,7 +870,8 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
             # O'Brien, O'Neill, D'Angelo all silently did nothing and the line
             # just stayed lowercase, with no sign anything had been skipped.
             # Safe for ordinary contractions: "don't" now matches as one token,
-            # is not in custom_single, and is returned unchanged.
+            # is not in custom_single, its root "don" is not either, and it is
+            # returned unchanged.
             # Same word pattern the spell checker uses. (Found 2026-08-07.)
             text = re.sub(r"\b[a-zA-Z]+(?:'[a-zA-Z]+)*", _cap_custom, text)
         return text
