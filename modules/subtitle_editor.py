@@ -2555,6 +2555,8 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 else:
                     return
 
+            from modules.spell_checker import is_ok_contraction
+
             spell = SpellChecker()
             known = [w.lower() for w in app.custom_cap_words + app.custom_spell_words]
             if known:
@@ -2661,6 +2663,15 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                 w = words[j]
                                 if ((w.lower() in unknown or w in unknown)
                                         and w.lower() not in ignored):
+                                    # Valid contraction / possessive whose ROOT
+                                    # is known? Not an error. "Whatever's" is
+                                    # correct English, and once "Vanya" is in
+                                    # the dictionary "Vanya's" must stop being
+                                    # flagged too — otherwise adding a name
+                                    # never covers the form it usually appears
+                                    # in. See is_ok_contraction().
+                                    if is_ok_contraction(w, spell, known):
+                                        continue
                                     cands = spell.candidates(w)
                                     spell_error_indices.add(ci)
                                     scan_cue[0] = ci

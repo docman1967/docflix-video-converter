@@ -16,6 +16,80 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 
+# ── Contractions and possessives ─────────────────────────────────────────────
+# Tony, 2026-08-07, on "Whatever's" being flagged with suggestions 'whatever'
+# and 'whitener's': *"Most spell checkers will flag things with an apostrophe
+# like what's, like's etc... We should have a way to determine whether it's a
+# contraction and spell check the root and not the whole word. This happens
+# with names as well."*
+#
+# pyspellchecker only knows whole tokens, so every possessive of a proper noun
+# is a false positive — and it stays one FOREVER, because adding "Vanya" to the
+# custom dictionary does nothing for "Vanya's". That is what makes this worth
+# fixing rather than skipping past: the dictionary silently fails to cover the
+# form the name most often appears in.
+_CONTRACTION_SUFFIXES = {'s', 're', 've', 'll', 'd', 'm', 't'}
+
+# No letter-root to recover — these do not decompose.
+_IRREGULAR_CONTRACTIONS = {
+    "won't": ["will"], "shan't": ["shall"], "ain't": ["be", "is", "am"],
+    "o'clock": ["clock"], "y'all": ["you", "all"],
+}
+
+
+def contraction_roots(word):
+    """Candidate roots for a contraction/possessive; [] if it is not one.
+
+    ⚠️ RETURNS CANDIDATES, NOT ONE ANSWER, because n't is genuinely ambiguous:
+        doesn't = does + n't   -> strip 3
+        can't   = can  + 't    -> strip 2
+    "can" is the one root that already ends in n, so no single rule covers both.
+    Rather than enumerate exceptions, hand the dictionary both and let it pick;
+    the caller accepts the word if ANY candidate is known.
+
+    Curly apostrophes are normalised first — subtitles are full of them and
+    "Whatever's" must behave exactly like "Whatever's".
+    """
+    w = (word or '').replace('’', "'")
+    if "'" not in w:
+        return []
+    low = w.lower()
+    if low in _IRREGULAR_CONTRACTIONS:
+        return _IRREGULAR_CONTRACTIONS[low]
+    out = []
+    if low.endswith("n't"):
+        out.append(w[:-3])      # doesn't -> does
+        out.append(w[:-2])      # can't   -> can
+    root, _, suffix = w.rpartition("'")
+    # suffix == '' covers plural possessives: boys'
+    if root and (suffix == '' or suffix.lower() in _CONTRACTION_SUFFIXES):
+        out.append(root)
+    return [r for r in dict.fromkeys(out) if r]
+
+
+def is_ok_contraction(word, spell, extra_known=()):
+    """True if `word` is a contraction/possessive whose ROOT is known.
+
+    ⚠️ Only ever SUPPRESSES a flag — it can never create one. If the root is
+    unknown too ("Xyzzy's"), this returns False and the word stays flagged, so
+    a genuinely misspelled name is still caught. Adding the root to the
+    dictionary then clears every possessive of it at once, which is the point.
+    """
+    roots = contraction_roots(word)
+    if not roots:
+        return False
+    known = {str(x).lower() for x in extra_known}
+    for r in roots:
+        if r.lower() in known:
+            return True
+        try:
+            if not spell.unknown([r]):
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def run_spell_check_scan(app, parent_window, cues, spell_error_indices):
     """Scan all cues for spelling errors.
 
@@ -165,12 +239,18 @@ def run_spell_highlight_scan(app, parent_window, cues, spell_error_indices):
             continue
         unknown = spell.unknown(words)
         if unknown:
-            spell_error_indices.add(i)
             cue_words = []
             for w in words:
                 if w.lower() in unknown or w in unknown:
+                    # Skip valid contractions/possessives — see the note on
+                    # is_ok_contraction. Without this, every "Whatever's" and
+                    # every possessive of a known name is a false positive.
+                    if is_ok_contraction(w, spell, known):
+                        continue
                     cue_words.append(w)
-            errors_by_cue[i] = cue_words
+            if cue_words:
+                spell_error_indices.add(i)
+                errors_by_cue[i] = cue_words
     return errors_by_cue
 
 
