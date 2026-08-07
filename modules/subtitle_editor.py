@@ -113,6 +113,39 @@ _CAPS_TAG_RE = re.compile(r'<[^>]+>')
 _CAPS_RE = re.compile(r'\b([A-Z]{2,})\b')          # 2+ uppercase letters, no digits
 
 
+def paste_over_selection(event):
+    """Make paste REPLACE the selection in a tk.Text, the way every other
+    editor does.
+
+    ⚠️ TK'S Text WIDGET DOES NOT DO THIS BY DEFAULT — it inserts at the cursor
+    and leaves the selected text alone. Measured 2026-08-07: select "hello" in
+    "hello world", paste "PASTED", and Tk gives you
+
+        'helloPASTED world'      <- tk.Text   (wrong, and surprising)
+        'PASTED world'           <- ttk.Entry (correct)
+
+    So only the multi-line cue editor is affected; every Entry in the app is
+    already fine. Tony hit it typing corrections into a cue.
+
+    Bound to <<Paste>>, which is the virtual event BOTH Ctrl+V and the
+    right-click menu route through — binding the keystroke instead would miss
+    the menu, and binding both risks pasting twice.
+
+    Returns "break" so the class binding does not then insert a second copy.
+    """
+    w = event.widget
+    try:
+        if w.tag_ranges('sel'):
+            w.delete('sel.first', 'sel.last')
+    except Exception:
+        pass
+    try:
+        w.insert('insert', w.clipboard_get())
+    except Exception:
+        pass          # empty or non-text clipboard — leave the widget alone
+    return "break"
+
+
 def _match_case(src, repl):
     """Give `repl` the capitalisation of the text it is replacing."""
     if src.isupper() and len(src) > 1:
@@ -4667,6 +4700,10 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             edit_entry.insert('1.0', cues[idx]['text'])
             edit_entry.focus_set()
             edit_entry.tag_configure('sel', background='#4a90d9')
+            # Paste must REPLACE the selection here. tk.Text does not do that on
+            # its own — it inserts at the cursor and leaves the selected text in
+            # place. See paste_over_selection(). (Tony, 2026-08-07)
+            edit_entry.bind('<<Paste>>', paste_over_selection)
 
             def save_edit(e=None):
                 nonlocal edit_entry
