@@ -2975,7 +2975,21 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                          f"({error_count[0]} errors found)")
                 sug_lb.delete(0, 'end')
                 for c in ca:
-                    sug_lb.insert('end', c)
+                    # ⚠️ SHOW NAMES THE WAY TONY WROTE THEM. pyspellchecker's
+                    # word_frequency is lowercase-only, so a custom name offered
+                    # as a candidate comes back lowercased — "kazahrusan"
+                    # suggests "kazahrusian", not "Kazahrusian". Accepting that
+                    # verbatim inserts a wrong-case name, which is precisely the
+                    # defect the caps pass exists to find, and the scanner has
+                    # already advanced past this word so it would NOT be caught
+                    # this run. The tool would be manufacturing its own findings.
+                    #
+                    # Corrected HERE, at the point the lowercase artifact is
+                    # created, rather than on the way out. Anything the user
+                    # TYPES is left exactly as typed: a deliberate lowercase
+                    # "mark" must stay "mark" even though "Mark" is a name, and
+                    # snapping the case downstream could not tell the two apart.
+                    sug_lb.insert('end', cap_lut.get(c.lower(), c))
                 if kind == 'caps':
                     # THE ONE DOCUMENTED EXCEPTION to the no-pre-fill rule
                     # below, and it holds only because the suggestion is not a
@@ -2985,7 +2999,10 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     # "probably X", it does NOT get to reuse this.
                     kind_var.set("Wrong capitalization:")
                     sug_lb.selection_set(0)
-                    replace_var.set(ca[0])
+                    # Read back from the listbox, not from `ca`, so the
+                    # pre-filled value can never disagree with the one line the
+                    # user is looking at.
+                    replace_var.set(sug_lb.get(0))
                     _update_add_labels()
                     return
                 kind_var.set("Not in dictionary:")

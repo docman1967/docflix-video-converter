@@ -85,6 +85,23 @@ def main():
             print(f"           got  {got!r}")
             print(f"           want {want!r}")
 
+    # ⚠️ A SUGGESTED NAME COMES BACK LOWERCASED. word_frequency is
+    # lowercase-only, so offering a candidate verbatim would insert a wrong-case
+    # name — the tool manufacturing the very defect it just learned to find.
+    # The dialog maps candidates through the same lut before displaying them;
+    # this pins the mapping, and pins that a TYPED word is left alone.
+    print("\n  suggested names are shown the way they were written")
+    SUGGEST = [
+        ("kazahrusian", "Kazahrusian", "candidate from word_frequency"),
+        ("hirst", "Hirst", "same, short name"),
+        ("firsts", "firsts", "ordinary word, not a name — untouched"),
+    ]
+    for cand, want, note in SUGGEST:
+        got = LUT.get(cand.lower(), cand)
+        ok = got == want
+        fails += not ok
+        print(f"    {'ok  ' if ok else 'FAIL'} {cand:14} -> {got:14} ({note})")
+
     # ⚠️ The whole feature rests on this being true. If pyspellchecker ever
     # becomes case-aware, the caps pass turns into duplicate reporting rather
     # than the only reporting — and this is the line that would say so.
@@ -100,7 +117,7 @@ def main():
     except ImportError:
         print("    pyspellchecker not installed — skipping")
 
-    total = len(CASES) + len(RECASE) + 1
+    total = len(CASES) + len(RECASE) + len(SUGGEST) + 1
     print(f"\n  {total - fails}/{total} pass\n")
     sys.exit(1 if fails else 0)
 
