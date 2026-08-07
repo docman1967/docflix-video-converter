@@ -1,9 +1,9 @@
 # Docflix Media Suite — Project Summary
 
-**Last Updated:** 2026-08-07 (rev 105)  
-**Version:** 3.15.0  
+**Last Updated:** 2026-08-07 (rev 106)  
+**Version:** 3.16.0  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
-**Installed To:** `~/.local/share/docflix/`  
+**Installed To:** `~/.local/share/docflix/` (install test target — *not* the working copy)  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
 **Purpose:** Batch video converter, subtitle editor, media processor, and media tools suite. Converts video files to H.265/HEVC format using ffmpeg, with support for CPU and multi-GPU encoding (NVIDIA NVENC, Intel QSV, AMD VAAPI).
 
@@ -17,13 +17,19 @@ dev and GitHub were both on 3.14.2). Nothing errored. It just quietly ran old co
 
 | path | role | notes |
 |---|---|---|
-| `~/scripts/video_converter/` | **DEV — edit only here** | all work happens here |
+| `~/scripts/video_converter/` | **DEV — edit, run and debug here** | Tony's working copy; this is the product |
 | `~/docflix-video-converter/` | GitHub clone | `git pull` only, never edit |
-| `~/.local/share/docflix/` | **INSTALLED — what actually runs** | written by `install.sh` |
+| `~/.local/share/docflix/` | **Install test target** | written by `install.sh`; answers "does the installer work?" |
 
 `docflix` execs `~/.local/share/docflix/run_converter.sh`, so the app menu and every
-`docflix-*` command run the INSTALLED copy. Editing dev and testing "the app" without
-installing means testing the old build.
+`docflix-*` command run the installed copy — which is why step 5 below exists.
+
+**⚠️ But that copy is NOT the working runtime.** Tony, 2026-08-07: *"I use and do all my
+development on the DEV copy. The production copy I have installed is only there for me to test
+the production install."* So it is **expected** to lag dev, and a version difference there is
+not a symptom — the 2026-08-06 note above read an idle test fixture as an app "quietly running
+old code." When a bug is reported, reproduce in **DEV**; never launch the installed copy to
+test a theory (it holds live `preferences.json` and starting it rewrites them).
 
 **The full ship sequence:**
 ```
@@ -60,6 +66,59 @@ done
 > the Forced Subtitle Editor (3.12.0), VobSub IDX/SUB support (3.11.3), AI-upscaler
 > auto-tiling (3.11.2), APISR restore models and the Audio Tools suite (3.11.0) — see
 > `git log` for those. Noted rather than backfilled, so nobody reads this as complete.
+
+### 2026-08-07 → 3.16.0 — Subtitle Editor: the wrong-case blind spot, and a waveform that keeps up
+
+Seven commits, all from Tony using the tool and noticing something felt off. **Three of them were
+bugs that reported success** — no error, no warning, a confident and wrong result. That is the
+shape to watch for in this codebase.
+
+**Spell Check now catches names written in the wrong case** (`modules/spell_checker.py`,
+`modules/subtitle_editor.py`)
+Tony: *"I just found a name that is in the list but it didn't repair it. Name is hirst."* The
+cause is backwards from how it reads — **adding a name to the list is what made the checker blind
+to it.** `custom_cap_words` is loaded into pyspellchecker lowercased, and pyspellchecker
+lowercases before lookup anyway, so once "Hirst" is a known name every one of Hirst / hirst /
+HIRST is a correctly spelled word. "hirst" was never a *spelling* error at all — it is a
+*capitalisation* error, and the only tool that looked at capitalisation was the bulk Fix ALL CAPS
+filter. Any name added **after** a file was filtered fell between the two tools, permanently and
+silently: 30 spelling errors reported in the reported episode, 33 wrong-case names not reported.
+New `miscased_name()` / `name_case_lut()`; the scanner's word loop had to come out of `if
+unknown:` because a name in the list is by construction a *known* word. Handles possessives
+("hirst's"), skips ALL CAPS, does not decompose multi-word names (splitting "New York" would make
+every "new" a finding). Measured across 96 real subtitle files: **517 wrong-case names, 0 false
+positives** from the 12 list entries that are also English words.
+
+**Suggested names keep their real capitalisation.** `word_frequency` is lowercase-only, so a
+custom name offered as a candidate came back lowercased — clicking it inserted a wrong-case name,
+the exact defect the pass above had just been built to find, and the scanner had already advanced
+past that word so it would not be caught. Fixed where the artifact is created (display time), not
+downstream: a lowercase word the user **types** must be left alone.
+
+**The waveform follows the subtitle, and says what it is doing** (`modules/waveform_timeline.py`)
+Reported as "the panes appear but nothing is loaded in them." Nothing was broken — driving the
+editor headlessly found the right video and loaded it every time. ffmpeg just needs ~7s for a
+43-minute episode, during which the panes are up and empty; and the video pane is black until you
+press Play (mpv is launched from `_toggle_playback` and nowhere else) while
+`_load_waveform_for_video` *deleted* the placeholder text explaining that. Seven seconds
+indistinguishable from broken, and the video half stayed that way. The placeholder is now a live
+status. **Two real bugs found while proving it**: the reload guard was `if not is_loaded`, so the
+first video won for the life of the editor — open a second subtitle and you kept episode 1's audio
+under episode 8's cues (Tony hit this one in the wild); and `_find_video_for_subtitle` fell back to
+globbing the directory and returning the **first** video found, which in a flat season folder is
+episode 1 for every subtitle in the season. The fallback is deleted — returning `None` is correct
+and the caller already prompts.
+
+**Selecting a cue takes the video with it.** Cue selection called `scroll_to_cue()`, which pans the
+*view*, and nothing touched the playback *position* — so you had to click the waveform to catch the
+picture up, aiming by hand at a timestamp the editor already knew. New `seek_to_cue()`.
+
+Also: per-file character names for Fix ALL CAPS ("This File Only"), right-click → Add to Temp
+Names, and paste now replaces the selection in the cue editor instead of inserting in front of it.
+
+New regression suite `tests/test_name_case.py` (22 cases), including a guard on the premise that
+pyspellchecker cannot see case — if that ever changes, this pass becomes duplicate reporting
+rather than the only reporting.
 
 ### 2026-08-05 → 3.13.0 — A morning of small friction fixes (seven patch releases, rolled up)
 
