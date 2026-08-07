@@ -849,7 +849,15 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
                 if original:
                     return original
                 return word
-            text = re.sub(r'\b[a-zA-Z]+\b', _cap_custom, text)
+            # ⚠️ APOSTROPHES ARE PART OF THE WORD. This was r'\b[a-zA-Z]+\b',
+            # which split "o'brien" into "o" and "brien" — so NO custom name
+            # containing an apostrophe was ever applied by Fix ALL CAPS.
+            # O'Brien, O'Neill, D'Angelo all silently did nothing and the line
+            # just stayed lowercase, with no sign anything had been skipped.
+            # Safe for ordinary contractions: "don't" now matches as one token,
+            # is not in custom_single, and is returned unchanged.
+            # Same word pattern the spell checker uses. (Found 2026-08-07.)
+            text = re.sub(r"\b[a-zA-Z]+(?:'[a-zA-Z]+)*", _cap_custom, text)
         return text
 
     result = []

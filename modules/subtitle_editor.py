@@ -113,6 +113,36 @@ _CAPS_TAG_RE = re.compile(r'<[^>]+>')
 _CAPS_RE = re.compile(r'\b([A-Z]{2,})\b')          # 2+ uppercase letters, no digits
 
 
+def _name_case(s):
+    """Normalise a selected name to the case a name is actually written in.
+
+    ⚠️ WITHOUT THIS, THE FEATURE IS USELESS FOR ITS MAIN USE CASE. filter_fix_caps
+    reproduces a custom name EXACTLY as stored, and the whole point of adding one
+    is that you are looking at an ALL CAPS subtitle — so the obvious gesture,
+    selecting "GRACE" out of "GRACE, COME HERE!", stores "GRACE" and the line
+    stays shouting. Measured 2026-08-07:
+
+        stored "Grace" -> "Grace, come here!"     what you wanted
+        stored "GRACE" -> "GRACE, come here!"     what you would have got
+        stored "grace" -> "grace, come here!"
+
+    Only normalises when the selection is UNIFORMLY cased. Mixed case is assumed
+    deliberate, so "McKay", "DeAngelo" and "van Helsing" are left exactly alone —
+    guessing at those does more harm than leaving them.
+    """
+    if not s or not (s.isupper() or s.islower()):
+        return s
+    out = []
+    for w in s.split(' '):
+        if not w:
+            continue
+        w = w[:1].upper() + w[1:].lower()
+        # Irish O' — common enough in subtitles to be worth the one rule.
+        w = re.sub(r"^(O')(\w)", lambda m: m.group(1) + m.group(2).upper(), w)
+        out.append(w)
+    return ' '.join(out)
+
+
 def paste_over_selection(event):
     """Make paste REPLACE the selection in a tk.Text, the way every other
     editor does.
@@ -4782,11 +4812,73 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             edit_ctx.add_separator()
             edit_ctx.add_command(label="Select All",
                                 command=lambda: _edit_action('select_all'))
+            edit_ctx.add_separator()
+
+            # ── Add to Temp Names, straight off the selection ────────────────
+            # Tony, 2026-08-07: *"add the ability to add it to the temp name file
+            # by selecting the name then right click --> add to temp name file."*
+            #
+            # Better than the dialog I built first, and the reason is instructive:
+            # he went looking for this in the SPELL CHECKER because that is where
+            # we had been working, not in Fix ALL CAPS where I had put it. A name
+            # like Grace is never flagged (it is a dictionary word), so there is
+            # no error to click — the only way in was to know which dialog it
+            # lived in and type her name again. Selecting the word you can already
+            # see removes both the hunting and the typing.
+            def _selected_name():
+                """The selected text, trimmed to something name-shaped. '' if none."""
+                if not edit_entry:
+                    return ''
+                try:
+                    if not edit_entry.tag_ranges('sel'):
+                        return ''
+                    raw = edit_entry.get('sel.first', 'sel.last')
+                except Exception:
+                    return ''
+                # Trim surrounding punctuation/space but keep internal spaces and
+                # apostrophes — filter_fix_caps handles multi-word entries, so
+                # "Van Helsing" and "O'Brien" both need to survive intact.
+                word = raw.strip().strip('.,!?;:"“”()[]-—…').strip()
+                return _name_case(word)
+
+            def _add_selection_to_temp():
+                word = _selected_name()
+                if not word:
+                    return
+                existing = [w.lower()
+                            for w in temp_cap_words + app.custom_cap_words]
+                if word.lower() not in existing:
+                    temp_cap_words.append(word)
+                if edit_entry:
+                    edit_entry.focus_force()
+
+            edit_ctx.add_command(label="Add to Temp Names",
+                                 command=_add_selection_to_temp)
+            _TEMP_ITEM = edit_ctx.index('end')      # remembered so the label can
+            #                                          be rewritten per popup
 
             _edit_ctx_open = [False]
 
             def show_edit_ctx(event):
                 _edit_ctx_open[0] = True
+                # Name the word on the menu item, and disable it when there is
+                # nothing selected — same contract as the spell dialog's Add
+                # buttons: never offer an action without saying what it acts on.
+                word = _selected_name()
+                if word:
+                    shown = word if len(word) <= 18 else word[:17] + '…'
+                    already = word.lower() in [
+                        w.lower() for w in temp_cap_words + app.custom_cap_words]
+                    edit_ctx.entryconfigure(
+                        _TEMP_ITEM,
+                        label=(f'Already a known name: "{shown}"' if already
+                               else f'Add "{shown}" to Temp Names'),
+                        state=('disabled' if already else 'normal'))
+                else:
+                    edit_ctx.entryconfigure(
+                        _TEMP_ITEM,
+                        label="Add to Temp Names  (select a name first)",
+                        state='disabled')
                 def on_menu_close():
                     _edit_ctx_open[0] = False
                     if edit_entry:
