@@ -2537,13 +2537,16 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             sd = tk.Toplevel(editor)
             sd.withdraw()
             sd.title("Spell Check")
-            sd.geometry("500x440")
+            # 560 not 500: the dictionary buttons now carry the current word in
+            # their labels, and two of those plus Close overflowed a 500px row on
+            # longer words. Truncation caps the label; this caps the worst case.
+            sd.geometry("560x440")
             sd.resizable(True, True)
             sd.update_idletasks()
             # Center on editor window
             ew, eh = editor.winfo_width(), editor.winfo_height()
             ex, ey = editor.winfo_x(), editor.winfo_y()
-            sw, sh = 500, 440
+            sw, sh = 560, 440
             sd.geometry(f"{sw}x{sh}+{ex + (ew - sw)//2}+{ey + (eh - sh)//2}")
             sd.deiconify()
             sd.attributes('-topmost', True)
@@ -2669,11 +2672,22 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 sug_lb.delete(0, 'end')
                 for c in ca:
                     sug_lb.insert('end', c)
-                if ca:
-                    sug_lb.selection_set(0)
-                    replace_var.set(ca[0])
-                else:
-                    replace_var.set(w)
+                # ⚠️ DO NOT PRE-SELECT A SUGGESTION OR PRE-FILL "Replace with".
+                # This used to auto-fill the top candidate, which meant every
+                # proper noun arrived with a WRONG answer already loaded and the
+                # destructive button one reflex-click away. Tony hit it on
+                # "Vanya" — suggestions were 'tanya' and 'vanda', and "Replace
+                # with" already said 'tanya'. One click would have renamed a
+                # character and lowercased her. Replace with an empty field is a
+                # no-op (see _do_replace), so the safe action is now the default
+                # and picking a suggestion is a deliberate act. (2026-08-07)
+                replace_var.set('')
+                # Say WHICH word the dictionary buttons will add. They act on the
+                # scanned word, never on "Replace with" — but the field sits right
+                # above them, so the layout implied otherwise and Tony had to ask.
+                shown = w if len(w) <= 12 else w[:11] + '…'
+                add_dict_btn.configure(text=f'Add "{shown}" to Dict')
+                add_name_btn.configure(text=f'Add "{shown}" as Name')
 
             def _do_replace():
                 if not current_error[0]:
@@ -2761,12 +2775,18 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
 
             bf2 = ttk.Frame(bf)
             bf2.pack(fill='x', pady=(4, 0))
-            ttk.Button(bf2, text="Add to Dict",
-                       command=_do_add_dict,
-                       width=10).pack(side='left', padx=2)
-            ttk.Button(bf2, text="Add as Name",
-                       command=_do_add_name,
-                       width=10).pack(side='left', padx=2)
+            # No fixed width — the labels carry the current word and have to grow.
+            # Both act on the "Not in dictionary" word, never on "Replace with";
+            # _show_next() rewrites these so that is visible instead of implied.
+            #   Add to Dict → custom_spell_words        (stop flagging it)
+            #   Add as Name → + custom_cap_words        (also shields it from the
+            #                                            Fix ALL CAPS filter)
+            add_dict_btn = ttk.Button(bf2, text="Add to Dict",
+                                      command=_do_add_dict)
+            add_dict_btn.pack(side='left', padx=2)
+            add_name_btn = ttk.Button(bf2, text="Add as Name",
+                                      command=_do_add_name)
+            add_name_btn.pack(side='left', padx=2)
             ttk.Button(bf2, text="Close", command=sd.destroy,
                        width=6).pack(side='right', padx=2)
 
