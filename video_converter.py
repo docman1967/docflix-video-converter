@@ -109,8 +109,18 @@ GPU_BACKENDS = {
         'cq_flag':        '-cq',
         'multipass_encoders': {'hevc_nvenc', 'h264_nvenc', 'av1_nvenc'},
         'multipass_args':     ['-multipass', 'fullres'],
-        'quality_args':       ['-rc', 'vbr', '-rc-lookahead', '32',
-                               '-temporal-aq', '1', '-spatial-aq', '1'],
+        # ⚠️ SPLIT 2026-08-08. This used to also carry -temporal-aq/-spatial-aq,
+        # which are now opt-in via `aq_args` because they were expensive:
+        # measured at identical CQ on two opposite sources,
+        #     grainy 2009 BluRay : +48% bitrate, VMAF 92.15 vs 92.26
+        #     modern WEB h264    : +19% bitrate, VMAF 84.91 vs 85.03
+        # Lookahead stays here — it measured +2% bitrate for +0.07 VMAF, which
+        # is a fair trade and is a different mechanism entirely.
+        'quality_args':       ['-rc', 'vbr', '-rc-lookahead', '32'],
+        'aq_args':            ['-temporal-aq', '1', '-spatial-aq', '1'],
+        # 10-bit pixel format for this backend, per encoder family. NVENC wants
+        # p010le; libx265 wants yuv420p10le (see codec map / cpu path).
+        'pix_fmt_10bit':      'p010le',
     },
     'qsv': {
         'label':        'Intel (QSV)',
@@ -135,6 +145,8 @@ GPU_BACKENDS = {
         'multipass_encoders': set(),
         'multipass_args':     [],
         'quality_args':       ['-look_ahead', '1', '-look_ahead_depth', '40'],
+        'aq_args':            [],
+        'pix_fmt_10bit':      'p010le',
     },
     'vaapi': {
         'label':        'AMD / VAAPI',
@@ -160,6 +172,11 @@ GPU_BACKENDS = {
         'multipass_encoders': set(),
         'multipass_args':     [],
         'quality_args':       [],
+        'aq_args':            [],
+        # VAAPI takes its 10-bit format via the hwupload chain, not -pix_fmt.
+        # None = "this backend cannot be told 10-bit here", and the caller must
+        # skip it rather than emit a flag VAAPI will reject.
+        'pix_fmt_10bit':      None,
     },
 }
 
@@ -177,6 +194,10 @@ VIDEO_CODEC_MAP = {
         'crf_presets': (18, 20, 23, 28, 30, 32),
         'crf_flag': '-crf',
         'short_name': 'H265',
+        # 10-bit format for the CPU encoder. None = this codec cannot be
+        # forced to 10-bit here; the caller must emit no -pix_fmt at all
+        # rather than a flag ffmpeg will reject.
+        'pix_fmt_10bit': 'yuv420p10le',
     },
     'H.264 / AVC': {
         'cpu_encoder': 'libx264',
@@ -187,6 +208,7 @@ VIDEO_CODEC_MAP = {
         'crf_presets': (18, 20, 23, 28, 30, 32),
         'crf_flag': '-crf',
         'short_name': 'H264',
+        'pix_fmt_10bit': 'yuv420p10le',
     },
     'AV1': {
         'cpu_encoder': 'libsvtav1',
@@ -196,6 +218,7 @@ VIDEO_CODEC_MAP = {
         'crf_presets': (24, 27, 30, 35, 40, 45),
         'crf_flag': '-crf',
         'short_name': 'AV1',
+        'pix_fmt_10bit': 'yuv420p10le',
     },
     'VP9': {
         'cpu_encoder': 'libvpx-vp9',
@@ -205,6 +228,7 @@ VIDEO_CODEC_MAP = {
         'crf_presets': (25, 30, 33, 38, 45, 50),
         'crf_flag': '-crf',
         'short_name': 'VP9',
+        'pix_fmt_10bit': 'yuv420p10le',
     },
     'MPEG-4': {
         'cpu_encoder': 'mpeg4',
@@ -214,6 +238,7 @@ VIDEO_CODEC_MAP = {
         'crf_presets': (2, 4, 8, 15, 20, 25),
         'crf_flag': '-q:v',
         'short_name': 'MPEG4',
+        'pix_fmt_10bit': None,   # MPEG-4 Part 2 is 8-bit only
     },
     'ProRes (QuickTime)': {
         'cpu_encoder': 'prores_ks',
@@ -223,6 +248,10 @@ VIDEO_CODEC_MAP = {
         'crf_presets': (5, 10, 15, 20, 30, 40),
         'crf_flag': '-q:v',
         'short_name': 'ProRes',
+        # ProRes carries its own pixel format per profile (yuv422p10le and up).
+        # None = do not emit -pix_fmt; forcing yuv420p10le here would silently
+        # change the chroma subsampling, which is the whole point of ProRes.
+        'pix_fmt_10bit': None,
     },
     'Copy (no re-encode)': {
         'cpu_encoder': 'copy',
@@ -232,6 +261,11 @@ VIDEO_CODEC_MAP = {
         'crf_presets': (),
         'crf_flag': None,
         'short_name': 'copy',
+        # ⚠️ Stream copy re-muxes the existing bitstream untouched. There is no
+        # pixel format to choose, and passing -pix_fmt alongside -c:v copy is
+        # a hard ffmpeg error. None means "emit nothing", which is the only
+        # correct answer here.
+        'pix_fmt_10bit': None,
     },
 }
 
@@ -3466,6 +3500,34 @@ class VideoConverter:
                         if quality_args:
                             c.extend(quality_args)
 
+                        # ── Adaptive quantisation (opt-in, see GPU_BACKENDS) ──
+                        if is_gpu and backend and settings.get('gpu_aq'):
+                            c.extend(backend.get('aq_args', []))
+
+                        # ── Bit depth ──
+                        # 'auto' emits nothing, which is the historical
+                        # behaviour: ffmpeg then inherits the source's depth.
+                        # ⚠️ Never force 10-bit on encoders that cannot do it —
+                        # ProRes/MPEG-4 and the VAAPI path take their format
+                        # elsewhere, and an unsupported -pix_fmt is a hard
+                        # ffmpeg failure, not a graceful downgrade.
+                        _depth = str(settings.get('bit_depth', 'auto'))
+                        if _depth in ('8', '10'):
+                            # `pix_fmt_10bit` doubles as "does this target accept
+                            # an explicit -pix_fmt at all?". None means the format
+                            # is decided elsewhere (ProRes profile, VAAPI
+                            # hwupload) or does not exist (stream copy), and the
+                            # 8-bit case has to respect that too — an earlier
+                            # version hard-coded yuv420p for 8-bit with no guard,
+                            # which would have killed every ProRes and every
+                            # -c:v copy job the moment someone picked 8-bit.
+                            _pf10 = codec_info.get('pix_fmt_10bit')
+                            if _pf10 and is_gpu and backend:
+                                _pf10 = backend.get('pix_fmt_10bit')
+                            if _pf10:
+                                c.extend(['-pix_fmt',
+                                          'yuv420p' if _depth == '8' else _pf10])
+
                         # ── AV1: keyframe interval for seeking ──
                         _AV1_ENCODERS = {'libsvtav1', 'av1_nvenc', 'av1_qsv', 'av1_vaapi'}
                         if video_enc_name in _AV1_ENCODERS:
@@ -4209,6 +4271,28 @@ class VideoConverterApp:
         self.quality_mode = tk.StringVar(value='bitrate')
         self.bitrate = tk.StringVar(value='2M')
         self.crf = tk.StringVar(value='23')
+        # ── Bit depth ────────────────────────────────────────────────────
+        # 'auto' = whatever the SOURCE is, which is what this app did for its
+        # whole life (it simply never passed -pix_fmt, so ffmpeg inherited it).
+        # That is why ~43% of Tony's library is already 10-bit without anyone
+        # choosing it: those sources happened to be 10-bit.
+        #
+        # 10-bit HEVC is measurably MORE efficient than 8-bit even from an
+        # 8-bit source — more precision in the transform means less banding to
+        # spend bits correcting. The AI-upscale paths already hard-code p010le
+        # for HEVC (torch_upscaler.py:303); the main encode path never got it.
+        self.bit_depth = tk.StringVar(value='auto')      # auto | 8 | 10
+        # ── NVENC adaptive quantisation ──────────────────────────────────
+        # ⚠️ DEFAULTS OFF, and that is a deliberate change (2026-08-08).
+        # -temporal-aq/-spatial-aq were previously always on for NVENC. Measured
+        # on two deliberately opposite sources at identical CQ:
+        #     grainy 2009 BluRay : +48% bitrate, VMAF 92.15 vs 92.26
+        #     modern WEB h264    : +19% bitrate, VMAF 84.91 vs 85.03
+        # i.e. it costs a great deal and scores slightly WORSE both times.
+        # Kept as an option rather than deleted because VMAF is known to
+        # under-credit what AQ actually improves (banding in skies and dark
+        # scenes), so it may still be worth it on specific material.
+        self.gpu_aq = tk.BooleanVar(value=False)
         self.cpu_preset = tk.StringVar(value='ultrafast')
         self.gpu_preset = tk.StringVar(value='p4')
         self.skip_existing = tk.BooleanVar(value=True)
@@ -4748,6 +4832,41 @@ class VideoConverterApp:
         ttk.Radiobutton(mode_sub_frame, text="CRF (constant quality)",
                        variable=self.quality_mode, value='crf',
                        command=self.on_quality_mode_change).pack(side='left', padx=10)
+
+        # ── Bit depth + adaptive quantisation ──
+        # Both live here because they change what a given CRF/CQ number costs,
+        # so they belong next to the quality controls rather than buried.
+        ttk.Label(self.quality_mode_frame, text="   Bit depth:").pack(side='left')
+        _depth_box = ttk.Combobox(self.quality_mode_frame, width=8,
+                                  state='readonly',
+                                  values=('auto', '8-bit', '10-bit'))
+        _depth_box.pack(side='left', padx=(2, 0))
+        # The combobox shows friendly labels; the variable stores auto|8|10.
+        _depth_map = {'auto': 'auto', '8-bit': '8', '10-bit': '10'}
+        _depth_rev = {v: k for k, v in _depth_map.items()}
+        _depth_box.set(_depth_rev.get(self.bit_depth.get(), 'auto'))
+        _depth_box.bind('<<ComboboxSelected>>',
+                        lambda e: self.bit_depth.set(_depth_map[_depth_box.get()]))
+        # Keep the widget in step if the variable is set elsewhere (prefs load).
+        self.bit_depth.trace_add(
+            'write',
+            lambda *_: _depth_box.set(_depth_rev.get(self.bit_depth.get(), 'auto')))
+        _create_tooltip(_depth_box,
+                       "auto = match the source (what this app always did).\n"
+                       "10-bit HEVC is more efficient even from an 8-bit source —\n"
+                       "less banding to spend bitrate correcting.\n"
+                       "Ignored by codecs that cannot do it (ProRes, MPEG-4).")
+
+        _aq_cb = ttk.Checkbutton(self.quality_mode_frame, text="GPU adaptive quant",
+                                 variable=self.gpu_aq)
+        _aq_cb.pack(side='left', padx=(12, 0))
+        _create_tooltip(_aq_cb,
+                       "NVENC -temporal-aq/-spatial-aq. OFF by default since "
+                       "3.17.0.\nMeasured at identical CQ: +48% bitrate on a "
+                       "grainy BluRay\nand +19% on a modern WEB source, for no "
+                       "VMAF gain either time.\nKept because VMAF under-credits "
+                       "what AQ improves (banding\nin skies and dark scenes) — "
+                       "try it if you see banding.")
         
         # Bitrate settings - Row 3
         row = 3
@@ -7973,6 +8092,8 @@ class VideoConverterApp:
             'transcode_mode':       self.transcode_mode.get(),
             'quality_mode':         self.quality_mode.get(),
             'crf':                  self.crf.get(),
+            'bit_depth':            self.bit_depth.get(),
+            'gpu_aq':               self.gpu_aq.get(),
             'cpu_preset':           self.cpu_preset.get(),
             'gpu_preset':           self.gpu_preset.get(),
             'audio_codec':          self.audio_codec.get(),
@@ -8082,6 +8203,8 @@ class VideoConverterApp:
             # Bitrate intentionally not saved/loaded — always starts at default (2.0M)
             # to avoid hidden mismatches between saved value and UI slider position
             self.crf.set(prefs.get('crf',                       self.crf.get()))
+            self.bit_depth.set(prefs.get('bit_depth',           self.bit_depth.get()))
+            self.gpu_aq.set(bool(prefs.get('gpu_aq',            self.gpu_aq.get())))
             self.cpu_preset.set(prefs.get('cpu_preset',         self.cpu_preset.get()))
             self.gpu_preset.set(prefs.get('gpu_preset',         self.gpu_preset.get()))
             self.audio_codec.set(prefs.get('audio_codec',       self.audio_codec.get()))
@@ -8473,15 +8596,21 @@ class VideoConverterApp:
                 'mode':           self.quality_mode.get(),
                 'bitrate':        self.bitrate.get(),
                 'crf':            int(self.crf.get()),
+                'bit_depth':      self.bit_depth.get(),
+                'gpu_aq':         self.gpu_aq.get(),
                 'audio_codec':    ('copy' if self.transcode_mode.get() == 'video'
                                    else self.get_audio_codec_name()),
                 'audio_bitrate':  self.audio_bitrate.get(),
                 'gpu_index':      self.gpu_index.get(),
             }
         except Exception:
+            # ⚠️ Keep this fallback in step with the dict above. bit_depth
+            # 'auto' and gpu_aq False are the safe defaults: 'auto' reproduces
+            # the behaviour this app had before bit depth was settable at all.
             return {'transcode_mode': 'video', 'encoder': self._default_gpu,
                     'codec_info': VIDEO_CODEC_MAP['H.265 / HEVC'],
                     'mode': 'bitrate', 'bitrate': '2M', 'crf': 23,
+                    'bit_depth': 'auto', 'gpu_aq': False,
                     'audio_codec': 'copy', 'audio_bitrate': '128k'}
 
     def refresh_estimated_sizes(self):
