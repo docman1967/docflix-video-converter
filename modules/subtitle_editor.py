@@ -330,6 +330,32 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         video_source = [None]  # set when editing a subtitle from a video file
         # When set: {'path': video_path, 'stream_index': N, 'temp_srt': path,
         #            'streams': [...], 'stream_info': {...}}
+        # Last path delivered by a drag-and-drop, purely so the crash report at
+        # the bottom of this function can name it. See _on_editor_destroy.
+        _last_drop = [None]
+
+        def _trace(msg, level='INFO'):
+            """Diagnostic line that SURVIVES the window dying.
+
+            ⚠️ DO NOT USE app.add_log FOR CRASH DIAGNOSTICS. It only inserts
+            into the GUI log panel, and it does so deferred via
+            root.after(0, ...) — so a message logged while the editor is being
+            torn down is queued into a widget that is about to stop existing,
+            and is never written anywhere. The first version of this
+            instrumentation did exactly that: a trap that could not spring,
+            which is the same failure it was built to catch.
+            stderr is captured into logs/video_converter_*.log by
+            run_converter.sh, and flushing makes it survive an abort.
+            """
+            try:
+                sys.stderr.write(f"[Docflix/SubEditor] {msg}\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
+            try:
+                app.add_log(f"Subtitle Editor: {msg}", level)
+            except Exception:
+                pass
 
         # ── Color tag names ──
         TAG_MODIFIED = 'modified'
@@ -1672,6 +1698,12 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                             return  # no supported files in folder
 
                 ext = Path(path).suffix.lower()
+                # ⚠️ LOG BEFORE ACTING, not after. The 2026-08-07 bug takes the
+                # window down during the drop, so anything logged afterwards
+                # never gets written. This line is the last known good state.
+                _last_drop[0] = path
+                _trace(f"drop -> {path!r} (ext={ext}, branch="
+                       f"{'video' if (ext in VIDEO_EXTENSIONS or ext == '.idx') else 'subtitle'})")
                 if ext in VIDEO_EXTENSIONS or ext == '.idx':
                     load_video_subtitle(path)
                 else:
@@ -5382,6 +5414,46 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 app.root.destroy()
 
         editor.protocol('WM_DELETE_WINDOW', on_editor_close)
+
+        # ── Why did the editor window go? ────────────────────────────────────
+        # ⚠️ THIS EXISTS TO ANSWER ONE QUESTION AND IT IS NOT DECORATIVE.
+        # Tony, 2026-08-07: dragging a subtitle in made the editor window
+        # *vanish* — twice — with the Suite still running, a 0-byte log, and no
+        # exception anywhere. There is exactly ONE editor.destroy() in this file
+        # (in on_editor_close above), so either that handler ran or the window
+        # died by some route Python never saw. Those need opposite fixes and
+        # nothing in the app could tell them apart.
+        #
+        # `_close_ran` distinguishes them. Next time it happens, the log says:
+        #   "closed via on_editor_close"  -> something delivered a close. Find
+        #                                    what: WM, File>Close, stray event.
+        #   "destroyed WITHOUT ..."       -> the window went down below Python.
+        #                                    Look at tkdnd / X, and check for a
+        #                                    faulthandler traceback above.
+        # Remove this only once the cause is known and fixed.
+        _close_ran = [False]
+        _orig_close = on_editor_close
+
+        def on_editor_close():                      # noqa: F811  (wraps above)
+            _close_ran[0] = True
+            _trace("close handler invoked")
+            return _orig_close()
+
+        editor.protocol('WM_DELETE_WINDOW', on_editor_close)
+
+        def _on_editor_destroy(event):
+            # <Destroy> fires for every child widget too; only the Toplevel
+            # itself is the event we care about.
+            if event.widget is not editor:
+                return
+            if _close_ran[0]:
+                _trace("window closed via on_editor_close (normal)")
+            else:
+                _trace("*** WINDOW DESTROYED WITHOUT THE CLOSE HANDLER — this "
+                       "is the vanishing bug (first seen 2026-08-07). last "
+                       f"dropped path: {_last_drop[0]!r} ***", 'ERROR')
+
+        editor.bind('<Destroy>', _on_editor_destroy)
 
         # Auto-open file passed via command line (e.g. "Open with" from file manager)
         _start_path = getattr(app, '_open_file_on_start', None)

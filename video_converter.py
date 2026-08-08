@@ -10513,10 +10513,27 @@ def main():
         sys.argv.remove('--gpu-test-mode')
         print("*** GPU TEST MODE ENABLED — skipping GPU test encodes, detection only ***")
 
+    # ⚠️ WITHOUT THIS, A C-LEVEL FAULT IS TOTALLY SILENT. Core dumps are off on
+    # this machine (`ulimit -c` = 0), so a SIGSEGV/SIGABRT in Tk, tkdnd or any
+    # C extension leaves NO core, NO traceback and NO log line. That is the exact
+    # evidence vacuum behind the 2026-08-07 "editor window just vanished" report:
+    # a 0-byte log and nothing to read. faulthandler prints a real traceback to
+    # stderr on a fatal signal, and run_converter.sh already captures stderr into
+    # logs/. Costs nothing while the app is healthy.
+    try:
+        import faulthandler
+        faulthandler.enable()          # -> stderr -> logs/video_converter_*.log
+    except Exception:
+        pass
+
     root = TkinterDnD.Tk(className='docflix') if HAS_DND else tk.Tk(className='docflix')
 
     # Crash guard: a raised exception in ANY Tk callback (esp. tkinterdnd2 folder drops) used to
     # silently kill the whole app. Log it (flushed) and stay alive instead.
+    # ⚠️ This guard is why the SUITE survives a bad drop. It is also why a drop
+    # failure can look like "only the editor window died" — the app stays up, so
+    # the damage is scoped to whatever was half-done when the exception fired.
+    # If you are chasing a vanished window, look for this banner FIRST.
     def _docflix_cb_exc(exc, val, tb):
         import traceback as _t, sys as _s
         _s.stderr.write("\n=== [Docflix] callback exception — app kept alive ===\n")
