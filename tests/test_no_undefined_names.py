@@ -65,33 +65,37 @@ MODULE_DUNDERS = {
     '__loader__', '__builtins__', '__path__',
 }
 
-# ⚠️ KNOWN, TRIAGED, AND DELIBERATELY LEFT — NOT a suppression list.
-# Every entry below is a real NameError. They are tolerated only because the
-# code containing them is provably DEAD: nothing imports or calls it, and the
-# NameError is itself the evidence — a function that raises on its main path has
-# never been executed.
+# ⚠️ NOT-YET-WIRED CODE — NOT a suppression list, and NOT delete-me markers.
 #
-#   modules/preferences.py        save/load/reset_preferences have NO importers.
-#                                 Superseded by the App method at
-#                                 video_converter.py:7961 and standalone.py:115.
-#                                 Two dict keys use `self` in a function whose
-#                                 parameter is `app`.
-#   modules/subtitle_ocr.py       run_ocr_with_monitor is not called; the live
-#                                 one is video_converter.py:6809
-#                                 (_run_ocr_with_monitor). Its _finish() uses
-#                                 out_path / out_name / file_info, none of which
-#                                 are ever assigned.
+# ⚠️⚠️ I FIRST WROTE HERE THAT "THE RIGHT FIX IS DELETING THE DEAD MODULES."
+# THAT WAS WRONG AND IT WAS NEARLY EXPENSIVE. `modules/` is a half-finished
+# extraction from the video_converter.py monolith, and these files are
+# in-progress refactoring work, not corpses:
 #
-# ⚠️ THE RIGHT FIX IS DELETING THE DEAD MODULES, not growing this list. Both are
-# stale copies of code that moved into video_converter.py, and a duplicate that
-# cannot run is worse than no duplicate: it reads as a live implementation.
-# Raised with Tony 2026-08-08; left in place pending his call, since deleting a
-# module is his decision and neither is costing anything today.
+#   modules/converter.py    1,100+ lines, a complete-looking VideoConverter
+#                           extraction that simply is not wired up yet.
+#   modules/preferences.py  the same, for save/load/reset_preferences.
 #
-# Adding to this list requires the same standard: prove it cannot run, say why
-# here, and date it. If you cannot prove that, it is a bug — fix it.
+# And the sweep that produced this list also called torch_upscale_worker.py an
+# orphan — a LIVE, load-bearing module launched as a subprocess by
+# torch_upscaler.py:84, with no package imports by design. **"No importers" is
+# not "unused."** Acting on that list would have deleted the fast AI upscaler.
+#
+# Remaining entries, both in not-yet-wired code, so they have never run:
+#
+#   modules/preferences.py   `self` in a function whose parameter is `app` —
+#                            FIXED 2026-08-08 (two lines the extraction missed).
+#   modules/subtitle_ocr.py  run_ocr_with_monitor is not called; the live one is
+#                            video_converter.py:6809 (_run_ocr_with_monitor).
+#                            Its _finish() uses out_path / out_name / file_info,
+#                            none of which are ever assigned. Left alone: the
+#                            correct values are not obvious from the extracted
+#                            code, and guessing them would be worse than a
+#                            NameError in a function nothing calls.
+#
+# To add an entry: prove the code cannot currently run, say why here, and date
+# it. If you cannot prove that, it is a live bug — fix it instead.
 KNOWN_DEAD = {
-    ('modules/preferences.py', 'self'),
     ('modules/subtitle_ocr.py', 'out_path'),
     ('modules/subtitle_ocr.py', 'out_name'),
     ('modules/subtitle_ocr.py', 'file_info'),

@@ -50,8 +50,13 @@ def save_preferences(app):
         'use_names_db':          getattr(app, 'use_names_db', False),
         'custom_replacements':   app.custom_replacements,
         'custom_spell_words':    app.custom_spell_words,
-        'tv_rename_provider':    getattr(self, '_tv_rename_provider', 'TVDB'),
-        'tv_rename_template':    getattr(self, '_tv_rename_template', '{show} S{season}E{episode} {title}'),
+        # ⚠️ These two said `self` until 2026-08-08 — two lines the extraction
+        # from VideoConverterApp.save_preferences (video_converter.py:7961)
+        # forgot to convert, while every line around them was. This module is
+        # not wired up to anything yet, so it never ran and never complained.
+        # The NameError was the only evidence it had never executed.
+        'tv_rename_provider':    getattr(app, '_tv_rename_provider', 'TVDB'),
+        'tv_rename_template':    getattr(app, '_tv_rename_template', '{show} S{season}E{episode} {title}'),
         'media_processor':       getattr(app, '_media_proc_prefs', {}),
     }
     try:
