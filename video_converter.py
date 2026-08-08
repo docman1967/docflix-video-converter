@@ -8288,6 +8288,21 @@ class VideoConverterApp:
             # Bitrate intentionally not saved/loaded — always starts at default (2.0M)
             # to avoid hidden mismatches between saved value and UI slider position
             self.crf.set(prefs.get('crf',                       self.crf.get()))
+            # ⚠️ CRF LIVES IN TWO VARIABLES AND BOTH MUST BE RESTORED.
+            # `self.crf` is the value the encoder reads; `self.crf_var` drives
+            # the slider AND the entry box (both bind to it). Restoring only
+            # `self.crf` left the slider sitting at its 23 default, and the
+            # next event that reached on_crf_change read the SLIDER and wrote
+            # it back over the loaded value — so a saved 32 silently became 23
+            # on the next launch. Reported by Tony 2026-08-08.
+            # The comment above about bitrate is the same bug, avoided by not
+            # persisting bitrate at all; CRF is persisted, so it has to sync.
+            # Safe here because load_preferences() is the LAST thing __init__
+            # does, long after the widgets exist.
+            try:
+                self.crf_var.set(int(self.crf.get()))
+            except (ValueError, tk.TclError, AttributeError):
+                pass
             self.bit_depth.set(prefs.get('bit_depth',           self.bit_depth.get()))
             self.gpu_aq.set(bool(prefs.get('gpu_aq',            self.gpu_aq.get())))
             self.tag_encode_settings.set(bool(prefs.get('tag_encode_settings',

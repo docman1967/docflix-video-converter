@@ -1,7 +1,7 @@
 # Docflix Media Suite — Project Summary
 
 **Last Updated:** 2026-08-08 (rev 107)  
-**Version:** 3.17.0  
+**Version:** 3.17.1  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/` (install test target — *not* the working copy)  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -141,6 +141,32 @@ before trusting a number.
 > the Forced Subtitle Editor (3.12.0), VobSub IDX/SUB support (3.11.3), AI-upscaler
 > auto-tiling (3.11.2), APISR restore models and the Audio Tools suite (3.11.0) — see
 > `git log` for those. Noted rather than backfilled, so nobody reads this as complete.
+
+### 2026-08-08 → 3.17.1 — CRF value now actually persists
+
+Tony, minutes after 3.17.0 shipped: *"the crf value isn't persistent. I changed the value
+to 32 then closed with the x in the top right. When I relaunched it 23 was the value."*
+
+CRF lives in **two** Tk variables — `self.crf` (StringVar, what the encoder reads and what
+prefs save) and `self.crf_var` (IntVar, what the slider AND the entry box bind to).
+`load_preferences()` restored only the first. The slider stayed at its 23 default, and the
+next event reaching `on_crf_change()` read the SLIDER and wrote it back over the loaded
+value — so a saved 32 became 23 on launch and then got **saved as 23 on close**, destroying
+the setting rather than merely displaying it wrong.
+
+⚠️ The codebase already knew about this trap. Directly above the CRF line:
+
+    # Bitrate intentionally not saved/loaded — always starts at default (2.0M)
+    # to avoid hidden mismatches between saved value and UI slider position
+
+Someone hit it with bitrate and dodged it by not persisting bitrate at all. CRF has the
+identical shape but IS persisted, so it walked into exactly the mismatch that comment warns
+about. **Keep that comment.**
+
+`tests/test_prefs_roundtrip.py` asserts the PAIRING rather than the presence — for any
+setting with both a persisted variable and a paired UI variable, both halves must be
+restored. It also lists any other `X` / `X_var` pairs it does not cover, so the next one
+cannot hide.
 
 ### 2026-08-08 → 3.17.0 — Encoder: constant-quality that actually works, and six dead features
 
