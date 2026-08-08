@@ -233,6 +233,18 @@ A large bitrate cost for a slightly *worse* score, both times. This is why switc
 CRF mode previously looked pointless — AQ ate the entire gain. Now opt-in, default OFF.
 `-rc-lookahead 32` measured +2% for +0.07 VMAF and stays.
 
+**⚠️ THE NVENC PRESET LEVER IS DEAD ON THIS HARDWARE — do not recommend p6/p7.** Measured
+twice on 2026-08-08, at identical CQ on an RTX 2000E Ada:
+
+    p4   745 kbps   VMAF 92.19          p6   737 kbps   VMAF 92.28
+    p5   742 kbps   VMAF 92.23          p7   737 kbps   VMAF 92.31
+
+p4 → p6 buys **1% file size and 0.09 VMAF** — unmeasurable by any human — and costs Tony
+"a couple of minutes" per episode, which over a library-sized re-encode is real. Arthur
+recommended p6 on the reasoning that slower presets are better; true in principle, worth
+nothing here. **Stay on p4.** All of this release's gains came from CRF mode, 10-bit, and
+turning adaptive quantisation off — none from the preset.
+
 **Bit depth is now a setting** (auto | 8 | 10), default `auto` = the old behaviour of
 inheriting the source. The main encode path never passed `-pix_fmt` at all, which is why
 ~43% of the library was already 10-bit without anyone choosing it.
