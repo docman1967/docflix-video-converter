@@ -30,6 +30,7 @@ and VAAPI takes its format through the hwupload chain. Those must emit NO
 """
 
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -143,7 +144,35 @@ def main():
     fails += not auto_ok
     print(f"    {'ok  ' if auto_ok else 'FAIL'} auto -> no -pix_fmt anywhere")
 
-    total = (len(backends) * 2 + len(backends) + 2 + len(codecs) + 3)
+    # ⚠️⚠️ THE CHECK THAT WOULD HAVE CAUGHT THE REAL BUG.
+    # Everything above validates the CONFIG TABLES. The first version of this
+    # feature had perfect tables, a working UI, and still produced 8-bit files,
+    # because the keys were added to _current_settings() while the encoder is
+    # actually handed `file_settings`, built key-by-key somewhere else. The UI
+    # said 10-bit, the output was 8-bit, and nothing errored.
+    #
+    # A setting is only real if it survives the whole path:
+    #     Tk var -> batch `settings` dict -> `file_settings` -> convert_file
+    # so assert the key appears in EVERY dict along it.
+    print("\n  settings reach the encoder (not just the config tables)")
+    src = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), 'video_converter.py'), encoding='utf-8').read()
+    for key in ('bit_depth', 'gpu_aq'):
+        # the batch dict feeding file_settings
+        in_batch = f"'{key}': self." in src
+        # the per-file dict actually passed to convert_file.
+        # Whitespace-insensitive: the first version of this check hard-coded
+        # the indentation and reported a false FAIL against correct code.
+        in_file = re.search(rf"'{key}'\s*:\s*ov\.get\(\s*'{key}'", src) is not None
+        # and the consumer
+        used = f"settings.get('{key}'" in src
+        for label, ok in (('batch settings', in_batch),
+                          ('file_settings', in_file),
+                          ('read by convert_file', used)):
+            fails += not ok
+            print(f"    {'ok  ' if ok else 'FAIL'} {key:<10} {label}")
+
+    total = (len(backends) * 2 + len(backends) + 2 + len(codecs) + 3 + 6)
     print(f"\n  {total - fails}/{total} checks pass\n")
     sys.exit(1 if fails else 0)
 

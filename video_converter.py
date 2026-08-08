@@ -9971,6 +9971,14 @@ class VideoConverterApp:
             'mode': self.quality_mode.get(),
             'bitrate': self.bitrate.get(),
             'crf': int(self.crf.get()),
+            # ⚠️ THIS is the dict the encoder actually receives, via
+            # file_settings below. _current_settings() is a DIFFERENT dict and
+            # adding keys only there does nothing — which is exactly how the
+            # first version of the bit-depth feature shipped silently broken:
+            # the UI said 10-bit, the encode came out 8-bit, and nothing
+            # errored. Any new encode setting must be added in BOTH places.
+            'bit_depth': self.bit_depth.get(),
+            'gpu_aq': self.gpu_aq.get(),
             'preset': self.preset_combo.get(),
             'gpu_preset': self.gpu_preset.get(),
             'audio_codec': ('copy' if self.transcode_mode.get() == 'video'
@@ -10028,6 +10036,9 @@ class VideoConverterApp:
                 'mode':           ov.get('quality_mode',   settings['mode']),
                 'bitrate':        ov.get('bitrate',        settings['bitrate']),
                 'crf':            int(ov.get('crf',        settings['crf'])),
+                # Per-file overrides fall back to the batch settings above.
+                'bit_depth':      ov.get('bit_depth',      settings.get('bit_depth', 'auto')),
+                'gpu_aq':         ov.get('gpu_aq',         settings.get('gpu_aq', False)),
                 'preset':         ov.get('preset',         settings['preset']),
                 'gpu_preset':     ov.get('preset',         settings['gpu_preset']),
                 'audio_codec':    ov.get('audio_codec',    settings['audio_codec']),
