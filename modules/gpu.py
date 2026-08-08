@@ -14,8 +14,14 @@ import shutil
 import subprocess
 import tempfile
 
-from .constants import GPU_BACKENDS
-from .utils import get_video_duration, format_size
+# ⚠️ VIDEO_CODEC_MAP and format_time were used but never imported until
+# 2026-08-08 — NameError on the branches that reach them (a codec-info fallback
+# at ~411, and the duration-mismatch verification message at ~526). Same bug
+# class as get_all_streams in subtitle_editor: a name absent from an import list
+# is invisible until a rarely-taken branch runs.
+# tests/test_no_undefined_names.py now catches this across the package.
+from .constants import GPU_BACKENDS, VIDEO_CODEC_MAP
+from .utils import get_video_duration, format_size, format_time
 
 # Module-level flag — set via --gpu-test-mode CLI flag
 GPU_TEST_MODE = False

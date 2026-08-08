@@ -8,6 +8,11 @@ Supports all filter types plus search/replace pairs.
 import os
 from pathlib import Path
 import re
+# ⚠️ Missing until 2026-08-08. subprocess.run() is used to pull a subtitle
+# stream out of a video with ffmpeg (~line 801), so batch-filtering a VIDEO
+# file raised NameError there — while filtering plain .srt files, the common
+# case, worked fine and hid it.
+import subprocess
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox

@@ -29,6 +29,12 @@ from .constants import (
 )
 from .utils import (
     create_tooltip, get_subtitle_streams, get_video_duration,
+    # ⚠️ get_all_streams was MISSING here until 2026-08-08, and do_save_file
+    # calls it — so "save an edited subtitle back into the video" raised
+    # NameError every single time, on the one path that re-muxes. Nothing else
+    # uses it, so external .srt editing was unaffected and it went unnoticed.
+    # A NameError on a rarely-taken branch is invisible until someone takes it.
+    get_all_streams,
     scaled_geometry, scaled_minsize, ask_open_file, ask_save_file,
     center_window_on_parent,
 )
@@ -44,6 +50,12 @@ from .subtitle_filters import (
     filter_remove_duplicates, filter_merge_duplicates, filter_merge_short,
     filter_reduce_lines, filter_collapse_paint_on,
     shift_timestamps, stretch_timestamps, two_point_sync,
+    # ⚠️ retime_subtitles was MISSING until 2026-08-08 and it is the CORE of
+    # Smart Sync — _retime() called it, hit NameError, the global crash guard
+    # swallowed it to keep the app alive, and the Re-time button silently did
+    # nothing. A whole feature dead with no visible error. Found by an
+    # undefined-name sweep, not by reading the code.
+    retime_subtitles,
     BUILTIN_AD_PATTERNS,
     # Names database (optional)
     load_names_db, unload_names_db, is_names_db_loaded,
@@ -55,6 +67,11 @@ from .waveform_timeline import WaveformTimeline
 from .gpu import (detect_closed_captions, detect_cc_types,
                    extract_closed_captions_to_srt)
 from .subtitle_ocr import ocr_bitmap_subtitle
+# ⚠️ Also missing until 2026-08-08. Used by Smart Sync's _do_backup() to write
+# the pre-sync snapshot — inside a try/except, so the failure was caught and
+# the backup simply never appeared. Paired with the retime_subtitles bug above,
+# Smart Sync could neither retime nor protect the file it was about to retime.
+from .subtitle_ocr import write_srt_file
 
 try:
     from tkinterdnd2 import DND_FILES
@@ -1151,9 +1168,15 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         from .subtitle_ocr import reload_ocr_rules
                         reload_ocr_rules()
                         rules_win.destroy()
-                        if progress_callback:
-                            _progress_queue.put(
-                                f"OCR rules updated ({len(rules)} rules)")
+                        # ⚠️ Was `if progress_callback: _progress_queue.put(...)`
+                        # — copy-pasted from subtitle_ocr.py, where those exist.
+                        # Neither exists here, so this raised NameError every
+                        # time. It sits AFTER rules_win.destroy(), so the rules
+                        # did save and the window did close: the only visible
+                        # effect was a missing log line plus a traceback in the
+                        # log. Which is why it survived. (2026-08-08)
+                        app.add_log(
+                            f"OCR rules updated ({len(rules)} rules)", 'INFO')
 
                     ttk.Button(btn_frame, text="Delete Selected",
                                command=_delete_selected).pack(side='left')
