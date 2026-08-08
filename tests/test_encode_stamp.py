@@ -70,8 +70,7 @@ def main():
         print("\n  ffmpeg/ffprobe/mkvpropedit not all present — skipping\n")
         sys.exit(0)
 
-    from video_converter import VideoConverterApp   # noqa: E402
-    strip = VideoConverterApp.strip_mkv_tags_keeping_stamp
+    from modules.utils import strip_mkv_tags_keeping_stamp as strip  # noqa
 
     fails = 0
     tmp = tempfile.mkdtemp(prefix='docflix_stamp_test_')
@@ -136,7 +135,31 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    total = 5
+    # ⚠️ THE CHECK THAT STOPS THIS COMING BACK.
+    # Tony, on being told the converter's strip had been eating the stamp:
+    # "this will pop up again because I strip tags in the Docflix Video
+    # Processor as well." He was right — media_processor.py had its own
+    # identical inline block. Any NEW inline `mkvpropedit --tags` reintroduces
+    # the bug in a place nobody will think to look, so there must be exactly
+    # ONE implementation and it lives in modules/utils.py.
+    print("\n  nobody rolls their own mkvpropedit --tags")
+    import glob as _glob
+    offenders = []
+    for path in (_glob.glob(os.path.join(ROOT, '*.py'))
+                 + _glob.glob(os.path.join(ROOT, 'modules', '*.py'))):
+        rel = os.path.relpath(path, ROOT)
+        if rel == os.path.join('modules', 'utils.py'):
+            continue          # the one legitimate implementation
+        body = open(path, encoding='utf-8').read()
+        for i, line in enumerate(body.splitlines(), 1):
+            if "'mkvpropedit'" in line and '--tags' in line:
+                offenders.append(f"{rel}:{i}")
+    ok_single = not offenders
+    fails += not ok_single
+    print(f"    {'ok  ' if ok_single else 'FAIL'} single implementation"
+          + ("" if ok_single else f" — inline calls at {', '.join(offenders)}"))
+
+    total = 6
     print(f"\n  {total - fails}/{total} pass\n")
     sys.exit(1 if fails else 0)
 

@@ -1046,3 +1046,86 @@ def center_window_on_parent(win, parent):
     x = max(0, px + (pw - w) // 2)
     y = max(0, py + (ph - h) // 2)
     win.geometry(f'{w}x{h}+{x}+{y}')
+
+
+# ── MKV tag stripping that preserves our own encode stamp ────────────────────
+DOCFLIX_STAMP_KEY = 'DOCFLIX_ENCODE'
+
+
+def read_encode_stamp(path):
+    """The DOCFLIX_ENCODE stamp inside an MKV, or None."""
+    try:
+        r = subprocess.run(
+            ['ffprobe', '-v', 'quiet', '-show_entries',
+             f'format_tags={DOCFLIX_STAMP_KEY}', '-of', 'default=nw=1:nk=1',
+             path],
+            capture_output=True, text=True, timeout=30)
+        return (r.stdout or '').strip() or None
+    except Exception:
+        return None
+
+
+def strip_mkv_tags_keeping_stamp(path, log=None):
+    """`mkvpropedit --tags all:` on an MKV, preserving DOCFLIX_ENCODE.
+
+    ⚠️ THE STRIP DELETES OUR OWN ENCODE STAMP, AND THIS BUG HAS A HABIT OF
+    COMING BACK. ffmpeg's `-metadata` writes into the Matroska **Tags** section;
+    `--tags all:` removes that whole section. So with strip-tags on, the stamp
+    was written by ffmpeg and silently wiped moments later — two features that
+    each worked perfectly, cancelling each other, with nothing in the log.
+
+    Found 2026-08-08 in the main converter. Tony immediately pointed out the
+    obvious consequence: *"this will pop up again because I strip tags in the
+    Docflix Video Processor as well."* He was right — media_processor.py had its
+    own identical `mkvpropedit --tags all:` block.
+
+    **THAT is why this lives in utils and not in either caller.** Anywhere that
+    strips MKV tags must call THIS, not roll its own, or the bug returns the
+    next time someone adds a strip step. If you are about to write
+    `mkvpropedit ... --tags all:` somewhere new, call this instead.
+
+    Reads the stamp back BEFORE stripping and rewrites it after — reading rather
+    than re-deriving, so the restored value is byte-for-byte what ffmpeg wrote
+    and cannot drift from the encode it describes.
+
+    Returns True if the strip succeeded (whether or not there was a stamp).
+    """
+    import tempfile
+    from xml.sax.saxutils import escape as _xesc
+
+    _log = log or (lambda m, l='INFO': None)
+    keep = read_encode_stamp(path)
+
+    try:
+        r = subprocess.run(['mkvpropedit', path, '--tags', 'all:'],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            _log("  Stripped MKV tags (mkvpropedit)", 'INFO')
+        else:
+            _log(f"  mkvpropedit warning: {r.stderr.strip()}", 'WARNING')
+    except Exception as e:
+        _log(f"  mkvpropedit error: {e}", 'WARNING')
+        return False
+
+    if not keep:
+        return True
+    try:
+        xml = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+               '<Tags><Tag><Simple>'
+               f'<Name>{DOCFLIX_STAMP_KEY}</Name>'
+               f'<String>{_xesc(keep)}</String>'
+               '</Simple></Tag></Tags>\n')
+        tf = tempfile.NamedTemporaryFile('w', suffix='.xml', delete=False,
+                                         encoding='utf-8')
+        tf.write(xml)
+        tf.close()
+        r2 = subprocess.run(['mkvpropedit', path, '--tags', f'all:{tf.name}'],
+                            capture_output=True, text=True, timeout=30)
+        os.unlink(tf.name)
+        if r2.returncode == 0:
+            _log(f"  Restored encode tag: {keep}", 'INFO')
+            return True
+        _log(f"  could not restore encode tag: {r2.stderr.strip()}", 'WARNING')
+    except Exception as e:
+        _log(f"  could not restore encode tag: {e}", 'WARNING')
+    return False

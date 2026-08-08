@@ -20,7 +20,9 @@ from tkinter import ttk, messagebox
 from .constants import (VIDEO_EXTENSIONS, SUBTITLE_EXTENSIONS, EDITION_PRESETS,
                         LANG_CODE_TO_NAME, SUBTITLE_LANGUAGES)
 from .chapters import generate_auto_chapters, chapters_to_ffmetadata
-from .utils import get_audio_info, get_subtitle_streams, ask_directory, ask_open_files, scaled_geometry, scaled_minsize
+from .utils import (get_audio_info, get_subtitle_streams, ask_directory,
+                    ask_open_files, scaled_geometry, scaled_minsize,
+                    strip_mkv_tags_keeping_stamp)
 from .gpu import detect_closed_captions, get_video_codec, CC_STRIP_BSF
 
 try:
@@ -1779,16 +1781,13 @@ def open_media_processor(app):
                     if (do_strip_tags
                             and final_path.lower().endswith('.mkv')
                             and shutil.which('mkvpropedit')):
-                        try:
-                            _mkv_r = subprocess.run(
-                                ['mkvpropedit', final_path, '--tags', 'all:'],
-                                capture_output=True, text=True, timeout=30)
-                            if _mkv_r.returncode == 0:
-                                _log("  Stripped MKV tags (mkvpropedit)", 'INFO')
-                            else:
-                                _log(f"  mkvpropedit warning: {_mkv_r.stderr.strip()}", 'WARNING')
-                        except Exception as _e:
-                            _log(f"  mkvpropedit error: {_e}", 'WARNING')
+                        # ⚠️ Was an inline `mkvpropedit --tags all:` here, which
+                        # ALSO wiped the DOCFLIX_ENCODE stamp the converter writes
+                        # — Tony spotted it the moment the same bug was fixed in
+                        # the main app: "this will pop up again because I strip
+                        # tags in the Docflix Video Processor as well."
+                        # Shared helper now; do not inline mkvpropedit again.
+                        strip_mkv_tags_keeping_stamp(final_path, _log)
 
                     # Track whether subtitles were muxed for this file
                     do_mux = _ov(f, 'mux_subs', opt_mux_subs)

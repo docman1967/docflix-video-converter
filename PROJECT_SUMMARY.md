@@ -1,7 +1,7 @@
 # Docflix Media Suite — Project Summary
 
 **Last Updated:** 2026-08-08 (rev 107)  
-**Version:** 3.17.2  
+**Version:** 3.17.3  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/` (install test target — *not* the working copy)  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -141,6 +141,24 @@ before trusting a number.
 > the Forced Subtitle Editor (3.12.0), VobSub IDX/SUB support (3.11.3), AI-upscaler
 > auto-tiling (3.11.2), APISR restore models and the Audio Tools suite (3.11.0) — see
 > `git log` for those. Noted rather than backfilled, so nobody reads this as complete.
+
+### 2026-08-08 → 3.17.3 — one strip-tags implementation, not three
+
+Tony, immediately on hearing the converter's strip had been eating the DOCFLIX_ENCODE stamp:
+*"oh that's funny.....but this will pop up again because I strip tags in the Docflix Video
+Processor as well."*
+
+He was right. `media_processor.py` had its own identical inline `mkvpropedit --tags all:`
+block, which would have wiped the stamp off anything processed there — and the 3.17.2 fix
+would have looked like it worked, because the converter's own output was fine.
+
+**The fix is not to patch it twice.** `strip_mkv_tags_keeping_stamp()` now lives in
+`modules/utils.py` and both callers use it. Anywhere that strips MKV tags must call it.
+
+⚠️ `tests/test_encode_stamp.py` now scans every `.py` in the app and FAILS if any file other
+than `modules/utils.py` calls `mkvpropedit ... --tags` inline. That is what stops the bug
+class returning — a fix in one place is a patch, a single implementation plus a guard is a
+solution. Verified the guard fires by reintroducing an inline call.
 
 ### 2026-08-08 → 3.17.2 — the strip-tags step was eating the encode stamp
 
