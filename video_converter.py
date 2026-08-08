@@ -10051,6 +10051,82 @@ class VideoConverterApp:
         self.add_log(f"Files to convert: {len(self.files)}", 'INFO')
         self.add_log("=" * 50, 'INFO')
     
+    @staticmethod
+    def strip_mkv_tags_keeping_stamp(output_path, log=None):
+        """`mkvpropedit --tags all:` on an MKV, preserving DOCFLIX_ENCODE.
+
+        ⚠️ THE STRIP DELETES OUR OWN ENCODE STAMP. ffmpeg's `-metadata` writes
+        into the Matroska **Tags** section, and `--tags all:` removes that whole
+        section — so with strip-tags enabled the stamp was written by ffmpeg and
+        silently wiped moments later. Two features that each worked perfectly,
+        cancelling each other, with nothing in the log to say so.
+        (Tony, 2026-08-08: *"I had the tag settings checked but I don't see
+        anything written to the metadata."*)
+
+        So: read the stamp back BEFORE stripping and rewrite it after. Reading
+        rather than re-deriving means the restored value is byte-for-byte what
+        ffmpeg actually wrote, and cannot drift from the encode it describes.
+
+        The end state is exactly what strip-tags-plus-stamp should mean: none of
+        ffmpeg's BPS/DURATION/ENCODER bloat, just the one line saying how this
+        file was made.
+
+        A separate method purely so it can be tested — the first version lived
+        inline in run_conversion() and could only be verified by transcribing it
+        into a test, which is not the same as testing it.
+        """
+        _log = log or (lambda m, l='INFO': None)
+        import tempfile
+        from xml.sax.saxutils import escape as _xesc
+
+        def _read_stamp():
+            try:
+                r = subprocess.run(
+                    ['ffprobe', '-v', 'quiet', '-show_entries',
+                     'format_tags=DOCFLIX_ENCODE', '-of', 'default=nw=1:nk=1',
+                     output_path],
+                    capture_output=True, text=True, timeout=30)
+                return (r.stdout or '').strip() or None
+            except Exception:
+                return None
+
+        keep = _read_stamp()
+        try:
+            r = subprocess.run(['mkvpropedit', output_path, '--tags', 'all:'],
+                               capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                _log("  Stripped MKV tags (mkvpropedit)", 'INFO')
+            else:
+                _log(f"  mkvpropedit warning: {r.stderr.strip()}", 'WARNING')
+        except Exception as e:
+            _log(f"  mkvpropedit error: {e}", 'WARNING')
+            return False
+
+        if not keep:
+            return True
+        try:
+            xml = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+                   '<Tags><Tag><Simple>'
+                   '<Name>DOCFLIX_ENCODE</Name>'
+                   f'<String>{_xesc(keep)}</String>'
+                   '</Simple></Tag></Tags>\n')
+            tf = tempfile.NamedTemporaryFile('w', suffix='.xml', delete=False,
+                                             encoding='utf-8')
+            tf.write(xml)
+            tf.close()
+            r2 = subprocess.run(
+                ['mkvpropedit', output_path, '--tags', f'all:{tf.name}'],
+                capture_output=True, text=True, timeout=30)
+            os.unlink(tf.name)
+            if r2.returncode == 0:
+                _log(f"  Restored encode tag: {keep}", 'INFO')
+                return True
+            _log(f"  could not restore encode tag: {r2.stderr.strip()}",
+                         'WARNING')
+        except Exception as e:
+            _log(f"  could not restore encode tag: {e}", 'WARNING')
+        return False
+
     def run_conversion(self):
         """Run batch conversion in background thread"""
         self.start_time = datetime.now()
@@ -10349,16 +10425,7 @@ class VideoConverterApp:
                 if (file_settings.get('strip_metadata_tags')
                         and output_path.lower().endswith('.mkv')
                         and shutil.which('mkvpropedit')):
-                    try:
-                        _mkv_r = subprocess.run(
-                            ['mkvpropedit', output_path, '--tags', 'all:'],
-                            capture_output=True, text=True, timeout=30)
-                        if _mkv_r.returncode == 0:
-                            self.add_log("  Stripped MKV tags (mkvpropedit)", 'INFO')
-                        else:
-                            self.add_log(f"  mkvpropedit warning: {_mkv_r.stderr.strip()}", 'WARNING')
-                    except Exception as _e:
-                        self.add_log(f"  mkvpropedit error: {_e}", 'WARNING')
+                    self.strip_mkv_tags_keeping_stamp(output_path, self.add_log)
 
                 with _clk:
                     completed += 1

@@ -1,7 +1,7 @@
 # Docflix Media Suite — Project Summary
 
 **Last Updated:** 2026-08-08 (rev 107)  
-**Version:** 3.17.1  
+**Version:** 3.17.2  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/` (install test target — *not* the working copy)  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -141,6 +141,32 @@ before trusting a number.
 > the Forced Subtitle Editor (3.12.0), VobSub IDX/SUB support (3.11.3), AI-upscaler
 > auto-tiling (3.11.2), APISR restore models and the Audio Tools suite (3.11.0) — see
 > `git log` for those. Noted rather than backfilled, so nobody reads this as complete.
+
+### 2026-08-08 → 3.17.2 — the strip-tags step was eating the encode stamp
+
+Tony, minutes after 3.17.0 shipped the DOCFLIX_ENCODE stamp: *"so for this file I had the
+tag settings checked but I don't see anything written to the metadata."*
+
+Two features that each worked perfectly, cancelling each other out:
+
+1. ffmpeg's `-metadata DOCFLIX_ENCODE=...` writes into the Matroska **Tags** section.
+2. The strip-metadata post-step runs `mkvpropedit --tags all:`, which removes that entire
+   section.
+
+With strip-tags on — Tony's normal setting — the stamp was written and wiped moments later.
+**Nothing errored, nothing logged, the encode looked completely successful.**
+
+⚠️ Neither feature's own tests could have caught it. The stamp test encoded a file and read
+the tag back, correctly, because it never ran the post-step. The *interaction* was the bug.
+
+Now reads the stamp back before stripping and rewrites it after — reading rather than
+re-deriving, so the restored value is byte-for-byte what ffmpeg wrote and cannot drift from
+the encode it describes. End state is what strip-tags-plus-stamp should always have meant:
+none of ffmpeg's BPS/DURATION bloat, just the one line saying how the file was made.
+
+Extracted to `VideoConverterApp.strip_mkv_tags_keeping_stamp(path, log=None)` — a staticmethod
+purely so it can be tested. The first version lived inline in `run_conversion()` and could only
+be checked by transcribing it into a test, which is not the same as testing it.
 
 ### 2026-08-08 → 3.17.1 — CRF value now actually persists
 
