@@ -59,6 +59,55 @@ done
 
 ---
 
+## Known Issues — things Tony can live with, a stranger could not
+
+Deliberately kept, not forgotten. Each is fine for a single expert user who
+knows the workaround, and each would generate a support complaint if this ever
+shipped publicly.
+
+### Estimated output size is wrong in CRF mode (est. 69% high)
+
+`estimate_output_size()` (video_converter.py) maps CRF → bitrate from a **fixed
+1080p baseline**: `6_000_000 * (0.85 ** (crf - 23))` for H.265. It never looks
+at the source, so it returns the same figure for a 6 Mb/s WEB-DL and a 30 Mb/s
+BluRay remux. That was harmless while everything was fixed-bitrate — the answer
+genuinely *was* the same — and became wrong the moment CRF became the default
+(3.17.0).
+
+Measured 2026-08-08, 9 episodes at CRF 32 against ~6,242 kbps sources:
+
+| | |
+|---|---|
+| estimator says | 1,390 kbps, every file |
+| actual | 595 – 1,130 kbps (mean 823) |
+| error | **+69%**, roughly 200–300 MB per episode |
+
+Tony: *"Right now it's not a big deal but if this ever goes public, someone will
+complain about it not being accurate."*
+
+**⚠️ Do NOT just retune the constant.** Those 9 episodes are one show, clean
+1080p WEB-DL, at one CRF value. Fitting to them makes the estimate accurate for
+that case and wrong everywhere else — the same sampling error that produced a
+"43% smaller" claim from a single 90-second clip earlier the same day, when the
+real answer across the episode was 12%.
+
+Two better directions:
+
+1. **Estimate as a fraction of the SOURCE bitrate.** Across those 9 episodes the
+   output was a tight **9.5–18.1% of source (mean 13.2%)** — far more stable than
+   the CRF-only mapping, because source bitrate proxies content complexity.
+   `_probe_video_bitrate()` already exists for the copy path.
+2. **Or stop pretending to a precision CRF cannot have.** The encoder decides
+   after it sees the content; that is what CRF *means*. Showing
+   `~0.6–1.2 GB (CRF — varies with content)` is honest, and teaches the user
+   what the mode does instead of setting them up to feel misled. A range that is
+   right beats a point estimate that is 300 MB out.
+
+Whichever route, calibrate across content types (grainy film, animation, WEB-DL)
+before trusting a number.
+
+---
+
 ## Recent Changes
 
 > ⚠️ **Gap in this log: 3.8.0 → 3.12.x (2026-07-15 → 2026-08-04) are not written up here.**
