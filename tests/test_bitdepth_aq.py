@@ -157,7 +157,7 @@ def main():
     print("\n  settings reach the encoder (not just the config tables)")
     src = open(os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), 'video_converter.py'), encoding='utf-8').read()
-    for key in ('bit_depth', 'gpu_aq'):
+    for key in ('bit_depth', 'gpu_aq', 'tag_encode_settings'):
         # the batch dict feeding file_settings
         in_batch = f"'{key}': self." in src
         # the per-file dict actually passed to convert_file.
@@ -172,7 +172,50 @@ def main():
             fails += not ok
             print(f"    {'ok  ' if ok else 'FAIL'} {key:<10} {label}")
 
-    total = (len(backends) * 2 + len(backends) + 2 + len(codecs) + 3 + 6)
+    # ── DOCFLIX_ENCODE stamp ────────────────────────────────────────────
+    # Tony, 2026-08-08, beginning a long re-encode project: *"I'll need a way
+    # to distinguish CRF encodes from fixed bitrate encodes."* The filename
+    # already carries it but is stripped when files are renamed into the
+    # library, so it goes into the container instead.
+    #
+    # ⚠️ THE TAG MUST BE DERIVED FROM THE REAL SETTINGS, NEVER TYPED. A file
+    # that confidently misdescribes its own encode is worse than an untagged
+    # one — so these cases check the tag CHANGES when the settings change.
+    print("\n  DOCFLIX_ENCODE tag is derived from the settings actually used")
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from video_converter import VideoConverter          # noqa: E402
+
+    TAGS = [
+        ({'mode': 'crf', 'crf': 32, 'gpu_preset': 'p6', 'bit_depth': '10',
+          'gpu_aq': False, 'audio_codec': 'ac3 (Dolby Digital)',
+          'audio_bitrate': '384k'},
+         ['CRF32', 'p6', '10bit', 'ac3@384k'], ['aq'],
+         'the new defaults'),
+        ({'mode': 'bitrate', 'bitrate': '2M', 'gpu_preset': 'p4',
+          'bit_depth': 'auto', 'gpu_aq': True, 'audio_codec': 'copy'},
+         ['2M', 'p4', 'depth-auto', 'aq', 'audio-copy'], ['CRF'],
+         'the OLD settings must be distinguishable'),
+        ({'mode': 'crf', 'crf': 28, 'gpu_preset': 'p7', 'bit_depth': '8',
+          'gpu_aq': True, 'audio_codec': 'copy'},
+         ['CRF28', 'p7', '8bit', 'aq'], ['10bit'],
+         '8-bit and AQ both show'),
+    ]
+    for s, must, must_not, note in TAGS:
+        tag = VideoConverter.build_encode_tag(s, 'hevc_nvenc')
+        ok = all(m in tag for m in must) and not any(m in tag for m in must_not)
+        fails += not ok
+        print(f"    {'ok  ' if ok else 'FAIL'} {note}")
+        print(f"           {tag}")
+
+    # Two different setting sets must never produce the same tag, or the whole
+    # point (telling encodes apart) is lost.
+    tags = [VideoConverter.build_encode_tag(s, 'hevc_nvenc') for s, _, _, _ in TAGS]
+    uniq = len(set(tags)) == len(tags)
+    fails += not uniq
+    print(f"    {'ok  ' if uniq else 'FAIL'} all three settings produce distinct tags")
+
+    total = (len(backends) * 2 + len(backends) + 2 + len(codecs) + 3 + 9
+             + len(TAGS) + 1)
     print(f"\n  {total - fails}/{total} checks pass\n")
     sys.exit(1 if fails else 0)
 

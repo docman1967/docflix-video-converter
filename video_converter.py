@@ -3133,6 +3133,45 @@ class VideoConverter:
             timestamp = datetime.now().strftime('%H:%M:%S')
             self.log_callback(f"[{timestamp}] [{level}] {message}", level)
 
+    @staticmethod
+    def build_encode_tag(settings, video_enc_name):
+        """A one-line, greppable description of how this file was encoded.
+
+        Written into the container as DOCFLIX_ENCODE so it survives renaming
+        and moving — the filename suffix does not, because files get renamed on
+        the way into the library. Lets Tony ask "which episodes have I already
+        re-encoded?" with ffprobe instead of archaeology.
+
+        ⚠️ DERIVED FROM THE SETTINGS ACTUALLY USED, never from a label the user
+        typed. A hand-written tag drifts the first time a setting changes and
+        the label doesn't, and a file that confidently misdescribes its own
+        encode is worse than one carrying no tag at all.
+
+        Example: "CRF32 hevc_nvenc p6 10bit ac3@384k v3.17.0"
+        """
+        bits = []
+        if settings.get('mode') == 'crf':
+            bits.append(f"CRF{settings.get('crf', '?')}")
+        else:
+            bits.append(str(settings.get('bitrate', '?')))
+        bits.append(str(video_enc_name or '?'))
+        preset = settings.get('gpu_preset') or settings.get('preset')
+        if preset:
+            bits.append(str(preset))
+        depth = str(settings.get('bit_depth', 'auto'))
+        bits.append('10bit' if depth == '10' else
+                    '8bit' if depth == '8' else 'depth-auto')
+        if settings.get('gpu_aq'):
+            bits.append('aq')
+        ac = settings.get('audio_codec', '')
+        if ac and ac != 'copy':
+            short = str(ac).split(' ')[0]
+            bits.append(f"{short}@{settings.get('audio_bitrate', '?')}")
+        else:
+            bits.append('audio-copy')
+        bits.append(f"v{APP_VERSION}")
+        return ' '.join(bits)
+
     def _src_audio_decodable(self, input_path):
         """Return False if ffmpeg cannot decode the source audio streams.
 
@@ -3957,6 +3996,22 @@ class VideoConverter:
                     c.extend(['-metadata', f'title={edition}'])
                     self.log(f"Setting edition tag: {edition}", 'INFO')
 
+                # ── Stamp how this file was encoded ──
+                # ⚠️ Deliberately OUTSIDE the `if set_track_metadata:` block
+                # just above — that switch is about language tags and the user
+                # may have it off, while this stamp is about being able to
+                # identify the file months later and must not depend on an
+                # unrelated setting. But it must stay INSIDE _build_base_cmd(),
+                # which is where `c` lives: the first version sat one indent
+                # further out and died with "name 'c' is not defined".
+                # Skipped for stream copy — nothing was encoded, so a tag
+                # describing an encode would be a lie.
+                if (settings.get('tag_encode_settings', True)
+                        and video_enc_name != 'copy'):
+                    _tag = self.build_encode_tag(settings, video_enc_name)
+                    c.extend(['-metadata', f'DOCFLIX_ENCODE={_tag}'])
+                    self.log(f"Encode tag: {_tag}", 'INFO')
+
             # ── Log what we're about to do ──
             self.log(f"Video codec: {video_enc_name}", 'INFO')
             self.log(f"Mode: {mode}" + (" (two-pass)" if use_two_pass else " (GPU multipass)" if use_gpu_multipass else ""), 'INFO')
@@ -4293,6 +4348,21 @@ class VideoConverterApp:
         # under-credit what AQ actually improves (banding in skies and dark
         # scenes), so it may still be worth it on specific material.
         self.gpu_aq = tk.BooleanVar(value=False)
+        # ── Stamp the encode settings into the file ──────────────────────
+        # Tony, 2026-08-08, starting a months-long project to re-encode
+        # favourites at CRF 32: *"I'll need a way to distinguish CRF encodes
+        # from fixed bitrate encodes."*
+        #
+        # The output FILENAME already carries all of it
+        # (…-CRF32-NVENC_H265_p6-AC3_384k.mkv) but that is stripped when a file
+        # is renamed on the way into the library, so months later there is no
+        # way to tell what a given episode was encoded with.
+        #
+        # ⚠️ THE TAG IS DERIVED, NEVER TYPED. A free-text label would drift out
+        # of sync with the real settings the first time one changed and the
+        # label didn't — a file confidently describing an encode it didn't get.
+        # Built from the settings actually used, at command-build time.
+        self.tag_encode_settings = tk.BooleanVar(value=True)
         self.cpu_preset = tk.StringVar(value='ultrafast')
         self.gpu_preset = tk.StringVar(value='p4')
         self.skip_existing = tk.BooleanVar(value=True)
@@ -4860,6 +4930,20 @@ class VideoConverterApp:
         _aq_cb = ttk.Checkbutton(self.quality_mode_frame, text="GPU adaptive quant",
                                  variable=self.gpu_aq)
         _aq_cb.pack(side='left', padx=(12, 0))
+
+        _tag_cb = ttk.Checkbutton(self.quality_mode_frame, text="Tag settings in file",
+                                  variable=self.tag_encode_settings)
+        _tag_cb.pack(side='left', padx=(12, 0))
+        _create_tooltip(_tag_cb,
+                        "Writes DOCFLIX_ENCODE into the output file, e.g.\n"
+                        "  CRF32 hevc_nvenc p6 10bit ac3@384k v3.17.0\n\n"
+                        "Survives renaming and moving (the filename suffix does\n"
+                        "not), is invisible to Avalon/Emby, and lets you ask\n"
+                        "\"which episodes have I already re-encoded?\" like this:\n\n"
+                        "  ffprobe -v quiet -show_entries format_tags=DOCFLIX_ENCODE \\\n"
+                        "          -of default=nw=1:nk=1 FILE.mkv\n\n"
+                        "Always built from the settings actually used, never typed,\n"
+                        "so it cannot describe an encode the file did not get.")
         _create_tooltip(_aq_cb,
                        "NVENC -temporal-aq/-spatial-aq. OFF by default since "
                        "3.17.0.\nMeasured at identical CQ: +48% bitrate on a "
@@ -8094,6 +8178,7 @@ class VideoConverterApp:
             'crf':                  self.crf.get(),
             'bit_depth':            self.bit_depth.get(),
             'gpu_aq':               self.gpu_aq.get(),
+            'tag_encode_settings':  self.tag_encode_settings.get(),
             'cpu_preset':           self.cpu_preset.get(),
             'gpu_preset':           self.gpu_preset.get(),
             'audio_codec':          self.audio_codec.get(),
@@ -8205,6 +8290,8 @@ class VideoConverterApp:
             self.crf.set(prefs.get('crf',                       self.crf.get()))
             self.bit_depth.set(prefs.get('bit_depth',           self.bit_depth.get()))
             self.gpu_aq.set(bool(prefs.get('gpu_aq',            self.gpu_aq.get())))
+            self.tag_encode_settings.set(bool(prefs.get('tag_encode_settings',
+                                                        self.tag_encode_settings.get())))
             self.cpu_preset.set(prefs.get('cpu_preset',         self.cpu_preset.get()))
             self.gpu_preset.set(prefs.get('gpu_preset',         self.gpu_preset.get()))
             self.audio_codec.set(prefs.get('audio_codec',       self.audio_codec.get()))
@@ -8598,6 +8685,7 @@ class VideoConverterApp:
                 'crf':            int(self.crf.get()),
                 'bit_depth':      self.bit_depth.get(),
                 'gpu_aq':         self.gpu_aq.get(),
+                'tag_encode_settings': self.tag_encode_settings.get(),
                 'audio_codec':    ('copy' if self.transcode_mode.get() == 'video'
                                    else self.get_audio_codec_name()),
                 'audio_bitrate':  self.audio_bitrate.get(),
@@ -9979,6 +10067,7 @@ class VideoConverterApp:
             # errored. Any new encode setting must be added in BOTH places.
             'bit_depth': self.bit_depth.get(),
             'gpu_aq': self.gpu_aq.get(),
+            'tag_encode_settings': self.tag_encode_settings.get(),
             'preset': self.preset_combo.get(),
             'gpu_preset': self.gpu_preset.get(),
             'audio_codec': ('copy' if self.transcode_mode.get() == 'video'
@@ -10039,6 +10128,8 @@ class VideoConverterApp:
                 # Per-file overrides fall back to the batch settings above.
                 'bit_depth':      ov.get('bit_depth',      settings.get('bit_depth', 'auto')),
                 'gpu_aq':         ov.get('gpu_aq',         settings.get('gpu_aq', False)),
+                'tag_encode_settings': ov.get('tag_encode_settings',
+                                       settings.get('tag_encode_settings', True)),
                 'preset':         ov.get('preset',         settings['preset']),
                 'gpu_preset':     ov.get('preset',         settings['gpu_preset']),
                 'audio_codec':    ov.get('audio_codec',    settings['audio_codec']),
