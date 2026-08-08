@@ -57,6 +57,39 @@ def main():
     backends, codecs = load_tables()
     fails = 0
 
+    # ⚠️ THESE TABLES EXIST TWICE. video_converter.py:89 has its own copy (what
+    # the main encoder reads, and what this file checks); modules/constants.py:74
+    # has another, read by gpu.py and video_scaler.py. A test that looks at only
+    # one will report a clean result while the other is stale — so say so out
+    # loud rather than implying full coverage.
+    print("\n  ⚠️ duplicate-table check (these tables exist in TWO files)")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        import ast
+        c_src = open(os.path.join(root, 'modules', 'constants.py'),
+                     encoding='utf-8').read()
+        c_back = {}
+        for n in ast.parse(c_src).body:
+            if isinstance(n, ast.Assign):
+                for t in n.targets:
+                    if isinstance(t, ast.Name) and t.id == 'GPU_BACKENDS':
+                        c_back = ast.literal_eval(n.value)
+        diverged = []
+        for name in sorted(set(backends) | set(c_back)):
+            a = backends.get(name, {}).get('quality_args')
+            b = c_back.get(name, {}).get('quality_args')
+            if a != b:
+                diverged.append(name)
+        if diverged:
+            print(f"    note  video_converter.py and modules/constants.py "
+                  f"DIVERGE for: {', '.join(diverged)}")
+            print(f"          (expected in 3.17.0 — Video Scaler intentionally "
+                  f"keeps AQ; see Known Issues)")
+        else:
+            print("    ok    both copies agree")
+    except Exception as e:
+        print(f"    note  could not compare copies: {e}")
+
     print("\n  every GPU backend declares aq_args and pix_fmt_10bit")
     for name, b in sorted(backends.items()):
         for key in ('aq_args', 'pix_fmt_10bit'):

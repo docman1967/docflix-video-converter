@@ -1,7 +1,7 @@
 # Docflix Media Suite — Project Summary
 
-**Last Updated:** 2026-08-07 (rev 106)  
-**Version:** 3.16.0  
+**Last Updated:** 2026-08-08 (rev 107)  
+**Version:** 3.17.0  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/` (install test target — *not* the working copy)  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -65,6 +65,32 @@ Deliberately kept, not forgotten. Each is fine for a single expert user who
 knows the workaround, and each would generate a support complaint if this ever
 shipped publicly.
 
+### GPU_BACKENDS / VIDEO_CODEC_MAP exist TWICE, and diverged in 3.17.0
+
+```
+video_converter.py:89      GPU_BACKENDS      <- the MAIN converter reads this
+modules/constants.py:74    GPU_BACKENDS      <- gpu.py + video_scaler.py read this
+```
+
+Two independent copies of the same tables. 3.17.0 added `aq_args` and
+`pix_fmt_10bit` to the `video_converter.py` copy and made adaptive quantisation
+opt-in there. **The `modules/constants.py` copy was deliberately left alone**, so
+the **Video Scaler still has `-temporal-aq/-spatial-aq` hard-on and no 10-bit
+option** — unchanged from how it has always behaved, but now inconsistent with
+the main converter.
+
+Left rather than fixed because changing it silently alters the Video Scaler's
+encoding on a path Tony has not tested ([[feedback_test-before-push]]). The
+Scaler targets CRF 18 quality-first upscales, where AQ's bit spend may actually
+be worth it — that needs measuring on upscaled content, not assuming.
+
+⚠️ **A test reading only one copy will report a clean result while the other is
+stale.** `tests/test_bitdepth_aq.py` reads the `video_converter.py` copy (the
+live encode path) and now warns loudly if the two diverge.
+
+The real fix is one table imported in both places, but that is a refactor of the
+half-finished `modules/` extraction, not a 3.17.0 change.
+
 ### Estimated output size is wrong in CRF mode (est. 69% high)
 
 `estimate_output_size()` (video_converter.py) maps CRF → bitrate from a **fixed
@@ -115,6 +141,59 @@ before trusting a number.
 > the Forced Subtitle Editor (3.12.0), VobSub IDX/SUB support (3.11.3), AI-upscaler
 > auto-tiling (3.11.2), APISR restore models and the Audio Tools suite (3.11.0) — see
 > `git log` for those. Noted rather than backfilled, so nobody reads this as complete.
+
+### 2026-08-08 → 3.17.0 — Encoder: constant-quality that actually works, and six dead features
+
+Started as a one-line import fix and turned into the day the encoder settings got
+revisited for the first time since the GPUs arrived.
+
+**Tony's 2 Mb/s fixed bitrate was never wrong — it answered a constraint that no longer
+exists.** On CPU encoding, predictable time and size mattered more than efficiency, and
+CRF was "god awful slow and wasn't worth the pain". The GPUs removed that constraint
+years ago and the setting stayed, because nothing broke.
+
+**NVENC's adaptive quantisation was the real find.** `-temporal-aq/-spatial-aq` were
+unconditionally ON and are expensive. Measured at identical CQ on two deliberately
+opposite sources:
+
+    grainy 2009 BluRay   +48% bitrate   VMAF 92.15 vs 92.26
+    modern WEB h264      +19% bitrate   VMAF 84.91 vs 85.03
+
+A large bitrate cost for a slightly *worse* score, both times. This is why switching to
+CRF mode previously looked pointless — AQ ate the entire gain. Now opt-in, default OFF.
+`-rc-lookahead 32` measured +2% for +0.07 VMAF and stays.
+
+**Bit depth is now a setting** (auto | 8 | 10), default `auto` = the old behaviour of
+inheriting the source. The main encode path never passed `-pix_fmt` at all, which is why
+~43% of the library was already 10-bit without anyone choosing it.
+
+**Real-world result** — nine Powers episodes, CRF 32 + 10-bit + AQ off, verified by eye:
+**61% average off video bitrate** (595–1,130 kbps vs a flat 2,097). Fixed bitrate had
+been giving a quiet dialogue episode and a hard one the same 2,097 kbps; the spread is
+the point.
+
+**DOCFLIX_ENCODE stamp** — `CRF32 hevc_nvenc p6 10bit ac3@384k v3.17.0` written into the
+container, because the filename suffix is stripped when files are renamed into the
+library. Derived from the settings actually used, never typed, so it cannot misdescribe
+its own file.
+
+**SIX undefined names fixed, found by a sweep rather than by reading code**
+(`tests/test_no_undefined_names.py`). One was `retime_subtitles` — **the core of Smart
+Sync**, which raised NameError into the global crash guard, so the Re-time button
+silently did nothing. A whole feature dead since it was written. Also `subprocess` in
+batch_filter (extracting subs from video always failed) and `get_all_streams` in
+subtitle_editor (saving a subtitle back into a video always failed).
+
+**Vanishing-editor-window instrumentation** — an intermittent bug where the Subtitle
+Editor window disappears on drag-and-drop, with the Suite surviving, a 0-byte log and no
+exception. `faulthandler` is now enabled (core dumps are off on this box, so a C-level
+fault wrote *nothing*), and a `<Destroy>` hook records whether the close handler ran —
+the measurement that splits the remaining hypotheses.
+
+⚠️ Also: **do not delete `modules/converter.py` or `modules/preferences.py`.** They look
+orphaned and are unfinished extraction work, and the same sweep called
+`torch_upscale_worker.py` an orphan when it is launched as a *subprocess*. "No importers"
+is not "unused".
 
 ### 2026-08-07 → 3.16.0 — Subtitle Editor: the wrong-case blind spot, and a waveform that keeps up
 
