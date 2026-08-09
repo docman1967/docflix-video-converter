@@ -65,7 +65,43 @@ Deliberately kept, not forgotten. Each is fine for a single expert user who
 knows the workaround, and each would generate a support complaint if this ever
 shipped publicly.
 
+### NVENC encoder settings exist in FOUR places (updated 2026-08-09)
+
+```
+video_converter.py        GPU_BACKENDS        AQ opt-in      <- fixed in 3.17.0
+modules/constants.py      GPU_BACKENDS        AQ hard-on     <- video_scaler + gpu.py read this
+modules/ai_upscaler.py    NVENC_ENCODERS      AQ hard-on, cq 22, own preset defaults
+modules/torch_upscaler.py (inline args)       no AQ at all   <- the default "fast" engine
+```
+
+Four independent definitions of how to drive NVENC, and 3.17.0 fixed exactly one of them.
+⚠️ **An earlier version of this note said TWO.** Arthur found the `constants.py` copy, wrote it up,
+and only discovered `ai_upscaler.NVENC_ENCODERS` days later while chasing something else — then
+briefly claimed the Video Scaler was "stuck at 8-bit" on the strength of the `constants.py`
+divergence, without checking that the upscalers never read that table. They each carry their own.
+**Do not reason about this from one file.**
+
+Current behaviour, measured rather than assumed:
+- the **torch** engine (Tony's default, "Cartoon/Anime Video (fast)") uses no AQ and requests
+  `p010le` for anything that is not H.264 — it was never affected
+- the **ncnn/ai_upscaler** engine hard-codes AQ, which we measured costing 19–48% bitrate for no
+  VMAF gain — and it does so at CRF 18–22 on intermediates that get thrown away
+- `video_scaler.py` reads `constants.GPU_BACKENDS`, so its encoder table is the un-fixed one
+
+⚠️ Deliberately NOT synced. Changing the Scaler's encoding silently alters a path Tony has not
+tested ([[feedback_test-before-push]]), and the Scaler targets near-lossless intermediates where
+AQ's bit spend may genuinely be worth it — that needs measuring on upscaled content, not assuming.
+
+⚠️ **A test reading only one copy reports a clean result while the others are stale.**
+`tests/test_bitdepth_aq.py` reads the `video_converter.py` copy (the live encode path) and warns
+if it diverges from `constants.py` — it does **not** currently see `ai_upscaler.NVENC_ENCODERS`.
+
+The real fix is one table imported everywhere, but that is a refactor of the half-finished
+`modules/` extraction, not a patch.
+
 ### GPU_BACKENDS / VIDEO_CODEC_MAP exist TWICE, and diverged in 3.17.0
+
+<details><summary>superseded 2026-08-08 note (kept for the reasoning)</summary>
 
 ```
 video_converter.py:89      GPU_BACKENDS      <- the MAIN converter reads this
