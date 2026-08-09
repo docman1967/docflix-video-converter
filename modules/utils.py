@@ -1066,6 +1066,110 @@ def read_encode_stamp(path):
         return None
 
 
+def is_matroska(path):
+    """True only if this really is a Matroska file.
+
+    ⚠️ The extension does NOT tell you. Until 3.18.2 the Media Processor could
+    write a genuine MP4 and then rename it onto the source's .mkv name, so a
+    large slice of the library is MP4 wearing .mkv. mkvpropedit refuses those
+    ("not a Matroska file"), which is the honest answer — they cannot carry a
+    DOCFLIX_ENCODE stamp at all, because MP4 drops custom keys.
+    """
+    try:
+        r = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=format_name',
+             '-of', 'default=nw=1:nk=1', path],
+            capture_output=True, text=True, timeout=30)
+        return 'matroska' in (r.stdout or '').lower()
+    except Exception:
+        return False
+
+
+def write_encode_stamp(path, stamp, log=None):
+    """Write DOCFLIX_ENCODE into an existing MKV **without remuxing it**.
+
+    mkvpropedit edits the header in place — no re-encode, no rewrite of the
+    file body — so this is instant regardless of file size. That is the whole
+    reason this exists rather than a Media Processor pass: stamping a folder of
+    8 GB episodes costs seconds, not hours, and cannot degrade the video.
+
+    ⚠️ MERGES, it does not overwrite. `mkvpropedit --tags all:<file>` REPLACES
+    the entire Tags section, and real files carry ENCODER / DURATION /
+    per-track statistics tags in there. Writing only our stamp would silently
+    delete all of them. So: read the existing tags out with mkvextract, splice
+    our Simple into the global Tag, write the whole thing back.
+
+    (Contrast strip_mkv_tags_keeping_stamp(), which replaces on purpose — that
+    IS the strip. Do not merge these two.)
+
+    Returns True on success.
+    """
+    import tempfile
+    import xml.etree.ElementTree as ET
+
+    _log = log or (lambda m, l='INFO': None)
+    if not stamp:
+        return False
+
+    # ── Existing tags (may legitimately be empty) ──
+    root = None
+    try:
+        r = subprocess.run(['mkvextract', 'tags', path],
+                           capture_output=True, text=True, timeout=60)
+        xml_text = (r.stdout or '').lstrip('﻿').strip()
+        if xml_text:
+            root = ET.fromstring(xml_text)
+    except Exception:
+        root = None
+    if root is None or root.tag != 'Tags':
+        root = ET.Element('Tags')
+
+    # ── The global Tag = the one with no TrackUID target ──
+    global_tag = None
+    for tag in root.findall('Tag'):
+        targets = tag.find('Targets')
+        if targets is None or targets.find('TrackUID') is None:
+            global_tag = tag
+            break
+    if global_tag is None:
+        global_tag = ET.SubElement(root, 'Tag')
+        ET.SubElement(global_tag, 'Targets')
+
+    for simple in list(global_tag.findall('Simple')):
+        name = simple.find('Name')
+        if name is not None and (name.text or '').upper() == DOCFLIX_STAMP_KEY:
+            global_tag.remove(simple)          # replace, never duplicate
+
+    simple = ET.SubElement(global_tag, 'Simple')
+    ET.SubElement(simple, 'Name').text = DOCFLIX_STAMP_KEY
+    ET.SubElement(simple, 'String').text = stamp
+
+    tf = None
+    try:
+        tf = tempfile.NamedTemporaryFile('w', suffix='.xml', delete=False,
+                                         encoding='utf-8')
+        tf.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+        tf.write(ET.tostring(root, encoding='unicode'))
+        tf.close()
+        r = subprocess.run(['mkvpropedit', path, '--tags', f'all:{tf.name}'],
+                           capture_output=True, text=True, timeout=120)
+        if r.returncode == 0:
+            _log(f"  Stamped: {stamp}", 'SUCCESS')
+            return True
+        _log(f"  mkvpropedit failed: {r.stderr.strip() or r.stdout.strip()}",
+             'ERROR')
+        return False
+    except Exception as e:
+        _log(f"  could not write stamp: {e}", 'ERROR')
+        return False
+    finally:
+        if tf is not None:
+            try:
+                os.unlink(tf.name)
+            except OSError:
+                pass
+
+
 def strip_mkv_tags_keeping_stamp(path, log=None):
     """`mkvpropedit --tags all:` on an MKV, preserving DOCFLIX_ENCODE.
 
