@@ -1,7 +1,7 @@
 # Docflix Media Suite — Project Summary
 
 **Last Updated:** 2026-08-08 (rev 107)  
-**Version:** 3.17.3  
+**Version:** 3.17.4  
 **Source / Backup:** `/home/docman1967/scripts/video_converter/`  
 **Installed To:** `~/.local/share/docflix/` (install test target — *not* the working copy)  
 **GitHub:** https://github.com/docman1967/docflix-video-converter  
@@ -141,6 +141,39 @@ before trusting a number.
 > the Forced Subtitle Editor (3.12.0), VobSub IDX/SUB support (3.11.3), AI-upscaler
 > auto-tiling (3.11.2), APISR restore models and the Audio Tools suite (3.11.0) — see
 > `git log` for those. Noted rather than backfilled, so nobody reads this as complete.
+
+### 2026-08-09 → 3.17.4 — the mouse wheel was silently changing settings
+
+Tony, finding 19 episodes encoded at preset **p1** when he had set **p4**: *"Some of the drop
+downs also change when you use the mouse wheel. I've done this before where I used the mouse
+wheel to scroll down in that top window and ended up changing settings without realizing it."*
+
+ttk widgets respond to a wheel event by changing their **value**. The settings panel is a
+scrollable canvas, so scrolling it with the pointer passing over a dropdown changed a setting —
+**no click, no confirmation, no visible cue, no log entry.** By his account it had happened
+before and gone unnoticed.
+
+⚠️ **It was only ever caught because of the DOCFLIX_ENCODE stamp**, added the previous day.
+Nothing else in the system records what a file was actually encoded with. Worth remembering
+before anyone decides that stamp is not earning its keep.
+
+`modules.utils.install_wheel_guard(root)` binds at the **class** level, so it covers every
+Combobox / Scale / Spinbox in every window including ones created later, rather than needing to
+be remembered at ~60 call sites. The wheel still scrolls — the event is forwarded to the nearest
+scrollable Canvas ancestor — it just no longer edits what it passes over.
+
+⚠️ **Installed in BOTH `video_converter.main()` and `standalone.create_standalone_root()`.** A Tk
+class binding only applies to the interpreter that installed it, and every standalone tool builds
+its own root, so guarding only the main app would have left `docflix-subs`, `docflix-media` and
+the rest wheel-editable — a half-fix that reads as finished.
+
+`tests/test_wheel_guard.py` asserts both halves: the value must not move, **and** the panel must
+still scroll. It also verifies the bug still reproduces unguarded (p4 -> p1, Tony's exact
+symptom) — if that stops reproducing the test can no longer discriminate.
+
+Also fixed: the encode stamp read `gpu_preset` while the encoder reads `preset` — two variables
+kept in step only by a change handler. They normally agree, but a stamp that can lie is worse
+than no stamp.
 
 ### 2026-08-08 → 3.17.3 — one strip-tags implementation, not three
 

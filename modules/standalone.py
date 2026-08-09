@@ -214,6 +214,21 @@ def create_standalone_root(title, geometry="960x650", minsize=(800, 550)):
         _t.print_exception(exc, val, tb); _s.stderr.flush()
     root.report_callback_exception = _docflix_cb_exc
 
+    # ⚠️ Stop the mouse wheel silently editing dropdowns it scrolls past —
+    # see modules.utils.install_wheel_guard for what it cost.
+    # ⚠️ THIS MUST BE HERE **AND** IN video_converter.main(). Every standalone
+    # tool builds its own root — `docflix-subs`, `docflix-media`, the Subtitle
+    # Editor opened on its own — and a Tk class binding only applies to the
+    # interpreter that installed it. Guarding just the main app would leave
+    # every standalone tool wheel-editable, which is exactly the kind of
+    # half-fix that reads as finished.
+    try:
+        from .utils import install_wheel_guard
+        install_wheel_guard(root)
+    except Exception as _e:
+        import sys as _s
+        _s.stderr.write(f"[Docflix] wheel guard not installed: {_e}\n")
+
     # Apply high-DPI scaling before any widgets are created
     configure_dpi_scaling(root)
 

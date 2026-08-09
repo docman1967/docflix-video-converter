@@ -1129,3 +1129,66 @@ def strip_mkv_tags_keeping_stamp(path, log=None):
     except Exception as e:
         _log(f"  could not restore encode tag: {e}", 'WARNING')
     return False
+
+
+# ── Mouse-wheel guard ────────────────────────────────────────────────────────
+def install_wheel_guard(root):
+    """Stop the mouse wheel silently changing Combobox / Scale / Spinbox values.
+
+    ⚠️ THIS IS A REAL DATA-LOSS BUG, NOT A NICETY. ttk widgets respond to the
+    wheel by changing their VALUE. Scroll the settings panel with the pointer
+    happening to pass over a dropdown, and a setting changes with no click, no
+    confirmation and no visible cue.
+
+    Tony, 2026-08-09, after 19 episodes encoded at preset p1 when he had set p4:
+    *"Some of the drop downs also change when you use the mouse wheel. I've done
+    this before where I used the mouse wheel to scroll down in that top window
+    and ended up changing settings without realizing it."*
+
+    It cost him a batch, and it had cost him before — the encode-settings stamp
+    is the only reason it was ever noticed at all.
+
+    Bound at the CLASS level so it covers every such widget in every window,
+    including ones created later and ones in dialogs. Per-widget binding would
+    have to be remembered at each of the ~60 call sites, and would be forgotten.
+
+    The wheel still scrolls: the event is forwarded to the nearest scrollable
+    Canvas ancestor, so the panel moves as the user expects. It just no longer
+    edits whatever it passes over.
+    """
+    def _scrollable_ancestor(widget):
+        w = widget
+        for _ in range(12):                      # generous but bounded
+            try:
+                w = w.master
+            except Exception:
+                return None
+            if w is None:
+                return None
+            if isinstance(w, tk.Canvas):
+                return w
+        return None
+
+    def _guard(event):
+        canvas = _scrollable_ancestor(event.widget)
+        if canvas is not None:
+            try:
+                if event.num == 4:
+                    canvas.yview_scroll(-3, 'units')
+                elif event.num == 5:
+                    canvas.yview_scroll(3, 'units')
+                else:
+                    canvas.yview_scroll(int(-1 * (event.delta / 120)) or
+                                        (-1 if event.delta > 0 else 1), 'units')
+            except Exception:
+                pass
+        # ⚠️ 'break' is the load-bearing part: it stops the widget's own class
+        # binding from changing the value. Without it the guard does nothing.
+        return 'break'
+
+    for cls in ('TCombobox', 'TSpinbox', 'TScale', 'Scale', 'Spinbox'):
+        for seq in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
+            try:
+                root.bind_class(cls, seq, _guard)
+            except Exception:
+                pass

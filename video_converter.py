@@ -3155,7 +3155,15 @@ class VideoConverter:
         else:
             bits.append(str(settings.get('bitrate', '?')))
         bits.append(str(video_enc_name or '?'))
-        preset = settings.get('gpu_preset') or settings.get('preset')
+        # ⚠️ READ THE SAME KEY THE ENCODER READS, in the same order.
+        # The `-preset` flag is built from settings['preset'] (the combobox);
+        # settings['gpu_preset'] is a SEPARATE StringVar kept in step only by
+        # on_preset_change(), which fires on a user selection and nothing else.
+        # This originally read gpu_preset first, so any divergence would have
+        # produced a tag describing a preset the file was not encoded with —
+        # and a stamp that can lie is worse than no stamp, because the whole
+        # point is being able to trust it a year from now. (2026-08-09)
+        preset = settings.get('preset') or settings.get('gpu_preset')
         if preset:
             bits.append(str(preset))
         depth = str(settings.get('bit_depth', 'auto'))
@@ -10779,6 +10787,17 @@ def main():
         _s.stderr.write("\n=== [Docflix] callback exception — app kept alive ===\n")
         _t.print_exception(exc, val, tb); _s.stderr.flush()
     root.report_callback_exception = _docflix_cb_exc
+
+    # ⚠️ Stop the mouse wheel silently editing dropdowns it scrolls past.
+    # ttk widgets change their VALUE on a wheel event, so scrolling the settings
+    # panel could change a setting with no click and no visible cue. It cost
+    # Tony a 19-episode batch encoded at the wrong preset on 2026-08-08, and he
+    # said it had happened before. Class-level, so it covers every window.
+    try:
+        from modules.utils import install_wheel_guard
+        install_wheel_guard(root)
+    except Exception as _e:
+        print(f"[Docflix] wheel guard not installed: {_e}", file=sys.stderr)
 
     # Apply high-DPI scaling before any widgets are created
     _configure_dpi_scaling(root)
