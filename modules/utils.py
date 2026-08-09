@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tkinter as tk
 from tkinter import filedialog
 
@@ -1192,3 +1193,130 @@ def install_wheel_guard(root):
                 root.bind_class(cls, seq, _guard)
             except Exception:
                 pass
+
+
+# ── X11 error guard ──────────────────────────────────────────────────────────
+# Kept at module scope on purpose: ctypes callbacks are garbage-collected like
+# any other object, and Xlib holds only a raw pointer. If this is allowed to be
+# freed, the next X error jumps into deallocated memory — turning a survivable
+# bug into a segfault. Do not make it a local.
+_X_ERROR_CB = None
+
+# Xlib error codes we are willing to swallow. All three mean "the thing you
+# asked about is gone", which during a drag is normal and harmless.
+# All of these mean "the resource you asked about is gone or isn't what you
+# thought", which during a drag is a normal race and harmless.
+# ⚠️ These are the codes from X.h — do NOT guess them. BadValue is 2 and
+# BadName is 15; getting this table wrong silently swallows the wrong errors.
+_X_SURVIVABLE = {
+    3: 'BadWindow',
+    4: 'BadPixmap',
+    5: 'BadAtom',
+    8: 'BadMatch',
+    9: 'BadDrawable',
+}
+
+
+def install_x_error_guard(log=None):
+    """Stop a stray X11 error from killing the whole application.
+
+    ⚠️ THIS IS THE ROOT CAUSE OF THE "WINDOW JUST VANISHED" BUG.
+    Found 2026-08-09 when the Whisper Transcriber died mid drag-and-drop and
+    left exactly five lines behind:
+
+        X Error of failed request:  BadWindow (invalid Window parameter)
+          Major opcode of failed request:  20 (X_GetProperty)
+
+    Drag-and-drop on X11 works by the RECEIVING app calling XGetProperty on the
+    SOURCE window to read the dragged data. If that window id has gone stale by
+    the time the read lands — the file manager redrew, the drag ended early, a
+    plain race — Xlib raises BadWindow, and **Xlib's default handler prints that
+    message and calls exit()**.
+
+    Which explains every symptom that made the Subtitle Editor version of this
+    bug so hard to place on 2026-08-07:
+      * the window "vanishes" — the PROCESS is gone, not the window
+      * no Python traceback — Xlib exits below Python; nothing propagates
+      * faulthandler silent — it is a clean exit(), not a fatal signal
+      * no core dump — nothing crashed, it quit
+      * intermittent — it is a race against the drag source
+
+    Returning 0 from the handler means "carry on". A failed drop is a failed
+    drop; it should never take the application with it.
+
+    ⚠️ ONLY the codes in _X_SURVIVABLE are swallowed. Anything else is re-raised
+    to the previous handler, because silently ignoring every X error would trade
+    a visible crash for an invisible corruption — a much worse deal.
+    """
+    global _X_ERROR_CB
+    if _X_ERROR_CB is not None:
+        return True                      # already installed
+    try:
+        import ctypes
+        import ctypes.util
+
+        name = ctypes.util.find_library('X11')
+        if not name:
+            return False
+        xlib = ctypes.CDLL(name)
+
+        class XErrorEvent(ctypes.Structure):
+            # ⚠️ Field ORDER must match Xlib.h EXACTLY or every field decodes as
+            # garbage — and it decodes *silently*, so the guard appears to work
+            # while swallowing the wrong errors. Verified against the real
+            # header with offsetof() on 2026-08-09:
+            #   type 0 · display 8 · resourceid 16 · serial 24
+            #   error_code 32 · request_code 33 · minor_code 34 · sizeof 40
+            # Note resourceid comes BEFORE serial. The obvious guess is wrong.
+            _fields_ = [
+                ('type',         ctypes.c_int),
+                ('display',      ctypes.c_void_p),
+                ('resourceid',   ctypes.c_ulong),
+                ('serial',       ctypes.c_ulong),
+                ('error_code',   ctypes.c_ubyte),
+                ('request_code', ctypes.c_ubyte),
+                ('minor_code',   ctypes.c_ubyte),
+            ]
+
+        HANDLER = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p,
+                                   ctypes.POINTER(XErrorEvent))
+        _prev = [None]
+
+        def _handler(display, event):
+            try:
+                e = event.contents
+                code, req = int(e.error_code), int(e.request_code)
+                nm = _X_SURVIVABLE.get(code)
+                if nm is not None:
+                    msg = (f"[Docflix] survived X error {nm}({code}) on request "
+                           f"{req} (resource 0x{int(e.resourceid):x}) — "
+                           f"window/resource went away, continuing")
+                    try:
+                        sys.stderr.write(msg + "\n")
+                        sys.stderr.flush()
+                    except Exception:
+                        pass
+                    if log:
+                        try:
+                            log(msg, 'WARNING')
+                        except Exception:
+                            pass
+                    return 0
+                # Not ours to swallow — hand it back to whoever had it.
+                if _prev[0]:
+                    return _prev[0](display, event)
+            except Exception:
+                pass
+            return 0
+
+        cb = HANDLER(_handler)
+        # argtypes is load-bearing: without it ctypes will not marshal the
+        # callback correctly and the handler is never actually invoked — the
+        # call still "succeeds", so it fails completely silently.
+        xlib.XSetErrorHandler.argtypes = [HANDLER]
+        xlib.XSetErrorHandler.restype = HANDLER
+        _prev[0] = xlib.XSetErrorHandler(cb)
+        _X_ERROR_CB = cb
+        return True
+    except Exception:
+        return False

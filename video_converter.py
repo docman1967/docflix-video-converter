@@ -10799,6 +10799,16 @@ def main():
     except Exception as _e:
         print(f"[Docflix] wheel guard not installed: {_e}", file=sys.stderr)
 
+    # ⚠️ Stop a stray X11 error killing the process mid drag-and-drop — the
+    # "window just VANISHED" bug. Xlib's default error handler calls exit(),
+    # below Python, which is why it never produced a traceback and faulthandler
+    # never fired. See modules.utils.install_x_error_guard.
+    try:
+        from modules.utils import install_x_error_guard
+        install_x_error_guard()
+    except Exception as _e:
+        print(f"[Docflix] X error guard not installed: {_e}", file=sys.stderr)
+
     # Apply high-DPI scaling before any widgets are created
     _configure_dpi_scaling(root)
 

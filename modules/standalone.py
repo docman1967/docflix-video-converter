@@ -229,6 +229,18 @@ def create_standalone_root(title, geometry="960x650", minsize=(800, 550)):
         import sys as _s
         _s.stderr.write(f"[Docflix] wheel guard not installed: {_e}\n")
 
+    # ⚠️ Stop a stray X11 error killing the process mid drag-and-drop — this is
+    # the "the window just VANISHED" bug (Subtitle Editor 8/7, Whisper
+    # Transcriber 8/9). Xlib's default handler calls exit(), which is why there
+    # was never a traceback to find. Same reasoning as above: EVERY root needs
+    # it, because every standalone tool is its own process.
+    try:
+        from .utils import install_x_error_guard
+        install_x_error_guard()
+    except Exception as _e:
+        import sys as _s
+        _s.stderr.write(f"[Docflix] X error guard not installed: {_e}\n")
+
     # Apply high-DPI scaling before any widgets are created
     configure_dpi_scaling(root)
 
