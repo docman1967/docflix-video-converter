@@ -1217,6 +1217,34 @@ _X_SURVIVABLE = {
 }
 
 
+# Durable record of every crash this guard prevented. The app's own logs rotate
+# at 10 runs, so a hit at 2am would be gone by morning — and this bug is
+# intermittent enough that "it didn't crash today" proves nothing on its own.
+# This file is the evidence: each line is one process death that did NOT happen.
+X_ERROR_LOG = os.path.expanduser('~/.local/share/docflix/x_errors.log')
+_X_ERROR_LOG_MAX = 256 * 1024        # tiny; truncate rather than grow forever
+
+
+def _record_survived_x_error(name, code, request, resourceid):
+    """Append one line to X_ERROR_LOG. Never raises — this runs inside an X
+    error handler, and a failure to log must not become a second failure."""
+    try:
+        import datetime
+        os.makedirs(os.path.dirname(X_ERROR_LOG), exist_ok=True)
+        try:
+            if os.path.getsize(X_ERROR_LOG) > _X_ERROR_LOG_MAX:
+                os.replace(X_ERROR_LOG, X_ERROR_LOG + '.1')
+        except OSError:
+            pass
+        stamp = datetime.datetime.now().isoformat(timespec='seconds')
+        who = os.path.basename(getattr(sys, 'argv', ['?'])[0] or '?')
+        with open(X_ERROR_LOG, 'a', encoding='utf-8') as fh:
+            fh.write(f"{stamp}\t{who}\tpid={os.getpid()}\t{name}({code})\t"
+                     f"request={request}\tresource=0x{resourceid:x}\n")
+    except Exception:
+        pass
+
+
 def install_x_error_guard(log=None):
     """Stop a stray X11 error from killing the whole application.
 
@@ -1296,6 +1324,7 @@ def install_x_error_guard(log=None):
                         sys.stderr.flush()
                     except Exception:
                         pass
+                    _record_survived_x_error(nm, code, req, int(e.resourceid))
                     if log:
                         try:
                             log(msg, 'WARNING')

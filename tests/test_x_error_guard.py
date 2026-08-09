@@ -146,6 +146,36 @@ def test_error_codes_are_the_real_ones():
         assert code not in _X_SURVIVABLE
 
 
+def test_a_survived_error_is_recorded_durably(tmp_path, monkeypatch):
+    """⚠️ This is what makes the fix TESTABLE IN THE WILD.
+
+    The bug is intermittent, so "I dragged a file and it was fine" proves
+    nothing — it was fine most of the time before the fix too. The app's own
+    logs rotate at 10 runs, so a 2am hit would be gone by morning.
+
+    Each line in this file is one process death that did NOT happen. It also
+    DISCRIMINATES: if a window ever vanishes again and there is no matching
+    line here, it is a DIFFERENT bug and we stop re-litigating this one.
+    """
+    from modules import utils
+    log = tmp_path / 'x_errors.log'
+    monkeypatch.setattr(utils, 'X_ERROR_LOG', str(log))
+    utils._record_survived_x_error('BadWindow', 3, 20, 0x412128)
+    line = log.read_text(encoding='utf-8').strip()
+    assert 'BadWindow(3)' in line
+    assert 'request=20' in line
+    assert 'resource=0x412128' in line
+    assert f'pid={os.getpid()}' in line
+
+
+def test_recorder_never_raises(monkeypatch):
+    """It runs INSIDE the X error handler. A failure to log must not become a
+    second failure — that would resurrect the very crash we just fixed."""
+    from modules import utils
+    monkeypatch.setattr(utils, 'X_ERROR_LOG', '/proc/nonexistent/nope/x.log')
+    utils._record_survived_x_error('BadWindow', 3, 20, 1)   # must not raise
+
+
 def test_every_tk_root_installs_it():
     """Every standalone tool is its OWN process, so the guard has to be in both
     entry points. Guarding only the main app is the kind of half-fix that reads
