@@ -221,7 +221,8 @@ class BatchTranscribeWorker(threading.Thread):
                  task: str = "transcribe", word_timestamps: bool = False,
                  skip_existing: bool = False, output_dir: str | None = None,
                  output_formats: list[str] | None = None,
-                 backend: str = "faster-whisper", batch_size: int = 16):
+                 backend: str = "faster-whisper", batch_size: int = 16,
+                 device_index: int = 0):
         super().__init__(daemon=True)
         self.q = q
         self.paths = paths
@@ -237,6 +238,12 @@ class BatchTranscribeWorker(threading.Thread):
         self.output_formats = output_formats or ["srt"]
         self.backend = backend
         self.batch_size = batch_size
+        # ⚠️ WHICH GPU. Both backends take device_index and both defaulted to 0,
+        # so a two-card box always loaded onto cuda:0 no matter what else was
+        # living there. Tony hit this with only ~8 GB free on GPU0 (Merlin's
+        # Coqui TTS had moved onto it) while GPU1 sat with ~12 GB spare —
+        # large-v2 would not fit on the card it insisted on using.
+        self.device_index = int(device_index or 0)
         self._stop_event = threading.Event()
 
     def stop(self):
@@ -276,9 +283,10 @@ class BatchTranscribeWorker(threading.Thread):
         import whisperx
 
         compute_type = "float16" if self.device == "cuda" else "int8"
-        self.q.put(("log", f"Loading WhisperX model '{self.model_size}'  [{self.device}, {compute_type}]..."))
+        self.q.put(("log", f"Loading WhisperX model '{self.model_size}'  [{self.device}:{self.device_index}, {compute_type}]..."))
         model = whisperx.load_model(
             self.model_size, self.device,
+            device_index=self.device_index,
             compute_type=compute_type,
             language=self.language,
             task=self.task,
@@ -384,8 +392,10 @@ class BatchTranscribeWorker(threading.Thread):
     def _run_faster_whisper(self):
         from faster_whisper import WhisperModel
 
-        self.q.put(("log", f"Loading model '{self.model_size}'  [{self.device}]..."))
-        model = WhisperModel(self.model_size, device=self.device, compute_type="auto")
+        self.q.put(("log", f"Loading model '{self.model_size}'  [{self.device}:{self.device_index}]..."))
+        model = WhisperModel(self.model_size, device=self.device,
+                             device_index=self.device_index,
+                             compute_type="auto")
         self.q.put(("log", "Model ready."))
 
         total = len(self.paths)
@@ -968,6 +978,47 @@ def open_whisper_transcriber(app):
     adv3 = ttk.Frame(adv_frame)
     adv3.pack(fill='x', padx=4, pady=2)
 
+    # ── GPU picker ──
+    # ⚠️ Both backends default to device_index=0, so on a two-card box this tool
+    # always grabbed cuda:0 regardless of what else was resident there. Tony,
+    # 2026-08-09, with Merlin's TTS on GPU0: "can we force it to use GPU1?
+    # Might not be a bad idea to have a drop down for using either or."
+    # Free VRAM is shown in the label because that is the number that decides
+    # it — large-v2 needs ~10 GB and will OOM on a card that looks idle.
+    # ⚠️ No "Auto" entry on purpose. Nothing here picks a card automatically —
+    # both backends just default to index 0 — so an "Auto" label would promise
+    # behaviour that does not exist. List the real cards and let the free-VRAM
+    # figure make the choice obvious.
+    _gpu_choices = {}
+    try:
+        from .gpu import enumerate_nvidia_gpus
+        for _g in enumerate_nvidia_gpus():
+            _i = int(_g.get('index', 0))
+            # ⚠️ keys are vram_total / vram_used (MiB), NOT memory.total.
+            # The first version guessed nvidia-smi's names, hit the except, and
+            # would have silently rendered labels with no free-VRAM figure —
+            # dropping the one number that makes this dropdown worth having.
+            _name = str(_g.get('name', '?')).replace('NVIDIA ', '')
+            _tot, _use = _g.get('vram_total'), _g.get('vram_used')
+            if _tot is not None and _use is not None:
+                _lbl = f"GPU {_i} — {_name} ({(int(_tot)-int(_use))/1024:.1f} GB free)"
+            else:
+                _lbl = f"GPU {_i} — {_name}"
+            _gpu_choices[_lbl] = _i
+    except Exception:
+        pass
+    ttk.Label(adv3, text="GPU:").pack(side='left', padx=(0, 4))
+    if not _gpu_choices:                       # no NVIDIA card / nvidia-smi absent
+        _gpu_choices = {"GPU 0": 0}
+    _saved_idx = int(_wp.get('device_index', 0))
+    _gpu_var = tk.StringVar(value=list(_gpu_choices)[0])
+    for _l, _v in _gpu_choices.items():
+        if _v == _saved_idx:
+            _gpu_var.set(_l)
+            break
+    ttk.Combobox(adv3, textvariable=_gpu_var, values=list(_gpu_choices),
+                 state='readonly', width=30).pack(side='left', padx=(0, 12))
+
     ttk.Label(adv3, text="WX Batch Size:").pack(side='left', padx=(0, 4))
     _batch_size_var = tk.IntVar(value=_wp.get('batch_size', 16))
     tk.Spinbox(adv3, from_=1, to=64, increment=1,
@@ -1316,6 +1367,7 @@ def open_whisper_transcriber(app):
             "skip_existing": _skip_existing_var.get(),
             "max_lead": _max_lead_var.get(),
             "batch_size": _batch_size_var.get(),
+            "device_index": _gpu_choices.get(_gpu_var.get(), 0),
             "reading_speed": _cps_var.get(),
             "split_gap": _gap_var.get(),
         }
@@ -1355,6 +1407,10 @@ def open_whisper_transcriber(app):
             _max_lead_var.set(float(settings["max_lead"]))
         if "batch_size" in settings:
             _batch_size_var.set(int(settings["batch_size"]))
+        if "device_index" in settings:
+            for _l, _v in _gpu_choices.items():
+                if _v == int(settings["device_index"]):
+                    _gpu_var.set(_l); break
         if "reading_speed" in settings:
             _cps_var.set(float(settings["reading_speed"]))
         if "split_gap" in settings:
@@ -1481,6 +1537,10 @@ def open_whisper_transcriber(app):
             output_formats=fmt_list,
             backend=backend,
             batch_size=_batch_size_var.get(),
+            # ⚠️ The construction site. Adding a setting to the UI and to
+            # prefs does NOTHING unless it is passed here — the exact way
+            # the bit-depth setting shipped broken on 2026-08-08.
+            device_index=_gpu_choices.get(_gpu_var.get(), 0),
         )
         _worker[0].start()
 
