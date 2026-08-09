@@ -1741,20 +1741,63 @@ def open_media_processor(app):
 
                     if is_inplace:
                         original = f['path']
-                        if _edition_fn_part:
-                            # Rename to include edition tag in filename
-                            orig_base, orig_ext = os.path.splitext(original)
-                            _ext = opt_container.get() or orig_ext
-                            new_name = orig_base + _edition_fn_part + _ext
+                        orig_base, orig_ext = os.path.splitext(original)
+
+                        # ⚠️ NAME THE FILE FOR WHAT WE ACTUALLY WROTE.
+                        # This used to be a bare `os.replace(out_path, original)`
+                        # — a RENAME, not a conversion. With the container set
+                        # to .mp4 it wrote a genuine MP4 to the temp file and
+                        # then moved it onto the source's .mkv name: the
+                        # extension came from the file being replaced, the
+                        # format came from the setting, and nothing ever
+                        # compared the two.
+                        #
+                        # Silent and long-lived: 44% of a 300-file hdd6 sample
+                        # turned out to be MP4 wearing .mkv — precisely the
+                        # files subtitles had been muxed into. Every tool trusts
+                        # the extension, so nothing complained. The damage was
+                        # downstream: MP4 cannot store the DOCFLIX_ENCODE stamp
+                        # (no custom keys survive its muxer) and text subs get
+                        # downgraded to mov_text instead of SRT.
+                        # Found 2026-08-09 — Tony called it from the symptom:
+                        # "the media processor stripped out the tag when I muxed
+                        # the subtitle and video."
+                        #
+                        # ⚠️ Uses _ov(), not opt_container.get(): a per-file
+                        # container override must win here too, or the name
+                        # disagrees with the bytes for exactly the files that
+                        # were special-cased. The old edition branch read the
+                        # global and had that bug.
+                        target_ext = _ov(f, 'container', opt_container) or orig_ext
+                        new_name = orig_base + _edition_fn_part + target_ext
+                        renamed = (os.path.normpath(new_name)
+                                   != os.path.normpath(original))
+
+                        if not renamed:
+                            try:
+                                os.replace(out_path, original)
+                            except OSError as e:
+                                _log(f"  Warning: could not replace original: {e}",
+                                     'WARNING')
+                            final_path = original
+                        else:
                             try:
                                 os.replace(out_path, new_name)
                                 final_path = new_name
-                                if os.path.normpath(new_name) != os.path.normpath(original):
-                                    try:
+                                try:
+                                    if os.path.exists(original):
                                         os.remove(original)
-                                    except OSError:
-                                        pass
-                                _log(f"  Renamed to: {os.path.basename(new_name)}", 'INFO')
+                                except OSError:
+                                    pass
+                                if target_ext.lower() != orig_ext.lower():
+                                    _log(f"  Container {orig_ext} → {target_ext} "
+                                         f"— renamed to "
+                                         f"{os.path.basename(new_name)} so the "
+                                         f"extension matches the real format",
+                                         'WARNING')
+                                else:
+                                    _log(f"  Renamed to: "
+                                         f"{os.path.basename(new_name)}", 'INFO')
                             except OSError as e:
                                 _log(f"  Warning: could not rename: {e}", 'WARNING')
                                 try:
@@ -1762,12 +1805,6 @@ def open_media_processor(app):
                                 except OSError:
                                     pass
                                 final_path = original
-                        else:
-                            try:
-                                os.replace(out_path, original)
-                            except OSError as e:
-                                _log(f"  Warning: could not replace original: {e}", 'WARNING')
-                            final_path = original
                     else:
                         final_path = out_path
 
