@@ -70,6 +70,57 @@ def test_the_editor_actually_binds_it():
     assert "'break')[1]" in src, "the Ctrl binding no longer returns 'break'"
 
 
+@pytest.mark.skipif(not __import__('shutil').which('xvfb-run'),
+                    reason='needs xvfb-run')
+def test_selection_is_replaced_not_deleted():
+    """⚠️ THE 3.19.0 BUG, in a real Tk widget.
+
+    'sel.first'/'sel.last' are LIVE index expressions, not positions. delete()
+    removes the selection, so the next insert('sel.first', …) raises and the
+    text is already gone. Tony hit it within ten minutes of shipping:
+    *"it deletes the text completely instead of changing it."*
+
+    The pure-function tests all passed, because the bug was never in the string
+    handling — it was in the Tk index lifetime. This has to run against a real
+    widget or it proves nothing.
+    """
+    import subprocess
+    import textwrap
+    prog = textwrap.dedent('''
+        import sys, tkinter as tk
+        sys.path.insert(0, %r)
+        from modules.subtitle_editor import toggle_srt_tag
+        root = tk.Tk(); root.withdraw()
+        t = tk.Text(root); t.insert('1.0', 'Come with me if you want to live.')
+        t.tag_add('sel', '1.5', '1.9')                 # "with"
+        start, end = t.index('sel.first'), t.index('sel.last')   # the fix
+        raw = t.get(start, end)
+        new = toggle_srt_tag(raw, 'i')
+        t.delete(start, end); t.insert(start, new)
+        print(t.get('1.0', 'end-1c'))
+    ''') % os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run(['xvfb-run', '-a', sys.executable, '-c', prog],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == 'Come <i>with</i> me if you want to live.', \
+        f'selection was not replaced correctly: {r.stdout!r}'
+
+
+def test_indices_are_frozen_before_the_edit():
+    """Source guard for the same bug — the fix is one call that is easy to
+    'simplify' away later."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, 'modules', 'subtitle_editor.py'),
+               encoding='utf-8').read()
+    block = src[src.index('def _toggle_format('):]
+    block = block[:block.index('edit_ctx.add_command(label="Italic')]
+    assert 'start = edit_entry.index(start)' in block, \
+        "sel.first/sel.last are no longer frozen before delete() — the text " \
+        "will vanish again"
+    assert 'except Exception:\n                    pass' not in block, \
+        'a silent except is back; that is what hid this bug'
+
+
 def test_no_stale_names_from_the_refactor():
     """The whitespace handling moved into toggle_srt_tag; the closure must not
     still reference lead/trail. This shipped broken for about ninety seconds."""

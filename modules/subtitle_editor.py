@@ -5020,6 +5020,16 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         start, end = 'sel.first', 'sel.last'
                     else:
                         start, end = '1.0', 'end-1c'
+                    # ⚠️ RESOLVE TO ABSOLUTE INDICES BEFORE TOUCHING THE TEXT.
+                    # 'sel.first'/'sel.last' are LIVE expressions, not positions.
+                    # delete() removes the selection, so the very next
+                    # insert('sel.first', …) raises "text doesn't contain any
+                    # characters tagged with sel" — and the text is already gone.
+                    # Shipped exactly that way in 3.19.0; Tony hit it within ten
+                    # minutes: *"it deletes the text completely instead of
+                    # changing it."* index() freezes them to 'line.col' first.
+                    start = edit_entry.index(start)
+                    end = edit_entry.index(end)
                     raw = edit_entry.get(start, end)
                 except Exception:
                     return
@@ -5032,9 +5042,20 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     push_undo()
                     edit_entry.delete(start, end)
                     edit_entry.insert(start, new)
+                    # Keep the affected span selected so the shortcut can be
+                    # pressed again to toggle back off, or another tag added.
+                    edit_entry.tag_remove('sel', '1.0', 'end')
+                    edit_entry.tag_add('sel', start,
+                                       f'{start}+{len(new)}c')
                     edit_entry.focus_force()
-                except Exception:
-                    pass
+                except Exception as _e:
+                    # ⚠️ NEVER swallow silently here. A bare `except: pass` is
+                    # what turned the bug above into "the text just disappears"
+                    # instead of a visible error.
+                    import sys as _s
+                    _s.stderr.write(f"[Docflix/SubEditor] format {tag} failed: "
+                                    f"{_e!r}\n")
+                    _s.stderr.flush()
 
             edit_ctx.add_command(label="Italic          Ctrl+I",
                                  command=lambda: _toggle_format('i'))
