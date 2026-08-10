@@ -277,6 +277,29 @@ def scan_allcaps_words(cues):
     return indices, details
 
 
+def toggle_srt_tag(raw, tag):
+    """Wrap `raw` in <tag>…</tag>, or unwrap it if already wrapped.
+
+    Module-level and pure so it can be tested — the caller is buried in a
+    nested closure inside the tree-edit handler, where nothing is reachable.
+
+    ⚠️ Surrounding whitespace stays OUTSIDE the tag. Wrapping it in produces
+    "<i> word </i>", which renders with stray spaces inside the italics.
+
+    Only <i>/<b>/<u> matter here: the editor normalises everything to SRT on
+    save (.ass/.vtt are converted on load), so there is no ASS {\\i1} variant.
+    """
+    open_t, close_t = f'<{tag}>', f'</{tag}>'
+    if not raw or not raw.strip():
+        return raw
+    lead = raw[:len(raw) - len(raw.lstrip())]
+    trail = raw[len(raw.rstrip()):]
+    core = raw.strip()
+    if core.startswith(open_t) and core.endswith(close_t):
+        return lead + core[len(open_t):-len(close_t)] + trail
+    return f'{lead}{open_t}{core}{close_t}{trail}'
+
+
 def _vtt_to_srt(vtt_text):
     """Native WebVTT → SRT text. Robust where ffmpeg's demuxer silently emits an EMPTY
     file: HLS/broadcast .vtt with an `X-TIMESTAMP-MAP` header, BOM, CRLF, missing cue IDs,
@@ -4973,6 +4996,61 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             edit_ctx.add_command(label="Select All",
                                 command=lambda: _edit_action('select_all'))
             edit_ctx.add_separator()
+
+            # ── Formatting: italic / bold / underline ────────────────────────
+            # Tony, 2026-08-10: *"There should be a way to edit the text for
+            # italics, bold, etc."* The editor could already STRIP tags (the
+            # "Remove Tags" filter) but never add them — you could take
+            # formatting away and never put it back.
+            #
+            # Everything normalises to SRT on save (.ass/.vtt are converted on
+            # load, and _vtt_to_srt deliberately keeps <i>/<b>/<u>), so these are
+            # the correct tags — no ASS {\i1} variant to handle.
+            #
+            # ⚠️ TOGGLES, and works on the WHOLE CUE when nothing is selected.
+            # Both matter: subtitle italics are usually a whole line (narration,
+            # off-screen voice, song lyrics) but occasionally one word. Requiring
+            # a selection would mean selecting the entire cue for the common case.
+            def _toggle_format(tag):
+                """Wrap the selection (or whole cue) in <tag>, or unwrap it."""
+                if not edit_entry:
+                    return
+                try:
+                    if edit_entry.tag_ranges('sel'):
+                        start, end = 'sel.first', 'sel.last'
+                    else:
+                        start, end = '1.0', 'end-1c'
+                    raw = edit_entry.get(start, end)
+                except Exception:
+                    return
+                if not raw.strip():
+                    return
+                new = toggle_srt_tag(raw, tag)
+                if new == raw:
+                    return
+                try:
+                    push_undo()
+                    edit_entry.delete(start, end)
+                    edit_entry.insert(start, new)
+                    edit_entry.focus_force()
+                except Exception:
+                    pass
+
+            edit_ctx.add_command(label="Italic          Ctrl+I",
+                                 command=lambda: _toggle_format('i'))
+            edit_ctx.add_command(label="Bold            Ctrl+B",
+                                 command=lambda: _toggle_format('b'))
+            edit_ctx.add_command(label="Underline       Ctrl+U",
+                                 command=lambda: _toggle_format('u'))
+            edit_ctx.add_separator()
+
+            # ⚠️ `return 'break'` is load-bearing: tk.Text binds Ctrl+B/I/U to its
+            # own cursor-movement defaults, which would fire IN ADDITION to ours
+            # and move the insert point out from under the edit.
+            for _k, _t in (('i', 'i'), ('I', 'i'), ('b', 'b'), ('B', 'b'),
+                           ('u', 'u'), ('U', 'u')):
+                edit_entry.bind(f'<Control-{_k}>',
+                                lambda e, t=_t: (_toggle_format(t), 'break')[1])
 
             # ── Add to Temp Names, straight off the selection ────────────────
             # Tony, 2026-08-07: *"add the ability to add it to the temp name file
