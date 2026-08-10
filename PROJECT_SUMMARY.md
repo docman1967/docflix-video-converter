@@ -172,6 +172,67 @@ before trusting a number.
 
 ## Recent Changes
 
+### 3.18.3 — `docflix_stamp.py`: add an encode stamp in place (2026-08-09)
+
+Tony's idea, after Arthur had started designing a Media Processor feature for the same job:
+*"we should be able to do this manually with propedit right?"* He was right, and it is far better.
+
+**`mkvpropedit` edits the Matroska header in place** — no remux, no re-encode, no rewrite of the
+file body. Proven: video + audio stream MD5s **byte-identical** before/after, file grew 322 bytes
+(the Tags element). 96 files across four drives took seconds; a remux would have taken an hour.
+
+```bash
+./docflix_stamp.py "CRF32 hevc_nvenc p4 10bit ac3@384k v3.18.3" DIR [DIR...] [--commit]
+```
+
+- `modules/utils.write_encode_stamp()` — ⚠️ **MERGES.** `mkvpropedit --tags all:<file>` REPLACES the
+  whole Tags section and real files carry ENCODER/DURATION/per-track stats there; writing only our
+  stamp would silently delete them. mkvextract → splice → write back. Replaces, never duplicates.
+- `modules/utils.is_matroska()` — the extension does not tell you (see 3.18.2).
+- ⚠️ **Honesty by verification, not by disclaimer.** An encoder stamp is measured truth; one written
+  here is *asserted*. Bit depth, video codec, audio codec and bitrate ARE measurable and are checked
+  against the claim — contradictions reported per-file and skipped unless `--force`. **CRF, preset
+  and AQ leave no trace and can never be verified.** Caught 4 trailers on its first real run.
+  Tests: `tests/test_stamp_writer.py`.
+
+### 3.18.2 — name processed files for the container they actually are (2026-08-09)
+
+⚠️ **The big one.** The Media Processor's in-place path ended with a bare
+`os.replace(out_path, original)` — a RENAME, not a conversion. With its container set to `.mp4` it
+wrote a genuine MP4 and moved it onto the source's `.mkv` name. **Extension came from the file being
+replaced, format came from the setting, nothing compared them.** ~44% of a 300-file hdd6 sample was
+MP4 wearing `.mkv` — exactly the files subtitles had been muxed into. Silent for years because every
+tool trusts the extension.
+
+Damage was downstream: MP4 drops custom metadata keys, so **DOCFLIX_ENCODE died on every mux**, and
+text subs were downgraded to `mov_text` instead of SRT.
+
+Fix: derive the name from the container actually written; remove the original only when the name
+really changed; log a container change at **WARNING** (silence is what let this run for years). Also
+fixed the edition branch reading the *global* `opt_container` instead of `_ov()`.
+Tests: `tests/test_container_matches_extension.py`.
+
+### 3.18.1 — X11 error guard: the vanishing-window crash (2026-08-09)
+
+Open since 8/7. **Never Python.** XDND reads a property off the *drag source* window; if that id
+goes stale mid-drag, Xlib's **default error handler prints five lines and calls `exit()`**. That one
+mechanism explains every symptom: the window "vanishes" (the process is gone), no traceback (Xlib
+exits below Python), `faulthandler` silent (clean exit, not a signal), no core dump, intermittent
+(a race), and the log looked empty because **Xlib prints to STDOUT**.
+
+`modules/utils.install_x_error_guard()` — ctypes `XSetErrorHandler` returning 0 for the
+resource-went-away codes, chaining the rest. Installed in **both** `video_converter.main()` and
+`standalone.create_standalone_root()` (every standalone tool is its own process).
+
+Three traps, each producing a guard that *looks* fine: the ctypes callback must live at module scope
+or Python GCs it out from under Xlib; `argtypes` is load-bearing or the callback is never invoked;
+and **`XErrorEvent` puts `resourceid` BEFORE `serial`** (verified with `offsetof`) — the obvious
+ordering decodes every field as garbage while still appearing to work.
+
+Every prevented crash is recorded to `~/.local/share/docflix/x_errors.log`, because the bug is
+intermittent and "it didn't crash today" proves nothing. It also **discriminates**: a vanish with no
+matching line is a *different* bug. Tests: `tests/test_x_error_guard.py`.
+
 > ⚠️ **Gap in this log: 3.8.0 → 3.12.x (2026-07-15 → 2026-08-04) are not written up here.**
 > The entries below jump from 3.7.4 straight to 3.13.0. Real work shipped in between —
 > the Forced Subtitle Editor (3.12.0), VobSub IDX/SUB support (3.11.3), AI-upscaler

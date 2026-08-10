@@ -176,6 +176,38 @@ def test_recorder_never_raises(monkeypatch):
     utils._record_survived_x_error('BadWindow', 3, 20, 1)   # must not raise
 
 
+def test_a_storm_is_reported_as_one_fact(monkeypatch):
+    """⚠️ Found in production 2026-08-10, the morning after shipping.
+
+    The guard fired 575 times in 26 minutes — all BadWindow on X_QueryTree —
+    and printed every one, so Tony watched a wall of them scroll past while
+    using the Whisper Transcriber. The guard was working perfectly and still
+    read as a malfunction. A storm of the SAME error is one fact, not 575.
+    """
+    from modules import utils
+    monkeypatch.setattr(utils, '_X_ERROR_COUNTS', {})
+    printed = []
+    for _ in range(1200):
+        report, n = utils._should_report(3, 15)
+        if report:
+            printed.append(n)
+    assert len(printed) < 12, f'storm still floods the log ({len(printed)} lines)'
+    assert printed[:3] == [1, 2, 3], 'first occurrences must always be reported'
+    assert max(printed) >= 1000, 'must keep signalling that it is ongoing'
+
+
+def test_a_storm_cannot_mask_a_different_error(monkeypatch):
+    """The dangerous failure: throttling by error CLASS would hide a new,
+    genuinely fatal error behind an ongoing benign one."""
+    from modules import utils
+    monkeypatch.setattr(utils, '_X_ERROR_COUNTS', {})
+    for _ in range(5000):
+        utils._should_report(3, 15)          # the X_QueryTree storm
+    report, n = utils._should_report(3, 20)  # the drag-and-drop killer
+    assert report is True and n == 1, \
+        'a new (code, request) pair must report immediately'
+
+
 def test_every_tk_root_installs_it():
     """Every standalone tool is its OWN process, so the guard has to be in both
     entry points. Guarding only the main app is the kind of half-fix that reads

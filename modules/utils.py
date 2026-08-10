@@ -1329,6 +1329,32 @@ X_ERROR_LOG = os.path.expanduser('~/.local/share/docflix/x_errors.log')
 _X_ERROR_LOG_MAX = 256 * 1024        # tiny; truncate rather than grow forever
 
 
+# Per-(code, request) occurrence counts, so a storm reports its SHAPE instead
+# of printing 575 near-identical lines at Tony. See _should_report().
+_X_ERROR_COUNTS = {}
+
+
+def _should_report(code, request):
+    """True when this occurrence is worth a line. Exponential backoff.
+
+    ⚠️ Learned in production 2026-08-10. The guard fired 575 times in 26
+    minutes — all BadWindow on X_QueryTree — and every one printed to stderr,
+    so Tony watched a wall of them scroll past while using the Whisper
+    Transcriber. The guard was working perfectly and still felt like a
+    malfunction.
+
+    A storm of the SAME error is one fact, not 575 facts. Report the first
+    few, then thin out, so the log still shows it is ongoing and roughly how
+    fast — without burying the one-off events that actually need reading.
+    """
+    key = (code, request)
+    n = _X_ERROR_COUNTS.get(key, 0) + 1
+    _X_ERROR_COUNTS[key] = n
+    if n <= 3 or n in (10, 50, 100):
+        return True, n
+    return (n % 500 == 0), n
+
+
 def _record_survived_x_error(name, code, request, resourceid):
     """Append one line to X_ERROR_LOG. Never raises — this runs inside an X
     error handler, and a failure to log must not become a second failure."""
@@ -1341,10 +1367,17 @@ def _record_survived_x_error(name, code, request, resourceid):
         except OSError:
             pass
         stamp = datetime.datetime.now().isoformat(timespec='seconds')
+        # ⚠️ This is the HOST PROCESS, not necessarily the tool you had open.
+        # Tools launched from inside the Suite (Whisper Transcriber, Subtitle
+        # Editor, Media Processor) run in the Suite's own process, so they all
+        # report `video_converter.py`. Cost 5 minutes of wrong-tool hunting on
+        # 2026-08-10 — Tony had to tell me it was the Transcriber.
         who = os.path.basename(getattr(sys, 'argv', ['?'])[0] or '?')
+        n = _X_ERROR_COUNTS.get((code, request), 0)
         with open(X_ERROR_LOG, 'a', encoding='utf-8') as fh:
-            fh.write(f"{stamp}\t{who}\tpid={os.getpid()}\t{name}({code})\t"
-                     f"request={request}\tresource=0x{resourceid:x}\n")
+            fh.write(f"{stamp}\thost={who}\tpid={os.getpid()}\t{name}({code})\t"
+                     f"request={request}\tresource=0x{resourceid:x}\t"
+                     f"seen={n}\n")
     except Exception:
         pass
 
@@ -1420,20 +1453,28 @@ def install_x_error_guard(log=None):
                 code, req = int(e.error_code), int(e.request_code)
                 nm = _X_SURVIVABLE.get(code)
                 if nm is not None:
-                    msg = (f"[Docflix] survived X error {nm}({code}) on request "
-                           f"{req} (resource 0x{int(e.resourceid):x}) — "
-                           f"window/resource went away, continuing")
-                    try:
-                        sys.stderr.write(msg + "\n")
-                        sys.stderr.flush()
-                    except Exception:
-                        pass
-                    _record_survived_x_error(nm, code, req, int(e.resourceid))
-                    if log:
+                    # ⚠️ Rate-limited. A storm of the same error is ONE fact.
+                    # Unthrottled this printed 575 lines at Tony in 26 minutes
+                    # while working perfectly — see _should_report().
+                    report, n = _should_report(code, req)
+                    if report:
+                        msg = (f"[Docflix] survived X error {nm}({code}) on "
+                               f"request {req} (resource "
+                               f"0x{int(e.resourceid):x})"
+                               + (f" — {n} so far this session" if n > 1 else
+                                  " — window/resource went away, continuing"))
                         try:
-                            log(msg, 'WARNING')
+                            sys.stderr.write(msg + "\n")
+                            sys.stderr.flush()
                         except Exception:
                             pass
+                        _record_survived_x_error(nm, code, req,
+                                                 int(e.resourceid))
+                        if log:
+                            try:
+                                log(msg, 'WARNING')
+                            except Exception:
+                                pass
                     return 0
                 # Not ours to swallow — hand it back to whoever had it.
                 if _prev[0]:
