@@ -121,6 +121,77 @@ def test_indices_are_frozen_before_the_edit():
         'a silent except is back; that is what hid this bug'
 
 
+# ── multi-cue formatting (Tony, 2026-08-10) ─────────────────────────────────
+
+def _group_apply(texts, tag):
+    """Mirror of format_selected()'s decision logic, which lives in a closure."""
+    from modules.subtitle_editor import has_srt_tag
+    idx = [i for i, t in enumerate(texts) if t.strip()]
+    all_wrapped = all(has_srt_tag(texts[i], tag) for i in idx)
+    out = list(texts)
+    for i in idx:
+        if all_wrapped or not has_srt_tag(out[i], tag):
+            out[i] = toggle_srt_tag(out[i], tag)
+    return out
+
+
+def test_group_wraps_then_unwraps():
+    plain = ['One', 'Two', 'Three']
+    italic = _group_apply(plain, 'i')
+    assert italic == ['<i>One</i>', '<i>Two</i>', '<i>Three</i>']
+    assert _group_apply(italic, 'i') == plain
+
+
+def test_mixed_selection_converges_instead_of_inverting():
+    """⚠️ The design decision. Per-cue toggling across a mixed selection would
+    flip each one and leave it MORE mixed — the opposite of "make these all
+    italic". Group semantics: wrap the stragglers, leave the rest."""
+    mixed = ['<i>One</i>', 'Two', '<i>Three</i>']
+    once = _group_apply(mixed, 'i')
+    assert once == ['<i>One</i>', '<i>Two</i>', '<i>Three</i>'], \
+        'a mixed selection must converge to all-wrapped'
+    assert _group_apply(once, 'i') == ['One', 'Two', 'Three'], \
+        'a fully-wrapped selection must then unwrap'
+
+
+def test_blank_cues_are_skipped_not_tagged():
+    """An empty cue must not become '<i></i>'."""
+    assert _group_apply(['Real', '   ', 'Also real'], 'i') == \
+        ['<i>Real</i>', '   ', '<i>Also real</i>']
+
+
+def test_has_srt_tag_requires_an_exact_wrap():
+    from modules.subtitle_editor import has_srt_tag
+    assert has_srt_tag('<i>x</i>', 'i') is True
+    assert has_srt_tag('  <i>x</i>  ', 'i') is True
+    assert has_srt_tag('say <i>x</i> now', 'i') is False
+    assert has_srt_tag('<i>x', 'i') is False
+    assert has_srt_tag('', 'i') is False
+
+
+def test_batch_is_one_undo_and_restores_the_selection():
+    """Source guards. push_undo() must be called ONCE outside the loop, or
+    Ctrl+Z takes back a single cue instead of the operation; and refresh_tree
+    rebuilds the rows, so the selection has to be put back or the next
+    shortcut press acts on nothing."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, 'modules', 'subtitle_editor.py'),
+               encoding='utf-8').read()
+    block = src[src.index('def format_selected('):]
+    block = block[:block.index('def split_selected(')]
+    # Drop the docstring — it explains the batching in prose and mentions
+    # push_undo() by name, so counting the raw block matches our own comment.
+    # (Third time today a source-level test caught its own documentation.)
+    block = block.split('"""', 2)[2]
+    assert block.count('push_undo()') == 1, 'undo must cover the whole batch'
+    assert block.index('push_undo()') < block.index('for i in indices:'), \
+        'push_undo() must run before the loop, not inside it'
+    assert 'tree.selection_add' in block, 'selection not restored after refresh'
+    # And it must actually be reachable from the tree.
+    assert "format_selected('i')" in src and "format_selected(t), 'break')" in src, \
+        'multi-cue formatting is not wired to the menu and/or Ctrl shortcuts'
+
+
 def test_no_stale_names_from_the_refactor():
     """The whitespace handling moved into toggle_srt_tag; the closure must not
     still reference lead/trail. This shipped broken for about ninety seconds."""

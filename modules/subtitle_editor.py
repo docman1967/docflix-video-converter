@@ -277,6 +277,14 @@ def scan_allcaps_words(cues):
     return indices, details
 
 
+def has_srt_tag(raw, tag):
+    """True if `raw` is wrapped in <tag>…</tag> exactly (ignoring outer space)."""
+    core = (raw or '').strip()
+    return (bool(core)
+            and core.startswith(f'<{tag}>')
+            and core.endswith(f'</{tag}>'))
+
+
 def toggle_srt_tag(raw, tag):
     """Wrap `raw` in <tag>…</tag>, or unwrap it if already wrapped.
 
@@ -3338,6 +3346,49 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 tree.focus(iid)
                 tree.see(iid)
 
+        def format_selected(tag):
+            """Apply <tag> to every selected cue.
+
+            Tony, 2026-08-10: *"can we select multiple cues and make them all
+            italic? ... being able to select multiple cues would be a huge
+            help."* Whole scenes of narration or song lyrics are italic
+            together; doing them one double-click at a time is the slow path.
+
+            ⚠️ Toggles as a GROUP, not per-cue. If EVERY selected cue is
+            already wrapped, the whole selection unwraps. Otherwise the
+            unwrapped ones get wrapped and the already-wrapped are left alone.
+            Per-cue toggling across a mixed selection would invert each one and
+            leave it *more* mixed than it started — the opposite of the intent.
+
+            One push_undo() for the whole batch, so Ctrl+Z takes back the
+            operation rather than one cue of it.
+            """
+            selected = tree.selection()
+            if not selected:
+                return
+            indices = sorted(int(s) for s in selected
+                             if s.isdigit() and int(s) < len(cues))
+            indices = [i for i in indices if (cues[i].get('text') or '').strip()]
+            if not indices:
+                return
+
+            all_wrapped = all(has_srt_tag(cues[i]['text'], tag) for i in indices)
+
+            push_undo()
+            for i in indices:
+                if all_wrapped or not has_srt_tag(cues[i]['text'], tag):
+                    cues[i]['text'] = toggle_srt_tag(cues[i]['text'], tag)
+
+            refresh_tree(cues)
+            # refresh_tree rebuilds the rows, so the selection has to be put
+            # back or the next shortcut press would act on nothing.
+            for i in indices:
+                tree.selection_add(str(i))
+            if indices:
+                tree.focus(str(indices[0]))
+                tree.see(str(indices[0]))
+            _rebuild_stats()
+
         def split_selected():
             nonlocal cues
             selected = tree.selection()
@@ -5210,6 +5261,17 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         ctx_menu.add_command(label="✂ Split cue", command=split_selected)
         ctx_menu.add_command(label="⊕ Join selected cues", command=join_selected)
         ctx_menu.add_separator()
+        # ── Formatting across the whole selection (Tony, 2026-08-10) ──
+        # The per-cue version lives in the double-click editor; this is the
+        # batch one, for a scene of narration or a song where every line is
+        # italic. Same shortcuts, so the muscle memory carries over.
+        ctx_menu.add_command(label="𝘐  Italic selected        Ctrl+I",
+                             command=lambda: format_selected('i'))
+        ctx_menu.add_command(label="𝗕  Bold selected          Ctrl+B",
+                             command=lambda: format_selected('b'))
+        ctx_menu.add_command(label="U̲  Underline selected     Ctrl+U",
+                             command=lambda: format_selected('u'))
+        ctx_menu.add_separator()
         ctx_menu.add_command(label="⤒ Insert line above", command=lambda: insert_cue('above'))
         ctx_menu.add_command(label="⤓ Insert line below", command=lambda: insert_cue('below'))
         ctx_menu.add_separator()
@@ -5222,6 +5284,15 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             ctx_menu.tk_popup(event.x_root, event.y_root)
 
         tree.bind('<Button-3>', show_context_menu)
+
+        # ⚠️ 'break' so ttk.Treeview's own Control-key defaults don't also fire.
+        # These are bound on the TREE; the identical shortcuts inside the
+        # double-click edit widget are bound on that widget and take precedence
+        # while it has focus, so one cue vs many is decided by where you are.
+        for _k, _t in (('i', 'i'), ('I', 'i'), ('b', 'b'), ('B', 'b'),
+                       ('u', 'u'), ('U', 'u')):
+            tree.bind(f'<Control-{_k}>',
+                      lambda e, t=_t: (format_selected(t), 'break')[1])
 
         # ── Waveform Timeline ──
         timeline_frame = ttk.Frame(paned)
