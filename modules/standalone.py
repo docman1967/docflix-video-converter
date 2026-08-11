@@ -88,6 +88,17 @@ class StandaloneContext:
                     for item in main_list:
                         if item not in cur_list:
                             cur_list.append(item)
+                # ⚠️ use_names_db is a BOOL, not a list, so it cannot ride the
+                # merge loop above — and it was simply absent from the mirror
+                # entirely. Tony enabled it in the Subtitle Editor on
+                # 2026-08-11, re-ran Fix ALL CAPS from the main app, and got
+                # nothing: the editor wrote True to
+                # ~/.local/share/docflix/preferences.json while the main app
+                # kept reading False from ~/.config/.../prefs.json. A setting
+                # that silently does not apply is worse than one that is
+                # missing. Adopt main's value only when we have none of our own.
+                if 'use_names_db' not in prefs and 'use_names_db' in _main:
+                    self.use_names_db = bool(_main['use_names_db'])
         except Exception:
             pass
 
@@ -169,6 +180,8 @@ class StandaloneContext:
                 self, 'custom_spell_words', [])
             _main['custom_replacements'] = getattr(
                 self, 'custom_replacements', [])
+            # Same setting, both stores — see the note in the load path.
+            _main['use_names_db'] = bool(getattr(self, 'use_names_db', False))
             _main_path.parent.mkdir(parents=True, exist_ok=True)
             _main_path.write_text(json.dumps(_main, indent=2))
         except Exception:
