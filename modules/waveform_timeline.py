@@ -1553,6 +1553,36 @@ class WaveformTimeline(tk.Frame):
         """Full redraw — call after cue list changes (undo/redo/filters)."""
         self._full_redraw()
 
+    def unload(self):
+        """Release everything this widget is holding and go back to empty.
+
+        ⚠️ Hiding the timeline pane does NOT do this. `paned.forget()` removes
+        the widget from view while mpv keeps playing, the extracted temp WAV
+        stays on disk, and the full-resolution sample array stays in memory —
+        an episode's audio is not small. Before this existed there was no way
+        to put the editor back to its pre-waveform state short of closing it.
+
+        Safe to call when nothing is loaded.
+        """
+        try:
+            self._stop_mpv()
+        except Exception:
+            pass
+        try:
+            self._cleanup_temp()
+        except Exception:
+            pass
+        self._raw_samples = None
+        self._video_path = None
+        self._playback_pos_ms = None
+        self._marker_a_ms = None
+        self._marker_b_ms = None
+        self._loading = False
+        try:
+            self.refresh()
+        except Exception:
+            pass
+
     @property
     def is_loaded(self):
         """True if audio waveform data is loaded."""

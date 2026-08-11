@@ -4070,13 +4070,44 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 if vpath:
                     _load_waveform_for_video(vpath)
 
-        view_menu.add_command(label="Load Waveform...",
-                              command=_load_waveform_menu)
-        view_menu.add_command(label="Show/Hide Timeline",
-                              command=_toggle_timeline_menu,
-                              accelerator="Ctrl+T")
-        editor.bind('<Control-t>', lambda e: _toggle_timeline_menu())
-        editor.bind('<Control-T>', lambda e: _toggle_timeline_menu())
+        # ── Waveform: ONE checkable item, not two commands ──────────────
+        # Tony, 2026-08-11: *"make View Waveform selectable so one click loads
+        # it and then another unloads it."*
+        #
+        # It used to be "Load Waveform..." plus a separate "Show/Hide Timeline",
+        # which meant the menu could not tell you whether a waveform was loaded,
+        # and hiding the pane left mpv playing and the temp WAV on disk (see
+        # WaveformTimeline.unload). One checkbutton reflects the true state and
+        # genuinely releases everything when unticked.
+        waveform_on = tk.BooleanVar(value=False)
+
+        def _waveform_toggle():
+            if waveform_on.get():
+                _load_waveform_menu()
+                # ⚠️ Re-sync from reality, not from the click. If no video was
+                # found and the file dialog was cancelled, nothing loaded — a
+                # tick sitting next to an empty pane is exactly the kind of lie
+                # that made the old flow feel broken.
+                waveform_on.set(bool(timeline_visible[0]))
+            else:
+                try:
+                    timeline.unload()
+                except Exception:
+                    pass
+                _hide_timeline()
+                _hide_video()
+
+        view_menu.add_checkbutton(label="Waveform", variable=waveform_on,
+                                  command=_waveform_toggle,
+                                  accelerator="Ctrl+T")
+
+        def _waveform_hotkey(_e=None):
+            waveform_on.set(not waveform_on.get())
+            _waveform_toggle()
+            return 'break'
+
+        editor.bind('<Control-t>', _waveform_hotkey)
+        editor.bind('<Control-T>', _waveform_hotkey)
 
         def _open_forced_subs():
             """Forced Subtitle Editor — build a forced track for mixed-language media.
