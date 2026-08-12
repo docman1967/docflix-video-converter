@@ -10499,7 +10499,16 @@ class VideoConverterApp:
         self.add_log("=" * 50, 'INFO')
 
         # Play notification sound
-        self.play_notification_sound()
+        # ⚠️ try/except is load-bearing, not politeness. run_conversion() has NO
+        # exception handler around it and runs in a daemon thread, so ANYTHING
+        # that raises between the worker join and the rename offer below kills
+        # the thread silently — the traceback goes to stderr, which nobody sees
+        # when the Suite is launched from a desktop icon. The visible symptom is
+        # "the encoded files didn't get renamed back", with no error anywhere.
+        try:
+            self.play_notification_sound()
+        except Exception as e:
+            self.add_log(f"Notification sound failed (ignored): {e}", 'WARNING')
 
         # Show completion dialog
         self.root.after(0, lambda: messagebox.showinfo(
@@ -10508,7 +10517,10 @@ class VideoConverterApp:
             f"Time: {format_time(elapsed.total_seconds())}"
         ))
 
-        # Offer to rename encoded files back to original names (only if originals were deleted)
+        # Offer to rename encoded files back to original names (only if originals
+        # were deleted). Logged unconditionally: when this offer does not appear,
+        # the log now says whether there was nothing to offer or something broke.
+        self.add_log(f"Rename-back candidates: {len(renamed_candidates)}", 'INFO')
         if renamed_candidates:
             def _ask_rename():
                 answer = messagebox.askyesno(
