@@ -10060,6 +10060,61 @@ class VideoConverterApp:
         self.add_log("=" * 50, 'INFO')
     
     def run_conversion(self):
+        """Never let the batch thread die silently.
+
+        ⚠️ WHY THIS WRAPPER EXISTS. The body below runs in a daemon thread with
+        no handler above it, so ANY exception kills the thread mid-batch and the
+        traceback goes to stderr — invisible when the Suite is launched from a
+        desktop icon. Everything after the crash point simply never happens: the
+        buttons stay disabled, no completion dialog, and — the symptom Tony hit
+        on 2026-08-12 — no offer to rename the finished encodes back to their
+        original names. A batch that half-worked and said nothing.
+
+        Now it lands in the log AND on disk, so "capture it better next time"
+        is the app's job rather than his.
+        """
+        try:
+            self._run_conversion_body()
+        except Exception:
+            import traceback
+            tb = traceback.format_exc()
+            self._record_batch_crash(tb)
+            self.is_converting = False
+            for line in tb.strip().splitlines():
+                self.add_log(line, 'ERROR')
+            self.add_log("Batch crashed — details in "
+                         "~/.local/share/docflix/batch_crash.log", 'ERROR')
+            # Give the buttons back; a dead thread must not leave a dead UI.
+            try:
+                self.root.after(0, lambda: (
+                    self.start_btn.configure(state='normal'),
+                    self.pause_btn.configure(state='disabled'),
+                    self.stop_btn.configure(state='disabled'),
+                    self.status_label.configure(text="Stopped — batch error (see log)"),
+                ))
+            except Exception:
+                pass
+
+    def _record_batch_crash(self, tb):
+        """Append a batch crash to disk. Never raises — a logging failure must
+        not become the second failure. Same shape as _record_survived_x_error."""
+        try:
+            import datetime
+            path = os.path.expanduser('~/.local/share/docflix/batch_crash.log')
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            try:
+                if os.path.getsize(path) > 256 * 1024:
+                    os.replace(path, path + '.1')
+            except OSError:
+                pass
+            with open(path, 'a', encoding='utf-8') as fh:
+                fh.write(f"\n===== {datetime.datetime.now().isoformat(timespec='seconds')} "
+                         f"pid={os.getpid()} files={len(getattr(self, 'files', []))} =====\n")
+                fh.write(tb)
+        except Exception:
+            pass
+
+    def _run_conversion_body(self):
         """Run batch conversion in background thread"""
         self.start_time = datetime.now()
         self.current_file_index = 0
