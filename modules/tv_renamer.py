@@ -2412,7 +2412,7 @@ def open_tv_renamer(app):
             return None
 
         def _load_show_by_name(query, embedded_id=None,
-                               force_prompt=False):
+                               force_prompt=False, direct_result=None):
             """Search the active provider for a show name and auto-load the
             best match. Prompts the user if multiple shows share the same name.
             embedded_id is an optional (provider, id_str) tuple from a
@@ -2425,7 +2425,15 @@ def open_tv_renamer(app):
             if not query:
                 return None
             prov = provider_var.get()
-            results = _provider_search(query)
+            if direct_result is not None:
+                # "Match by ID..." — the user already told us exactly which
+                # show this is, so skip searching entirely and hand the
+                # fetched record straight to the registration path below.
+                # Everything downstream (name disambiguation, cross-provider
+                # IDs, episode fetch, _all_shows) is reused unchanged.
+                results = [direct_result]
+            else:
+                results = _provider_search(query)
             # Retry with And↔& swap if initial search found nothing
             if not results:
                 alt = None
@@ -3637,6 +3645,172 @@ def open_tv_renamer(app):
                 win.clipboard_clear()
                 win.clipboard_append(vals[2])
 
+
+        def _parse_id_input(text):
+            """Turn whatever the user pasted into (provider, id) or None.
+
+            Tony finds these shows by hand when the search fails, which means
+            he already has the page open — so accept a pasted URL, not just a
+            bare number. Recognised:
+              1399                      -> uses the provider dropdown
+              tt0944947                 -> imdb
+              {tvdb-77398}              -> tvdb  (Sonarr/Radarr tag)
+              themoviedb.org/tv/1399-.. -> tmdb
+              imdb.com/title/tt0944947  -> imdb
+              thetvdb.com/...&id=77398  -> tvdb
+            ⚠️ A thetvdb.com/series/<slug> URL carries NO numeric id — the
+            slug is not the id. Those are rejected with a clear message
+            rather than silently fetching the wrong show.
+            """
+            t = (text or '').strip()
+            if not t:
+                return None
+            m = re.search(r'\{(tmdb|tvdb|imdb)-([^}]+)\}', t, re.IGNORECASE)
+            if m:
+                return (m.group(1).lower(), m.group(2))
+            low = t.lower()
+            if 'themoviedb.org' in low:
+                m = re.search(r'/(?:tv|movie)/(\d+)', low)
+                if m:
+                    return ('tmdb', m.group(1))
+            if 'imdb.com' in low:
+                m = re.search(r'/title/(tt\d+)', low)
+                if m:
+                    return ('imdb', m.group(1))
+            if 'thetvdb.com' in low:
+                m = re.search(r'[?&]id=(\d+)', low)
+                if m:
+                    return ('tvdb', m.group(1))
+                m = re.search(r'/series/(\d+)', low)
+                if m:
+                    return ('tvdb', m.group(1))
+                return ('__slug__', t)      # signal: slug, not an id
+            if re.fullmatch(r'tt\d+', t, re.IGNORECASE):
+                return ('imdb', t.lower())
+            if re.fullmatch(r'\d+', t):
+                return (None, t)            # provider comes from the dropdown
+            return None
+
+        def _match_by_id_for_selected():
+            """Manually pin the selected files to a show by provider ID.
+
+            The automatic search fails on a handful of shows every library —
+            odd titles, foreign names, remakes that share a name. Rather than
+            fight the matcher, this hands the wheel over: paste the ID (or the
+            URL) and the show is fetched directly.
+            """
+            sel = tree.selection()
+            if not sel:
+                return
+
+            dlg = tk.Toplevel(win)
+            dlg.title("Match by ID")
+            dlg.geometry("560x230")
+            dlg.resizable(True, False)
+            dlg.transient(win)
+            dlg.grab_set()
+            _center_on_parent(dlg, win)
+
+            f = ttk.Frame(dlg, padding=16)
+            f.pack(fill='both', expand=True)
+            f.columnconfigure(1, weight=1)
+
+            names = []
+            for iid in sel[:3]:
+                i = tree.index(iid)
+                if i < len(_file_items):
+                    names.append(os.path.basename(_file_items[i]['path']))
+            blurb = ', '.join(names) + ('...' if len(sel) > 3 else '')
+            ttk.Label(f, text=f"{len(sel)} file(s):  {blurb}",
+                      font=('Helvetica', 9), wraplength=520).grid(
+                          row=0, column=0, columnspan=3, sticky='w',
+                          pady=(0, 12))
+
+            ttk.Label(f, text="Provider:").grid(row=1, column=0, sticky='w')
+            prov_v = tk.StringVar(value=provider_var.get().upper())
+            prov_box = ttk.Combobox(f, textvariable=prov_v, state='readonly',
+                                    values=['TVDB', 'TMDB', 'IMDB'], width=10)
+            prov_box.grid(row=1, column=1, sticky='w', pady=4)
+
+            ttk.Label(f, text="ID or URL:").grid(row=2, column=0, sticky='w')
+            id_v = tk.StringVar()
+            id_e = ttk.Entry(f, textvariable=id_v)
+            id_e.grid(row=2, column=1, columnspan=2, sticky='ew', pady=4)
+            id_e.focus_set()
+
+            ttk.Label(f, foreground='#888', font=('Helvetica', 8),
+                      text="e.g.  77398   ·   tt0944947   ·   a pasted "
+                           "TMDB or IMDB URL").grid(
+                row=3, column=1, columnspan=2, sticky='w')
+
+            status = ttk.Label(f, text="", foreground='#c0392b',
+                               font=('Helvetica', 9), wraplength=520)
+            status.grid(row=4, column=0, columnspan=3, sticky='w', pady=(8, 0))
+
+            def _go():
+                parsed = _parse_id_input(id_v.get())
+                if not parsed:
+                    status.config(text="Couldn't read an ID out of that.")
+                    return
+                prov, ident = parsed
+                if prov == '__slug__':
+                    status.config(
+                        text="That TVDB link has no numeric ID in it. Open "
+                             "the series page and use the ID shown on it.")
+                    return
+                if prov is None:
+                    prov = prov_v.get().lower()
+                status.config(text=f"Fetching {prov.upper()} {ident}...",
+                              foreground='#666')
+                dlg.update_idletasks()
+                try:
+                    rec = _fetch_by_embedded_id((prov, ident))
+                except Exception as e:
+                    rec = None
+                    _log(f"  Match by ID failed: {e}", 'ERROR')
+                if not rec:
+                    status.config(
+                        text=f"No {prov.upper()} record for \"{ident}\".",
+                        foreground='#c0392b')
+                    return
+                # Reuse the whole normal load path — episode fetch, external
+                # IDs, name disambiguation, _all_shows registration.
+                label = rec.get('name', rec.get('objectName', '')) or ident
+                show_name = _load_show_by_name(
+                    label, embedded_id=(prov, ident), direct_result=rec)
+                if not show_name:
+                    status.config(text="Fetched it, but loading failed — "
+                                       "see the log.", foreground='#c0392b')
+                    return
+                # Pin the selected files to it, overriding any earlier guess.
+                n = 0
+                for iid in sel:
+                    i = tree.index(iid)
+                    if i < len(_file_items):
+                        _file_items[i]['matched_show'] = show_name
+                        n += 1
+                _log(f"  Matched {n} file(s) to \"{show_name}\" "
+                     f"via {prov.upper()} ID {ident}")
+                dlg.destroy()
+                _refresh_preview()
+
+            btns = ttk.Frame(f)
+            btns.grid(row=5, column=0, columnspan=3, sticky='e', pady=(14, 0))
+            ttk.Button(btns, text="Cancel",
+                       command=dlg.destroy).pack(side='right', padx=4)
+            ttk.Button(btns, text="Match",
+                       command=_go).pack(side='right')
+            dlg.bind('<Return>', lambda e: _go())
+            dlg.bind('<Escape>', lambda e: dlg.destroy())
+
+        def sel_shows_precheck(sel):
+            """True if any selected file already has a matched show."""
+            for iid in sel:
+                i = tree.index(iid)
+                if i < len(_file_items) and _file_items[i].get('matched_show'):
+                    return True
+            return False
+
         def _on_tree_right_click(event):
             iid = tree.identify_row(event.y)
             if iid:
@@ -3662,6 +3836,13 @@ def open_tv_renamer(app):
                 _tree_ctx.add_command(
                     label="Open Folder",
                     command=_open_containing_folder)
+                if not sel_shows_precheck(sel):
+                    # ⚠️ The whole point of this feature is the show that
+                    # could NOT be matched — so the entry has to appear when
+                    # there is no show attached, not only alongside Re-match.
+                    _tree_ctx.add_command(
+                        label="Match by ID...",
+                        command=_match_by_id_for_selected)
                 _tree_ctx.add_separator()
                 _tree_ctx.add_command(
                     label=f"Remove Selected ({len(sel)} file{'s' if len(sel) > 1 else ''})",
@@ -3683,6 +3864,9 @@ def open_tv_renamer(app):
                     _tree_ctx.add_command(
                         label=re_label,
                         command=_rematch_selected)
+                    _tree_ctx.add_command(
+                        label="Match by ID...",
+                        command=_match_by_id_for_selected)
                     # "Remove show"
                     if len(sel_shows) == 1:
                         _tree_ctx.add_command(
