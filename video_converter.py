@@ -4385,6 +4385,10 @@ class VideoConverterApp:
 
         # Audio settings
         self.audio_codec = tk.StringVar(value='aac')
+        # Atmos handling — Tony's call (2026-08-17): the tool should offer
+        # the choice, not decide. Default 'Preserve' because converting is
+        # the irreversible direction.
+        self.atmos_mode = tk.StringVar(value='Preserve - copy untouched')
         self.audio_bitrate = tk.StringVar(value='128k')
 
         # Metadata cleanup settings
@@ -5075,6 +5079,12 @@ class VideoConverterApp:
             'pcm 24-bit': 'pcm_s24le',
             'copy': 'copy'
         }
+
+        self.atmos_mode_map = {
+            'Preserve - copy untouched':        'preserve',
+            'Convert like any other track':    'convert',
+            'Preserve + add converted track':  'both',
+        }
         
         self.audio_codec_combo = ttk.Combobox(self.audio_frame, textvariable=self.audio_codec,
                                               width=22, state='readonly')
@@ -5089,10 +5099,17 @@ class VideoConverterApp:
         self.audio_bitrate_combo['values'] = AUDIO_BITRATES
         self.audio_bitrate_combo.set('128k')  # Default
         self.audio_bitrate_combo.pack(side='left', padx=5)
+
+        ttk.Label(self.audio_frame, text="Atmos:").pack(side='left', padx=(15, 5))
+        self.atmos_mode_combo = ttk.Combobox(self.audio_frame, textvariable=self.atmos_mode,
+                                            width=30, state='readonly')
+        self.atmos_mode_combo['values'] = list(self.atmos_mode_map.keys())
+        self.atmos_mode_combo.pack(side='left', padx=5)
         
         # Audio frame always visible — disabled when in video-only mode
         self.audio_codec_combo.configure(state='disabled')
         self.audio_bitrate_combo.configure(state='disabled')
+        self.atmos_mode_combo.configure(state='disabled')
 
         # Checkboxes - Row 7
         self.check_frame = ttk.Frame(settings_frame)
@@ -8191,6 +8208,7 @@ class VideoConverterApp:
             'gpu_preset':           self.gpu_preset.get(),
             'audio_codec':          self.audio_codec.get(),
             'audio_bitrate':        self.audio_bitrate.get(),
+            'atmos_mode':           self.atmos_mode.get(),
             'skip_existing':        self.skip_existing.get(),
             'delete_originals':     self.delete_originals.get(),
             'hw_decode':            self.hw_decode.get(),
@@ -8318,6 +8336,7 @@ class VideoConverterApp:
             self.cpu_preset.set(prefs.get('cpu_preset',         self.cpu_preset.get()))
             self.gpu_preset.set(prefs.get('gpu_preset',         self.gpu_preset.get()))
             self.audio_codec.set(prefs.get('audio_codec',       self.audio_codec.get()))
+            self.atmos_mode.set(prefs.get('atmos_mode',         self.atmos_mode.get()))
             self.audio_bitrate.set(prefs.get('audio_bitrate',   self.audio_bitrate.get()))
             self.skip_existing.set(prefs.get('skip_existing',   self.skip_existing.get()))
             self.delete_originals.set(prefs.get('delete_originals', self.delete_originals.get()))
@@ -8423,6 +8442,7 @@ class VideoConverterApp:
         self.cpu_preset.set('ultrafast')
         self.gpu_preset.set('p4')
         self.audio_codec.set('aac')
+        self.atmos_mode.set('Preserve - copy untouched')
         self.audio_bitrate.set('128k')
         self.delete_originals.set(False)
         self.hw_decode.set(self.has_gpu)
@@ -8712,6 +8732,7 @@ class VideoConverterApp:
                 'audio_codec':    ('copy' if self.transcode_mode.get() == 'video'
                                    else self.get_audio_codec_name()),
                 'audio_bitrate':  self.audio_bitrate.get(),
+                'atmos_mode':     self.atmos_mode_map.get(self.atmos_mode.get(), 'preserve'),
                 'gpu_index':      self.gpu_index.get(),
             }
         except Exception:
@@ -8722,7 +8743,8 @@ class VideoConverterApp:
                     'codec_info': VIDEO_CODEC_MAP['H.265 / HEVC'],
                     'mode': 'bitrate', 'bitrate': '2M', 'crf': 23,
                     'bit_depth': 'auto', 'gpu_aq': False,
-                    'audio_codec': 'copy', 'audio_bitrate': '128k'}
+                    'audio_codec': 'copy', 'audio_bitrate': '128k',
+                    'atmos_mode': 'preserve'}
 
     def refresh_estimated_sizes(self):
         """Recalculate estimated output sizes for all files and update the tree."""
@@ -9857,6 +9879,7 @@ class VideoConverterApp:
             self.audio_frame.grid(row=3)
             self.audio_codec_combo.configure(state='readonly')
             self.audio_bitrate_combo.configure(state='readonly')
+            self.atmos_mode_combo.configure(state='readonly')
             self.check_frame.grid(row=4)
             self.add_log("Audio-only transcoding mode selected", 'INFO')
         else:
@@ -9905,6 +9928,7 @@ class VideoConverterApp:
             self.audio_frame.grid(row=6)
             self.audio_codec_combo.configure(state='readonly')
             self.audio_bitrate_combo.configure(state='readonly')
+            self.atmos_mode_combo.configure(state='readonly')
             self.check_frame.grid(row=7)
         else:
             self.audio_frame.grid_remove()

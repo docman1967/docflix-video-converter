@@ -465,8 +465,19 @@ class VideoConverter:
                 elif transcode_mode == 'audio':
                     c.extend(['-c:v', 'copy'])
 
+            # carries the 'keep both' decision from _add_audio_args to
+            # _add_atmos_extra_track (which must run after the maps are emitted)
+            _atmos_dup = {}
+
             def _add_audio_args(c):
-                """Add audio encoding arguments."""
+                """Add audio encoding arguments.
+
+                Decisions are made PER TRACK, not per file. Before 2026-08-17 a
+                single Atmos stream anywhere in the file forced `-c:a copy` on
+                ALL audio, so a 640k commentary alongside an Atmos main track
+                was silently left alone too. With 1,176 multi-track episodes in
+                the library that mattered.
+                """
                 EXPERIMENTAL_CODECS = {'opus', 'vorbis'}
                 LOSSLESS_CODECS = {'flac', 'alac', 'pcm_s16le', 'pcm_s24le', 'wavpack', 'tta'}
                 audio_codec = settings.get('audio_codec', 'aac')
@@ -474,30 +485,25 @@ class VideoConverter:
                 # Safety net: video-only mode always copies audio
                 if settings.get('transcode_mode') == 'video':
                     audio_codec = 'copy'
-                # Atmos detection + copy-if-same-codec optimization
+
+                # ── Atmos handling: now the user's choice, not a hard rule ────
+                # Tony, 2026-08-17: "We originally added it because sometimes
+                # converting Atmos to AC3 can get ugly but in my experience,
+                # it's really rare. I think we need to add it as a setting."
+                #   preserve — copy the Atmos stream untouched (DEFAULT)
+                #   convert  — transcode it like any other track
+                #   both     — copy it AND append a converted track alongside
+                # Default stays 'preserve' because it is the irreversible
+                # direction: an Atmos track can be converted later, but the
+                # height objects cannot be recovered once flattened to a bed.
+                atmos_mode = (settings.get('atmos_mode') or 'preserve').lower()
+                src_streams = []
                 if audio_codec != 'copy':
                     try:
                         from .utils import get_audio_info
-                        src_streams = get_audio_info(input_path)
-                        for astream in src_streams:
-                            profile = astream.get('profile', '')
-                            if 'atmos' in profile.lower():
-                                audio_codec = 'copy'
-                                self.log(
-                                    "Dolby Atmos audio detected — copying "
-                                    "original stream (Atmos transcoding is "
-                                    "not supported at this time)", 'ERROR')
-                                break
-                        # Copy instead of re-encoding if source already matches target
-                        if audio_codec != 'copy' and src_streams:
-                            src_codec = src_streams[0].get('codec_name', '')
-                            if src_codec == audio_codec:
-                                audio_codec = 'copy'
-                                self.log(
-                                    f"Audio already {src_codec} — copying "
-                                    f"(no re-encode needed)", 'INFO')
+                        src_streams = get_audio_info(input_path) or []
                     except Exception:
-                        pass
+                        src_streams = []
                 # Undecodable-audio fallback: if the source audio can't be
                 # decoded (corrupt/non-standard stream), re-encoding to the
                 # target codec would make ffmpeg abort the whole job. Copy
@@ -516,12 +522,72 @@ class VideoConverter:
                         pass
                 if audio_codec == 'copy':
                     c.extend(['-c:a', 'copy'])
-                else:
+                    return
+                if not src_streams:
+                    # Couldn't read the streams — fall back to the old blanket
+                    # behaviour rather than guess.
                     c.extend(['-c:a', audio_codec])
                     if audio_codec in EXPERIMENTAL_CODECS:
                         c.extend(['-strict', '-2'])
                     if audio_codec not in LOSSLESS_CODECS:
                         c.extend(['-b:a', audio_bitrate])
+                    return
+
+                for i, astream in enumerate(src_streams):
+                    profile = (astream.get('profile') or '').lower()
+                    is_atmos = 'atmos' in profile
+                    src_codec = astream.get('codec_name', '')
+                    if is_atmos and atmos_mode in ('preserve', 'both'):
+                        c.extend([f'-c:a:{i}', 'copy'])
+                        self.log(
+                            f"Audio {i}: Dolby Atmos — copying original stream"
+                            + (" (a converted track will be appended)"
+                               if atmos_mode == 'both' else ""), 'INFO')
+                        if atmos_mode == 'both':
+                            _atmos_dup['src'] = i
+                        continue
+                    if src_codec == audio_codec:
+                        c.extend([f'-c:a:{i}', 'copy'])
+                        self.log(f"Audio {i}: already {src_codec} — copying", 'INFO')
+                        continue
+                    if is_atmos:
+                        self.log(
+                            f"Audio {i}: Dolby Atmos — converting to "
+                            f"{audio_codec} at your request; the object/height "
+                            f"data flattens to the channel bed", 'WARNING')
+                    c.extend([f'-c:a:{i}', audio_codec])
+                    if audio_codec in EXPERIMENTAL_CODECS:
+                        c.extend(['-strict', '-2'])
+                    if audio_codec not in LOSSLESS_CODECS:
+                        c.extend([f'-b:a:{i}', audio_bitrate])
+                _atmos_dup['n_src'] = len(src_streams)
+                _atmos_dup['codec'] = audio_codec
+                _atmos_dup['bitrate'] = audio_bitrate
+
+            def _add_atmos_extra_track(c):
+                """'both' mode: append a converted copy of the Atmos track.
+
+                ⚠️ MUST be called AFTER _add_subtitle_args. ffmpeg assigns output
+                stream indices in -map order, and the blanket `-map 0:a?` lives in
+                the subtitle function. Emitting this map earlier would make the
+                appended track audio stream 0 and shift every -c:a:N off by one.
+                Appending last puts it at output index n_src, which is what the
+                -c:a:N below assumes.
+                """
+                if 'src' not in _atmos_dup:
+                    return
+                if settings.get('container', '.mkv') != '.mkv':
+                    self.log("Atmos 'keep both' skipped: needs an MKV container", 'WARNING')
+                    return
+                i = _atmos_dup['n_src']          # output index of the appended track
+                codec = _atmos_dup['codec']
+                c.extend(['-map', f"0:a:{_atmos_dup['src']}"])
+                c.extend([f'-c:a:{i}', codec])
+                if codec not in {'flac', 'alac', 'pcm_s16le', 'pcm_s24le', 'wavpack', 'tta'}:
+                    c.extend([f'-b:a:{i}', _atmos_dup['bitrate']])
+                c.extend([f'-metadata:s:a:{i}',
+                          f"title={codec.upper()} {_atmos_dup['bitrate']} (from Atmos)"])
+                self.log(f"Atmos 'keep both': appended {codec} track as audio {i}", 'INFO')
 
             def _add_subtitle_args(c):
                 """Add subtitle stream arguments (internal + external embed).
@@ -872,6 +938,7 @@ class VideoConverter:
                 _add_video_args(cmd2, pass_num=2)
                 _add_audio_args(cmd2)
                 _add_subtitle_args(cmd2)
+                _add_atmos_extra_track(cmd2)
                 _add_metadata_args(cmd2)
                 cmd2.append(output_path)
                 self.log(f"Pass 2 command: {' '.join(cmd2)}", 'INFO')
@@ -895,6 +962,7 @@ class VideoConverter:
                 _add_video_args(cmd)
                 _add_audio_args(cmd)
                 _add_subtitle_args(cmd)
+                _add_atmos_extra_track(cmd)
                 _add_metadata_args(cmd)
                 cmd.append(output_path)
                 self.log(f"Command: {' '.join(cmd)}", 'INFO')
