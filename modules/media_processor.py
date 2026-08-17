@@ -97,12 +97,22 @@ def open_media_processor(app):
         }
         mp_audio_codec_reverse = {v: k for k, v in mp_audio_codec_map.items()}
 
+        # Atmos handling, carried over from the main converter (2026-08-17).
+        # Before this the Processor had NO Atmos awareness at all and would
+        # flatten it without asking.
+        mp_atmos_mode_map = {
+            'Preserve - copy untouched':        'preserve',
+            'Convert like any other track':    'convert',
+            'Preserve + add converted track':  'both',
+        }
+
         # Load saved Media Processor preferences (empty dict on fresh install)
         _mp = getattr(app, '_media_proc_prefs', {})
 
         opt_convert_audio  = tk.BooleanVar(value=_mp.get('convert_audio', False))
         opt_audio_codec    = tk.StringVar(value=_mp.get('audio_codec', 'ac3 (Dolby Digital)'))
         opt_audio_bitrate  = tk.StringVar(value=_mp.get('audio_bitrate', '384k'))
+        opt_atmos_mode     = tk.StringVar(value=_mp.get('atmos_mode', 'Preserve - copy untouched'))
         opt_strip_chapters = tk.BooleanVar(value=_mp.get('strip_chapters', False))
         opt_strip_tags     = tk.BooleanVar(value=_mp.get('strip_tags', False))
         opt_strip_subs     = tk.BooleanVar(value=_mp.get('strip_subs', False))
@@ -1164,6 +1174,7 @@ def open_media_processor(app):
             st = 'readonly' if opt_convert_audio.get() else 'disabled'
             mp_ac_combo.configure(state=st)
             mp_br_combo.configure(state=st)
+            mp_atmos_combo.configure(state=st)
 
         ttk.Checkbutton(ops_row1, text="Convert audio:",
                        variable=opt_convert_audio, command=_toggle_audio_controls).pack(side='left', padx=(0, 4))
@@ -1176,6 +1187,11 @@ def open_media_processor(app):
                                    values=('128k', '192k', '256k', '320k', '384k', '448k', '512k', '640k'),
                                    width=6, state='readonly')
         mp_br_combo.pack(side='left')
+        ttk.Label(ops_row1, text="Atmos:").pack(side='left', padx=(8, 2))
+        mp_atmos_combo = ttk.Combobox(ops_row1, textvariable=opt_atmos_mode,
+                                      values=list(mp_atmos_mode_map.keys()),
+                                      width=30, state='readonly')
+        mp_atmos_combo.pack(side='left')
 
         # Row 2: Track metadata
         ops_row2 = ttk.Frame(ops_frame)
@@ -1430,8 +1446,32 @@ def open_media_processor(app):
                         cmd.extend(['-i', ch_meta_path])
                         f['_ch_meta_path'] = ch_meta_path  # for cleanup
 
+            # ── Resolve the audio plan BEFORE mapping ─────────────────────
+            # 'Preserve + add converted track' needs an extra -map. Resolving it
+            # here (rather than in the audio block below) lets that map sit with
+            # the other audio maps, so output order stays audio-then-subtitles.
+            # ⚠️ ffmpeg assigns output indices in -map order; the appended track
+            # therefore lands at audio index len(streams), which is what the
+            # -c:a:N below assumes.
+            _atmos_mode = mp_atmos_mode_map.get(opt_atmos_mode.get(), 'preserve')
+            _a_streams = f.get('audio_info', []) or []
+            _dup_src = None
+            if _ov(f, 'convert_audio', opt_convert_audio) and _atmos_mode == 'both':
+                _tc = (ov['audio_codec'] if 'audio_codec' in ov
+                       else mp_audio_codec_map.get(opt_audio_codec.get(), opt_audio_codec.get()))
+                if _tc != 'copy':
+                    for _i, _s in enumerate(_a_streams):
+                        if 'atmos' in (_s.get('profile') or '').lower():
+                            _dup_src = _i
+                            break
+
             # ── Mapping ──
             cmd.extend(['-map', '0:v:0?', '-map', '0:a?'])
+            if _dup_src is not None and out_ext == '.mkv':
+                cmd.extend(['-map', f'0:a:{_dup_src}'])
+            elif _dup_src is not None:
+                _log("  Atmos 'keep both' skipped: needs an MKV container", 'WARNING')
+                _dup_src = None
 
             # Subtitle mapping
             do_strip_subs = _ov(f, 'strip_subs', opt_strip_subs)
@@ -1472,8 +1512,11 @@ def open_media_processor(app):
                 if target_codec == 'copy':
                     cmd.extend(['-c:a', 'copy'])
                 else:
-                    audio = f.get('audio_info', [])
-                    src_codec = audio[0]['codec_name'] if audio else ''
+                    # ⚠️ PER TRACK, not per file. This block used to inspect only
+                    # audio[0] and then apply a single -c:a to every stream, so a
+                    # 640k commentary rode on whatever the main track decided.
+                    LOSSLESS = {'flac'}
+                    EXPERIMENTAL = {'opus', 'vorbis'}
                     codec_aliases = {
                         'ac3': ('ac3', 'eac3'),
                         'eac3': ('eac3',),
@@ -1483,36 +1526,55 @@ def open_media_processor(app):
                         'flac': ('flac',),
                     }
                     match_set = codec_aliases.get(target_codec, (target_codec,))
-                    # Compare source bitrate against target bitrate
-                    src_br_raw = audio[0].get('bit_rate', '') if audio else ''
                     try:
-                        src_kbps = int(src_br_raw) // 1000 if src_br_raw else 0
-                    except (ValueError, TypeError):
-                        src_kbps = 0
-                    # Parse target bitrate (e.g. '384k' → 384)
-                    tgt_str = audio_bitrate.lower().rstrip('k')
-                    try:
-                        tgt_kbps = int(tgt_str)
+                        tgt_kbps = int(audio_bitrate.lower().rstrip('k'))
                     except (ValueError, TypeError):
                         tgt_kbps = 0
-                    # Skip transcoding only if codec AND bitrate match
-                    # (10% tolerance for bitrate comparison)
-                    bitrate_matches = (
-                        src_kbps == 0 or tgt_kbps == 0
-                        or abs(src_kbps - tgt_kbps) <= tgt_kbps * 0.10
-                    )
-                    if src_codec in match_set and bitrate_matches:
+                    if not _a_streams:
                         cmd.extend(['-c:a', 'copy'])
-                        _log(f"  Audio: already {src_codec.upper()}"
-                             f" @ {src_kbps}k, copying", 'SKIP')
-                    else:
-                        LOSSLESS = {'flac'}
-                        EXPERIMENTAL = {'opus', 'vorbis'}
-                        cmd.extend(['-c:a', target_codec])
+                        _log("  Audio: streams unreadable — copying", 'WARNING')
+                    for i, astream in enumerate(_a_streams):
+                        src_codec = astream.get('codec_name', '')
+                        is_atmos = 'atmos' in (astream.get('profile') or '').lower()
+                        try:
+                            src_kbps = int(astream.get('bit_rate') or 0) // 1000
+                        except (ValueError, TypeError):
+                            src_kbps = 0
+                        # ⚠️ src_kbps == 0 (bitrate unreported) counts as a match,
+                        # so an unreadable stream is copied rather than churned.
+                        bitrate_matches = (
+                            src_kbps == 0 or tgt_kbps == 0
+                            or abs(src_kbps - tgt_kbps) <= tgt_kbps * 0.10
+                        )
+                        if is_atmos and _atmos_mode in ('preserve', 'both'):
+                            cmd.extend([f'-c:a:{i}', 'copy'])
+                            _log(f"  Audio {i}: Dolby Atmos — copying original"
+                                 + ("; a converted track is appended"
+                                    if _atmos_mode == 'both' else ""), 'SKIP')
+                            continue
+                        if src_codec in match_set and bitrate_matches:
+                            cmd.extend([f'-c:a:{i}', 'copy'])
+                            _log(f"  Audio {i}: already {src_codec.upper()}"
+                                 f" @ {src_kbps}k, copying", 'SKIP')
+                            continue
+                        if is_atmos:
+                            _log(f"  Audio {i}: Dolby Atmos — converting to "
+                                 f"{target_codec} at your request; object/height "
+                                 f"data flattens to the bed", 'WARNING')
+                        cmd.extend([f'-c:a:{i}', target_codec])
                         if target_codec in EXPERIMENTAL:
                             cmd.extend(['-strict', '-2'])
                         if target_codec not in LOSSLESS:
-                            cmd.extend(['-b:a', audio_bitrate])
+                            cmd.extend([f'-b:a:{i}', audio_bitrate])
+                    # the appended 'keep both' track
+                    if _dup_src is not None:
+                        j = len(_a_streams)
+                        cmd.extend([f'-c:a:{j}', target_codec])
+                        if target_codec not in LOSSLESS:
+                            cmd.extend([f'-b:a:{j}', audio_bitrate])
+                        cmd.extend([f'-metadata:s:a:{j}',
+                                    f'title={target_codec.upper()} {audio_bitrate} (from Atmos)'])
+                        _log(f"  Atmos 'keep both': appended {target_codec} as audio {j}", 'INFO')
             else:
                 cmd.extend(['-c:a', 'copy'])
 
@@ -2044,6 +2106,7 @@ def open_media_processor(app):
                 'convert_audio':  opt_convert_audio.get(),
                 'audio_codec':    opt_audio_codec.get(),
                 'audio_bitrate':  opt_audio_bitrate.get(),
+                'atmos_mode':     opt_atmos_mode.get(),
                 'strip_chapters': opt_strip_chapters.get(),
                 'strip_tags':     opt_strip_tags.get(),
                 'strip_subs':     opt_strip_subs.get(),
