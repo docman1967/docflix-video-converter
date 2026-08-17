@@ -3605,8 +3605,20 @@ class VideoConverter:
                 elif transcode_mode == 'audio':
                     c.extend(['-c:v', 'copy'])
 
+            # carries the 'keep both' decision to _add_atmos_extra_track,
+            # which must run after the maps are emitted
+            _atmos_dup = {}
+
             def _add_audio_args(c):
-                """Add audio encoding arguments."""
+                """Add audio encoding arguments — PER TRACK.
+
+                ⚠️ THIS IS THE THIRD COPY of this logic (the others are in
+                modules/converter.py and modules/media_processor.py) and it is the
+                one the main multi-GPU batch path actually uses. When changing
+                audio behaviour, grep the whole tree for the log text -- fixing
+                only modules/ leaves Tony's primary workflow untouched, which is
+                exactly what happened on 2026-08-17.
+                """
                 EXPERIMENTAL_CODECS = {'opus', 'vorbis'}
                 LOSSLESS_CODECS = {'flac', 'alac', 'pcm_s16le', 'pcm_s24le', 'wavpack', 'tta'}
                 audio_codec = settings.get('audio_codec', 'aac')
@@ -3614,55 +3626,18 @@ class VideoConverter:
                 # Safety net: video-only mode always copies audio
                 if settings.get('transcode_mode') == 'video':
                     audio_codec = 'copy'
-                # Atmos detection + copy-if-same-codec optimization
+
+                # Atmos: the user's choice, not a hard rule.
+                #   preserve (default) | convert | both
+                atmos_mode = (settings.get('atmos_mode') or 'preserve').lower()
+                src_streams = []
                 if audio_codec != 'copy':
                     try:
                         from modules.utils import get_audio_info
-                        src_streams = get_audio_info(input_path)
-                        for astream in src_streams:
-                            profile = astream.get('profile', '')
-                            if 'atmos' in profile.lower():
-                                audio_codec = 'copy'
-                                self.log(
-                                    "Dolby Atmos audio detected — copying "
-                                    "original stream (Atmos transcoding is "
-                                    "not supported at this time)", 'ERROR')
-                                break
-                        # Copy instead of re-encoding ONLY if source already matches the target
-                        # codec AND bitrate. Matching codec alone is NOT enough: AC3 448k → AC3 384k
-                        # (or AC3 192k → 384k) must re-encode to honor the bitrate the user chose.
-                        if audio_codec != 'copy' and src_streams:
-                            src_codec = src_streams[0].get('codec_name', '')
-                            codec_aliases = {
-                                'ac3': ('ac3', 'eac3'), 'eac3': ('eac3',), 'aac': ('aac',),
-                                'mp3': ('mp3',), 'opus': ('opus',), 'flac': ('flac',),
-                            }
-                            match_set = codec_aliases.get(audio_codec, (audio_codec,))
-                            src_br_raw = src_streams[0].get('bit_rate', '')
-                            try:
-                                src_kbps = int(src_br_raw) // 1000 if src_br_raw else 0
-                            except (ValueError, TypeError):
-                                src_kbps = 0
-                            try:
-                                tgt_kbps = int(str(audio_bitrate).lower().rstrip('k'))
-                            except (ValueError, TypeError):
-                                tgt_kbps = 0
-                            # Bitrate "matches" only if unknown, or within 10% of target.
-                            bitrate_matches = (
-                                src_kbps == 0 or tgt_kbps == 0
-                                or abs(src_kbps - tgt_kbps) <= tgt_kbps * 0.10
-                            )
-                            if src_codec in match_set and bitrate_matches:
-                                audio_codec = 'copy'
-                                self.log(
-                                    f"Audio already {src_codec} @ {src_kbps}k "
-                                    f"(≈ target {tgt_kbps}k) — copying, no re-encode needed", 'INFO')
-                            else:
-                                self.log(
-                                    f"Audio {src_codec} @ {src_kbps}k → re-encoding to "
-                                    f"{audio_codec} @ {tgt_kbps}k (honoring chosen bitrate)", 'INFO')
+                        src_streams = get_audio_info(input_path) or []
                     except Exception:
-                        pass
+                        src_streams = []
+
                 # Undecodable-audio fallback: if the source audio can't be
                 # decoded (corrupt/non-standard stream), re-encoding to the
                 # target codec would make ffmpeg abort the whole job. Copy
@@ -3679,14 +3654,91 @@ class VideoConverter:
                             audio_codec = 'copy'
                     except Exception:
                         pass
+
                 if audio_codec == 'copy':
                     c.extend(['-c:a', 'copy'])
-                else:
+                    return
+                if not src_streams:
                     c.extend(['-c:a', audio_codec])
                     if audio_codec in EXPERIMENTAL_CODECS:
                         c.extend(['-strict', '-2'])
                     if audio_codec not in LOSSLESS_CODECS:
                         c.extend(['-b:a', audio_bitrate])
+                    return
+
+                codec_aliases = {
+                    'ac3': ('ac3', 'eac3'), 'eac3': ('eac3',), 'aac': ('aac',),
+                    'mp3': ('mp3',), 'opus': ('opus',), 'flac': ('flac',),
+                }
+                match_set = codec_aliases.get(audio_codec, (audio_codec,))
+                try:
+                    tgt_kbps = int(str(audio_bitrate).lower().rstrip('k'))
+                except (ValueError, TypeError):
+                    tgt_kbps = 0
+
+                for i, astream in enumerate(src_streams):
+                    profile = (astream.get('profile') or '').lower()
+                    is_atmos = 'atmos' in profile
+                    src_codec = astream.get('codec_name', '')
+                    try:
+                        src_kbps = int(astream.get('bit_rate') or 0) // 1000
+                    except (ValueError, TypeError):
+                        src_kbps = 0
+                    # Bitrate "matches" only if unknown, or within 10% of target.
+                    bitrate_matches = (
+                        src_kbps == 0 or tgt_kbps == 0
+                        or abs(src_kbps - tgt_kbps) <= tgt_kbps * 0.10
+                    )
+                    if is_atmos and atmos_mode in ('preserve', 'both'):
+                        c.extend([f'-c:a:{i}', 'copy'])
+                        self.log(
+                            f"Audio {i}: Dolby Atmos — copying original stream"
+                            + ("; a converted track will be appended"
+                               if atmos_mode == 'both' else ""), 'INFO')
+                        if atmos_mode == 'both':
+                            _atmos_dup['src'] = i
+                        continue
+                    if src_codec in match_set and bitrate_matches:
+                        c.extend([f'-c:a:{i}', 'copy'])
+                        self.log(f"Audio {i}: already {src_codec} @ {src_kbps}k "
+                                 f"(≈ target {tgt_kbps}k) — copying", 'INFO')
+                        continue
+                    if is_atmos:
+                        self.log(
+                            f"Audio {i}: Dolby Atmos — converting to {audio_codec} "
+                            f"at your request; object/height data flattens to the bed",
+                            'WARNING')
+                    else:
+                        self.log(f"Audio {i}: {src_codec} @ {src_kbps}k → "
+                                 f"{audio_codec} @ {tgt_kbps}k", 'INFO')
+                    c.extend([f'-c:a:{i}', audio_codec])
+                    if audio_codec in EXPERIMENTAL_CODECS:
+                        c.extend(['-strict', '-2'])
+                    if audio_codec not in LOSSLESS_CODECS:
+                        c.extend([f'-b:a:{i}', audio_bitrate])
+                _atmos_dup.update(n_src=len(src_streams), codec=audio_codec,
+                                  bitrate=audio_bitrate)
+
+            def _add_atmos_extra_track(c):
+                """'both' mode: append a converted copy of the Atmos track.
+
+                ⚠️ MUST run AFTER the maps. ffmpeg assigns output indices in -map
+                order and the blanket '-map 0:a?' is emitted by _add_subtitle_args,
+                so emitting this earlier would shift every -c:a:N by one.
+                """
+                if 'src' not in _atmos_dup:
+                    return
+                if settings.get('container', '.mkv') != '.mkv':
+                    self.log("Atmos 'keep both' skipped: needs an MKV container", 'WARNING')
+                    return
+                i = _atmos_dup['n_src']
+                codec = _atmos_dup['codec']
+                c.extend(['-map', f"0:a:{_atmos_dup['src']}", f'-c:a:{i}', codec])
+                if codec not in {'flac', 'alac', 'pcm_s16le', 'pcm_s24le', 'wavpack', 'tta'}:
+                    c.extend([f'-b:a:{i}', _atmos_dup['bitrate']])
+                c.extend([f'-metadata:s:a:{i}',
+                          f"title={codec.upper()} {_atmos_dup['bitrate']} (from Atmos)"])
+                self.log(f"Atmos 'keep both': appended {codec} track as audio {i}", 'INFO')
 
             def _add_subtitle_args(c):
                 """Add subtitle stream arguments (internal + external embed).
@@ -4054,6 +4106,7 @@ class VideoConverter:
                 _add_video_args(cmd2, pass_num=2)
                 _add_audio_args(cmd2)
                 _add_subtitle_args(cmd2)
+                _add_atmos_extra_track(cmd2)
                 _add_metadata_args(cmd2)
                 cmd2.append(output_path)
                 self.log(f"Pass 2 command: {' '.join(cmd2)}", 'INFO')
@@ -4077,6 +4130,7 @@ class VideoConverter:
                 _add_video_args(cmd)
                 _add_audio_args(cmd)
                 _add_subtitle_args(cmd)
+                _add_atmos_extra_track(cmd)
                 _add_metadata_args(cmd)
                 cmd.append(output_path)
                 self.log(f"Command: {' '.join(cmd)}", 'INFO')
