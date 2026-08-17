@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import threading
 import urllib.parse
 import urllib.request
@@ -182,16 +183,41 @@ def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
         cmd = [ytdlp, "--ignore-config", "-f", fmt, "-S", _SORT,
                "--merge-output-format", container,
                "--no-playlist", "--no-progress", "-o", tmp, url]
-        log("$ " + " ".join(cmd))
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        for line in p.stdout:
-            if stop_flag and stop_flag[0]:
-                p.terminate()
-                return False, "Cancelled."
-            log(line.rstrip())
-        p.wait()
-        if p.returncode != 0 or not os.path.isfile(tmp):
-            return False, f"yt-dlp failed (exit {p.returncode})."
+        # ── Retry on failure ──────────────────────────────────────────────
+        # YouTube 403s the media URL *probabilistically*. Measured 2026-08-17 on
+        # one trailer: identical command, identical player client (android_vr),
+        # four attempts -> OK, OK, OK, 403. Nothing about the request differs; a
+        # fresh invocation just gets fresh URLs.
+        #
+        # ⚠️ It is NOT the client, the format, or cookies -- all three were tested
+        # and ruled out. Clients that can SEE the HD formats (android_vr) 403;
+        # clients that fetch reliably (mweb, tv_simply) only offer 360p; browser
+        # cookies made no difference. So do not "fix" this by pinning a client or
+        # dropping to 360p.
+        #
+        # This is exactly Tony's own workaround -- "if I keep hitting fetch
+        # trailer, eventually it will download it" -- just automated.
+        rc, attempts = None, 4
+        for attempt in range(1, attempts + 1):
+            if attempt > 1:
+                log(f"-- retry {attempt} of {attempts} (YouTube 403s intermittently)")
+                time.sleep(2)
+            if os.path.isfile(tmp):
+                try: os.remove(tmp)
+                except OSError: pass
+            log("$ " + " ".join(cmd))
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            for line in p.stdout:
+                if stop_flag and stop_flag[0]:
+                    p.terminate()
+                    return False, "Cancelled."
+                log(line.rstrip())
+            p.wait()
+            rc = p.returncode
+            if rc == 0 and os.path.isfile(tmp):
+                break
+        if rc != 0 or not os.path.isfile(tmp):
+            return False, f"yt-dlp failed after {attempts} attempts (exit {rc})."
         if strip:
             log("Stripping tags -> " + out_path)
             # ⚠️ Map v/a/s explicitly rather than "-map 0". "-map 0" also picks up
