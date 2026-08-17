@@ -8362,8 +8362,18 @@ class VideoConverterApp:
             self.encoder_mode.set(saved_encoder)
             self.video_codec.set(prefs.get('video_codec',       self.video_codec.get()))
             self.container_format.set(prefs.get('container',    self.container_format.get()))
-            # Always start in video-only mode regardless of saved preference
-            self.transcode_mode.set('video')
+            # Restore the saved transcode mode (2026-08-17). This used to be
+            # hardcoded to 'video' with the comment "Always start in video-only
+            # mode regardless of saved preference" -- no reason given. Tony:
+            # "All the settings save on exit except for one and it's bitten me a
+            # couple of times now." It was being SAVED correctly all along and
+            # then discarded here.
+            # Safe to restore because the UI is re-synced at the end of this
+            # function (on_transcode_mode_change below), which shows/hides the
+            # quality and audio panels to match -- that sync is presumably what
+            # the hardcode was avoiding before it existed.
+            _tm = prefs.get('transcode_mode', self.transcode_mode.get())
+            self.transcode_mode.set(_tm if _tm in ('video', 'audio', 'both') else 'video')
             self.quality_mode.set(prefs.get('quality_mode',     self.quality_mode.get()))
             # Bitrate intentionally not saved/loaded — always starts at default (2.0M)
             # to avoid hidden mismatches between saved value and UI slider position
