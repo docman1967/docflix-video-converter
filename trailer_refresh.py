@@ -185,7 +185,7 @@ def worklist(st):
     return [(p, v) for p, v in st["items"].items() if v.get("status") == "pending"]
 
 
-def run(st, limit=None, dry=False):
+def run(st, limit=None, dry=False, vcodec="h265"):
     ytdlp = find_ytdlp()
     if not ytdlp:
         print("  yt-dlp not found."); return st
@@ -228,9 +228,11 @@ def run(st, limit=None, dry=False):
 
         # ── download to temp, verify, then swap ───────────────────────────
         ext = os.path.splitext(path)[1] or ".mkv"
+        # AVI cannot carry HEVC; leave those alone rather than fail the item.
+        vc = "copy" if ext.lower() == ".avi" else vcodec
         tmp = path + ".new" + ext
         ok, msg = download_trailer(ytdlp, url, tmp, container=ext.lstrip("."),
-                                   strip=True, log=lambda s: None)
+                                   strip=True, log=lambda s: None, vcodec=vc)
         if not ok:
             fails += 1
             info["status"] = "pending"
@@ -339,6 +341,11 @@ def main():
     ap.add_argument("--status", action="store_true", help="progress so far")
     ap.add_argument("--limit", type=int, help="only attempt N items this run")
     ap.add_argument("--dry-run", action="store_true", help="resolve URLs, download nothing")
+    # ⚠️ Default is h265, NOT copy: Tony wants trailers to match the library
+    # (HEVC CQ32 10-bit). YouTube never serves HEVC, so this is always a local
+    # NVENC transcode -- a few seconds per 2-minute clip. --copy skips it.
+    ap.add_argument("--copy", action="store_true",
+                    help="keep the downloaded codec instead of re-encoding to HEVC")
     a = ap.parse_args()
     st = load_state()
     if a.scan or (a.run and not st["items"]):
@@ -346,7 +353,8 @@ def main():
         st = scan(st)
         save_state(st)
     if a.run:
-        st = run(st, limit=a.limit, dry=a.dry_run)
+        st = run(st, limit=a.limit, dry=a.dry_run,
+                 vcodec="copy" if a.copy else "h265")
         save_state(st)
     if a.report:
         write_report(st)

@@ -154,9 +154,13 @@ ATTEMPT_TIMEOUT_SECS = 150
 # ⚠️ YouTube never serves H.265; this is always a local transcode.
 VIDEO_CODECS = {
     "copy":  None,
-    "h264":  ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "28"],
-    "h265":  ["-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "28",
-              "-pix_fmt", "p010le"],
+    "h264":  ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr",
+              "-rc-lookahead", "32", "-cq", "32"],
+    # ⚠️ CQ 32 + p4 + 10-bit + lookahead 32 is not a guess -- it is byte-for-byte
+    # the Media Suite's library standard, so a trailer encoded here is
+    # indistinguishable from everything else Tony owns. Do not "improve" it.
+    "h265":  ["-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr",
+              "-rc-lookahead", "32", "-cq", "32", "-pix_fmt", "p010le"],
 }
 
 # What each container will actually carry. ⚠️ AVI is a 1992 container: no HEVC
