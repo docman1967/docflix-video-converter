@@ -10230,6 +10230,13 @@ class VideoConverterApp:
             'audio_codec': ('copy' if self.transcode_mode.get() == 'video'
                            else self.get_audio_codec_name()),
             'audio_bitrate': self.audio_bitrate.get(),
+            # ⚠️ Third place this has to be listed. The comment above is not a
+            # historical note -- I walked straight into it on 2026-08-17: added
+            # atmos_mode to _current_settings() and to file_settings, but not
+            # HERE, so file_settings' `settings.get('atmos_mode', 'preserve')`
+            # fell back to the default and the dropdown appeared to do nothing.
+            # Same silent failure as the 10-bit case. THREE dicts, all required.
+            'atmos_mode': self.atmos_mode_map.get(self.atmos_mode.get(), 'preserve'),
             'hw_decode': self.hw_decode.get(),
             'two_pass': self.two_pass.get(),
             'subtitle_settings': {},  # per-file override below
