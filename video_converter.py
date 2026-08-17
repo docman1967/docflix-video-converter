@@ -8816,6 +8816,7 @@ class VideoConverterApp:
                     'crf':            int(ov.get('crf',        settings['crf'])),
                     'audio_codec':    ov.get('audio_codec',    settings['audio_codec']),
                     'audio_bitrate':  ov.get('audio_bitrate',  settings['audio_bitrate']),
+                    'atmos_mode':     ov.get('atmos_mode',     settings.get('atmos_mode', 'preserve')),
                 })
             file_info['est_size'] = estimate_output_size(file_info['path'], eff)
         # Redraw tree
@@ -10290,6 +10291,12 @@ class VideoConverterApp:
                 'gpu_preset':     ov.get('preset',         settings['gpu_preset']),
                 'audio_codec':    ov.get('audio_codec',    settings['audio_codec']),
                 'audio_bitrate':  ov.get('audio_bitrate',  settings['audio_bitrate']),
+                # ⚠️ This dict is an EXPLICIT allow-list: anything not named here never
+                # reaches the encoder. atmos_mode was missing, so the dropdown recorded
+                # the choice, _current_settings() carried it, and this rebuild dropped
+                # it -- _add_audio_args saw None and fell back to 'preserve'. ADD NEW
+                # SETTINGS HERE TOO, or they will look ignored. (2026-08-17)
+                'atmos_mode':     ov.get('atmos_mode',     settings.get('atmos_mode', 'preserve')),
                 'hw_decode':         ov.get('hw_decode',      settings['hw_decode']),
                 'two_pass':          ov.get('two_pass',        settings['two_pass']),
                 'subtitle_settings': file_info.get('subtitle_settings', {}),
