@@ -147,11 +147,40 @@ def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
     if not ytdlp:
         return False, "yt-dlp not found. Install it and set its path."
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    fmt = ("bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b" if container == "mp4"
-           else "bv*+ba/b")
+    # ── Format selection: PREFER, don't pin ───────────────────────────────
+    # -f filters hard; -S expresses a preference and degrades gracefully. That
+    # distinction is the whole lesson here.
+    #
+    # We want 1080p h264 + AAC: h264 because the Roku cannot decode AV1, and
+    # YouTube's smallest 1080p IS AV1 -- so a naive "best video" lands on a
+    # trailer that makes Avalon transcode every time you browse past it.
+    #
+    # ⚠️ But do NOT express that as a hard -f filter. Format availability varies
+    # per video and per session, and format SELECTION cannot see that a URL will
+    # 403 at fetch time -- so a pinned codec fails the entire download instead of
+    # falling back. -S sorts by preference and takes the next best thing.
+    #
+    # ⚠️ And the reason trailers were 360p was never this string: yt-dlp was
+    # pinned at 2026.01.29 and could only see format 18 (640x360 pre-merged), so
+    # every format spec correctly picked "the best available". 91% of the 4,673
+    # trailers in the library are 360p because of that one stale binary. Keep
+    # yt-dlp current -- it degrades silently and reads as a downloader bug.
+    # A JS runtime (deno, symlinked to /usr/local/bin 2026-08-17) is now needed
+    # for full extraction; without one, formats quietly go missing again.
+    _FMT  = "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b"
+    _SORT = "res:1080,vcodec:h264,acodec:aac"
+    fmt = _FMT
     with tempfile.TemporaryDirectory() as td:
         tmp = os.path.join(td, "dl." + container)
-        cmd = [ytdlp, "-f", fmt, "--merge-output-format", container,
+        # ⚠️ --ignore-config is load-bearing. A user-level ~/.config/yt-dlp/config
+        # (Tony had one from 2026-01-31) applies to every invocation, and its
+        # --embed-thumbnail buried a cover.webp ATTACHMENT stream in the MKV. The
+        # tag-strip below then died with "Attachment stream 2 has no mimetype tag",
+        # which surfaced to Tony as "ffmpeg tag-strip failed" on a download that had
+        # actually succeeded. That config also silently redirects -o to ~/Videos.
+        # This tool must behave the same regardless of what is in that file.
+        cmd = [ytdlp, "--ignore-config", "-f", fmt, "-S", _SORT,
+               "--merge-output-format", container,
                "--no-playlist", "--no-progress", "-o", tmp, url]
         log("$ " + " ".join(cmd))
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -165,7 +194,14 @@ def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
             return False, f"yt-dlp failed (exit {p.returncode})."
         if strip:
             log("Stripping tags -> " + out_path)
-            fcmd = ["ffmpeg", "-y", "-i", tmp, "-map", "0", "-c", "copy",
+            # ⚠️ Map v/a/s explicitly rather than "-map 0". "-map 0" also picks up
+            # ATTACHMENT streams (embedded cover art), and stream-copying one into
+            # matroska fails because the mimetype tag does not survive -- header
+            # write dies with "incorrect codec parameters". Attachments are exactly
+            # the sort of thing we are stripping anyway.
+            fcmd = ["ffmpeg", "-y", "-i", tmp,
+                    "-map", "0:v", "-map", "0:a?", "-map", "0:s?",
+                    "-c", "copy",
                     "-map_metadata", "-1", "-map_chapters", "-1", out_path]
             fp = subprocess.run(fcmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             if fp.returncode != 0 or not os.path.isfile(out_path):
