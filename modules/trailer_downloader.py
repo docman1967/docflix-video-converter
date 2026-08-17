@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -140,6 +141,11 @@ def safe_filename(name):
     return re.sub(r'[<>:"/\\|?*]+', "", name or "").strip() or "trailer"
 
 
+# Wall-clock cap per download attempt. Trailers are 10-40MB; this is generous
+# for a poor connection while keeping the worst case (4 attempts) bounded.
+ATTEMPT_TIMEOUT_SECS = 150
+
+
 def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
                      log=lambda s: None, stop_flag=None):
     """Download `url` with yt-dlp into `container` (mkv|mp4); optionally strip metadata.
@@ -180,7 +186,9 @@ def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
         # which surfaced to Tony as "ffmpeg tag-strip failed" on a download that had
         # actually succeeded. That config also silently redirects -o to ~/Videos.
         # This tool must behave the same regardless of what is in that file.
+        # --socket-timeout: without it a stalled connection hangs forever.
         cmd = [ytdlp, "--ignore-config", "-f", fmt, "-S", _SORT,
+               "--socket-timeout", "30",
                "--merge-output-format", container,
                "--no-playlist", "--no-progress", "-o", tmp, url]
         # ── Retry on failure ──────────────────────────────────────────────
@@ -206,14 +214,55 @@ def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
                 try: os.remove(tmp)
                 except OSError: pass
             log("$ " + " ".join(cmd))
-            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            for line in p.stdout:
-                if stop_flag and stop_flag[0]:
-                    p.terminate()
-                    return False, "Cancelled."
-                log(line.rstrip())
-            p.wait()
-            rc = p.returncode
+            # ⚠️ start_new_session so the watchdog can kill the whole GROUP.
+            # Killing yt-dlp alone is not enough: it spawns ffmpeg to merge the
+            # video+audio streams, and that child INHERITS the stdout pipe. Kill
+            # only the parent and the pipe stays open, so "for line in p.stdout"
+            # blocks forever and the watchdog achieves nothing. Proved it with a
+            # fake yt-dlp that spawned a sleeping child (2026-08-17).
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 text=True, start_new_session=True)
+            # ── Watchdog ──────────────────────────────────────────────────
+            # ⚠️ Reading stdout line-by-line blocks. If yt-dlp hangs SILENTLY the
+            # loop below never runs again, so neither the elapsed check nor the
+            # Cancel button can fire -- the GUI just sits there. With the retry
+            # loop that is four indefinite hangs, not one. A separate poller is
+            # the only thing that can break out of it.
+            state = {"killed": None}
+
+            def _watch():
+                start = time.time()
+                while p.poll() is None:
+                    if stop_flag and stop_flag[0]:
+                        state["killed"] = "cancelled"
+                        break
+                    if time.time() - start > ATTEMPT_TIMEOUT_SECS:
+                        state["killed"] = "timeout"
+                        break
+                    time.sleep(0.5)
+                if state["killed"]:
+                    try:
+                        os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                    except Exception:
+                        try:
+                            p.kill()
+                        except Exception:
+                            pass
+
+            wd = threading.Thread(target=_watch, daemon=True)
+            wd.start()
+            try:
+                for line in p.stdout:
+                    log(line.rstrip())
+                p.wait()
+            finally:
+                rc = p.returncode
+                wd.join(timeout=2)
+            if state["killed"] == "cancelled":
+                return False, "Cancelled."
+            if state["killed"] == "timeout":
+                log(f"-- attempt {attempt} timed out after {ATTEMPT_TIMEOUT_SECS}s")
+                rc = rc or -1
             if rc == 0 and os.path.isfile(tmp):
                 break
         if rc != 0 or not os.path.isfile(tmp):
