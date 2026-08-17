@@ -193,7 +193,7 @@ def run(st, limit=None, dry=False, vcodec="h265"):
     todo = worklist(st)
     if limit:
         todo = todo[:limit]
-    print(f"  {len(todo)} to attempt (of {len(worklist(st))} pending)\n")
+    print(f"  {len(todo)} to attempt (of {len(worklist(st))} pending)\n", flush=True)
 
     fails = 0
     for n, (path, info) in enumerate(todo, 1):
@@ -218,7 +218,7 @@ def run(st, limit=None, dry=False, vcodec="h265"):
         if not url:
             info["status"] = "no_trailer"
             info["note"] = "TMDB has no trailer for this title"
-            print(f"  {label}  -> no trailer on TMDB (manual list)")
+            print(f"  {label}  -> no trailer on TMDB (manual list)", flush=True)
             save_state(st)
             continue
 
@@ -237,14 +237,14 @@ def run(st, limit=None, dry=False, vcodec="h265"):
             fails += 1
             info["status"] = "pending"
             info["last_error"] = msg[:120]
-            print(f"  {label}  FAIL {msg[:52]}")
+            print(f"  {label}  FAIL {msg[:52]}", flush=True)
         else:
             new_h = probe_height(tmp)
             if new_h > cur_h:
                 os.replace(tmp, path)
                 info.update(status="done", height=new_h, was=cur_h,
                             done_at=datetime.now().isoformat(timespec="seconds"))
-                print(f"  {label}  {cur_h}p -> {new_h}p")
+                print(f"  {label}  {cur_h}p -> {new_h}p", flush=True)
                 fails = 0
             else:
                 # ⚠️ Not a failure. The upload itself is this small -- mark it so
@@ -254,14 +254,14 @@ def run(st, limit=None, dry=False, vcodec="h265"):
                 except OSError:
                     pass
                 info.update(status="source_limited", best_available=new_h)
-                print(f"  {label}  source is only {new_h}p (manual list)")
+                print(f"  {label}  source is only {new_h}p (manual list)", flush=True)
                 fails = 0
         save_state(st)
 
         # ── politeness ────────────────────────────────────────────────────
         if n < len(todo) and not _stop["now"]:
             if fails >= PAUSE_AFTER:
-                print(f"  -- {fails} failures in a row; pausing {PAUSE_SECS//60} min")
+                print(f"  -- {fails} failures in a row; pausing {PAUSE_SECS//60} min", flush=True)
                 _sleep(PAUSE_SECS)
                 fails = 0
             else:
