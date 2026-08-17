@@ -145,9 +145,34 @@ def safe_filename(name):
 # for a poor connection while keeping the worst case (4 attempts) bounded.
 ATTEMPT_TIMEOUT_SECS = 150
 
+# ── Output codecs ─────────────────────────────────────────────────────────
+# "copy" is the default and stays the default: YouTube already hands us h264,
+# and re-encoding an already-lossy 2-minute clip buys nothing on its own.
+# H.265 exists for LIBRARY UNIFORMITY -- everything else Tony owns is HEVC
+# CQ32 -- and because it permanently sidesteps the AV1/Roku question if YouTube
+# ever stops serving h264. NVENC so it costs seconds, not minutes.
+# ⚠️ YouTube never serves H.265; this is always a local transcode.
+VIDEO_CODECS = {
+    "copy":  None,
+    "h264":  ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "28"],
+    "h265":  ["-c:v", "hevc_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "28",
+              "-pix_fmt", "p010le"],
+}
+
+# What each container will actually carry. ⚠️ AVI is a 1992 container: no HEVC
+# in any player worth the name, and no modern subtitle support. It is offered
+# because it was asked for, but h265+avi is refused rather than silently
+# producing a file nothing can play.
+CONTAINER_CODECS = {
+    "mkv": {"copy", "h264", "h265"},
+    "mp4": {"copy", "h264", "h265"},
+    "mov": {"copy", "h264", "h265"},
+    "avi": {"copy", "h264"},
+}
+
 
 def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
-                     log=lambda s: None, stop_flag=None):
+                     log=lambda s: None, stop_flag=None, vcodec="copy"):
     """Download `url` with yt-dlp into `container` (mkv|mp4); optionally strip metadata.
     Stream-copy (no re-encode) so it's fast. Returns (ok, message).
     MKV takes any codec; MP4 prefers MP4-friendly streams (h264/aac) so the copy-mux works."""
@@ -267,17 +292,28 @@ def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
                 break
         if rc != 0 or not os.path.isfile(tmp):
             return False, f"yt-dlp failed after {attempts} attempts (exit {rc})."
-        if strip:
-            log("Stripping tags -> " + out_path)
+        if vcodec not in CONTAINER_CODECS.get(container, {"copy"}):
+            return False, (f"{vcodec.upper()} is not supported in .{container} "
+                           f"-- pick MKV/MP4/MOV, or set the codec to Copy.")
+        if strip or vcodec != "copy":
+            log(("Encoding to " + vcodec + " -> " if vcodec != "copy"
+                 else "Stripping tags -> ") + out_path)
             # ⚠️ Map v/a/s explicitly rather than "-map 0". "-map 0" also picks up
             # ATTACHMENT streams (embedded cover art), and stream-copying one into
             # matroska fails because the mimetype tag does not survive -- header
             # write dies with "incorrect codec parameters". Attachments are exactly
             # the sort of thing we are stripping anyway.
             fcmd = ["ffmpeg", "-y", "-i", tmp,
-                    "-map", "0:v", "-map", "0:a?", "-map", "0:s?",
-                    "-c", "copy",
-                    "-map_metadata", "-1", "-map_chapters", "-1", out_path]
+                    "-map", "0:v", "-map", "0:a?"]
+            # AVI cannot carry subtitle streams at all; everything else can.
+            if container != "avi":
+                fcmd += ["-map", "0:s?"]
+            venc = VIDEO_CODECS.get(vcodec)
+            if venc:
+                fcmd += venc + ["-c:a", "aac", "-b:a", "192k"]
+            else:
+                fcmd += ["-c", "copy"]
+            fcmd += ["-map_metadata", "-1", "-map_chapters", "-1", out_path]
             fp = subprocess.run(fcmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             if fp.returncode != 0 or not os.path.isfile(out_path):
                 log(fp.stdout)
@@ -363,6 +399,7 @@ def open_trailer_downloader(app):
     v_url    = tk.StringVar()
     v_dest   = tk.StringVar(value=tprefs.get("dest", os.path.expanduser("~")))
     v_container = tk.StringVar(value=tprefs.get("container", "mkv"))
+    v_vcodec    = tk.StringVar(value=tprefs.get("vcodec", "copy"))
     v_strip     = tk.BooleanVar(value=tprefs.get("strip", True))
     v_source    = tk.StringVar(value=tprefs.get("source", "tmdb"))
 
@@ -543,6 +580,7 @@ def open_trailer_downloader(app):
         def worker():
             ok, msg = download_trailer(ytdlp_path[0], url, out,
                                        container=v_container.get(), strip=v_strip.get(),
+                                       vcodec=v_vcodec.get(),
                                        log=log, stop_flag=stop_flag)
 
             def done():
@@ -553,6 +591,7 @@ def open_trailer_downloader(app):
                     tp = load_trailer_prefs()
                     tp.update({"kind": v_kind.get(), "dest": v_dest.get(),
                                "container": v_container.get(), "strip": v_strip.get(),
+                               "vcodec": v_vcodec.get(),
                                "source": v_source.get()})
                     save_trailer_prefs(tp)
                     messagebox.showinfo("Trailer Grabber", "Trailer saved:\n" + out, parent=win)
@@ -575,7 +614,17 @@ def open_trailer_downloader(app):
     cmenu = tk.Menu(smenu, tearoff=0)
     cmenu.add_radiobutton(label="MKV", variable=v_container, value="mkv")
     cmenu.add_radiobutton(label="MP4", variable=v_container, value="mp4")
+    cmenu.add_radiobutton(label="MOV", variable=v_container, value="mov")
+    cmenu.add_radiobutton(label="AVI  (no subtitles, no H.265)",
+                          variable=v_container, value="avi")
     smenu.add_cascade(label="Container", menu=cmenu)
+    vmenu = tk.Menu(smenu, tearoff=0)
+    vmenu.add_radiobutton(label="Copy  (no re-encode, fastest)",
+                          variable=v_vcodec, value="copy")
+    vmenu.add_radiobutton(label="H.264  (NVENC)", variable=v_vcodec, value="h264")
+    vmenu.add_radiobutton(label="H.265 / HEVC  (NVENC, matches library)",
+                          variable=v_vcodec, value="h265")
+    smenu.add_cascade(label="Video Codec", menu=vmenu)
     smenu.add_checkbutton(label="Strip metadata tags", variable=v_strip)
     smenu.add_separator()
     smenu.add_command(label="Set yt-dlp Path…", command=set_ytdlp)
