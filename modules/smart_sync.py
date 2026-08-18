@@ -57,8 +57,15 @@ def smart_sync(video_path, cues, model_size='base', language=None,
                 if 'is_offline_mode' in _err_msg:
                     progress_callback(
                         "WhisperX/transformers version conflict: " + _err_msg)
+                    # ⚠️ The old advice was "pin transformers<4.45". That is
+                    # BACKWARDS now: is_offline_mode only breaks whisperx 3.3.x,
+                    # and pinning transformers back is precisely what forces pip
+                    # to install that ancient whisperx — which drags in a cuDNN 8
+                    # ctranslate2 that cannot run on this box, and shares
+                    # site-packages with Merlin's voice STT. Upgrade forward.
                     progress_callback(
-                        "Fix: pip install --user 'transformers<4.45'")
+                        "Fix: pip install --user --break-system-packages "
+                        "-U whisperx 'ctranslate2>=4.5'")
                 else:
                     progress_callback("whisperx not installed")
             return None
@@ -400,8 +407,11 @@ def smart_sync(video_path, cues, model_size='base', language=None,
                 if progress_callback:
                     progress_callback(f"Failed to load WhisperX model: {e}")
                     if 'is_offline_mode' in str(e) or 'transformers' in str(e):
+                        # See the note at the top of this module's whisperx import:
+                        # pinning transformers back installs an obsolete whisperx.
                         progress_callback(
-                            "Fix: pip install --user 'transformers<4.45'")
+                            "Fix: pip install --user --break-system-packages "
+                            "-U whisperx 'ctranslate2>=4.5'")
                 return None
         else:
             if progress_callback:

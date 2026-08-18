@@ -4457,7 +4457,12 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                         [sys.executable, '-m', 'pip', 'install',
                                          '--user', '--break-system-packages',
                                          '--progress-bar', 'off',
-                                         'whisperx', 'transformers<4.45'],
+                                         # ctranslate2>=4.5, NOT transformers<4.45:
+                                         # the old pin forces whisperx 3.3.1 and a
+                                         # cuDNN 8 ctranslate2 that cannot load here,
+                                         # and it shares site-packages with Merlin's
+                                         # voice STT. (2026-08-18)
+                                         'whisperx', 'ctranslate2>=4.5'],
                                         stdout=subprocess.PIPE,
                                         stderr=subprocess.STDOUT,
                                         text=True)

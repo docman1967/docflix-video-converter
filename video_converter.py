@@ -2006,7 +2006,10 @@ def smart_sync(video_path, cues, model_size='base', language=None,
                     progress_callback(
                         "WhisperX/transformers version conflict: " + _err_msg)
                     progress_callback(
-                        "Fix: pip install --user 'transformers<4.45'")
+                        # NOT transformers<4.45 — that pin installs whisperx
+                        # 3.3.1 and a cuDNN 8 ctranslate2. Upgrade forward.
+                        "Fix: pip install --user --break-system-packages "
+                        "-U whisperx 'ctranslate2>=4.5'")
                 else:
                     progress_callback("whisperx not installed")
             return None
@@ -2349,7 +2352,10 @@ def smart_sync(video_path, cues, model_size='base', language=None,
                     progress_callback(f"Failed to load WhisperX model: {e}")
                     if 'is_offline_mode' in str(e) or 'transformers' in str(e):
                         progress_callback(
-                            "Fix: pip install --user 'transformers<4.45'")
+                            # NOT transformers<4.45 — that pin installs whisperx
+                        # 3.3.1 and a cuDNN 8 ctranslate2. Upgrade forward.
+                        "Fix: pip install --user --break-system-packages "
+                        "-U whisperx 'ctranslate2>=4.5'")
                 return None
         else:
             if progress_callback:

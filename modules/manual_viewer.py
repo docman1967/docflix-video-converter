@@ -37,7 +37,7 @@ MANUAL_SECTIONS = [
         ("table_row", "pytesseract|Python Tesseract bindings|pip install pytesseract"),
         ("table_row", "pyspellchecker|Subtitle spell checker|pip install pyspellchecker"),
         ("table_row", "faster-whisper|Smart Sync (Standard)|pip install faster-whisper"),
-        ("table_row", "whisperx|Smart Sync (Precise)|pip install whisperx 'transformers<4.45'"),
+        ("table_row", "whisperx|Smart Sync (Precise)|pip install whisperx 'ctranslate2>=4.5'"),
         ("table_row", "langdetect|Subtitle language detection|pip install langdetect"),
         ("table_row", "mpv|Quick Sync video playback|sudo apt install mpv"),
         ("p", ""),

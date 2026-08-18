@@ -1018,17 +1018,42 @@ def transcribe_whisperx(
     WhisperX provides better word-level alignment via wav2vec2 forced
     phoneme alignment.  Speaker diarization is intentionally not used.
     """
+    import torch
     import whisperx
+
+    # ⚠️ PyTorch 2.6 flipped torch.load's `weights_only` default False → True.
+    # WhisperX's bundled VAD (whisperx/assets/pytorch_model.bin) is a pytorch-
+    # lightning checkpoint — it pickles whole objects, not a bare state_dict —
+    # so the new safe-unpickler refuses it and EVERY model size fails
+    # identically at load time ("Unsupported global: omegaconf...ListConfig").
+    # That identical-failure-across-models is the tell: it's the VAD, not the ASR.
+    #
+    # add_safe_globals() is not the fix. Allowlisting ListConfig just surfaces
+    # TorchVersion behind it, and another behind that — a lightning checkpoint
+    # has an open-ended set of globals. Verified 2026-08-18 on torch 2.8.0+cu128.
+    #
+    # So: scope weights_only=False to this load only, and always restore. The
+    # checkpoint ships inside the whisperx package we installed — same trust
+    # level as the code executing this line.
+    _orig_load = torch.load
+
+    def _load_trusted(*a, **kw):
+        kw["weights_only"] = False
+        return _orig_load(*a, **kw)
 
     compute_type = "float16" if device == "cuda" else "int8"
     print(f"🤖  Loading WhisperX model  : {model_size}  (device={device}, compute={compute_type})")
-    model = whisperx.load_model(
-        model_size,
-        device,
-        compute_type=compute_type,
-        language=language,
-        task=task,
-    )
+    torch.load = _load_trusted
+    try:
+        model = whisperx.load_model(
+            model_size,
+            device,
+            compute_type=compute_type,
+            language=language,
+            task=task,
+        )
+    finally:
+        torch.load = _orig_load    # restore even if the load raises
 
     task_label = "Translating → English" if task == "translate" else "Transcribing"
     print(f"🔊  {task_label} with WhisperX…   (this may take a while for long files)\n")

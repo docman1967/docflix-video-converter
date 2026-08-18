@@ -1181,7 +1181,7 @@ def open_whisper_transcriber(app):
         Shows a modal dialog with an indeterminate progress bar while
         pip runs in a background thread.  Returns True on success.
 
-        pip_args: list of extra pip arguments, e.g. ["whisperx", "transformers<4.45"]
+        pip_args: list of extra pip arguments, e.g. ["whisperx", "ctranslate2>=4.5"]
                   If None, defaults to [package_name].
         """
         if pip_args is None:
@@ -1288,7 +1288,23 @@ def open_whisper_transcriber(app):
         Returns True if installed successfully, False otherwise."""
         if backend == 'whisperx':
             display_name = 'WhisperX'
-            pip_args = ['whisperx', 'transformers<4.45']
+            # ⚠️ DO NOT PIN transformers BACK HERE. This used to read
+            # ['whisperx', 'transformers<4.45'] to dodge whisperx 3.3.x importing
+            # transformers.utils.is_offline_mode (moved in transformers 4.45).
+            # That pin became a trap: modern whisperx REQUIRES transformers>=4.45,
+            # so pip satisfied the constraint by backtracking to whisperx 3.3.1 —
+            # which hard-pins faster-whisper==1.1.0 and ctranslate2<4.5.0. And
+            # ctranslate2 4.4 links cuDNN 8 while this box has cuDNN 9, so the ASR
+            # engine could not load at all.
+            #
+            # It reached well past the Suite: merlin-voice.service runs
+            # /usr/bin/python3 with NO venv, so it shares this same ~/.local
+            # site-packages and uses whisperx for speech-to-text. Clicking "yes"
+            # on this dialog on 2026-08-18 took Merlin's ears out.
+            #
+            # ctranslate2>=4.5 is explicit on purpose — it keeps pip from ever
+            # backtracking into a cuDNN 8 build again, whatever whisperx asks for.
+            pip_args = ['whisperx', 'ctranslate2>=4.5']
         else:
             display_name = 'faster-whisper'
             pip_args = ['faster-whisper']
@@ -1326,8 +1342,11 @@ def open_whisper_transcriber(app):
                 ok = _pip_install_backend("faster-whisper", ["faster-whisper"])
             else:
                 # No — install whisperx
+                # ctranslate2>=4.5, NOT transformers<4.45 — see the long note in
+                # _prompt_install_backend. The old pin installs whisperx 3.3.1,
+                # which brings a cuDNN 8 ctranslate2 this box cannot load.
                 ok = _pip_install_backend("WhisperX",
-                                          ["whisperx", "transformers<4.45"])
+                                          ["whisperx", "ctranslate2>=4.5"])
             if not ok:
                 _log_write("Backend installation failed.", "error")
                 _status_var.set("Installation failed -- see log")
