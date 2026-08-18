@@ -71,13 +71,24 @@ def tmdb_search(api_key, query, kind):
     return out
 
 
-def tmdb_trailer_url(api_key, kind, tmdb_id):
-    """Best YouTube trailer URL for a TMDB movie/tv id, or None.
-    Preference: official Trailer > any Trailer > Teaser; YouTube only."""
+def tmdb_trailer_candidates(api_key, kind, tmdb_id, limit=4):
+    """Ordered YouTube trailer URLs for a TMDB id, best first.
+
+    ⚠️ Ordering considers TMDB's `size` field (the upload's vertical resolution)
+    as well as type/official. The original scored only on type and official and
+    ignored size entirely — which is how Downton Abbey resolved to a 480p entry
+    and, worse, why a failed download was simply given up on. Better Call Saul
+    has FOUR official 1080p trailers on TMDB; the 2026-08-17 bulk run picked one,
+    hit the intermittent 403 four times, and abandoned the title with three
+    perfectly good alternatives untried.
+
+    Returns a list so the caller can fall through on failure.
+    """
     data = _tmdb_get(api_key, f"/{kind}/{tmdb_id}/videos")
     vids = [v for v in data.get("results", []) if v.get("site") == "YouTube" and v.get("key")]
     if not vids:
-        return None
+        return []
+
     def score(v):
         t = (v.get("type") or "").lower()
         s = (10 if t == "trailer" else 5 if t == "teaser" else 0)
@@ -85,8 +96,24 @@ def tmdb_trailer_url(api_key, kind, tmdb_id):
             s += 3
         if "official" in (v.get("name") or "").lower():
             s += 1
+        # size is 360/480/720/1080/2160 — worth ~1 point per tier, enough to
+        # break ties between equal-type entries without ever letting a
+        # high-res featurette outrank an actual trailer.
+        try:
+            sz = int(v.get("size") or 0)
+        except (TypeError, ValueError):
+            sz = 0
+        s += {2160: 4, 1080: 3, 720: 2, 480: 1}.get(sz, 0)
         return s
-    return _YT_WATCH.format(max(vids, key=score)["key"])
+
+    ranked = sorted(vids, key=score, reverse=True)
+    return [_YT_WATCH.format(v["key"]) for v in ranked[:limit]]
+
+
+def tmdb_trailer_url(api_key, kind, tmdb_id):
+    """Best single YouTube trailer URL, or None. (Kept for the GUI.)"""
+    c = tmdb_trailer_candidates(api_key, kind, tmdb_id, limit=1)
+    return c[0] if c else None
 
 
 # ── TVDB (v4: login → bearer token; trailer coverage is thinner than TMDB) ──
@@ -144,6 +171,21 @@ def safe_filename(name):
 # Wall-clock cap per download attempt. Trailers are 10-40MB; this is generous
 # for a poor connection while keeping the worst case (4 attempts) bounded.
 ATTEMPT_TIMEOUT_SECS = 150
+
+# Failures that will NEVER succeed on retry. Retrying these wastes time and
+# makes needless requests to YouTube -- and worse, the generic "failed after 4
+# attempts" message hides WHY, so the manual worklist says nothing actionable.
+# (All four of TMDB's Better Call Saul trailers are region-blocked; the bulk run
+#  hammered them 16 times and reported it as a plain failure. 2026-08-18.)
+PERMANENT_ERRORS = (
+    "not made this video available in your country",
+    "video is unavailable",
+    "video is private",
+    "video has been removed",
+    "account associated with this video has been terminated",
+    "sign in to confirm your age",
+    "members-only content",
+)
 
 # ── Output codecs ─────────────────────────────────────────────────────────
 # "copy" is the default and stays the default: YouTube already hands us h264,
@@ -234,7 +276,7 @@ def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
         #
         # This is exactly Tony's own workaround -- "if I keep hitting fetch
         # trailer, eventually it will download it" -- just automated.
-        rc, attempts = None, 4
+        rc, attempts, last_err = None, 4, ""
         for attempt in range(1, attempts + 1):
             if attempt > 1:
                 log(f"-- retry {attempt} of {attempts} (YouTube 403s intermittently)")
@@ -249,6 +291,7 @@ def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
             # only the parent and the pipe stays open, so "for line in p.stdout"
             # blocks forever and the watchdog achieves nothing. Proved it with a
             # fake yt-dlp that spawned a sleeping child (2026-08-17).
+            err_lines = []
             p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                  text=True, start_new_session=True)
             # ── Watchdog ──────────────────────────────────────────────────
@@ -282,7 +325,10 @@ def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
             wd.start()
             try:
                 for line in p.stdout:
-                    log(line.rstrip())
+                    line = line.rstrip()
+                    if "ERROR" in line:
+                        err_lines.append(line)
+                    log(line)
                 p.wait()
             finally:
                 rc = p.returncode
@@ -294,7 +340,15 @@ def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
                 rc = rc or -1
             if rc == 0 and os.path.isfile(tmp):
                 break
+            last_err = err_lines[-1] if err_lines else last_err
+            low = last_err.lower()
+            if any(k in low for k in PERMANENT_ERRORS):
+                # deterministic -- retrying cannot help
+                reason = last_err.split(":")[-1].strip() or last_err
+                return False, reason[:120]
         if rc != 0 or not os.path.isfile(tmp):
+            if last_err:
+                return False, last_err.split("ERROR:")[-1].strip()[:120]
             return False, f"yt-dlp failed after {attempts} attempts (exit {rc})."
         if vcodec not in CONTAINER_CODECS.get(container, {"copy"}):
             return False, (f"{vcodec.upper()} is not supported in .{container} "

@@ -63,7 +63,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from modules.trailer_downloader import (            # noqa: E402
-    download_trailer, find_ytdlp, tmdb_search, tmdb_trailer_url,
+    download_trailer, find_ytdlp, tmdb_search, tmdb_trailer_candidates,
 )
 from modules.constants import BETA_DEFAULT_TMDB_KEY  # noqa: E402
 
@@ -204,18 +204,19 @@ def run(st, limit=None, dry=False, vcodec="h265"):
         label = f"[{n}/{len(todo)}] {title[:44]}"
 
         # ── find a trailer URL ────────────────────────────────────────────
-        url = None
+        urls = []
         try:
             hits = tmdb_search(key, title, "tv" if kind == "tv" else "movie")
             if info.get("year"):
                 exact = [h for h in hits if str(h.get("year")) == str(info["year"])]
                 hits = exact or hits
             if hits:
-                url = tmdb_trailer_url(key, "tv" if kind == "tv" else "movie", hits[0]["id"])
+                urls = tmdb_trailer_candidates(key, "tv" if kind == "tv" else "movie",
+                                               hits[0]["id"])
         except Exception as e:
-            print(f"  {label}  lookup error: {str(e)[:50]}")
+            print(f"  {label}  lookup error: {str(e)[:50]}", flush=True)
 
-        if not url:
+        if not urls:
             info["status"] = "no_trailer"
             info["note"] = "TMDB has no trailer for this title"
             print(f"  {label}  -> no trailer on TMDB (manual list)", flush=True)
@@ -223,7 +224,7 @@ def run(st, limit=None, dry=False, vcodec="h265"):
             continue
 
         if dry:
-            print(f"  {label}  would fetch {url}")
+            print(f"  {label}  would fetch {urls[0]}  ({len(urls)} candidate(s))", flush=True)
             continue
 
         # ── download to temp, verify, then swap ───────────────────────────
@@ -231,8 +232,20 @@ def run(st, limit=None, dry=False, vcodec="h265"):
         # AVI cannot carry HEVC; leave those alone rather than fail the item.
         vc = "copy" if ext.lower() == ".avi" else vcodec
         tmp = path + ".new" + ext
-        ok, msg = download_trailer(ytdlp, url, tmp, container=ext.lstrip("."),
-                                   strip=True, log=lambda s: None, vcodec=vc)
+        # ⚠️ Fall through the candidates. download_trailer already retries the
+        # intermittent 403 four times against ONE url; if that url is simply bad
+        # we move to the next TMDB entry rather than abandoning a title that has
+        # three other 1080p trailers sitting there (Better Call Saul, 2026-08-17).
+        ok, msg = False, "no candidates"
+        for ci, url in enumerate(urls, 1):
+            ok, msg = download_trailer(ytdlp, url, tmp, container=ext.lstrip("."),
+                                       strip=True, log=lambda s: None, vcodec=vc)
+            if ok:
+                if ci > 1:
+                    print(f"  {label}  (candidate {ci} of {len(urls)})", flush=True)
+                break
+            if _stop["now"]:
+                break
         if not ok:
             fails += 1
             info["status"] = "pending"
