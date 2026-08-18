@@ -64,8 +64,11 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from modules.trailer_downloader import (            # noqa: E402
     download_trailer, find_ytdlp, tmdb_search, tmdb_trailer_candidates,
+    tvdb_login, tvdb_search, tvdb_trailer_url,
 )
-from modules.constants import BETA_DEFAULT_TMDB_KEY  # noqa: E402
+from modules.constants import (                     # noqa: E402
+    BETA_DEFAULT_TMDB_KEY, BETA_DEFAULT_TVDB_KEY,
+)
 
 DB       = os.path.expanduser("~/scripts/video_database/media_master.db")
 STATE    = os.path.expanduser("~/.local/share/docflix/trailer_refresh.json")
@@ -165,7 +168,10 @@ def scan(st, verbose=True):
         for path in find_trailers(folder):
             seen += 1
             prev = st["items"].get(path, {})
-            if prev.get("status") in ("done", "source_limited", "no_trailer"):
+            # "keep" = Tony looked and decided the current trailer stays. That is a
+            # judgement, not a failure — it must survive a rescan or the job will
+            # keep re-proposing something he already said no to.
+            if prev.get("status") in ("done", "source_limited", "no_trailer", "keep"):
                 continue
             h = probe_height(path)
             st["items"][path] = {
@@ -190,6 +196,17 @@ def run(st, limit=None, dry=False, vcodec="h265"):
     if not ytdlp:
         print("  yt-dlp not found."); return st
     key = BETA_DEFAULT_TMDB_KEY
+    # ⚠️ TVDB as a FALLBACK, not a replacement: TMDB has far better trailer
+    # coverage overall, but it has nothing at all for a meaningful slice of the
+    # library. Spot-checked 10 of the "no trailer on TMDB" titles on 2026-08-18
+    # and TVDB had 3 of them (Amazing Stories, Banshee, Batman and Robin 1949).
+    # At ~20% of items hitting that bucket, this is worth a few hundred manual
+    # lookups Tony doesn't have to do.
+    tvdb_tok = None
+    try:
+        tvdb_tok = tvdb_login(BETA_DEFAULT_TVDB_KEY)
+    except Exception as e:
+        print(f"  (TVDB fallback unavailable: {str(e)[:50]})", flush=True)
     todo = worklist(st)
     if limit:
         todo = todo[:limit]
@@ -216,10 +233,21 @@ def run(st, limit=None, dry=False, vcodec="h265"):
         except Exception as e:
             print(f"  {label}  lookup error: {str(e)[:50]}", flush=True)
 
+        if not urls and tvdb_tok:
+            try:
+                k = "tv" if kind == "tv" else "movie"
+                h = tvdb_search(tvdb_tok, title, k)
+                u = tvdb_trailer_url(tvdb_tok, k, h[0]["id"]) if h else None
+                if u:
+                    urls = [u]
+                    info["source"] = "tvdb"
+            except Exception:
+                pass
+
         if not urls:
             info["status"] = "no_trailer"
-            info["note"] = "TMDB has no trailer for this title"
-            print(f"  {label}  -> no trailer on TMDB (manual list)", flush=True)
+            info["note"] = "no trailer on TMDB or TVDB"
+            print(f"  {label}  -> no trailer on TMDB or TVDB (manual list)", flush=True)
             save_state(st)
             continue
 
@@ -294,41 +322,62 @@ def _sleep(secs):
 
 
 # ── report ───────────────────────────────────────────────────────────────────
+def _yt_search(title, kind, year=None):
+    import urllib.parse
+    q = f"{title} {year or ''} {'TV series' if kind == 'tv' else ''} official trailer"
+    return "https://www.youtube.com/results?search_query=" + urllib.parse.quote(q.strip())
+
+
 def write_report(st):
+    """A worklist Tony can actually work from.
+
+    Not just names: what he HAS, why the job couldn't do it, a ready-made
+    YouTube search, and the folder to drop the file in. Checkboxes because it's
+    a list to work through over time, not a status dump.
+    ⚠️ Everything here is a JUDGEMENT case -- the automated pass handles the
+    labour, these are the ones that need a person to go looking.
+    """
     no_tr = [(p, v) for p, v in st["items"].items() if v.get("status") == "no_trailer"]
     low   = [(p, v) for p, v in st["items"].items() if v.get("status") == "source_limited"]
     errs  = [(p, v) for p, v in st["items"].items()
              if v.get("status") == "pending" and v.get("last_error")]
+
+    def entry(f, v, note):
+        yr = f" ({v['year']})" if v.get("year") else ""
+        f.write(f"- [ ] **{v['title']}**{yr} — {note}  \n")
+        f.write(f"      [search YouTube]({_yt_search(v['title'], v.get('kind'), v.get('year'))})  \n")
+        f.write(f"      `{v['folder']}`\n")
+
     os.makedirs(os.path.dirname(REPORT), exist_ok=True)
     with open(REPORT, "w") as f:
         f.write("# Trailers needing a human\n\n")
-        f.write(f"_Generated {datetime.now():%Y-%m-%d %H:%M} by trailer_refresh.py_\n\n")
-        f.write("These are the ones the bulk job cannot fix by itself. Everything\n"
-                "else has been replaced or was already fine.\n\n")
+        f.write(f"_Generated {datetime.now():%Y-%m-%d %H:%M} — "
+                f"{len(no_tr) + len(low) + len(errs)} items_\n\n")
+        f.write("The bulk job handles everything it can. These need someone to go\n"
+                "looking. Paste a YouTube URL straight into the Trailer Grabber\n"
+                "(Media Suite → Trailer Grabber → Trailer URL) and it'll download,\n"
+                "encode to HEVC and drop it in the right folder.\n\n")
 
-        f.write(f"## No trailer on TMDB ({len(no_tr)})\n\n")
-        f.write("Nothing found automatically — worth a manual search. The Trailer\n"
-                "Grabber takes a pasted YouTube URL directly.\n\n")
-        for p, v in sorted(no_tr, key=lambda x: x[1]["title"]):
-            f.write(f"- **{v['title']}**"
-                    + (f" ({v['year']})" if v.get("year") else "")
-                    + f"  \n  `{v['folder']}`\n")
+        f.write(f"## No trailer on TMDB or TVDB ({len(no_tr)})\n\n")
+        f.write("Neither database has a video entry, so there was nothing to try.\n\n")
+        for _p, v in sorted(no_tr, key=lambda x: x[1]["title"].lower()):
+            entry(f, v, f"nothing on TMDB or TVDB — currently {v.get('height', '?')}p")
 
         f.write(f"\n## Source is genuinely low-res ({len(low)})\n\n")
-        f.write("A trailer was found and downloaded, but it is no better than what\n"
-                "you already have — that resolution is all the uploader ever posted.\n"
-                "Only worth chasing if you can find a different upload.\n\n")
-        for p, v in sorted(low, key=lambda x: x[1]["title"]):
-            f.write(f"- **{v['title']}** — have {v.get('height')}p, "
-                    f"best found {v.get('best_available')}p  \n  `{v['folder']}`\n")
+        f.write("A trailer was found and downloaded, but it was no better than what\n"
+                "you already have — that's all the uploader ever posted. Only worth\n"
+                "chasing if a different upload exists.\n\n")
+        for _p, v in sorted(low, key=lambda x: x[1]["title"].lower()):
+            entry(f, v, f"have {v.get('height')}p, best on TMDB was "
+                        f"{v.get('best_available')}p")
 
-        if errs:
-            f.write(f"\n## Still failing ({len(errs)})\n\n")
-            f.write("These will be retried on the next run — listed only so nothing\n"
-                    "disappears quietly.\n\n")
-            for p, v in sorted(errs, key=lambda x: x[1]["title"])[:200]:
-                f.write(f"- **{v['title']}** — {v.get('last_error','?')[:80]}\n")
-    print(f"  report -> {REPORT}")
+        f.write(f"\n## Failed for a reason worth reading ({len(errs)})\n\n")
+        f.write("Region blocks, private or removed videos, age-gates. The reason is\n"
+                "verbatim from yt-dlp — a region block usually just means finding a\n"
+                "different upload of the same trailer.\n\n")
+        for _p, v in sorted(errs, key=lambda x: x[1]["title"].lower()):
+            entry(f, v, f"{v.get('last_error', '?')} (have {v.get('height', '?')}p)")
+    print(f"  report -> {REPORT}", flush=True)
 
 
 def status(st):
@@ -336,7 +385,7 @@ def status(st):
     c = Counter(v.get("status", "?") for v in st["items"].values())
     total = sum(c.values())
     print(f"  {total} trailers known")
-    for k in ("pending", "done", "ok", "source_limited", "no_trailer"):
+    for k in ("pending", "done", "ok", "source_limited", "no_trailer", "keep"):
         if c.get(k):
             print(f"     {k:16} {c[k]:5}")
     done = [v for v in st["items"].values() if v.get("status") == "done"]
