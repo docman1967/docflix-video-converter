@@ -1418,6 +1418,13 @@ def show_enhanced_media_info(app, filepath, parent=None):
             chapter_list[idx]['title'] = new_title
             ch_tree.set(item, 'title', new_title)
             _ch_dismiss_edit()
+            # Chapters are a plain list, not a Tk variable, so no trace fires for
+            # them — refresh the Save button by hand. (See the dirty-state note
+            # where _refresh_save_state is defined.)
+            try:
+                _refresh_save_state()
+            except NameError:
+                pass    # dialog still being built; state is set once at the end
 
         def _cancel_edit(event=None):
             _ch_dismiss_edit()
@@ -1576,11 +1583,19 @@ def show_enhanced_media_info(app, filepath, parent=None):
     # ══════════════════════════════════════════════════════════════
     # Save / Remux
     # ══════════════════════════════════════════════════════════════
+    # ⚠️ True while a remux is in flight. _refresh_save_state() must not re-enable the
+    # Save button mid-save — the button text stays 'Save Changes' throughout (only the
+    # progress LABEL changes), so there is no visual state to key off. Without this an
+    # edit made during the remux would fire a trace and hand the user a live Save
+    # button pointing at a file ffmpeg is currently writing.
+    _saving = [False]
+
     def _apply_changes():
         """Build ffmpeg remux command and apply metadata/disposition changes."""
         if not _has_changes():
             return
 
+        _saving[0] = True
         save_btn.configure(state='disabled')
         dlg.after(0, _show_progress)
 
@@ -1709,6 +1724,7 @@ def show_enhanced_media_info(app, filepath, parent=None):
                     if os.path.exists(tmp_out):
                         os.unlink(tmp_out)
                     dlg.after(0, _hide_progress)
+                    _saving[0] = False
                     dlg.after(0, lambda: save_btn.configure(text='Save Changes', state='normal'))
                     return
 
@@ -1729,6 +1745,7 @@ def show_enhanced_media_info(app, filepath, parent=None):
                     except OSError:
                         pass
                 dlg.after(0, _hide_progress)
+                _saving[0] = False
                 dlg.after(0, lambda: save_btn.configure(text='Save Changes', state='normal'))
             finally:
                 # Clean up temp chapter metadata file
@@ -1790,6 +1807,7 @@ def show_enhanced_media_info(app, filepath, parent=None):
 
         dlg.after(1500, _hide_progress)
         save_btn.configure(state='disabled')
+        _saving[0] = False
         dlg.after(2000, lambda: save_btn.configure(text='Save Changes',
                                                      state='normal' if _has_changes() else 'disabled'))
 
@@ -1846,6 +1864,41 @@ def show_enhanced_media_info(app, filepath, parent=None):
 
     save_btn = ttk.Button(btn_frame, text='Save Changes', command=_apply_changes)
     save_btn.pack(side='right', padx=(4, 0))
+
+    # ── Live dirty-state tracking ────────────────────────────────────────────
+    # ⚠️ BUG (Tony, 2026-08-20): "make a change and save it, then find something else
+    # that needs changing in that same file — the save button doesn't come back."
+    #
+    # Cause: NOTHING watched the edit variables. save_btn was only ever touched in
+    # three places — created (enabled by default), disabled when a save starts, and
+    # re-evaluated ONCE ~2s after a save finishes. Since _apply_changes() refreshes
+    # `originals` on success, that post-save check correctly finds no changes and
+    # leaves the button disabled — and no later edit could bring it back.
+    # _has_changes() was always correct, which is exactly why the Close prompt still
+    # caught the edits. The button was never a dirty indicator; it merely happened to
+    # start out enabled.
+    #
+    # Fix: trace every edit var so the button is a live answer to _has_changes().
+    def _refresh_save_state(*_args):
+        try:
+            if not save_btn.winfo_exists():
+                return
+            # ⚠️ Never fight an in-progress save. The button TEXT stays 'Save Changes'
+            # for the whole remux (only the progress label changes), so there is no
+            # visual state to test — the explicit _saving flag is the only safe guard.
+            if _saving[0]:
+                return
+            save_btn.configure(state='normal' if _has_changes() else 'disabled')
+        except Exception:
+            pass
+
+    for _v in [container_title_var, *edit_vars.values()]:
+        try:
+            _v.trace_add('write', _refresh_save_state)
+        except Exception:
+            pass
+    # Correct state on open: disabled until something actually changes.
+    _refresh_save_state()
 
     _close_after_save = [False]
 
