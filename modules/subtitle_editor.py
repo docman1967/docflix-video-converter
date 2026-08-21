@@ -62,7 +62,13 @@ from .subtitle_filters import (
     is_names_db_available, get_names_db_count,
     NAMES_DB_DIR, NAMES_DB_URLS,
 )
-from .smart_sync import smart_sync
+# ⚠️ smart_sync now runs in the ISOLATED ENGINE (a dedicated venv), not in this
+# process — same signature, same return shape. The Suite must not import whisperx or
+# torch into its own interpreter, and must never install them into the user's Python.
+# See modules/whisper_engine.py for why. The in-process implementation still lives in
+# modules/smart_sync.py; the worker imports and runs THAT, so there is one algorithm,
+# not a fork.
+from .whisper_client import smart_sync
 from .waveform_timeline import WaveformTimeline
 from .gpu import (detect_closed_captions, detect_cc_types,
                    extract_closed_captions_to_srt)
@@ -4181,35 +4187,14 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 messagebox.showinfo("No Subtitles", "Load subtitles first.", parent=editor)
                 return
 
-            # Check faster-whisper availability
-            try:
-                from faster_whisper import WhisperModel
-            except ImportError:
-                if messagebox.askyesno("Missing Package",
-                    "faster-whisper is not installed.\n\n"
-                    "Would you like to install it now?\n"
-                    "(This may take a few minutes — downloads ~200MB)",
-                    parent=editor):
-                    try:
-                        app.add_log("Installing faster-whisper...", 'INFO')
-                        _pip_result = subprocess.run(
-                            [sys.executable, '-m', 'pip', 'install',
-                             '--user', '--break-system-packages', 'faster-whisper'],
-                            capture_output=True, text=True, timeout=300)
-                        if _pip_result.returncode == 0:
-                            app.add_log("faster-whisper installed successfully", 'SUCCESS')
-                        else:
-                            messagebox.showerror("Install Failed",
-                                f"pip install failed:\n{_pip_result.stderr[-300:]}",
-                                parent=editor)
-                            return
-                    except Exception as _e:
-                        messagebox.showerror("Install Failed",
-                            f"Could not install:\n{_e}", parent=editor)
-                        return
-                else:
-                    return
-
+            # ⚠️ The engine is ISOLATED — a dedicated venv. The old code here
+            # pip-installed faster-whisper into the user's system Python and told them
+            # only "downloads ~200MB". ensure_engine_ui shows the full disclosure
+            # (size for THIS machine, where it goes, what is NOT touched, how to remove
+            # it) and is the single place all three whisper entry points now ask.
+            from .whisper_engine import ensure_engine_ui
+            if not ensure_engine_ui(editor, log=getattr(app, "add_log", None)):
+                return
             vpath = _find_video_for_subtitle()
 
             sd = tk.Toplevel(editor)
@@ -4425,88 +4410,14 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 import copy as _copy
                 pre_sync_cues[0] = _copy.deepcopy(cues)
 
-                # ── Engine-aware dependency check ──
-                _engine = engine_var.get()
-                if _engine == 'whisperx':
-                    try:
-                        import whisperx
-                    except ImportError:
-                        if messagebox.askyesno("Missing Package",
-                            "WhisperX is not installed.\n\n"
-                            "Would you like to install it now?\n"
-                            "(Requires PyTorch — downloads ~2GB)",
-                            parent=sd):
-                            # Run pip install in background thread with progress
-                            start_btn.configure(state='disabled')
-                            status_var.set("Installing whisperx (downloading ~2GB)...")
-                            app.add_log("Installing whisperx...", 'INFO')
-                            _rlog("Installing whisperx — this may take several minutes...")
-                            # Switch progress bar to indeterminate mode
-                            _install_pbar = None
-                            for _w in f.winfo_children():
-                                if isinstance(_w, ttk.Progressbar):
-                                    _install_pbar = _w
-                                    break
-                            if _install_pbar:
-                                _install_pbar.configure(mode='indeterminate')
-                                _install_pbar.start(15)
-
-                            def _do_whisperx_install():
-                                try:
-                                    proc = subprocess.Popen(
-                                        [sys.executable, '-m', 'pip', 'install',
-                                         '--user', '--break-system-packages',
-                                         '--progress-bar', 'off',
-                                         # ctranslate2>=4.5, NOT transformers<4.45:
-                                         # the old pin forces whisperx 3.3.1 and a
-                                         # cuDNN 8 ctranslate2 that cannot load here,
-                                         # and it shares site-packages with Merlin's
-                                         # voice STT. (2026-08-18)
-                                         'whisperx', 'ctranslate2>=4.5'],
-                                        stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT,
-                                        text=True)
-                                    for line in proc.stdout:
-                                        line = line.rstrip()
-                                        if line:
-                                            sd.after(0, lambda l=line:
-                                                     status_var.set(l[:80]))
-                                            sd.after(0, lambda l=line: _rlog(l))
-                                    proc.wait(timeout=600)
-                                    if proc.returncode == 0:
-                                        sd.after(0, lambda: status_var.set(
-                                            "whisperx installed — click Start"))
-                                        sd.after(0, lambda: _rlog(
-                                            "whisperx installed successfully"))
-                                        sd.after(0, lambda: app.add_log(
-                                            "whisperx installed successfully",
-                                            'SUCCESS'))
-                                    else:
-                                        sd.after(0, lambda: status_var.set(
-                                            "whisperx install failed"))
-                                        sd.after(0, lambda: _rlog(
-                                            "Install failed — check log above"))
-                                except Exception as _e:
-                                    sd.after(0, lambda: status_var.set(
-                                        f"Install error: {_e}"))
-                                    sd.after(0, lambda: _rlog(f"Error: {_e}"))
-                                finally:
-                                    def _reset_after_install():
-                                        start_btn.configure(state='normal')
-                                        if _install_pbar:
-                                            _install_pbar.stop()
-                                            _install_pbar.configure(
-                                                mode='determinate')
-                                            progress_var.set(0)
-                                    sd.after(0, _reset_after_install)
-
-                            import threading as _inst_threading
-                            _inst_threading.Thread(
-                                target=_do_whisperx_install,
-                                daemon=True).start()
-                            return  # exit _start(); user clicks Start after install
-                        else:
-                            return
+                # ── Engine check ──
+                # ⚠️ Both engines now run in the ISOLATED venv, so there is ONE check
+                # and one dialog. This replaced ~80 lines that pip-installed whisperx
+                # into the user's system Python on a background thread, having told
+                # them only "(Requires PyTorch — downloads ~2GB)".
+                from .whisper_engine import ensure_engine_ui
+                if not ensure_engine_ui(sd, log=getattr(app, "add_log", None)):
+                    return
 
                 start_btn.configure(state='disabled')
                 apply_btn.configure(state='disabled')

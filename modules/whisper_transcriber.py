@@ -1266,114 +1266,6 @@ def open_whisper_transcriber(app):
         return fmt_parts
 
     # ── pip install helper ──
-    def _pip_install_backend(package_name, pip_args=None):
-        """Install a Python package via pip with a progress dialog.
-
-        Shows a modal dialog with an indeterminate progress bar while
-        pip runs in a background thread.  Returns True on success.
-
-        pip_args: list of extra pip arguments, e.g. ["whisperx", "ctranslate2>=4.5"]
-                  If None, defaults to [package_name].
-        """
-        if pip_args is None:
-            pip_args = [package_name]
-
-        install_dlg = tk.Toplevel(win)
-        install_dlg.title(f"Installing {package_name}")
-        install_dlg.resizable(False, False)
-        install_dlg.grab_set()
-
-        frm = ttk.Frame(install_dlg, padding=20)
-        frm.pack(fill='both', expand=True)
-
-        ttk.Label(frm, text=f"Installing {package_name}...\n"
-                       f"This may take several minutes.",
-                  wraplength=380, justify='center').pack(pady=(0, 12))
-
-        inst_prog = ttk.Progressbar(frm, mode='indeterminate', length=350)
-        inst_prog.pack(pady=(0, 8))
-        inst_prog.start(15)
-
-        inst_status = ttk.Label(frm, text="Running pip install...", anchor='w')
-        inst_status.pack(fill='x')
-
-        inst_log = tk.Text(frm, wrap='word', height=10, width=55,
-                           state='disabled', font=('Courier', 9))
-        inst_log.pack(fill='both', expand=True, pady=(8, 0))
-
-        install_dlg.update_idletasks()
-        # Center on parent
-        w = install_dlg.winfo_reqwidth()
-        h = install_dlg.winfo_reqheight()
-        px, py = win.winfo_rootx(), win.winfo_rooty()
-        pw, ph = win.winfo_width(), win.winfo_height()
-        x = max(0, px + (pw - w) // 2)
-        y = max(0, py + (ph - h) // 2)
-        install_dlg.geometry(f"+{x}+{y}")
-        install_dlg.protocol('WM_DELETE_WINDOW', lambda: None)
-
-        result = [None]  # True/False/None
-
-        def _run_pip():
-            try:
-                cmd = [sys.executable, '-m', 'pip', 'install',
-                       '--user', '--no-input',
-                       '--break-system-packages'] + pip_args
-                proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1)
-                for line in proc.stdout:
-                    line = line.rstrip()
-                    if line:
-                        _pip_log_q.put(line)
-                proc.wait()
-                result[0] = (proc.returncode == 0)
-            except Exception as e:
-                _pip_log_q.put(f"Error: {e}")
-                result[0] = False
-
-        _pip_log_q = queue.Queue()
-
-        def _poll_pip():
-            while True:
-                try:
-                    line = _pip_log_q.get_nowait()
-                    inst_log.config(state='normal')
-                    inst_log.insert('end', line + '\n')
-                    inst_log.see('end')
-                    inst_log.config(state='disabled')
-                    # Update status with last meaningful line
-                    if line.startswith(('Collecting', 'Downloading',
-                                        'Installing', 'Building',
-                                        'Successfully')):
-                        inst_status.config(text=line[:80])
-                except queue.Empty:
-                    break
-            if result[0] is None:
-                install_dlg.after(100, _poll_pip)
-            else:
-                inst_prog.stop()
-                if result[0]:
-                    inst_status.config(text="Installation complete!")
-                    install_dlg.after(1500, lambda: (
-                        install_dlg.grab_release(), install_dlg.destroy()))
-                else:
-                    inst_status.config(text="Installation failed — see log above.")
-                    # Keep dialog open so user can read the error
-                    install_dlg.protocol('WM_DELETE_WINDOW',
-                        lambda: (install_dlg.grab_release(),
-                                 install_dlg.destroy()))
-                    close_btn = ttk.Button(frm, text="Close",
-                        command=lambda: (install_dlg.grab_release(),
-                                         install_dlg.destroy()))
-                    close_btn.pack(pady=(8, 0))
-
-        pip_thread = threading.Thread(target=_run_pip, daemon=True)
-        pip_thread.start()
-        install_dlg.after(100, _poll_pip)
-        install_dlg.wait_window()
-        return bool(result[0])
-
     def _prompt_install_backend(backend):
         """Ask the user if they want to install a missing backend.
         Returns True if installed successfully, False otherwise."""
@@ -1400,51 +1292,31 @@ def open_whisper_transcriber(app):
             display_name = 'faster-whisper'
             pip_args = ['faster-whisper']
 
-        answer = messagebox.askyesno(
-            f"{display_name} Not Installed",
-            f"'{display_name}' is not installed.\n\n"
-            f"Would you like to install it now?\n"
-            f"(This may take several minutes)",
-            parent=win)
-        if not answer:
-            return False
-        return _pip_install_backend(display_name, pip_args)
+        # ⚠️ Both backends live in the ISOLATED ENGINE now, so there is one install
+        # and one dialog. The old prompt said only "(This may take several minutes)"
+        # and then pip-installed into the user's system Python — the exact behaviour
+        # that took an unrelated voice assistant's STT offline on 2026-08-18.
+        # ensure_engine_ui states the size for THIS machine, where it goes, what is
+        # NOT touched, and how to remove it, then lets the user decide.
+        from .whisper_engine import ensure_engine_ui
+        return ensure_engine_ui(win)
 
     # ── dep check ──
+    # ── dep check ──
     def _check_deps_on_start():
-        has_fw = _is_backend_cached("faster-whisper")
-        has_wx = _is_backend_cached("whisperx")
-
-        if not has_fw and not has_wx:
-            # Neither backend installed — ask user which to install
-            choice = messagebox.askyesnocancel(
-                "No Transcription Backend",
-                "No transcription backend is installed.\n\n"
-                "• Yes  — install faster-whisper (recommended)\n"
-                "• No   — install WhisperX\n"
-                "• Cancel — close the transcriber",
-                parent=win)
-            if choice is None:
-                # Cancel — close
-                win.after(100, _close)
+        # ⚠️ ONE engine now, so there is no "which backend to install" choice — both
+        # faster-whisper and whisperx live in the same isolated venv. The old dialog
+        # asked the user to pick, then pip-installed the winner into their system
+        # Python. ensure_engine_ui shows the disclosure and builds the engine.
+        from .whisper_engine import is_installed as _engine_installed
+        if not _engine_installed():
+            if not _prompt_install_backend("engine"):
+                _log_write("The Whisper engine was not installed.", "warning")
+                _status_var.set("Engine not installed")
                 return
-            elif choice:
-                # Yes — install faster-whisper
-                ok = _pip_install_backend("faster-whisper", ["faster-whisper"])
-            else:
-                # No — install whisperx
-                # ctranslate2>=4.5, NOT transformers<4.45 — see the long note in
-                # _prompt_install_backend. The old pin installs whisperx 3.3.1,
-                # which brings a cuDNN 8 ctranslate2 this box cannot load.
-                ok = _pip_install_backend("WhisperX",
-                                          ["whisperx", "ctranslate2>=4.5"])
-            if not ok:
-                _log_write("Backend installation failed.", "error")
-                _status_var.set("Installation failed -- see log")
-                return
-
-            _log_write("Backend installed successfully.", "success")
+            _log_write("Whisper engine installed successfully.", "success")
             _refresh_backend_hints()
+
 
         # Check for ffmpeg
         if not shutil.which("ffmpeg"):

@@ -218,3 +218,49 @@ def uninstall():
         shutil.rmtree(VENV_DIR, ignore_errors=True)
         return True
     return False
+
+
+def ensure_engine_ui(parent, log=None):
+    """Check the engine; if missing, show the FULL disclosure and offer to build it.
+
+    Returns True when the engine is ready to use.
+
+    ⚠️ This is the single place the user is asked. Every whisper entry point in the
+    Suite routes through here so they all say the same thing — previously three
+    different dialogs quoted three different sizes ("~200MB", "~2GB", "several
+    minutes") and all three silently modified the user's system Python.
+
+    Tony, 2026-08-21: *"the user should know and have the info in-hand before making
+    that decision so they know what they are getting into."*
+    """
+    if is_installed():
+        return True
+
+    # Imported lazily: this module is also read by non-GUI code paths.
+    from tkinter import messagebox
+
+    plan = install_plan()
+    if not messagebox.askyesno("Install the Whisper engine?",
+                               disclosure_text(plan), parent=parent):
+        return False
+
+    def _log(m, lvl="INFO"):
+        if log:
+            log(m, lvl)
+        else:
+            print(m)
+
+    try:
+        build(log=_log)
+    except Exception as e:
+        messagebox.showerror("Install failed", str(e), parent=parent)
+        return False
+
+    ok, detail = probe()
+    if not ok:
+        messagebox.showerror(
+            "Engine not working",
+            f"The install completed but the engine failed its check:\n\n{detail}",
+            parent=parent)
+        return False
+    return True

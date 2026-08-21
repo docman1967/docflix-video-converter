@@ -444,8 +444,11 @@ def open_forced_subs_panel(parent, video_path=None, log_fn=None):
             try:
                 import tempfile
                 import subprocess as sp
-                from faster_whisper import WhisperModel
-                from faster_whisper.audio import decode_audio
+                # ⚠️ Translation runs in the ISOLATED ENGINE. The Suite must not import
+                # faster_whisper into its own process — see modules/whisper_engine.py.
+                # The worker decodes the audio and loads the model ONCE, exactly as the
+                # in-process loop did, then slices per span.
+                from . import whisper_client as wc
 
                 with tempfile.TemporaryDirectory() as tmp:
                     wav = os.path.join(tmp, "a.wav")
@@ -454,22 +457,18 @@ def open_forced_subs_panel(parent, video_path=None, log_fn=None):
                                capture_output=True, text=True)
                     if r.returncode != 0:
                         raise RuntimeError(r.stderr[-400:])
-                    audio = decode_audio(wav, sampling_rate=16000)
-                    model = WhisperModel(model_var.get(), device="cuda", compute_type="auto")
-                    for n, sp_ in enumerate(todo, 1):
-                        events.put(("status", f"Translating {n}/{len(todo)}…"))
-                        chunk = audio[int(sp_.start_ms / 1000 * 16000):
-                                      int(sp_.end_ms / 1000 * 16000)]
-                        if len(chunk) < 16000:
-                            continue
-                        # Let Whisper pick the source language per span unless the
-                        # scan already identified one we trust.
-                        lang = sp_.lang if sp_.lang and sp_.lang != "?" else None
-                        segs, info = model.transcribe(chunk, task="translate",
-                                                      language=lang, vad_filter=False)
-                        text = " ".join(s.text.strip() for s in segs).strip()
-                        events.put(("text", (sp_, text,
-                                             getattr(info, "language", sp_.lang))))
+
+                    # Per-span language: keep one the scan already identified and
+                    # trusts, otherwise let Whisper decide. Unchanged behaviour.
+                    payload = [{"start_ms": s_.start_ms, "end_ms": s_.end_ms,
+                                "lang": (s_.lang if s_.lang and s_.lang != "?" else None)}
+                               for s_ in todo]
+
+                    wc.translate_spans(
+                        wav, payload, model_var.get(), device="cuda",
+                        on_span=lambda i, text, lang: events.put(
+                            ("text", (todo[i], text, lang or todo[i].lang))),
+                        progress=lambda m: events.put(("status", m)))
                 events.put(("status", "Translation done."))
             except Exception as exc:
                 events.put(("status", f"Translate failed: {exc}"))
@@ -604,7 +603,7 @@ def open_forced_subs_panel(parent, video_path=None, log_fn=None):
             try:
                 import tempfile
                 import subprocess as sp
-                from . import whisper_subtitles as ws
+                from . import whisper_client as wc
 
                 with tempfile.TemporaryDirectory() as tmp:
                     wav = os.path.join(tmp, "a.wav")
@@ -613,7 +612,11 @@ def open_forced_subs_panel(parent, video_path=None, log_fn=None):
                                capture_output=True, text=True)
                     if r.returncode != 0:
                         raise RuntimeError(r.stderr[-400:])
-                    _main, _forced, report = ws.transcribe_with_forced(
+                    # ⚠️ Runs in the ISOLATED ENGINE, not this process. Same
+                    # signature and the same (main, forced, report) 3-tuple — the
+                    # worker imports and runs whisper_subtitles.transcribe_with_forced
+                    # itself, so the by-ear-tuned thresholds are the same code.
+                    _main, _forced, report = wc.transcribe_with_forced(
                         wav, model_var.get(), None, "cuda", 5, vad=True,
                         native_lang=native_var.get().strip() or "en",
                         progress=lambda m: events.put(("status", m)))

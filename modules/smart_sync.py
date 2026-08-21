@@ -62,10 +62,13 @@ def smart_sync(video_path, cues, model_size='base', language=None,
                     # and pinning transformers back is precisely what forces pip
                     # to install that ancient whisperx — which drags in a cuDNN 8
                     # ctranslate2 that cannot run on this box, and shares
-                    # site-packages with Merlin's voice STT. Upgrade forward.
+                    # site-packages with Merlin's voice STT.
+                    # ⚠️ And never advise pip-installing into the user's system Python
+                    # at all — whisper runs in the isolated engine now.
                     progress_callback(
-                        "Fix: pip install --user --break-system-packages "
-                        "-U whisperx 'ctranslate2>=4.5'")
+                        "The Whisper engine is not installed. Open Smart Sync again "
+                        "and accept the install prompt — it runs in its own isolated "
+                        "environment and will not modify your Python.")
                 else:
                     progress_callback("whisperx not installed")
             return None
@@ -409,9 +412,13 @@ def smart_sync(video_path, cues, model_size='base', language=None,
                     if 'is_offline_mode' in str(e) or 'transformers' in str(e):
                         # See the note at the top of this module's whisperx import:
                         # pinning transformers back installs an obsolete whisperx.
+                        # ⚠️ Do NOT tell the user to pip-install into their system
+                        # Python. whisper now runs in the isolated engine; if it is
+                        # missing the Suite offers to build it with a full disclosure.
                         progress_callback(
-                            "Fix: pip install --user --break-system-packages "
-                            "-U whisperx 'ctranslate2>=4.5'")
+                            "The Whisper engine is not installed. Open Smart Sync "
+                            "again and accept the install prompt — it runs in its own "
+                            "isolated environment and will not modify your Python.")
                 return None
         else:
             if progress_callback:

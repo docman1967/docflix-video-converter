@@ -245,3 +245,132 @@ def transcribe_with_forced(audio_path, model_size, language, device, beam_size, 
     return ([_Seg(s) for s in r.get("segments") or []],
             [_Seg(s) for s in r.get("forced") or []],
             r.get("report"))
+
+
+def smart_sync(video_path, cues, model_size='base', language=None,
+               num_segments=3, sample_minutes=5, progress_callback=None,
+               cancel_event=None, engine='faster-whisper'):
+    """Isolated-engine version of modules.smart_sync.smart_sync — same signature.
+
+    ⚠️ cancel_event is honoured by KILLING the worker, which can interrupt mid-model-load.
+    The in-process version could only check it at phase boundaries.
+
+    Returns the same result dict (or None) as the in-process function.
+    """
+    py = whisper_engine.venv_python()
+    if not py:
+        raise EngineMissing("The Whisper engine is not installed.")
+
+    job = {"mode": "smart_sync", "suite_dir": SUITE_DIR, "args": {
+        "video_path": str(video_path), "cues": cues, "model_size": model_size,
+        "language": language, "num_segments": num_segments,
+        "sample_minutes": sample_minutes, "engine": engine}}
+
+    jf = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+    json.dump(job, jf)
+    jf.close()
+
+    proc = None
+    result = None
+    err = None
+    try:
+        proc = subprocess.Popen([py, WORKER, jf.name], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, bufsize=1)
+        for line in proc.stdout:
+            if cancel_event is not None and cancel_event.is_set():
+                proc.kill()
+                return None
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                if progress_callback:
+                    progress_callback(line[:300])
+                continue
+            k = msg.get("kind")
+            if k == "progress" and progress_callback:
+                progress_callback(msg.get("message", ""))
+            elif k == "result":
+                result = msg
+            elif k == "error":
+                err = msg
+        if proc.poll() is None:
+            proc.wait(timeout=300)
+        if err:
+            raise WorkerFailed(err.get("message", "smart_sync failed"),
+                               err.get("traceback"))
+        return result.get("sync") if result else None
+    finally:
+        if proc and proc.poll() is None:
+            proc.kill()
+        try:
+            os.unlink(jf.name)
+        except OSError:
+            pass
+
+
+def translate_spans(audio_path, spans, model_size, device="cuda",
+                    compute_type="auto", on_span=None, on_skip=None,
+                    progress=None, should_stop=None):
+    """Translate foreign-speech spans, decoding the audio and loading the model ONCE.
+
+    spans: [{"start_ms": int, "end_ms": int, "lang": str|None}, ...]
+
+    Callbacks, so the panel updates live:
+        on_span(idx, text, detected_lang)
+        on_skip(idx)               span under 1s — skipped, as the in-process loop did
+        progress(text)
+        should_stop()              return True to cancel (kills the worker)
+    """
+    py = whisper_engine.venv_python()
+    if not py:
+        raise EngineMissing("The Whisper engine is not installed.")
+
+    job = {"mode": "translate_spans", "suite_dir": SUITE_DIR, "args": {
+        "audio_path": str(audio_path), "spans": spans, "model_size": model_size,
+        "device": device, "compute_type": compute_type}}
+
+    jf = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+    json.dump(job, jf)
+    jf.close()
+
+    proc = None
+    try:
+        proc = subprocess.Popen([py, WORKER, jf.name], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, bufsize=1)
+        for line in proc.stdout:
+            if should_stop and should_stop():
+                proc.kill()
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                if progress:
+                    progress(line[:300])
+                continue
+            k = msg.get("kind")
+            if k == "progress" and progress:
+                progress(msg.get("message", ""))
+            elif k == "span_done" and on_span:
+                on_span(msg["idx"], msg.get("text", ""), msg.get("lang"))
+            elif k == "span_skipped" and on_skip:
+                on_skip(msg["idx"])
+            elif k == "span_error" and progress:
+                progress(f"span {msg['idx']}: {msg.get('message','failed')}")
+            elif k == "error":
+                raise WorkerFailed(msg.get("message", "worker failed"),
+                                   msg.get("traceback"))
+        if proc.poll() is None:
+            proc.wait(timeout=120)
+    finally:
+        if proc and proc.poll() is None:
+            proc.kill()
+        try:
+            os.unlink(jf.name)
+        except OSError:
+            pass

@@ -167,6 +167,75 @@ def main():
         emit("batch_done")
         return 0
 
+    # ── translate_spans (forced-subtitle panel) ───────────────────────────────
+    # ⚠️ Decodes the audio ONCE and loads the model ONCE, then slices per span —
+    # exactly what the in-process loop did. Doing it per span would re-decode a whole
+    # film's audio for every foreign-speech fragment.
+    #
+    # Per-span language handling is preserved: a span keeps its own detected language
+    # if the scan identified one it trusts, otherwise Whisper picks. That is Tony's
+    # forced-subtitle behaviour and must not drift — see the notes in
+    # whisper_subtitles about the detector proposing rather than deciding.
+    if mode == "translate_spans":
+        from faster_whisper import WhisperModel
+        from faster_whisper.audio import decode_audio
+        SR = 16000
+        spans = a.get("spans") or []
+        emit("progress", message=f"decoding audio and loading "
+                                 f"'{a['model_size']}' for {len(spans)} span(s)...")
+        audio = decode_audio(a["audio_path"], sampling_rate=SR)
+        model = WhisperModel(a["model_size"], device=a.get("device", "cuda"),
+                             compute_type=a.get("compute_type", "auto"))
+        for i, sp in enumerate(spans):
+            try:
+                chunk = audio[int(sp["start_ms"] / 1000 * SR):
+                              int(sp["end_ms"] / 1000 * SR)]
+                if len(chunk) < SR:          # under a second — skip, as before
+                    emit("span_skipped", idx=i)
+                    continue
+                emit("progress", message=f"Translating {i+1}/{len(spans)}…")
+                lang = sp.get("lang") if sp.get("lang") and sp.get("lang") != "?" else None
+                segs, info = model.transcribe(chunk, task="translate",
+                                              language=lang, vad_filter=False)
+                text = " ".join(s.text.strip() for s in segs).strip()
+                emit("span_done", idx=i, text=text,
+                     lang=getattr(info, "language", sp.get("lang")))
+            except Exception as e:
+                emit("span_error", idx=i, message=str(e))
+        emit("batch_done")
+        return 0
+
+    # ── smart_sync ────────────────────────────────────────────────────────────
+    # ⚠️ Runs the Suite's OWN smart_sync() in here, whole. It cannot be expressed with
+    # the transcribe modes above: it uses whisperx's lower-level API directly —
+    # load_audio, model.transcribe, a lazily-loaded per-language alignment model, custom
+    # per-sample offsets, and a fallback path when alignment fails. Proxying those
+    # individually would be many round trips AND would fork logic Tony has tuned.
+    #
+    # Verified in a BARE venv (zero packages): modules.smart_sync imports cleanly. Its
+    # transitive imports are subtitle_filters (stdlib only) and utils (stdlib + tkinter,
+    # which every venv has — importing it headless is fine, only creating a root needs
+    # a display).
+    if mode == "smart_sync":
+        from modules.smart_sync import smart_sync as _smart_sync
+        try:
+            res = _smart_sync(
+                a["video_path"], a.get("cues") or [],
+                model_size=a.get("model_size", "base"),
+                language=a.get("language"),
+                num_segments=a.get("num_segments", 3),
+                sample_minutes=a.get("sample_minutes", 5),
+                progress_callback=lambda m: emit("progress", message=str(m)[:400]),
+                cancel_event=None,   # cancellation = the parent kills this process
+                engine=a.get("engine", "faster-whisper"),
+            )
+        except Exception as e:
+            emit("error", message=str(e), traceback=traceback.format_exc()[-3000:])
+            return 1
+        # smart_sync returns a result dict, or None when it cannot sync.
+        emit("result", sync=ser(res))
+        return 0
+
     try:
         emit("progress", message=f"loading {mode} engine...")
 
