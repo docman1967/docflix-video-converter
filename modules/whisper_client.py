@@ -136,7 +136,7 @@ def _run(mode, args, progress=None):
 def transcribe_batch(paths, model_size, language, device, engine="faster-whisper",
                      beam_size=5, vad=True, task="transcribe", word_timestamps=False,
                      batch_size=16, on_file=None, on_error=None, progress=None,
-                     should_stop=None):
+                     should_stop=None, on_start=None):
     """Transcribe many files with the model loaded ONCE.
 
     ⚠️ Use this for batches, never a loop over transcribe(). `medium` costs ~40s to
@@ -145,6 +145,7 @@ def transcribe_batch(paths, model_size, language, device, engine="faster-whisper
     that rather than regressing it.
 
     Callbacks fire as results stream in, so a GUI stays live:
+        on_start(idx, path)            a file is beginning
         on_file(idx, path, segments)   one finished file
         on_error(idx, path, message)   one failed file — the batch CONTINUES
         progress(text)                 human-readable status
@@ -192,6 +193,8 @@ def transcribe_batch(paths, model_size, language, device, engine="faster-whisper
             k = msg.get("kind")
             if k == "progress" and progress:
                 progress(msg.get("message", ""))
+            elif k == "file_start" and on_start:
+                on_start(msg["idx"], msg.get("path"))
             elif k == "file_done":
                 done[msg["idx"]] = [_Seg(s) for s in msg.get("segments") or []]
                 if on_file:

@@ -271,11 +271,102 @@ class BatchTranscribeWorker(threading.Thread):
             root_logger.removeHandler(log_handler)
 
     def _run(self):
-        if self.backend == "whisperx":
-            self._run_whisperx()
-        else:
-            self._run_faster_whisper()
+        # ⚠️ Both backends now run in the ISOLATED ENGINE (a dedicated venv), not in
+        # this process. The Suite no longer imports whisperx/torch at all and no longer
+        # installs them into the user's Python. See modules/whisper_engine.py for why:
+        # on 2026-08-18 installing WhisperX for the Suite reached into shared
+        # site-packages and took an unrelated always-on voice assistant's STT offline.
+        #
+        # The old in-process paths (_run_whisperx / _run_faster_whisper) are kept below
+        # for reference but are no longer reachable. They are the last remaining callers
+        # of `import whisperx` in the Suite.
+        self._run_isolated()
 
+    # ── isolated engine path ────────────────────────────────────────────────────
+    def _run_isolated(self):
+        """Batch-transcribe via the engine venv, preserving the GUI queue protocol.
+
+        ⚠️ skip-existing stays HERE, not in the worker — it needs output_dir and
+        output_formats, which are UI concerns. That means the worker sees a FILTERED
+        list, so its indices are not the caller's indices. `keep` maps them back;
+        getting that wrong would report results against the wrong file.
+        """
+        from . import whisper_client as wc
+        from . import whisper_engine as we
+
+        total = len(self.paths)
+
+        # Filter first, announcing skips against their ORIGINAL index.
+        keep = []
+        for idx, path in enumerate(self.paths):
+            if self.skip_existing and subtitle_exists(
+                    path, self.output_dir, self.output_formats):
+                self.q.put(("skip_file", (idx, path, "subtitle already exists")))
+                self.q.put(("log", f"Skipping (already exists): {path.name}"))
+                continue
+            keep.append((idx, path))
+
+        if not keep:
+            self.q.put(("batch_done", None))
+            return
+
+        if not we.is_installed():
+            self.q.put(("log",
+                        "The Whisper engine is not installed. Open the Transcriber's "
+                        "backend selector to install it — it runs in its own isolated "
+                        "environment and will not modify your system Python."))
+            self.q.put(("batch_done", None))
+            return
+
+        self.q.put(("log", f"Loading {self.backend} model '{self.model_size}' "
+                           f"[{self.device}:{self.device_index}] in the isolated engine..."))
+
+        def _on_start(w_idx, path_str):
+            idx, path = keep[w_idx]
+            self.q.put(("next_file", (idx, total, path)))
+            self.q.put(("log", f"\n-- [{idx+1}/{total}] {path.name}"))
+
+        def _on_file(w_idx, path_str, segments):
+            idx, path = keep[w_idx]
+            self.q.put(("file_done", (idx, path, segments)))
+            self.q.put(("log", f"Done: {len(segments)} segments  ->  {path.name}"))
+
+        def _on_error(w_idx, path_str, message):
+            idx, path = keep[w_idx]
+            self.q.put(("file_error", (idx, path, RuntimeError(message))))
+            self.q.put(("log", f"Error: {path.name}: {message}"))
+
+        try:
+            wc.transcribe_batch(
+                [p for _, p in keep],
+                model_size=self.model_size,
+                language=self.language,
+                device=self.device,
+                engine=self.backend,
+                beam_size=getattr(self, "beam_size", 5),
+                vad=getattr(self, "vad", True),
+                task=self.task,
+                word_timestamps=getattr(self, "word_timestamps", False),
+                batch_size=getattr(self, "batch_size", 16),
+                on_start=_on_start,
+                on_file=_on_file,
+                on_error=_on_error,
+                progress=lambda t: self.q.put(("log", f"   {t}")) if t else None,
+                should_stop=lambda: self._stop_event.is_set(),
+            )
+        except wc.EngineMissing as e:
+            self.q.put(("log", str(e)))
+        except Exception as exc:
+            self.q.put(("log", f"Engine error: {exc}"))
+            tb = getattr(exc, "tb", None)
+            if tb:
+                self.q.put(("log", tb))
+
+        if self._stop_event.is_set():
+            self.q.put(("log", "Batch cancelled."))
+        self.q.put(("batch_done", None))
+
+    # ── legacy in-process paths (no longer called; see _run) ────────────────────
     def _run_whisperx(self):
         import warnings
         warnings.filterwarnings("ignore", message="TensorFloat-32.*",
