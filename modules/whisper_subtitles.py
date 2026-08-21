@@ -26,16 +26,12 @@ def check_dependencies(backend: str = "faster-whisper"):
     """Verify that required packages and binaries are present."""
     missing = []
 
-    if backend == "whisperx":
-        try:
-            import whisperx  # noqa: F401
-        except ImportError:
-            missing.append("whisperx        →  pip install whisperx")
-    else:
-        try:
-            import faster_whisper  # noqa: F401
-        except ImportError:
-            missing.append("faster-whisper  →  pip install faster-whisper")
+    # ⚠️ Ask the engine, not this interpreter — see is_backend_available(). And never
+    # tell the user to pip-install into their own Python; the Suite offers to build the
+    # isolated engine with a full disclosure instead.
+    if not is_backend_available(backend):
+        missing.append("Whisper engine  →  install it from the Transcriber "
+                       "(runs in its own isolated environment)")
 
     if not shutil.which("ffmpeg"):
         missing.append("ffmpeg          →  https://ffmpeg.org/download.html")
@@ -46,19 +42,30 @@ def check_dependencies(backend: str = "faster-whisper"):
 
 
 def is_backend_available(backend: str) -> bool:
-    """Check if a backend is importable without exiting."""
-    if backend == "whisperx":
-        try:
-            import whisperx  # noqa: F401
-            return True
-        except ImportError:
-            return False
-    else:
-        try:
-            import faster_whisper  # noqa: F401
-            return True
-        except ImportError:
-            return False
+    """Is this backend usable?
+
+    ⚠️ ASKS THE ENGINE, NOT THIS INTERPRETER. Both backends live in the isolated
+    whisper venv, so `import whisperx` in the Suite's own process is the wrong
+    question — after isolation a user will NOT have whisperx in their system Python,
+    and the old check would have reported "not installed" to everyone with a perfectly
+    good engine built. It only appeared to work on the dev machine because a leftover
+    system install happened to still be there.
+
+    ⚠️ This module is ALSO imported by whisper_worker.py inside the venv, where the
+    packages genuinely are importable — hence the fallback. Do not remove it.
+    """
+    try:
+        from . import whisper_engine
+        return whisper_engine.is_installed()
+    except ImportError:
+        pass
+    # Running inside the engine venv (the worker), where a direct import is correct.
+    mod = "whisperx" if backend == "whisperx" else "faster_whisper"
+    try:
+        __import__(mod)
+        return True
+    except ImportError:
+        return False
 
 
 # ── lightweight segment container ────────────────────────────────────────────
