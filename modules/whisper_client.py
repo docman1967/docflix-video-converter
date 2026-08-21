@@ -133,6 +133,86 @@ def _run(mode, args, progress=None):
             pass
 
 
+def transcribe_batch(paths, model_size, language, device, engine="faster-whisper",
+                     beam_size=5, vad=True, task="transcribe", word_timestamps=False,
+                     batch_size=16, on_file=None, on_error=None, progress=None,
+                     should_stop=None):
+    """Transcribe many files with the model loaded ONCE.
+
+    ⚠️ Use this for batches, never a loop over transcribe(). `medium` costs ~40s to
+    load cold, so a 50-file batch that reloaded per file would spend half an hour doing
+    nothing but loading. The Suite's in-process loop already loaded once; this preserves
+    that rather than regressing it.
+
+    Callbacks fire as results stream in, so a GUI stays live:
+        on_file(idx, path, segments)   one finished file
+        on_error(idx, path, message)   one failed file — the batch CONTINUES
+        progress(text)                 human-readable status
+        should_stop()                  return True to cancel
+
+    ⚠️ Cancellation KILLS the worker, which interrupts mid-file. The old in-process loop
+    could only check between files.
+
+    Returns {idx: segments} for everything that succeeded.
+    """
+    py = whisper_engine.venv_python()
+    if not py:
+        raise EngineMissing("The Whisper engine is not installed.")
+
+    job = {"mode": "batch", "suite_dir": SUITE_DIR, "args": {
+        "paths": [str(p) for p in paths], "engine": engine,
+        "model_size": model_size, "language": language, "device": device,
+        "beam_size": beam_size, "vad": vad, "task": task,
+        "word_timestamps": word_timestamps, "batch_size": batch_size}}
+
+    jf = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+    json.dump(job, jf)
+    jf.close()
+
+    done = {}
+    proc = None
+    try:
+        proc = subprocess.Popen([py, WORKER, jf.name], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, bufsize=1)
+        for line in proc.stdout:
+            if should_stop and should_stop():
+                proc.kill()
+                if progress:
+                    progress("Batch cancelled.")
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                if progress:
+                    progress(line[:300])
+                continue
+            k = msg.get("kind")
+            if k == "progress" and progress:
+                progress(msg.get("message", ""))
+            elif k == "file_done":
+                done[msg["idx"]] = [_Seg(s) for s in msg.get("segments") or []]
+                if on_file:
+                    on_file(msg["idx"], msg.get("path"), done[msg["idx"]])
+            elif k == "file_error" and on_error:
+                on_error(msg["idx"], msg.get("path"), msg.get("message", "failed"))
+            elif k == "error":
+                raise WorkerFailed(msg.get("message", "worker failed"),
+                                   msg.get("traceback"))
+        if proc.poll() is None:
+            proc.wait(timeout=60)
+        return done
+    finally:
+        if proc and proc.poll() is None:
+            proc.kill()
+        try:
+            os.unlink(jf.name)
+        except OSError:
+            pass
+
+
 def transcribe(audio_path, model_size, language, device, beam_size, vad,
                task="transcribe", word_timestamps=False, progress=None):
     r = _run("transcribe", dict(

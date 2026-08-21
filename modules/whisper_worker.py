@@ -108,6 +108,65 @@ def main():
         except Exception:
             pass
 
+    # ── batch mode ────────────────────────────────────────────────────────────
+    # ⚠️ THE MODEL IS LOADED ONCE FOR THE WHOLE BATCH. This is the entire reason
+    # batch mode exists as a separate path: `medium` takes ~40s to load cold, so a
+    # 50-file batch that reloaded per file would spend half an hour doing nothing but
+    # loading. The Suite's in-process batch loop already worked this way and the
+    # subprocess design has to preserve it, not regress it.
+    #
+    # ffmpeg is a SYSTEM binary, not a venv dependency, so audio extraction happens in
+    # here — that keeps a file's whole journey on one side of the boundary.
+    #
+    # Cancellation is the parent killing this process. That is strictly better than the
+    # old between-files `_stop_event` check, which could not interrupt mid-file.
+    if mode == "batch":
+        import subprocess as _sp
+        import tempfile as _tf
+        paths = a.get("paths") or []
+        engine = a.get("engine", "faster-whisper")
+        emit("progress", message=f"loading {engine} model '{a['model_size']}' once for "
+                                 f"{len(paths)} file(s)...")
+        AUDIO_EXT = {".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wma"}
+        for idx, p in enumerate(paths):
+            src = Path(p)
+            try:
+                emit("file_start", idx=idx, path=str(src))
+                with _tf.TemporaryDirectory() as tmp:
+                    if src.suffix.lower() not in AUDIO_EXT:
+                        emit("progress", message=f"[{idx+1}/{len(paths)}] extracting audio...")
+                        wav = Path(tmp) / "audio.wav"
+                        r = _sp.run(["ffmpeg", "-y", "-i", str(src), "-vn",
+                                     "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                                     str(wav)], capture_output=True, text=True)
+                        if r.returncode != 0:
+                            raise RuntimeError(f"ffmpeg failed:\n{(r.stderr or '')[-600:]}")
+                        audio_in = wav
+                    else:
+                        audio_in = src
+
+                    emit("progress", message=f"[{idx+1}/{len(paths)}] {src.name}")
+                    if engine == "whisperx":
+                        segs = transcribe_whisperx(
+                            audio_in, a["model_size"], a.get("language"), a["device"],
+                            a.get("beam_size", 5), task=a.get("task", "transcribe"),
+                            word_timestamps=a.get("word_timestamps", False),
+                            batch_size=a.get("batch_size", 16))
+                    else:
+                        segs = transcribe(
+                            audio_in, a["model_size"], a.get("language"), a["device"],
+                            a.get("beam_size", 5), a.get("vad", True),
+                            task=a.get("task", "transcribe"),
+                            word_timestamps=a.get("word_timestamps", False))
+                emit("file_done", idx=idx, path=str(src), segments=ser(segs))
+            except Exception as e:
+                # One bad file must not kill the batch — same as the in-process loop,
+                # which caught per-file and carried on.
+                emit("file_error", idx=idx, path=str(src), message=str(e),
+                     traceback=traceback.format_exc()[-1200:])
+        emit("batch_done")
+        return 0
+
     try:
         emit("progress", message=f"loading {mode} engine...")
 
