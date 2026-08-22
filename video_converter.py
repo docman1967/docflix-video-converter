@@ -3932,6 +3932,8 @@ class VideoConverterApp:
                                command=self.open_whisper_transcriber)
         tools_menu.add_command(label="Docflix Sub Extractor...",
                                command=self.open_sub_ripper)
+        tools_menu.add_command(label="Docflix Track Extractor...",
+                               command=self.open_track_extractor)
         tools_menu.add_command(label="Docflix Trailer Grabber...",
                                command=self.open_trailer_downloader)
         # Help menu
@@ -6280,6 +6282,15 @@ class VideoConverterApp:
                 mod.open_video_scaler(self)
             else:
                 messagebox.showerror("Docflix Media Rescale", "modules/video_scaler.py not found.")
+
+    def open_track_extractor(self):
+        """Open the Track Extractor tool."""
+        try:
+            from modules.track_extractor import open_track_extractor
+            open_track_extractor(self)
+        except Exception as exc:
+            messagebox.showerror("Track Extractor",
+                                 f"Could not open the Track Extractor:\n{exc}")
 
     def open_whisper_transcriber(self):
         """Open the Whisper Subtitle Transcriber tool."""
