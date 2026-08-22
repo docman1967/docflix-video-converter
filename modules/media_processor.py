@@ -1451,6 +1451,25 @@ def open_media_processor(app):
                     cmd.extend(['-i', s['path']])
                     sub_inputs.append(s)
 
+            # Additional inputs: external audio tracks (commentary and friends)
+            #
+            # ⚠️ INPUT ORDER IS LOAD-BEARING. Subtitle inputs are mapped as
+            # `1 + idx`, so audio inputs go AFTER them and the chapter input
+            # index has to account for both. Insert audio before subs and every
+            # subtitle silently maps to the wrong stream.
+            #
+            # A track is carried across as a SECOND INPUT rather than extracted
+            # to a file first, because that is the only route that keeps its
+            # metadata. Measured 2026-08-22 moving a commentary between files:
+            #   second input -> title, language and `comment` all survive
+            #   via .mka     -> all survive (Matroska carries them)
+            #   via raw .ac3 -> ALL THREE LOST; an elementary stream has
+            #                   nowhere to put them
+            audio_inputs = []
+            for a in (f.get('ext_audio') or []):
+                cmd.extend(['-i', a['path']])
+                audio_inputs.append(a)
+
             # Chapter injection
             ch_meta_path = None
             ch_input_idx = None
@@ -1465,7 +1484,8 @@ def open_media_processor(app):
                 if chs:
                     ch_meta_path = chapters_to_ffmetadata(chs)
                     if ch_meta_path:
-                        ch_input_idx = 1 + len(sub_inputs)  # input 0=main, 1..N=subs
+                        # input 0=main, 1..N=subs, then external audio, then this
+                        ch_input_idx = 1 + len(sub_inputs) + len(audio_inputs)
                         cmd.extend(['-i', ch_meta_path])
                         f['_ch_meta_path'] = ch_meta_path  # for cleanup
 
@@ -1495,6 +1515,13 @@ def open_media_processor(app):
             elif _dup_src is not None:
                 _log("  Atmos 'keep both' skipped: needs an MKV container", 'WARNING')
                 _dup_src = None
+
+            # Map external audio inputs. `stream` is which audio stream to take
+            # from that input — a whole video file may hold several, so an .mkv
+            # source contributes only the track(s) actually chosen.
+            for idx, a in enumerate(audio_inputs):
+                input_idx = 1 + len(sub_inputs) + idx
+                cmd.extend(['-map', f"{input_idx}:a:{a.get('stream', 0)}"])
 
             # Subtitle mapping
             do_strip_subs = _ov(f, 'strip_subs', opt_strip_subs)
@@ -1600,6 +1627,59 @@ def open_media_processor(app):
                         _log(f"  Atmos 'keep both': appended {target_codec} as audio {j}", 'INFO')
             else:
                 cmd.extend(['-c:a', 'copy'])
+
+            # ── External audio: codec, metadata, disposition ──────────────
+            # ⚠️ These MUST be handled explicitly. In the convert branch above
+            # only the source's own streams get a `-c:a:{i}`, so an unspecified
+            # external stream would fall through to the container's default
+            # encoder and be re-encoded without anyone asking — silent quality
+            # loss on a track that was usually already AC-3.
+            if audio_inputs:
+                _ext_base = len(_a_streams) + (1 if _dup_src is not None else 0)
+                for idx, a in enumerate(audio_inputs):
+                    oi = _ext_base + idx
+                    a_codec = (a.get('codec') or '').lower()
+                    try:
+                        a_kbps = int(a.get('bit_rate') or 0) // 1000
+                    except (ValueError, TypeError):
+                        a_kbps = 0
+                    if do_convert_audio and target_codec != 'copy':
+                        _match = codec_aliases.get(target_codec, (target_codec,))
+                        _ok_br = (a_kbps == 0 or tgt_kbps == 0
+                                  or abs(a_kbps - tgt_kbps) <= tgt_kbps * 0.10)
+                        if a_codec in _match and _ok_br:
+                            cmd.extend([f'-c:a:{oi}', 'copy'])
+                            _log(f"  + {a['label']}: already {a_codec.upper()}"
+                                 f" @ {a_kbps}k, copying", 'SKIP')
+                        else:
+                            cmd.extend([f'-c:a:{oi}', target_codec])
+                            if target_codec in EXPERIMENTAL:
+                                cmd.extend(['-strict', '-2'])
+                            if target_codec not in LOSSLESS:
+                                cmd.extend([f'-b:a:{oi}', audio_bitrate])
+                            _log(f"  + {a['label']}: {a_codec.upper() or '?'} -> "
+                                 f"{target_codec.upper()} @ {audio_bitrate}", 'INFO')
+                    else:
+                        cmd.extend([f'-c:a:{oi}', 'copy'])
+                        _log(f"  + {a['label']}: copying", 'INFO')
+
+                    lang = a.get('language') or 'und'
+                    if lang and lang != 'und':
+                        cmd.extend([f'-metadata:s:a:{oi}', f'language={lang}'])
+                    title = (a.get('title') or '').strip()
+                    if title:
+                        cmd.extend([f'-metadata:s:a:{oi}', f'title={title}'])
+                    # ⚠️ -disposition REPLACES the whole set for that stream, so
+                    # everything wanted has to be named in one go. Commentary is
+                    # never `default` — a player that auto-picks it drops you into
+                    # two people talking over the film.
+                    disp = []
+                    if a.get('commentary'):
+                        disp.append('comment')
+                    if a.get('descriptive'):
+                        disp.append('descriptions')
+                    if disp:
+                        cmd.extend([f'-disposition:a:{oi}', '+'.join(disp)])
 
             # ── Subtitles codec ──
             if not do_strip_subs:
