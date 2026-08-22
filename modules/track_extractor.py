@@ -102,22 +102,26 @@ def probe_tracks(path):
     return tracks
 
 
-def output_name(src: Path, track, seq):
+def output_name(src: Path, track, seq, group_size=1):
     """Filename for one extracted track.
 
     ⚠️ These names are the CONTRACT with the Media Processor. Its
     _detect_ext_audio()/_detect_ext_subs() match on `<video stem>` followed by
-    tokens, and read `commentary<N>` to flag the track and order it. Change the
-    shape here and the round trip quietly stops working.
+    tokens, reading the role to flag the track and a trailing number to order
+    it. Change the shape here and the round trip quietly stops working.
+
+    Shape is `<stem>.<role>.<lang>[.<n>].mka` — Tony's, 2026-08-22. The number
+    appears ONLY when that role+language group has more than one member, so a
+    lone commentary is `commentary.eng.mka` rather than `commentary.eng.1.mka`.
+    Same principle as the commentary track TITLES: a disambiguator that shows
+    up when there is nothing to disambiguate is just noise.
     """
     stem = src.stem
     lang = track.get('language') or 'und'
+    n = f".{seq}" if group_size > 1 else ""
     if track['kind'] == 'audio':
-        if track['role'] == 'commentary':
-            return f"{stem}.commentary{seq}.mka"
-        if track['role'] == 'descriptive':
-            return f"{stem}.descriptive{seq}.mka"
-        return f"{stem}.audio{seq}.{lang}.mka"
+        role = track['role'] if track['role'] in ('commentary', 'descriptive') else 'audio'
+        return f"{stem}.{role}.{lang}{n}.mka"
     # subtitles keep their native shape so players and the Processor both cope
     codec = (track.get('codec') or '').lower()
     if codec in _TEXT_SUB_CODECS:
@@ -399,20 +403,30 @@ def open_track_extractor(app):
         d = outdir_var.get().strip()
         return Path(d) if d else src.parent
 
+    def _group_key(t):
+        """Which tracks compete for the same name, and so need numbering."""
+        if t['kind'] == 'audio':
+            role = t['role'] if t['role'] in ('commentary', 'descriptive') else 'audio'
+        else:
+            role = t['role']
+        return (t['kind'], role, t.get('language') or 'und')
+
     def _planned(path):
-        """[(track, out_path)] for one file, with commentary numbering applied."""
-        chosen = _wants(path)
-        out = []
-        counters = {}
-        for t in _tracks_of(path):
-            if (t['kind'], t['ord']) not in chosen:
-                continue
-            # Number within the ROLE, and only across chosen tracks, so ticking
-            # just the second commentary still yields ...commentary1.mka rather
-            # than a gap.
-            role = t['role'] if t['kind'] == 'audio' else 'sub'
-            counters[role] = counters.get(role, 0) + 1
-            out.append((t, _out_dir_for(path) / output_name(path, t, counters[role])))
+        """[(track, out_path)] for one file, numbered only where it's needed."""
+        chosen = [t for t in _tracks_of(path)
+                  if (t['kind'], t['ord']) in _wants(path)]
+        # ⚠️ Sizes are counted over the CHOSEN tracks, not all of them, so
+        # ticking one of two commentaries gives a clean `commentary.eng.mka`
+        # rather than a stray `.1` with no `.2` anywhere.
+        sizes = {}
+        for t in chosen:
+            sizes[_group_key(t)] = sizes.get(_group_key(t), 0) + 1
+        out, seen = [], {}
+        for t in chosen:
+            k = _group_key(t)
+            seen[k] = seen.get(k, 0) + 1
+            out.append((t, _out_dir_for(path)
+                        / output_name(path, t, seen[k], sizes[k])))
         return out
 
     def _rebuild():

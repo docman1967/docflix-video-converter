@@ -540,6 +540,11 @@ def open_media_processor(app):
         # Commentary tokens, with the trailing number stripped first, so
         # "commentary1"/"comm2" match as well as bare "commentary".
         _TAG_COMMENTARY = {'commentary', 'comment', 'comm'}
+        _TAG_DESCRIPTIVE = {'descriptive', 'description', 'ad'}
+        # A plain alternate audio track — the other half of a language swap
+        # (pull the English out, drop the Spanish in). Named by the Track
+        # Extractor as "<stem>.audio.spa.mka", so the token is deliberate.
+        _TAG_PLAIN_AUDIO = {'audio'}
         _SUB_EXTENSIONS = SUBTITLE_EXTENSIONS  # .srt .ass .ssa .vtt .sub .idx .sup
 
         def _normalize_lang(code):
@@ -738,17 +743,39 @@ def open_media_processor(app):
 
                 suffix = stem[len(video_stem):]
                 tokens = [t for t in re.split(r'[\.\s_\-]+', suffix.lower()) if t]
-                lang, is_comment, num = None, False, 0
+                # ⚠️ TWO NAME SHAPES, both accepted on purpose. The Track
+                # Extractor wrote `commentary1.mka` before 2026-08-22 and
+                # `commentary.eng.mka` / `commentary.eng.1.mka` after, so the
+                # digit may be glued to the word OR standing alone as its own
+                # token. Anything already extracted has to keep working.
+                lang, role, num = None, None, 0
                 for tok in tokens:
+                    if tok.isdigit():
+                        if role:
+                            num = int(tok)
+                        continue
                     m = re.match(r'^([a-z]+?)(\d*)$', tok)
                     word, n = (m.group(1), m.group(2)) if m else (tok, '')
                     if word in _TAG_COMMENTARY:
-                        is_comment = True
+                        role = 'commentary'
+                        if n:
+                            num = int(n)
+                    elif word in _TAG_DESCRIPTIVE:
+                        role = 'descriptive'
+                        if n:
+                            num = int(n)
+                    elif word in _TAG_PLAIN_AUDIO:
+                        role = 'audio'
                         if n:
                             num = int(n)
                     elif tok in _ALL_LANG_CODES and lang is None:
                         lang = _normalize_lang(tok)
-                if not is_comment:
+                # ⚠️ A role token is REQUIRED. Muxing every stray audio file
+                # beside a video would quietly add tracks nobody asked for — a
+                # leftover .ac3 from an old encode riding along as a duplicate
+                # main track. `audio`/`commentary` in the name is deliberate;
+                # the absence of one means the file is not ours to take.
+                if role is None:
                     continue
 
                 # What the file itself knows always beats the filename.
@@ -758,15 +785,20 @@ def open_media_processor(app):
                     'stream':     0,
                     'label':      fname,
                     'num':        num,
+                    'role':       role,
                     'codec':      info.get('codec_name', ''),
                     'bit_rate':   info.get('bit_rate', ''),
                     'language':   info.get('language') if info.get('language') not in (None, 'und') else (lang or 'eng'),
                     'title':      info.get('title') or '',
-                    'commentary': True,
-                    'descriptive': bool(info.get('descriptive')),
+                    'commentary': role == 'commentary' or bool(info.get('comment')),
+                    'descriptive': role == 'descriptive' or bool(info.get('descriptive')),
                 })
 
-            found.sort(key=lambda a: (a.get('num', 0), a['label']))
+            # Plain audio first, then commentary, then descriptive — matching
+            # the order they'd sit in inside a well-formed file.
+            _role_order = {'audio': 0, 'commentary': 1, 'descriptive': 2}
+            found.sort(key=lambda a: (_role_order.get(a.get('role'), 9),
+                                      a.get('num', 0), a['label']))
             return found
 
         def _add_one_file(filepath):
@@ -1777,13 +1809,19 @@ def open_media_processor(app):
                     # to keep one, so those get a readable stand-in built the same
                     # way the subtitle side builds its own.
                     title = (a.get('title') or '').strip()
-                    if not title and a.get('commentary'):
+                    if not title:
                         lang_name = LANG_CODE_TO_NAME.get(lang, lang.upper()
                                                           if lang != 'und' else '')
+                        role = a.get('role') or ('commentary' if a.get('commentary')
+                                                 else 'audio')
                         n = a.get('num', 0)
-                        multi = len(audio_inputs) > 1
-                        title = (f"{lang_name} - Commentary"
-                                 f"{f' {n}' if (multi and n) else ''}").strip(' -')
+                        same = sum(1 for x in audio_inputs
+                                   if (x.get('role') or 'audio') == role)
+                        word = {'commentary': 'Commentary',
+                                'descriptive': 'Descriptive'}.get(role, '')
+                        title = (f"{lang_name}"
+                                 f"{f' - {word}' if word else ''}"
+                                 f"{f' {n}' if (same > 1 and n) else ''}").strip(' -')
                     if title:
                         cmd.extend([f'-metadata:s:a:{oi}', f'title={title}'])
                     # ⚠️ -disposition REPLACES the whole set for that stream, so
