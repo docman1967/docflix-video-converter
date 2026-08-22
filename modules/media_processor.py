@@ -651,8 +651,16 @@ def open_media_processor(app):
                 comment_num = 0
 
                 for tok in tokens:
-                    # "commentary1" / "comm2" — split the trailing number off so
-                    # the word still matches and the number gives us the order.
+                    # ⚠️ TWO NAME SHAPES, both accepted. The digit may be glued
+                    # to the word ("commentary1", written before 2026-08-22) or
+                    # be its own token ("commentary.eng.1", written after).
+                    # Missing the standalone case cost the ORDER: both files
+                    # parsed as num=0 and sorted by directory listing, so
+                    # commentary 2 came out ahead of commentary 1.
+                    if tok.isdigit():
+                        if is_comment:
+                            comment_num = int(tok)
+                        continue
                     m = re.match(r'^([a-z]+?)(\d*)$', tok)
                     word, num = (m.group(1), m.group(2)) if m else (tok, '')
                     if word in _TAG_COMMENTARY:

@@ -1709,6 +1709,21 @@ def open_whisper_transcriber(app):
             _track_cache[key] = get_audio_streams(key)
         return _track_cache[key]
 
+    def _sub_lang_for(stream):
+        """Language code for the SUBTITLE this track will produce.
+
+        ⚠️ Not simply the audio track's language. Translating to English makes
+        an English subtitle out of a Japanese track, so the task wins; only
+        then does the track's own tag apply, and only then the language picked
+        for transcription.
+        """
+        if TASKS.get(_task_var.get()) == "translate":
+            return "eng"
+        lang = (stream or {}).get("language")
+        if lang and lang != "und":
+            return lang
+        return LANGUAGES.get(_lang_var.get()) or "eng"
+
     def _build_jobs(_mode=None):
         """Expand the ticked tracks into (file, audio track) jobs.
 
@@ -1745,13 +1760,26 @@ def open_whisper_transcriber(app):
                 continue
 
             for s in chosen:
-                # Tag by role when that is unambiguous, else by position.
-                if len(chosen) == 1:
+                # ⚠️ A COMMENTARY TRANSCRIPT IS NAMED FOR WHAT IT IS, even when
+                # it is the only one. `<stem>.commentary.eng.srt` is what the
+                # Media Processor's _detect_ext_subs() reads to flag the track
+                # `comment` and keep it out of the ordinary subtitle rotation.
+                # Left as a plain `.srt`, a commentary transcript is muxed back
+                # as a NORMAL English subtitle — and with SubtitleMode 0 that
+                # can auto-select over the real subs, so you start the episode
+                # reading two people discussing it.
+                #
+                # Ordinary tracks keep the plain `<stem>.srt` they have always
+                # had; that is the name players and Jellyfin expect, and
+                # changing it would break every existing workflow to solve a
+                # problem only commentary has.
+                role = s["role"]
+                if role in ("commentary", "descriptive"):
+                    same = [x for x in chosen if x["role"] == role]
+                    n = f".{same.index(s) + 1}" if len(same) > 1 else ""
+                    tag = f".{role}.{_sub_lang_for(s)}{n}"
+                elif len(chosen) == 1:
                     tag = ""
-                elif s["role"] == "commentary":
-                    same = [x for x in chosen if x["role"] == "commentary"]
-                    tag = (".commentary" if len(same) == 1
-                           else f".commentary{same.index(s) + 1}")
                 else:
                     tag = f".track{s['ord'] + 1}"
                 short = f"A{s['ord'] + 1}"
