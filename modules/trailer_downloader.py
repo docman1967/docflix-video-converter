@@ -217,9 +217,17 @@ CONTAINER_CODECS = {
 }
 
 
-# Exported cookie jar. ~/.cache is excluded from os_backup.sh on purpose — this file
-# is a signed-in Google session in plaintext and must not travel.
-_COOKIE_FILE = os.path.expanduser("~/.cache/docflix/yt-cookies.txt")
+# Default exported-cookie location. ~/.cache is excluded from os_backup.sh on purpose:
+# this file is a signed-in Google session in plaintext and should not travel to a backup
+# server or a rescue box. The user may point it elsewhere (Settings ▸ Use Browser
+# Cookies ▸ Cookie file location…) — the dialog says plainly what they are moving.
+_COOKIE_FILE_DEFAULT = os.path.expanduser("~/.cache/docflix/yt-cookies.txt")
+
+
+def cookie_file_path():
+    """Where the exported cookie jar lives — user-set, or the safe default."""
+    return os.path.expanduser(
+        load_trailer_prefs().get("cookie_file") or _COOKIE_FILE_DEFAULT)
 
 
 def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
@@ -298,8 +306,9 @@ def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
         # deliberately: ~/.cache is in os_backup.sh's EXCLUDES, so it does not
         # propagate to the backup server or the rescue box. Mode 600.
         # ⚠️ Cookies expire. When they do, the bot-check simply returns — re-export.
-        if cookies_from == "file" or (cookies_from and os.path.isfile(_COOKIE_FILE)):
-            cmd += ["--cookies", _COOKIE_FILE]
+        _cj = cookie_file_path()
+        if cookies_from == "file" or (cookies_from and os.path.isfile(_cj)):
+            cmd += ["--cookies", _cj]
         elif cookies_from:
             cmd += ["--cookies-from-browser", cookies_from]
         cmd.append(url)
@@ -742,41 +751,85 @@ def open_trailer_downloader(app):
                           command=_save_cookie_pref)
     kmenu.add_separator()
 
+    def _cookie_path_label():
+        cj = cookie_file_path()
+        return cj if len(cj) <= 52 else "…" + cj[-51:]
+
+    def _choose_cookie_file():
+        """Point at an existing cookie file (or a location to keep one)."""
+        cj = cookie_file_path()
+        f = filedialog.askopenfilename(
+            parent=win, title="Select cookie file",
+            initialdir=os.path.dirname(cj) or os.path.expanduser("~"),
+            initialfile=os.path.basename(cj),
+            filetypes=[("Cookie file", "*.txt"), ("All files", "*")])
+        win.lift(); win.focus_force()
+        if not f:
+            return
+        tp = load_trailer_prefs(); tp["cookie_file"] = f; save_trailer_prefs(tp)
+        _refresh_cookie_menu()
+        messagebox.showinfo("Cookie file", "Now using:\n" + f, parent=win)
+
     def _export_cookies():
-        """Export the browser's cookies to a file so the browser can stay OPEN."""
+        """Export browser cookies to a file so the browser can stay OPEN."""
         import subprocess as _sp
         src = v_cookies.get() or "chrome"
         if src == "file":
             src = "chrome"
-        os.makedirs(os.path.dirname(_COOKIE_FILE), exist_ok=True)
-        try:
-            os.chmod(os.path.dirname(_COOKIE_FILE), 0o700)
-        except OSError:
-            pass
+
+        # ⚠️ ASK WHERE. Everyone keeps credentials somewhere different, and a
+        # hardcoded path is wrong for a shipped tool. The default is deliberate
+        # though — see below.
+        dest = filedialog.asksaveasfilename(
+            parent=win, title="Save cookie file as",
+            initialdir=os.path.dirname(cookie_file_path()),
+            initialfile=os.path.basename(cookie_file_path()),
+            defaultextension=".txt",
+            filetypes=[("Cookie file", "*.txt"), ("All files", "*")])
+        win.lift(); win.focus_force()
+        if not dest:
+            return
+
+        # ⚠️ The default lives under ~/.cache because that path is in os_backup.sh's
+        # EXCLUDES. Anywhere else and a signed-in Google session starts replicating to
+        # the backup server and the rescue box. Say so rather than silently allowing it.
+        warn_extra = ""
+        if not dest.startswith(os.path.expanduser("~/.cache")):
+            warn_extra = ("\n⚠  This location is OUTSIDE ~/.cache, so it may be\n"
+                          "    included in backups. The default location is not.\n")
+
         if not messagebox.askyesno(
                 "Export cookies",
-                f"Export {src} cookies to a file?\n\n"
-                f"{_COOKIE_FILE}\n\n"
+                f"Export {src} cookies to:\n{dest}\n\n"
                 f"⚠  {src.title()} must be CLOSED right now, or the cookies\n"
                 f"    cannot be decrypted.\n\n"
-                f"⚠  The file is a signed-in Google session in plain text.\n"
-                f"    It is written with owner-only permissions, in a folder\n"
-                f"    excluded from backups. Cookies expire — re-export when\n"
-                f"    the bot-check returns.\n\n"
+                f"⚠  This file is a signed-in Google session in plain text.\n"
+                f"    Anyone who has it is logged into your account.\n"
+                f"    It is written owner-readable only (600).\n"
+                f"{warn_extra}\n"
+                f"Cookies expire — re-export when the bot-check returns.\n\n"
                 f"Afterwards the browser can stay open.", parent=win):
             return
+
+        d = os.path.dirname(dest)
+        if d:
+            os.makedirs(d, exist_ok=True)
+            try:
+                os.chmod(d, 0o700)
+            except OSError:
+                pass
         r = _sp.run([ytdlp_path[0] or "yt-dlp", "--ignore-config", "--no-warnings",
-                     "--cookies-from-browser", src, "--cookies", _COOKIE_FILE,
+                     "--cookies-from-browser", src, "--cookies", dest,
                      "--skip-download", "--simulate",
                      "https://www.youtube.com/watch?v=jRkM_VroEsE"],
                     capture_output=True, text=True)
-        if os.path.isfile(_COOKIE_FILE) and os.path.getsize(_COOKIE_FILE) > 1000:
+        if os.path.isfile(dest) and os.path.getsize(dest) > 1000:
             try:
-                os.chmod(_COOKIE_FILE, 0o600)
+                os.chmod(dest, 0o600)
             except OSError:
                 pass
-            v_cookies.set("file")
-            _save_cookie_pref()
+            tp = load_trailer_prefs(); tp["cookie_file"] = dest; save_trailer_prefs(tp)
+            v_cookies.set("file"); _save_cookie_pref(); _refresh_cookie_menu()
             messagebox.showinfo("Export cookies",
                                 "Exported. The browser can stay open from now on.",
                                 parent=win)
@@ -791,6 +844,18 @@ def open_trailer_downloader(app):
     kmenu.add_radiobutton(label="Use exported cookie file  (browser can stay open)",
                           variable=v_cookies, value="file", command=_save_cookie_pref)
     kmenu.add_command(label="Export cookies to file now…", command=_export_cookies)
+    kmenu.add_command(label="Cookie file location…", command=_choose_cookie_file)
+    _COOKIE_PATH_INDEX = kmenu.index("end") + 1
+    kmenu.add_command(label="   " + _cookie_path_label(), state="disabled")
+
+    def _refresh_cookie_menu():
+        """Keep the greyed-out path line honest after the user changes it."""
+        try:
+            kmenu.entryconfigure(_COOKIE_PATH_INDEX,
+                                 label="   " + _cookie_path_label())
+        except Exception:
+            pass
+
     kmenu.add_separator()
     kmenu.add_command(
         label="⚠  Browser must be CLOSED, and needs python3-secretstorage",
