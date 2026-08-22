@@ -54,7 +54,18 @@ _TEXT_SUB_CODECS = {'subrip', 'srt', 'ass', 'ssa', 'mov_text', 'webvtt', 'text'}
 _SUB_EXT_FOR = {'hdmv_pgs_subtitle': '.sup', 'dvd_subtitle': '.sub',
                 'dvb_subtitle': '.sub', 'ass': '.ass', 'ssa': '.ssa'}
 
-SEED_MODES = ('Commentary only', 'All audio', 'Nothing')
+def strip_command(src: Path, drop_indices, out_path: Path):
+    """ffmpeg args to rewrite *src* without the given absolute stream indices.
+
+    `-map 0` then a negative map per dropped stream: everything else — video,
+    remaining audio, subtitles, attachments, chapters — is carried through
+    untouched with `-c copy`.
+    """
+    cmd = ['ffmpeg', '-y', '-i', str(src), '-map', '0']
+    for idx in sorted(drop_indices):
+        cmd += ['-map', f'-0:{idx}']
+    cmd += ['-c', 'copy', '-map_chapters', '0', str(out_path)]
+    return cmd
 
 
 def probe_tracks(path):
@@ -141,36 +152,101 @@ def build_command(src: Path, track, out_path: Path):
 
 
 class ExtractWorker(threading.Thread):
-    """Runs the queued extractions, one ffmpeg per track."""
+    """Runs the queued extractions, one ffmpeg per track.
 
-    def __init__(self, q, jobs):
+    In *move* mode each source is rewritten without the tracks that were lifted
+    out — but only after every one of its tracks came out cleanly.
+    """
+
+    def __init__(self, q, groups, move=False):
         super().__init__(daemon=True)
         self.q = q
-        self.jobs = jobs
+        self.groups = groups        # [(src, [job, ...]), ...]
+        self.move = move
         self._stop = threading.Event()
 
     def stop(self):
         self._stop.set()
 
     def run(self):
-        for i, job in enumerate(self.jobs):
+        for src, jobs in self.groups:
             if self._stop.is_set():
                 self.q.put(('log', 'Stopped.'))
                 break
-            src, track, out = job['src'], job['track'], job['out']
-            self.q.put(('start', (i, job)))
-            try:
-                out.parent.mkdir(parents=True, exist_ok=True)
-                cmd = build_command(src, track, out)
-                self.q.put(('log', f"  {out.name}"))
-                r = subprocess.run(cmd, capture_output=True, text=True)
-                if r.returncode != 0:
-                    raise RuntimeError((r.stderr or '')[-400:])
-                size = out.stat().st_size if out.exists() else 0
-                self.q.put(('done', (i, job, size)))
-            except Exception as exc:
-                self.q.put(('error', (i, job, str(exc))))
+            self.q.put(('log', f"-- {src.name}"))
+            ok = []
+            for job in jobs:
+                if self._stop.is_set():
+                    break
+                out = job['out']
+                self.q.put(('start', job))
+                try:
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    cmd = build_command(src, job['track'], out)
+                    self.q.put(('log', f"   {out.name}"))
+                    r = subprocess.run(cmd, capture_output=True, text=True)
+                    if r.returncode != 0:
+                        raise RuntimeError((r.stderr or '')[-400:])
+                    size = out.stat().st_size if out.exists() else 0
+                    if size == 0:
+                        raise RuntimeError("wrote an empty file")
+                    self.q.put(('done', (job, size)))
+                    ok.append(job)
+                except Exception as exc:
+                    self.q.put(('error', (job, str(exc))))
+            if self.move and not self._stop.is_set():
+                self._strip(src, jobs, ok)
         self.q.put(('finished', None))
+
+    def _strip(self, src, jobs, ok):
+        """Rewrite *src* without the extracted tracks.
+
+        ⚠️ ALL OR NOTHING. If even one track failed to come out, the source is
+        left completely alone — removing a track whose copy does not exist is
+        the one unrecoverable thing this tool could do.
+        """
+        if len(ok) != len(jobs):
+            self.q.put(('log', "   source left intact — not every track "
+                               "extracted cleanly"))
+            return
+        drop = {j['track']['index'] for j in ok}
+        tmp = src.with_name(src.stem + '.tx_tmp' + src.suffix)
+        try:
+            r = subprocess.run(strip_command(src, drop, tmp),
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                raise RuntimeError((r.stderr or '')[-400:])
+            # Verify before replacing: the rewrite must have exactly the
+            # streams we expected to survive, and must not be empty.
+            after = probe_all_indices(tmp)
+            before = probe_all_indices(src)
+            expect = len(before) - len(drop)
+            if not tmp.exists() or tmp.stat().st_size == 0:
+                raise RuntimeError("rewrite produced an empty file")
+            if len(after) != expect:
+                raise RuntimeError(
+                    f"rewrite has {len(after)} streams, expected {expect}")
+            os.replace(str(tmp), str(src))
+            self.q.put(('stripped', (src, len(drop))))
+        except Exception as exc:
+            self.q.put(('log', f"   could NOT remove from source: {exc}"))
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+
+
+def probe_all_indices(path):
+    """Absolute stream indices present in *path*."""
+    try:
+        r = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'stream=index',
+             '-of', 'csv=p=0', str(path)], capture_output=True, text=True)
+        return [int(x) for x in r.stdout.split() if x.strip().isdigit()]
+    except Exception:
+        return []
 
 
 def open_track_extractor(app):
@@ -210,14 +286,9 @@ def open_track_extractor(app):
         return _tracks[key]
 
     def _seed(path):
-        mode = seed_var.get()
-        ts = _tracks_of(path)
-        if mode == 'All audio':
-            return {(t['kind'], t['ord']) for t in ts if t['kind'] == 'audio'}
-        if mode == 'Commentary only':
-            return {(t['kind'], t['ord']) for t in ts
-                    if t['kind'] == 'audio' and t['role'] == 'commentary'}
-        return set()
+        """Everything ticked. Tony's call, 2026-08-22: deselecting the few you
+        don't want beats picking from a dropdown that guesses for you."""
+        return {(t['kind'], t['ord']) for t in _tracks_of(path)}
 
     def _wants(path):
         key = str(path)
@@ -276,11 +347,15 @@ def open_track_extractor(app):
         b.pack(side='left', padx=(0, 4))
         _btns.append(b)
 
-    ttk.Label(bar, text="Select:").pack(side='left', padx=(12, 4))
-    seed_var = tk.StringVar(value=SEED_MODES[0])
-    seed_cb = ttk.Combobox(bar, textvariable=seed_var, values=list(SEED_MODES),
-                           state='readonly', width=16)
-    seed_cb.pack(side='left')
+    # ⚠️ COPY vs MOVE. Copy is forgiving; Move rewrites the source without the
+    # tracks it lifted out and is the only irreversible thing here. It is
+    # deliberately not the default, it confirms before running, and it refuses
+    # to leave a file with no video or no audio.
+    ttk.Label(bar, text="   Mode:").pack(side='left', padx=(12, 4))
+    move_var = tk.BooleanVar(value=False)
+    ttk.Radiobutton(bar, text="Copy out", variable=move_var, value=False).pack(side='left')
+    ttk.Radiobutton(bar, text="Move out (remove from source)",
+                    variable=move_var, value=True).pack(side='left', padx=(6, 0))
 
     # ── Track tree ──
     tree_fr = ttk.LabelFrame(frame, text="Files and tracks")
@@ -404,17 +479,6 @@ def open_track_extractor(app):
 
     tree.bind('<Button-1>', _on_click, add='+')
 
-    def _on_seed_change(_e=None):
-        # Same contract as the Transcriber and sub_ripper: the dropdown is a
-        # BULK SEED and re-picking it discards hand edits.
-        if _running[0]:
-            return
-        for p in _files:
-            _want[str(p)] = _seed(p)
-        _rebuild()
-
-    seed_cb.bind('<<ComboboxSelected>>', _on_seed_change)
-
     if HAS_DND:
         def _on_drop(event):
             if _running[0]:
@@ -482,15 +546,56 @@ def open_track_extractor(app):
     act.grid(row=5, column=0, sticky='ew', pady=(6, 0))
 
     def _start():
-        jobs = []
+        groups, jobs = [], []
         for path in _files:
-            for t, out in _planned(path):
-                jobs.append({'src': path, 'track': t, 'out': out})
+            plan = _planned(path)
+            if not plan:
+                continue
+            g = [{'src': path, 'track': t, 'out': out} for t, out in plan]
+            groups.append((path, g))
+            jobs.extend(g)
         if not jobs:
             messagebox.showwarning("Nothing selected",
                                    "Tick at least one track to extract.",
                                    parent=win)
             return
+
+        moving = move_var.get()
+        if moving:
+            # ⚠️ Refuse to gut a file. With everything ticked by default, one
+            # click in Move mode would otherwise strip a source of all its
+            # audio — or every track it has — and there is no undo.
+            gutted = []
+            for path, g in groups:
+                ts = _tracks_of(path)
+                taking = {(j['track']['kind'], j['track']['ord']) for j in g}
+                left_audio = [t for t in ts if t['kind'] == 'audio'
+                              and (t['kind'], t['ord']) not in taking]
+                if not left_audio and any(t['kind'] == 'audio' for t in ts):
+                    gutted.append(path.name)
+            if gutted:
+                messagebox.showerror(
+                    "That would leave a file with no audio",
+                    "Move mode removes the extracted tracks from the source, "
+                    "and these would be left with none at all:\n\n"
+                    + "\n".join(f"  {n}" for n in gutted[:8])
+                    + ("\n  ..." if len(gutted) > 8 else "")
+                    + "\n\nUntick at least one audio track to keep, or switch "
+                      "to Copy out.",
+                    parent=win)
+                return
+            names = [j['track']['label'].strip() for j in jobs[:6]]
+            if not messagebox.askyesno(
+                    "Remove these tracks from the source?",
+                    f"{len(jobs)} track(s) will be written out AND REMOVED "
+                    f"from {len(groups)} source file(s):\n\n"
+                    + "\n".join(f"  {n[:58]}" for n in names)
+                    + ("\n  ..." if len(jobs) > 6 else "")
+                    + "\n\nThe source is only rewritten if every one of its "
+                      "tracks extracts cleanly. This cannot be undone.\n\nContinue?",
+                    parent=win):
+                return
+
         clashes = [j['out'] for j in jobs if j['out'].exists()]
         if clashes:
             if not messagebox.askyesno(
@@ -506,8 +611,8 @@ def open_track_extractor(app):
         stop_btn.config(state='normal')
         for b in _btns:
             b.config(state='disabled')
-        _log(f"Extracting {len(jobs)} track(s)...")
-        _worker[0] = ExtractWorker(_q, jobs)
+        _log(f"{'Moving' if moving else 'Extracting'} {len(jobs)} track(s)...")
+        _worker[0] = ExtractWorker(_q, groups, move=moving)
         _worker[0].start()
 
     def _stop():
@@ -538,21 +643,26 @@ def open_track_extractor(app):
                 if ev == 'log':
                     _log(data)
                 elif ev == 'start':
-                    _tag(data[1], 'active')
+                    _tag(data, 'active')
                 elif ev == 'done':
-                    i, job, size = data
+                    job, size = data
                     _tag(job, 'done')
-                    _log(f"    -> {size / 1024 / 1024:.1f} MB")
+                    _log(f"      -> {size / 1024 / 1024:.1f} MB")
                 elif ev == 'error':
-                    i, job, msg = data
+                    job, msg = data
                     _tag(job, 'error')
-                    _log(f"    FAILED: {msg}")
+                    _log(f"      FAILED: {msg}")
+                elif ev == 'stripped':
+                    src, n = data
+                    _log(f"   removed {n} track(s) from {src.name}")
+                    _tracks.pop(str(src), None)   # re-probe: indices have moved
+                    _want.pop(str(src), None)
                 elif ev == 'finished':
                     _running[0] = False
                     stop_btn.config(state='disabled')
                     for b in _btns:
                         b.config(state='normal')
-                    _refresh_summary()
+                    _rebuild()
                     _log("Done.")
         except queue.Empty:
             pass
