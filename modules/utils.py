@@ -305,7 +305,12 @@ def get_audio_info(filepath):
     """Return a list of audio stream dicts for the given file.
 
     Each dict has: index, codec_name, codec_long_name, profile, channels,
-    sample_rate, bit_rate, language, title.
+    sample_rate, bit_rate, language, title, default, comment, descriptive.
+
+    ⚠️ The disposition flags were MISSING until 2026-08-22, which quietly broke
+    the thing that consumed them: media_processor's `{flags}` template checks
+    `info.get('comment')` to print "Commentary", and that key was never present,
+    so it could only ever fall back to sniffing the word out of the title.
     """
     try:
         cmd = [
@@ -323,6 +328,7 @@ def get_audio_info(filepath):
         streams = []
         for s in data.get('streams', []):
             tags = s.get('tags', {})
+            disp = s.get('disposition', {}) or {}
             streams.append({
                 'index':          s.get('index', 0),
                 'codec_name':     s.get('codec_name', 'unknown'),
@@ -333,6 +339,9 @@ def get_audio_info(filepath):
                 'bit_rate':       s.get('bit_rate', ''),
                 'language':       tags.get('language', 'und'),
                 'title':          tags.get('title', ''),
+                'default':        bool(disp.get('default', 0)),
+                'comment':        bool(disp.get('comment', 0)),
+                'descriptive':    bool(disp.get('descriptions', 0)),
             })
         return streams
     except Exception:

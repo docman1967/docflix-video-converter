@@ -32,6 +32,29 @@ except ImportError:
     HAS_DND = False
 
 
+# Titles a commentary track might carry. Matched case-insensitively as a
+# fallback for rips that never set the disposition flag — plenty of them
+# say "Commentary" in the name and nothing else.
+_COMMENTARY_WORDS = ('commentary', 'commentator', "director's comment",
+                     'audio commentary')
+
+
+def _is_commentary(info):
+    """True if this stream is a commentary track.
+
+    Trusts the `comment` disposition first and falls back to the title, the
+    same order sub_ripper's _classify_stream uses. Callers rely on this to
+    decide what NOT to overwrite, so a false negative costs a hand-written
+    title — prefer to say yes when the title says so.
+    """
+    if not info:
+        return False
+    if info.get('comment'):
+        return True
+    title = (info.get('title', '') or '').lower()
+    return any(word in title for word in _COMMENTARY_WORDS)
+
+
 def open_media_processor(app):
         import time as _time
         import tempfile
@@ -1671,6 +1694,18 @@ def open_media_processor(app):
                         if do_name_tracks and opt_name_audio.get():
                             a_title = _resolve_track_name(opt_name_audio.get(), ainfo)
                             cmd.extend([f'-metadata:s:a:{ai}', f'title={a_title}'])
+                        elif _is_commentary(ainfo):
+                            # ⚠️ NEVER blank a commentary title. The whole point of
+                            # "Set track metadata" is scrubbing junk names off
+                            # ordinary tracks, but a commentary title is CONTENT --
+                            # "Commentary with Co-Creators Sam Ernst and Jim Dunn"
+                            # is hand-written and unrecoverable, and it names the
+                            # only thing that distinguishes two identical-looking
+                            # stereo AC-3 tracks. Verified 2026-08-22: a remux with
+                            # this option on wiped the titles on a real file while
+                            # leaving the comment flag intact, so it looked fine in
+                            # a flag check and was silently gutted.
+                            pass
                         else:
                             cmd.extend([f'-metadata:s:a:{ai}', 'title='])
                 else:
