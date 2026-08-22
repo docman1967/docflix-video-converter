@@ -628,11 +628,15 @@ def open_whisper_transcriber(app):
     _results = {}          # job index -> list of segments
     _preview_idx = [None]
     # ⚠️ A JOB IS NOT A FILE. With audio-track selection one video can produce
-    # several transcripts, so the batch runs over jobs while the listbox still
-    # shows files. Every queue event carries a JOB index; use _job_row() before
-    # touching the listbox, and _jobs[idx] (never _file_paths[idx]) to find the
-    # source file. Built fresh by _build_jobs() at the start of every run.
-    _jobs = []             # list of {"path", "track", "row", "tag", "label"}
+    # several transcripts, so the batch runs over jobs while the tree still has
+    # one PARENT per file. Every queue event carries a JOB index; use _jobs[idx]
+    # (never _file_paths[idx]) to find the source file, and _tag_job() to colour
+    # it. Built fresh by _build_jobs() at the start of every run.
+    _jobs = []             # list of {"path", "track", "row", "ord", "tag", ...}
+    # Per-file chosen audio ordinals: str(path) -> {0, 2}. Seeded from the Audio
+    # dropdown, then hand-editable in the tree. THIS is what actually gets
+    # transcribed — the dropdown is only ever a bulk seed, as in sub_ripper.
+    _want = {}
 
     # ── Load saved preferences ──
     _wp = getattr(app, '_whisper_prefs', {})
@@ -681,11 +685,9 @@ def open_whisper_transcriber(app):
             path = Path(p)
             if path not in _file_paths:
                 _file_paths.append(path)
-                file_listbox.insert("end", path.name)
-                file_listbox.itemconfig("end", fg=COLOR_QUEUED)
                 added += 1
         if added:
-            _refresh_count()
+            _rebuild_tree()
             _status_var.set(f"Added {added} file(s) -- {len(_file_paths)} total")
 
     def _add_folder():
@@ -703,36 +705,43 @@ def open_whisper_transcriber(app):
         for path in media_files:
             if path not in _file_paths:
                 _file_paths.append(path)
-                file_listbox.insert("end", path.name)
-                file_listbox.itemconfig("end", fg=COLOR_QUEUED)
                 added += 1
         if added:
-            _refresh_count()
+            _rebuild_tree()
             _status_var.set(f"Added {added} file(s) from folder -- {len(_file_paths)} total")
             _log_write(f"Added {added} media file(s) from {directory}", "info")
 
-    def _remove_selected():
-        selected = list(file_listbox.curselection())
-        if not selected:
-            return
-        for idx in reversed(selected):
-            file_listbox.delete(idx)
-            _file_paths.pop(idx)
-            _results.pop(idx, None)
-            new_results = {}
-            for k, v in _results.items():
-                new_results[k if k < idx else k - 1] = v
-            _results.clear()
-            _results.update(new_results)
-        _refresh_count()
+    def _selected_rows():
+        """File rows implied by the tree selection (a child selects its parent)."""
+        rows = set()
+        for iid in file_tree.selection():
+            row = _row_of_iid(iid)
+            if row is not None:
+                rows.add(row)
+        return sorted(rows)
 
-    def _clear_files():
-        file_listbox.delete(0, "end")
-        _file_paths.clear()
+    def _remove_selected():
+        rows = _selected_rows()
+        if not rows:
+            return
+        for row in reversed(rows):
+            _want.pop(str(_file_paths[row]), None)
+            _file_paths.pop(row)
+        # Results are keyed by JOB index and jobs are rebuilt per run, so a
+        # removal mid-session invalidates them rather than shifting them.
         _results.clear()
         _preview_idx[0] = None
         _clear_preview()
-        _refresh_count()
+        _rebuild_tree()
+
+    def _clear_files():
+        _file_paths.clear()
+        _want.clear()
+        _results.clear()
+        _jobs.clear()
+        _preview_idx[0] = None
+        _clear_preview()
+        _rebuild_tree()
 
     for txt, cmd in [
         ("Add Files", _add_files),
@@ -744,48 +753,158 @@ def open_whisper_transcriber(app):
         btn.pack(side='left', padx=(0, 4))
         _file_btns.append(btn)
 
-    # Listbox with scrollbar
+    # ── file tree: one parent per file, one child per audio track ───────────
+    # Mirrors the Sub Extractor's "global defaults + per-file override": the
+    # Audio dropdown SEEDS the ticks, then you hand-correct any file. Audio
+    # can't use sub_ripper's fixed type columns because "commentary" is not one
+    # thing — a disc can carry two and you may want only the second.
     file_list_frame = ttk.LabelFrame(left, text="Files")
     file_list_frame.grid(row=1, column=0, sticky='nsew')
     file_list_frame.columnconfigure(0, weight=1)
     file_list_frame.rowconfigure(0, weight=1)
 
-    file_listbox = tk.Listbox(
-        file_list_frame,
-        relief="flat", activestyle="none",
-        highlightthickness=0, bd=0,
-    )
-    file_listbox.grid(row=0, column=0, sticky='nsew')
+    GLYPH_ON, GLYPH_OFF = '☑', '☐'      # ☑ ☐
+
+    file_tree = ttk.Treeview(file_list_frame, columns=('use', 'status'),
+                             show='tree headings', selectmode='extended')
+    file_tree.heading('#0', text='File / audio track', anchor='w')
+    file_tree.heading('use', text='Use', anchor='center')
+    file_tree.heading('status', text='', anchor='w')
+    file_tree.column('#0', width=360, minwidth=200, stretch=True)
+    file_tree.column('use', width=52, minwidth=44, stretch=False, anchor='center')
+    file_tree.column('status', width=96, minwidth=60, stretch=False, anchor='w')
+    file_tree.grid(row=0, column=0, sticky='nsew')
 
     file_sb = ttk.Scrollbar(file_list_frame, orient='vertical',
-                             command=file_listbox.yview)
+                            command=file_tree.yview)
     file_sb.grid(row=0, column=1, sticky='ns')
-    file_listbox['yscrollcommand'] = file_sb.set
+    file_tree['yscrollcommand'] = file_sb.set
 
-    def _on_list_double_click(_event=None):
-        sel = file_listbox.curselection()
+    for tag, colour in (('queued', COLOR_QUEUED), ('active', COLOR_ACTIVE),
+                        ('done', COLOR_DONE), ('error', COLOR_ERROR),
+                        ('skip', COLOR_SKIP)):
+        file_tree.tag_configure(tag, foreground=colour)
+
+    def _row_of_iid(iid):
+        """File row for a tree item, whether it is a file or one of its tracks."""
+        if not iid:
+            return None
+        head = iid.split('t')[0]
+        try:
+            return int(head.lstrip('f'))
+        except ValueError:
+            return None
+
+    def _ord_of_iid(iid):
+        """Audio ordinal for a track item, or None if it is a file row."""
+        if 't' not in iid:
+            return None
+        try:
+            return int(iid.split('t')[1])
+        except (IndexError, ValueError):
+            return None
+
+    def _on_tree_double_click(_event=None):
+        sel = file_tree.selection()
         if not sel:
             return
-        row = sel[0]
-        # A row can own several jobs (one per audio track); preview the first
-        # of its jobs that finished. Falls back to treating row as job index
-        # for the plain one-track-per-file case.
+        iid = sel[0]
+        row, o = _row_of_iid(iid), _ord_of_iid(iid)
         for j_idx, job in enumerate(_jobs):
-            if job["row"] == row and j_idx in _results:
+            if job["row"] != row or j_idx not in _results:
+                continue
+            if o is None or job.get("ord") == o:
                 _show_preview(j_idx)
                 return
-        if not _jobs and row in _results:
-            _show_preview(row)
-            return
-        _status_var.set("File not yet transcribed -- run extraction first.")
+        _status_var.set("Not yet transcribed -- run extraction first.")
 
-    file_listbox.bind("<Double-Button-1>", _on_list_double_click)
+    file_tree.bind("<Double-Button-1>", _on_tree_double_click)
+
+    _range_anchor = {'iid': None, 'state': None}
+
+    def _set_track(row, o, state):
+        """Tick or clear one track. Returns True if it changed."""
+        path = _file_paths[row]
+        chosen = _wants(path)
+        if state and o not in chosen:
+            chosen.add(o)
+        elif not state and o in chosen:
+            chosen.discard(o)
+        else:
+            return False
+        iid = f"f{row}t{o}"
+        if file_tree.exists(iid):
+            file_tree.set(iid, 'use', GLYPH_ON if state else GLYPH_OFF)
+        if file_tree.exists(f"f{row}"):
+            streams = _audio_streams_cached(path)
+            file_tree.set(f"f{row}", 'use', f"{len(chosen)} / {len(streams)}")
+        return True
+
+    def _on_tree_click(event):
+        """Toggle on the Use column; shift-click extends over a range.
+
+        Clicking a FILE row toggles all of its tracks at once — the quick way
+        to say "none of this one" without opening it.
+        """
+        if _processing[0]:
+            return None
+        if file_tree.identify_region(event.x, event.y) != 'cell':
+            return None
+        if file_tree.identify_column(event.x) != '#1':      # the Use column
+            return None
+        iid = file_tree.identify_row(event.y)
+        if not iid:
+            return None
+        row, o = _row_of_iid(iid), _ord_of_iid(iid)
+        if row is None:
+            return None
+
+        if o is None:                                       # a file row
+            chosen = _wants(_file_paths[row])
+            streams = _audio_streams_cached(_file_paths[row])
+            new_state = len(chosen) < len(streams)          # partial -> all on
+            for s in streams:
+                _set_track(row, s['ord'], new_state)
+            _range_anchor.update(iid=iid, state=new_state)
+            _refresh_count()
+            _refresh_audio_hint()
+            return 'break'
+
+        shift = bool(event.state & 0x0001)
+        anchor = _range_anchor
+        if shift and anchor['iid'] and 't' in anchor['iid']:
+            # Walk the flattened visible order between anchor and here.
+            flat = []
+            for fid in file_tree.get_children(''):
+                flat.append(fid)
+                flat.extend(file_tree.get_children(fid))
+            try:
+                lo, hi = sorted((flat.index(anchor['iid']), flat.index(iid)))
+            except ValueError:
+                lo = hi = None
+            if lo is not None:
+                for mid in flat[lo:hi + 1]:
+                    mo = _ord_of_iid(mid)
+                    if mo is not None:
+                        _set_track(_row_of_iid(mid), mo, anchor['state'])
+                _refresh_count()
+                _refresh_audio_hint()
+                return 'break'
+
+        new_state = o not in _wants(_file_paths[row])
+        _set_track(row, o, new_state)
+        _range_anchor.update(iid=iid, state=new_state)
+        _refresh_count()
+        _refresh_audio_hint()
+        return 'break'
+
+    file_tree.bind('<Button-1>', _on_tree_click, add='+')
 
     # Enable drag-and-drop
     if HAS_DND:
         try:
-            file_listbox.drop_target_register(DND_FILES)
-            file_listbox.dnd_bind("<<Drop>>", lambda e: _on_drop(e))
+            file_tree.drop_target_register(DND_FILES)
+            file_tree.dnd_bind("<<Drop>>", lambda e: _on_drop(e))
             win.drop_target_register(DND_FILES)
             win.dnd_bind("<<Drop>>", lambda e: _on_drop(e))
         except Exception:
@@ -806,9 +925,82 @@ def open_whisper_transcriber(app):
 
     def _refresh_count():
         n = len(_file_paths)
-        _file_count_var.set(f"{n} file{'s' if n != 1 else ''}")
-        # The audio-track hint counts transcripts, so it goes stale whenever the
-        # file list moves. Defined later in this function; guard for early calls.
+        jobs = sum(len(_wants(p)) for p in _file_paths) if _file_paths else 0
+        _file_count_var.set(
+            f"{n} file{'s' if n != 1 else ''}  --  {jobs} transcript"
+            f"{'s' if jobs != 1 else ''} selected")
+
+    def _wants(path):
+        """This file's chosen audio ordinals, seeded from the Audio dropdown.
+
+        Seeded LAZILY rather than when the file is added, so changing the
+        dropdown before adding files still does the obvious thing — the same
+        reason sub_ripper's _wants() is lazy.
+        """
+        key = str(path)
+        if key not in _want:
+            _want[key] = _seed_for(path, _audio_var.get())
+        return _want[key]
+
+    def _seed_for(path, mode):
+        """Which ordinals the bulk mode would tick for this file."""
+        if path.suffix.lower() in AUDIO_EXTENSIONS:
+            return {0}
+        streams = _audio_streams_cached(path)
+        if not streams:
+            return set()
+        if mode == AUDIO_TRACK_DEFAULT:
+            # ffmpeg's pick: most channels, ties to the lowest index.
+            best = max(streams, key=lambda s: (s.get('channels', 0), -s['ord']))
+            return {best['ord']}
+        if mode == "All tracks":
+            return {s['ord'] for s in streams}
+        if mode == "Commentary only":
+            return {s['ord'] for s in streams if s['role'] == 'commentary'}
+        if mode == "Main only":
+            return {s['ord'] for s in streams if s['role'] == 'main'}
+        if mode.startswith("Track "):
+            want = int(mode.split()[1]) - 1
+            return {s['ord'] for s in streams if s['ord'] == want}
+        return set()
+
+    def _reseed_wants():
+        """Re-apply the bulk mode over every file, discarding hand edits."""
+        mode = _audio_var.get()
+        for p in _file_paths:
+            _want[str(p)] = _seed_for(p, mode)
+
+    def _rebuild_tree():
+        """Redraw the whole tree from _file_paths + _want.
+
+        Cheap enough to do wholesale: ffprobe results are cached per path, so
+        this is string formatting, not I/O.
+        """
+        open_rows = {_row_of_iid(i) for i in file_tree.get_children('')
+                     if file_tree.item(i, 'open')}
+        sel_rows = {_row_of_iid(i) for i in file_tree.selection()}
+        for i in file_tree.get_children(''):
+            file_tree.delete(i)
+
+        for row, path in enumerate(_file_paths):
+            chosen = _wants(path)
+            streams = ([] if path.suffix.lower() in AUDIO_EXTENSIONS
+                       else _audio_streams_cached(path))
+            fid = f"f{row}"
+            count = (f"{len(chosen)} / {len(streams)}" if streams
+                     else ("audio" if not streams else ""))
+            file_tree.insert('', 'end', iid=fid, text=path.name,
+                             values=(count, ''), tags=('queued',),
+                             open=(row in open_rows) or len(_file_paths) <= 12)
+            for s in streams:
+                file_tree.insert(
+                    fid, 'end', iid=f"{fid}t{s['ord']}",
+                    text='    ' + describe_audio_stream(s),
+                    values=(GLYPH_ON if s['ord'] in chosen else GLYPH_OFF, ''),
+                    tags=('queued',))
+            if row in sel_rows:
+                file_tree.selection_add(fid)
+        _refresh_count()
         try:
             _refresh_audio_hint()
         except NameError:
@@ -842,18 +1034,14 @@ def open_whisper_transcriber(app):
                 for media_file in find_media_files(path):
                     if media_file not in _file_paths:
                         _file_paths.append(media_file)
-                        file_listbox.insert("end", media_file.name)
-                        file_listbox.itemconfig("end", fg=COLOR_QUEUED)
                         added += 1
             elif path.is_file() and path.suffix.lower() in all_exts:
                 if path not in _file_paths:
                     _file_paths.append(path)
-                    file_listbox.insert("end", path.name)
-                    file_listbox.itemconfig("end", fg=COLOR_QUEUED)
                     added += 1
 
         if added:
-            _refresh_count()
+            _rebuild_tree()
             _status_var.set(f"Dropped {added} file(s) -- {len(_file_paths)} total")
             _log_write(f"Dropped {added} file(s).", "info")
 
@@ -861,9 +1049,21 @@ def open_whisper_transcriber(app):
         for btn in _file_btns:
             btn.config(state=state)
 
-    def _safe_itemconfig(idx: int, **kw):
-        if 0 <= idx < file_listbox.size():
-            file_listbox.itemconfig(idx, **kw)
+    def _tag_job(idx: int, tag: str):
+        """Colour a job's track row, and its file row, by status tag."""
+        if not (0 <= idx < len(_jobs)):
+            return
+        job = _jobs[idx]
+        row, o = job["row"], job.get("ord")
+        for iid in (f"f{row}t{o}" if o is not None else None, f"f{row}"):
+            if iid and file_tree.exists(iid):
+                file_tree.item(iid, tags=(tag,))
+
+    def _reset_tags():
+        for fid in file_tree.get_children(''):
+            file_tree.item(fid, tags=('queued',))
+            for cid in file_tree.get_children(fid):
+                file_tree.item(cid, tags=('queued',))
 
     # ══════════════════════════════════════════════════════════════════
     # Settings panel
@@ -1509,12 +1709,13 @@ def open_whisper_transcriber(app):
             _track_cache[key] = get_audio_streams(key)
         return _track_cache[key]
 
-    def _build_jobs(mode: str):
-        """Expand the file list into (file, audio track) jobs.
+    def _build_jobs(_mode=None):
+        """Expand the ticked tracks into (file, audio track) jobs.
 
-        Returns (jobs, notes). One job per transcript that will be produced, so
-        a video with two commentary tracks yields two. `row` points back at the
-        listbox line the job came from — several jobs can share one row.
+        Reads the TREE, not the dropdown — the dropdown only ever seeds the
+        ticks, so a hand edit survives. Returns (jobs, notes); one job per
+        transcript that will be produced, so a video with two ticked commentary
+        tracks yields two. `row` points back at its file row.
 
         ⚠️ The suffix is only added when a file yields MORE THAN ONE job. A
         single-track file keeps its plain `name.srt`, so turning this feature on
@@ -1525,35 +1726,22 @@ def open_whisper_transcriber(app):
             if path.suffix.lower() in AUDIO_EXTENSIONS:
                 # Already audio -- there is no track to choose.
                 jobs.append({"path": path, "track": None, "row": row_idx,
-                             "tag": "", "label": path.name})
-                continue
-
-            if mode == AUDIO_TRACK_DEFAULT:
-                jobs.append({"path": path, "track": None, "row": row_idx,
-                             "tag": "", "label": path.name})
+                             "ord": 0, "tag": "", "short": "audio",
+                             "label": path.name})
                 continue
 
             streams = _audio_streams_cached(path)
             if not streams:
                 notes.append(f"{path.name}: no audio tracks found -- using default")
                 jobs.append({"path": path, "track": None, "row": row_idx,
-                             "tag": "", "label": path.name})
+                             "ord": 0, "tag": "", "short": "default",
+                             "label": path.name})
                 continue
 
-            if mode == "All tracks":
-                chosen = streams
-            elif mode == "Commentary only":
-                chosen = [s for s in streams if s["role"] == "commentary"]
-            elif mode == "Main only":
-                chosen = [s for s in streams if s["role"] == "main"]
-            elif mode.startswith("Track "):
-                want = int(mode.split()[1]) - 1
-                chosen = [s for s in streams if s["ord"] == want]
-            else:
-                chosen = streams[:1]
-
+            wanted = _wants(path)
+            chosen = [s for s in streams if s["ord"] in wanted]
             if not chosen:
-                notes.append(f"{path.name}: nothing matches '{mode}' -- skipped")
+                notes.append(f"{path.name}: no track ticked -- skipped")
                 continue
 
             for s in chosen:
@@ -1570,74 +1758,40 @@ def open_whisper_transcriber(app):
                 if s["role"] != "main":
                     short += f" {s['role'].capitalize()}"
                 jobs.append({"path": path, "track": s["index"], "row": row_idx,
-                             "tag": tag, "short": short,
+                             "ord": s["ord"], "tag": tag, "short": short,
                              "label": f"{path.name}  [{describe_audio_stream(s)}]"})
         return jobs, notes
 
-    def _job_row(idx: int) -> int:
-        """Listbox row for a job index (-1 if it has none)."""
-        if 0 <= idx < len(_jobs):
-            return _jobs[idx]["row"]
-        return -1
-
-    def _annotate_rows(jobs, mode):
-        """Write the chosen track(s) onto each file row.
-
-        ⚠️ This is the whole point of the feature being visible. A dropdown
-        reading 'Commentary only' says nothing about whether THIS file has a
-        commentary; the row has to say it. Tony added a file, saw no indication
-        of which track would be used, and reasonably concluded nothing had
-        changed (2026-08-22).
-        """
-        if _processing[0]:
-            return
-        per_row = {}
-        for j in jobs:
-            per_row.setdefault(j["row"], []).append(j)
-        sel = file_listbox.curselection()
-        top = file_listbox.yview()[0]
-        for row, path in enumerate(_file_paths):
-            if row >= file_listbox.size():
-                break
-            if mode == AUDIO_TRACK_DEFAULT:
-                label = path.name
-            else:
-                js = per_row.get(row)
-                label = (f"{path.name}   [{', '.join(j['short'] for j in js)}]"
-                         if js else f"{path.name}   [no matching audio]")
-            if file_listbox.get(row) != label:
-                fg = file_listbox.itemcget(row, 'fg')
-                file_listbox.delete(row)
-                file_listbox.insert(row, label)
-                if fg:
-                    file_listbox.itemconfig(row, fg=fg)
-        for i in sel:
-            file_listbox.selection_set(i)
-        file_listbox.yview_moveto(top)
-
     def _refresh_audio_hint(_event=None):
-        """Show what the current mode would actually select, before committing."""
-        mode = _audio_var.get()
+        """Summarise the current ticks under the dropdown."""
         if not _file_paths:
-            _audio_hint_var.set("highest-channel track (ffmpeg default)"
-                                if mode == AUDIO_TRACK_DEFAULT else "add files to preview")
+            _audio_hint_var.set("tick tracks per file below")
             return
         try:
-            jobs, notes = _build_jobs(mode)
+            jobs, notes = _build_jobs()
         except Exception:
             _audio_hint_var.set("")
             return
-        _annotate_rows(jobs, mode)
-        if mode == AUDIO_TRACK_DEFAULT:
-            _audio_hint_var.set("highest-channel track (ffmpeg default)")
-            return
         skipped = sum(1 for n in notes if "skipped" in n)
-        msg = f"{len(jobs)} transcript{'s' if len(jobs) != 1 else ''} from {len(_file_paths)} file(s)"
+        msg = (f"{len(jobs)} transcript{'s' if len(jobs) != 1 else ''} "
+               f"from {len(_file_paths)} file(s)")
         if skipped:
-            msg += f"  --  {skipped} with no match"
+            msg += f"  --  {skipped} with nothing ticked"
         _audio_hint_var.set(msg)
 
-    audio_cb.bind("<<ComboboxSelected>>", _refresh_audio_hint)
+    def _on_audio_mode_change(_event=None):
+        """The dropdown is a BULK SEED, not the source of truth.
+
+        Choosing a mode re-ticks every file, discarding hand edits — same
+        contract as sub_ripper, where changing the language re-seeds the
+        per-file type boxes. The tree is what actually gets transcribed.
+        """
+        if _processing[0]:
+            return
+        _reseed_wants()
+        _rebuild_tree()
+
+    audio_cb.bind("<<ComboboxSelected>>", _on_audio_mode_change)
     _refresh_audio_hint()
 
     def _start():
@@ -1695,19 +1849,20 @@ def open_whisper_transcriber(app):
         cancel_btn.config(state="normal")
         _set_file_buttons_state("disabled")
 
-        for i in range(file_listbox.size()):
-            file_listbox.itemconfig(i, fg=COLOR_QUEUED)
+        _reset_tags()
 
-        # Expand files into per-track jobs BEFORE anything else uses a count --
+        # Expand ticked tracks into jobs BEFORE anything else uses a count --
         # from here on "n" means transcripts to produce, not files queued.
         audio_mode = _audio_var.get()
-        jobs, notes = _build_jobs(audio_mode)
+        jobs, notes = _build_jobs()
         for note in notes:
             _log_write(note, "warning")
         if not jobs:
             messagebox.showwarning(
-                "No matching audio",
-                f"No queued file has an audio track matching '{audio_mode}'.",
+                "Nothing selected",
+                "No audio track is ticked. Open a file in the list and tick "
+                "the track(s) you want transcribed, or pick a mode from the "
+                "Audio dropdown to tick them in bulk.",
                 parent=win)
             _processing[0] = False
             start_btn.config(state="normal")
@@ -1716,9 +1871,6 @@ def open_whisper_transcriber(app):
             return
         _jobs.clear()
         _jobs.extend(jobs)
-        for j in jobs:
-            if j["row"] < file_listbox.size():
-                file_listbox.itemconfig(j["row"], fg=COLOR_QUEUED)
 
         n = len(_jobs)
         _status_var.set(f"Processing 0 / {n}...")
@@ -1859,10 +2011,12 @@ def open_whisper_transcriber(app):
 
                 elif event == "next_file":
                     idx, total, path = data
-                    row = _job_row(idx)
-                    _safe_itemconfig(row, fg=COLOR_ACTIVE)
-                    if 0 <= row < file_listbox.size():
-                        file_listbox.see(row)
+                    _tag_job(idx, 'active')
+                    if 0 <= idx < len(_jobs):
+                        row, o = _jobs[idx]["row"], _jobs[idx].get("ord")
+                        iid = f"f{row}t{o}" if o is not None else f"f{row}"
+                        if file_tree.exists(iid):
+                            file_tree.see(iid)
                     progress_var.set(0)
                     label = (_jobs[idx].get("label") if idx < len(_jobs)
                              else path.name) or path.name
@@ -1870,7 +2024,7 @@ def open_whisper_transcriber(app):
 
                 elif event == "skip_file":
                     idx, path, reason = data
-                    _safe_itemconfig(_job_row(idx), fg=COLOR_SKIP)
+                    _tag_job(idx, 'skip')
 
                 elif event == "progress":
                     current, total = data
@@ -1884,12 +2038,12 @@ def open_whisper_transcriber(app):
                 elif event == "file_done":
                     idx, path, segments = data
                     _results[idx] = segments
-                    _safe_itemconfig(_job_row(idx), fg=COLOR_DONE)
+                    _tag_job(idx, 'done')
                     _save_one(idx)
 
                 elif event == "file_error":
                     idx, path, exc = data
-                    _safe_itemconfig(_job_row(idx), fg=COLOR_ERROR)
+                    _tag_job(idx, 'error')
                     _log_write(f"Error: {path.name}: {exc}", "error")
 
                 elif event == "batch_done":
