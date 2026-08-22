@@ -562,9 +562,13 @@ def open_track_extractor(app):
 
         moving = move_var.get()
         if moving:
-            # ⚠️ Refuse to gut a file. With everything ticked by default, one
-            # click in Move mode would otherwise strip a source of all its
-            # audio — or every track it has — and there is no undo.
+            # ⚠️ Leaving a file with NO audio is allowed but never accidental.
+            # It is a real intermediate state — Tony's case (2026-08-22) is
+            # swapping a track for another language, where the file is briefly
+            # audio-free between the move and the mux. So this asks rather than
+            # refuses; what it must not do is let one click on an all-ticked
+            # list silently strip a source, which is why it is a separate
+            # question from the ordinary Move confirmation.
             gutted = []
             for path, g in groups:
                 ts = _tracks_of(path)
@@ -574,16 +578,18 @@ def open_track_extractor(app):
                 if not left_audio and any(t['kind'] == 'audio' for t in ts):
                     gutted.append(path.name)
             if gutted:
-                messagebox.showerror(
-                    "That would leave a file with no audio",
-                    "Move mode removes the extracted tracks from the source, "
-                    "and these would be left with none at all:\n\n"
-                    + "\n".join(f"  {n}" for n in gutted[:8])
-                    + ("\n  ..." if len(gutted) > 8 else "")
-                    + "\n\nUntick at least one audio track to keep, or switch "
-                      "to Copy out.",
-                    parent=win)
-                return
+                if not messagebox.askyesno(
+                        "Leave these files with no audio?",
+                        f"{len(gutted)} file(s) would be left with no audio "
+                        "track at all:\n\n"
+                        + "\n".join(f"  {n}" for n in gutted[:8])
+                        + ("\n  ..." if len(gutted) > 8 else "")
+                        + "\n\nThat is fine if you are swapping in a different "
+                          "track afterwards — otherwise untick an audio track "
+                          "to keep, or switch to Copy out.\n\nLeave them "
+                          "audio-free?",
+                        parent=win):
+                    return
             names = [j['track']['label'].strip() for j in jobs[:6]]
             if not messagebox.askyesno(
                     "Remove these tracks from the source?",
