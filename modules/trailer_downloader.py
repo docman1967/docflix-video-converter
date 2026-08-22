@@ -218,7 +218,8 @@ CONTAINER_CODECS = {
 
 
 def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
-                     log=lambda s: None, stop_flag=None, vcodec="copy"):
+                     log=lambda s: None, stop_flag=None, vcodec="copy",
+                     cookies_from=None):
     """Download `url` with yt-dlp into `container` (mkv|mp4); optionally strip metadata.
     Stream-copy (no re-encode) so it's fast. Returns (ok, message).
     MKV takes any codec; MP4 prefers MP4-friendly streams (h264/aac) so the copy-mux works."""
@@ -261,7 +262,31 @@ def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
         cmd = [ytdlp, "--ignore-config", "-f", fmt, "-S", _SORT,
                "--socket-timeout", "30",
                "--merge-output-format", container,
-               "--no-playlist", "--no-progress", "-o", tmp, url]
+               "--no-playlist", "--no-progress", "-o", tmp]
+        # ── optional browser cookies ────────────────────────────────────────
+        # ⚠️ THIS IS FOR THE BOT-CHECK, NOT THE 403s. Two different failures that
+        # look similar in a log:
+        #   "HTTP Error 403"                    -> probabilistic, per-URL. Cookies do
+        #                                          NOT help. See the retry note below.
+        #   "Sign in to confirm you're not a bot" -> IP-level flag after sustained
+        #                                          volume. Cookies DO fix it; nothing
+        #                                          else does (no player client works).
+        # Hit 2026-08-21 after ~2,400 downloads in three days.
+        #
+        # ⚠️ OPT-IN, and the BULK job must never pass this. Authenticated bulk
+        # downloading is what gets Google accounts terminated. Only the GUI Grabber
+        # supplies it, for the handful of trailers a human fetches by hand — which is
+        # why it is a parameter rather than a module-level setting.
+        #
+        # ⚠️ TWO THINGS ARE REQUIRED or it silently fails:
+        #   1. The browser must be CLOSED — Chrome holds the cookie DB lock.
+        #   2. `python3-secretstorage` must be installed — Chrome encrypts cookies
+        #      with a key in the GNOME keyring. Without it yt-dlp extracts the rows
+        #      and cannot decrypt them, reporting "N could not be decrypted" and
+        #      failing anyway. Installed here 2026-08-22 from apt.
+        if cookies_from:
+            cmd += ["--cookies-from-browser", cookies_from]
+        cmd.append(url)
         # ── Retry on failure ──────────────────────────────────────────────
         # YouTube 403s the media URL *probabilistically*. Measured 2026-08-17 on
         # one trailer: identical command, identical player client (android_vr),
@@ -459,6 +484,11 @@ def open_trailer_downloader(app):
     v_container = tk.StringVar(value=tprefs.get("container", "mkv"))
     v_vcodec    = tk.StringVar(value=tprefs.get("vcodec", "copy"))
     v_strip     = tk.BooleanVar(value=tprefs.get("strip", True))
+    # ⚠️ Browser cookies — OPT-IN, default off, GUI only. See download_trailer() for
+    # why: this fixes the "Sign in to confirm you're not a bot" IP flag, NOT the
+    # probabilistic 403s. Authenticated bulk downloading is what gets Google accounts
+    # terminated, so the bulk job (trailer_refresh.py) never passes this.
+    v_cookies   = tk.StringVar(value=tprefs.get("cookies_from", ""))
     v_source    = tk.StringVar(value=tprefs.get("source", "tmdb"))
 
     frm = ttk.Frame(win, padding=10)
@@ -639,7 +669,8 @@ def open_trailer_downloader(app):
             ok, msg = download_trailer(ytdlp_path[0], url, out,
                                        container=v_container.get(), strip=v_strip.get(),
                                        vcodec=v_vcodec.get(),
-                                       log=log, stop_flag=stop_flag)
+                                       log=log, stop_flag=stop_flag,
+                                       cookies_from=(v_cookies.get() or None))
 
             def done():
                 busy[0] = False
@@ -650,7 +681,8 @@ def open_trailer_downloader(app):
                     tp.update({"kind": v_kind.get(), "dest": v_dest.get(),
                                "container": v_container.get(), "strip": v_strip.get(),
                                "vcodec": v_vcodec.get(),
-                               "source": v_source.get()})
+                               "source": v_source.get(),
+                               "cookies_from": v_cookies.get()})
                     save_trailer_prefs(tp)
                     messagebox.showinfo("Trailer Grabber", "Trailer saved:\n" + out, parent=win)
                 else:
@@ -676,6 +708,30 @@ def open_trailer_downloader(app):
     cmenu.add_radiobutton(label="AVI  (no subtitles, no H.265)",
                           variable=v_container, value="avi")
     smenu.add_cascade(label="Container", menu=cmenu)
+    # ⚠️ Persist on CHANGE, not on a successful download. The other prefs are saved
+    # in the success path, which is wrong for this one: the user turns it on BECAUSE
+    # downloads are failing, so saving only on success would lose the setting exactly
+    # when it is needed.
+    def _save_cookie_pref():
+        tp = load_trailer_prefs()
+        tp["cookies_from"] = v_cookies.get()
+        save_trailer_prefs(tp)
+
+    kmenu = tk.Menu(smenu, tearoff=0)
+    kmenu.add_radiobutton(label="Off  (anonymous — default)",
+                          variable=v_cookies, value="", command=_save_cookie_pref)
+    kmenu.add_radiobutton(label="Chrome", variable=v_cookies, value="chrome",
+                          command=_save_cookie_pref)
+    kmenu.add_radiobutton(label="Firefox", variable=v_cookies, value="firefox",
+                          command=_save_cookie_pref)
+    kmenu.add_separator()
+    kmenu.add_command(
+        label="⚠  Browser must be CLOSED, and needs python3-secretstorage",
+        state="disabled")
+    kmenu.add_command(
+        label="⚠  Uses YOUR account — fine for a few, not for bulk",
+        state="disabled")
+    smenu.add_cascade(label="Use Browser Cookies", menu=kmenu)
     vmenu = tk.Menu(smenu, tearoff=0)
     vmenu.add_radiobutton(label="Copy  (no re-encode, fastest)",
                           variable=v_vcodec, value="copy")
