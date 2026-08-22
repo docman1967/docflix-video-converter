@@ -2396,10 +2396,19 @@ def open_media_processor(app):
                             parsed = urlparse(token)
                             paths.append(unquote(parsed.path))
                 else:
-                    # Tcl list format handles both braced and unbraced paths
-                    # {/path with spaces/file.mkv} becomes one token
-                    # /path/file.mkv becomes one token
-                    paths = [p.strip('{}') for p in re.findall(r'\{[^}]+\}|[^\s]+', raw)]
+                    # ⚠️ DO NOT parse a Tcl list with a regex. Braces NEST in
+                    # Tcl, so `\{[^}]+\}` stops at the first inner '}' and a
+                    # filename containing braces is torn in half:
+                    #   {/x/Haven - S02E11 {Commentary}.mkv}
+                    #     -> '/x/Haven - S02E11 {Commentary'  and  '.mkv}'
+                    # Neither exists, so the drop silently added nothing. That
+                    # broke every {Commentary} and {edition-...} file in the
+                    # library while looking fine on everything else.
+                    # tk.splitlist() is Tcl's own parser and gets nesting right.
+                    try:
+                        paths = list(win.tk.splitlist(raw))
+                    except Exception:
+                        paths = [p for p in raw.split() if p]
 
                 # Collect all file paths first (fast), then probe in background
                 file_paths = []

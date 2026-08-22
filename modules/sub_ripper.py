@@ -1671,8 +1671,17 @@ def open_sub_ripper(app):
                         parsed = urlparse(token)
                         paths.append(unquote(parsed.path))
             else:
-                paths = [p.strip('{}')
-                         for p in re.findall(r'\{[^}]+\}|[^\s]+', raw)]
+                # ⚠️ DO NOT parse a Tcl list with a regex. Braces NEST in Tcl,
+                # so `\{[^}]+\}` stops at the first inner '}' and a filename
+                # containing braces is torn in half:
+                #   {/x/Haven - S02E11 {Commentary}.mkv}
+                #     -> '/x/Haven - S02E11 {Commentary'  and  '.mkv}'
+                # Neither exists, so the drop silently added nothing.
+                # tk.splitlist() is Tcl's own parser and handles nesting.
+                try:
+                    paths = list(win.tk.splitlist(raw))
+                except Exception:
+                    paths = [p for p in raw.split() if p]
 
             file_paths = []
             for p in paths:

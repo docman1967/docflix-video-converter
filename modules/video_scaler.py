@@ -1983,16 +1983,21 @@ def open_video_scaler(app):
                     for uri in uris:
                         parsed = urlparse(uri)
                         paths.append(unquote(parsed.path))
-                elif raw.startswith('{'):
-                    # Tk wraps paths with spaces in braces: {/path/with spaces}
-                    import re as _dnd_re
-                    paths = _dnd_re.findall(r'\{([^}]+)\}', raw)
-                    # Also grab any non-braced tokens
-                    remainder = _dnd_re.sub(r'\{[^}]+\}', '', raw).strip()
-                    if remainder:
-                        paths.extend(remainder.split())
                 else:
-                    paths = raw.split()
+                    # ⚠️ DO NOT parse a Tcl list with a regex. Braces NEST in
+                    # Tcl, so `\{([^}]+)\}` stops at the first inner '}' and a
+                    # filename containing braces is torn in half:
+                    #   {/x/Haven - S02E11 {Commentary}.mkv}
+                    #     -> '/x/Haven - S02E11 {Commentary'  and  '.mkv}'
+                    # Neither exists, so the drop silently added nothing. That
+                    # broke every {Commentary} and {edition-...} file while
+                    # looking perfectly fine on everything else.
+                    # tk.splitlist() is Tcl's own parser and handles nesting,
+                    # braced and unbraced tokens alike.
+                    try:
+                        paths = list(win.tk.splitlist(raw))
+                    except Exception:
+                        paths = raw.split()
                 return paths
 
             def _on_drop(event):
