@@ -817,11 +817,22 @@ def open_whisper_transcriber(app):
     def _on_drop(event):
         if _processing[0]:
             return
-        raw = event.data
-        paths = []
-        for match in re.finditer(r'\{([^}]+)\}|(\S+)', raw):
-            p = match.group(1) or match.group(2)
-            paths.append(p)
+        # ⚠️ DO NOT parse this with a regex. tkinterdnd2 hands over a Tcl LIST,
+        # where a path containing spaces is wrapped in braces — and Tcl braces
+        # NEST. The old pattern (r'\{([^}]+)\}|(\S+)') stopped at the first
+        # inner '}', so any file with braces in its NAME was torn in half:
+        #
+        #   {/x/Haven - S02E11 {Commentary}.mkv}
+        #     ->  '/x/Haven - S02E11 {Commentary'   and   '.mkv}'
+        #
+        # Neither is a real path, so the drop silently added nothing. That hits
+        # every `{Commentary}` and `{edition-...}` file. tk.splitlist() is Tcl's
+        # own parser and gets nesting right, including two braced groups in one
+        # name ("... {Commentary} {Commentary}.mkv").
+        try:
+            paths = list(win.tk.splitlist(event.data))
+        except Exception:
+            paths = [p for p in (event.data or "").split() if p]
 
         all_exts = WS_VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
         added = 0
@@ -1488,6 +1499,16 @@ def open_whisper_transcriber(app):
 
     # ── start / cancel ──
 
+    _track_cache = {}
+
+    def _audio_streams_cached(path):
+        """ffprobe each file at most once — the hint re-runs on every mode change
+        and on every add, and probing a 40-file queue repeatedly is felt."""
+        key = str(path)
+        if key not in _track_cache:
+            _track_cache[key] = get_audio_streams(key)
+        return _track_cache[key]
+
     def _build_jobs(mode: str):
         """Expand the file list into (file, audio track) jobs.
 
@@ -1512,7 +1533,7 @@ def open_whisper_transcriber(app):
                              "tag": "", "label": path.name})
                 continue
 
-            streams = get_audio_streams(str(path))
+            streams = _audio_streams_cached(path)
             if not streams:
                 notes.append(f"{path.name}: no audio tracks found -- using default")
                 jobs.append({"path": path, "track": None, "row": row_idx,
@@ -1545,8 +1566,11 @@ def open_whisper_transcriber(app):
                            else f".commentary{same.index(s) + 1}")
                 else:
                     tag = f".track{s['ord'] + 1}"
+                short = f"A{s['ord'] + 1}"
+                if s["role"] != "main":
+                    short += f" {s['role'].capitalize()}"
                 jobs.append({"path": path, "track": s["index"], "row": row_idx,
-                             "tag": tag,
+                             "tag": tag, "short": short,
                              "label": f"{path.name}  [{describe_audio_stream(s)}]"})
         return jobs, notes
 
@@ -1556,19 +1580,56 @@ def open_whisper_transcriber(app):
             return _jobs[idx]["row"]
         return -1
 
+    def _annotate_rows(jobs, mode):
+        """Write the chosen track(s) onto each file row.
+
+        ⚠️ This is the whole point of the feature being visible. A dropdown
+        reading 'Commentary only' says nothing about whether THIS file has a
+        commentary; the row has to say it. Tony added a file, saw no indication
+        of which track would be used, and reasonably concluded nothing had
+        changed (2026-08-22).
+        """
+        if _processing[0]:
+            return
+        per_row = {}
+        for j in jobs:
+            per_row.setdefault(j["row"], []).append(j)
+        sel = file_listbox.curselection()
+        top = file_listbox.yview()[0]
+        for row, path in enumerate(_file_paths):
+            if row >= file_listbox.size():
+                break
+            if mode == AUDIO_TRACK_DEFAULT:
+                label = path.name
+            else:
+                js = per_row.get(row)
+                label = (f"{path.name}   [{', '.join(j['short'] for j in js)}]"
+                         if js else f"{path.name}   [no matching audio]")
+            if file_listbox.get(row) != label:
+                fg = file_listbox.itemcget(row, 'fg')
+                file_listbox.delete(row)
+                file_listbox.insert(row, label)
+                if fg:
+                    file_listbox.itemconfig(row, fg=fg)
+        for i in sel:
+            file_listbox.selection_set(i)
+        file_listbox.yview_moveto(top)
+
     def _refresh_audio_hint(_event=None):
         """Show what the current mode would actually select, before committing."""
         mode = _audio_var.get()
-        if mode == AUDIO_TRACK_DEFAULT:
-            _audio_hint_var.set("highest-channel track (ffmpeg default)")
-            return
         if not _file_paths:
-            _audio_hint_var.set("add files to preview")
+            _audio_hint_var.set("highest-channel track (ffmpeg default)"
+                                if mode == AUDIO_TRACK_DEFAULT else "add files to preview")
             return
         try:
             jobs, notes = _build_jobs(mode)
         except Exception:
             _audio_hint_var.set("")
+            return
+        _annotate_rows(jobs, mode)
+        if mode == AUDIO_TRACK_DEFAULT:
+            _audio_hint_var.set("highest-channel track (ffmpeg default)")
             return
         skipped = sum(1 for n in notes if "skipped" in n)
         msg = f"{len(jobs)} transcript{'s' if len(jobs) != 1 else ''} from {len(_file_paths)} file(s)"
