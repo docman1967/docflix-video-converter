@@ -178,6 +178,100 @@ def get_subtitle_streams(filepath):
         return []
 
 
+def get_audio_streams(filepath):
+    """Return a list of audio stream dicts for the given file.
+
+    Each dict has: index, ord, codec_name, language, title, channels,
+    channel_layout, default, comment, descriptive, role.
+
+    ``index`` is the ABSOLUTE ffprobe stream number, for ``-map 0:<index>``.
+    ``ord`` is the audio-relative position (0-based), which survives tracks
+    being added to the file later — use it when storing a choice on disk.
+
+    ⚠️ ``role`` matters more than it looks. ffmpeg with no ``-map`` picks the
+    audio stream with the MOST CHANNELS, so on a disc rip with a 5.1 feature
+    track and a stereo commentary, anything that "just extracts the audio"
+    silently gets the feature and never the commentary.
+    """
+    try:
+        cmd = [
+            'ffprobe', '-v', 'quiet',
+            '-print_format', 'json',
+            '-show_streams',
+            '-select_streams', 'a',
+            filepath,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=30)
+        if result.returncode != 0:
+            return []
+        data = json.loads(result.stdout)
+        streams = []
+        for pos, s in enumerate(data.get('streams', [])):
+            tags = s.get('tags', {})
+            disp = s.get('disposition', {})
+            try:
+                channels = int(s.get('channels', 0) or 0)
+            except (TypeError, ValueError):
+                channels = 0
+            streams.append({
+                'index':          s.get('index', 0),
+                'ord':            pos,
+                'codec_name':     s.get('codec_name', 'unknown'),
+                'language':       tags.get('language', 'und'),
+                'title':          tags.get('title', '') or '',
+                'channels':       channels,
+                'channel_layout': s.get('channel_layout', '') or '',
+                'default':        bool(disp.get('default', 0)),
+                'comment':        bool(disp.get('comment', 0)),
+                'descriptive':    bool(disp.get('descriptions', 0)),
+                'role':           _classify_audio_stream(tags, disp),
+            })
+        return streams
+    except Exception:
+        return []
+
+
+def _classify_audio_stream(tags, disp):
+    """Return 'commentary', 'descriptive' or 'main' for an audio stream.
+
+    Mirrors sub_ripper's ``_classify_stream``: trust the disposition flag
+    first, then fall back to the track title, because plenty of rips carry
+    the words and not the flag.
+    """
+    if disp.get('comment'):
+        return 'commentary'
+    if disp.get('descriptions'):
+        return 'descriptive'
+    title = (tags.get('title', '') or '').lower()
+    if any(kw in title for kw in ('commentary', 'commentator', 'director')):
+        return 'commentary'
+    if any(kw in title for kw in ('descriptive', 'description',
+                                  'audio description', 'visually impaired')):
+        return 'descriptive'
+    return 'main'
+
+
+def describe_audio_stream(stream):
+    """One-line human label for an audio track, e.g. 'A2  eng  ac3 2.0  Commentary'."""
+    bits = [f"A{stream.get('ord', 0) + 1}"]
+    lang = stream.get('language') or 'und'
+    if lang and lang != 'und':
+        bits.append(lang)
+    codec = stream.get('codec_name') or ''
+    layout = stream.get('channel_layout') or (
+        f"{stream.get('channels', 0)}ch" if stream.get('channels') else '')
+    if codec or layout:
+        bits.append(' '.join(x for x in (codec, layout) if x))
+    role = stream.get('role', 'main')
+    if role != 'main':
+        bits.append(role.capitalize())
+    title = (stream.get('title') or '').strip()
+    if title:
+        bits.append(f'"{title[:40]}"')
+    return '  '.join(bits)
+
+
 def get_all_streams(filepath):
     """Return a list of all stream dicts (video, audio, subtitle, etc.).
 

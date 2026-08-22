@@ -124,21 +124,34 @@ def main():
         import subprocess as _sp
         import tempfile as _tf
         paths = a.get("paths") or []
+        # Per-job audio stream, parallel to `paths`. An entry of None means
+        # "let ffmpeg choose", which is what every caller did before track
+        # selection existed — so an old-shaped job still behaves identically.
+        tracks = a.get("tracks") or [None] * len(paths)
         engine = a.get("engine", "faster-whisper")
         emit("progress", message=f"loading {engine} model '{a['model_size']}' once for "
                                  f"{len(paths)} file(s)...")
         AUDIO_EXT = {".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wma"}
         for idx, p in enumerate(paths):
             src = Path(p)
+            track = tracks[idx] if idx < len(tracks) else None
             try:
                 emit("file_start", idx=idx, path=str(src))
                 with _tf.TemporaryDirectory() as tmp:
                     if src.suffix.lower() not in AUDIO_EXT:
-                        emit("progress", message=f"[{idx+1}/{len(paths)}] extracting audio...")
+                        emit("progress", message=(
+                            f"[{idx+1}/{len(paths)}] extracting audio"
+                            + (f" (stream {track})..." if track is not None else "...")))
                         wav = Path(tmp) / "audio.wav"
-                        r = _sp.run(["ffmpeg", "-y", "-i", str(src), "-vn",
-                                     "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
-                                     str(wav)], capture_output=True, text=True)
+                        # ⚠️ Without -map, ffmpeg takes the audio stream with the
+                        # MOST CHANNELS, not the first one. See extract_audio() in
+                        # whisper_subtitles.py for the incident that found this.
+                        cmd = ["ffmpeg", "-y", "-i", str(src)]
+                        if track is not None:
+                            cmd += ["-map", f"0:{track}"]
+                        cmd += ["-vn", "-acodec", "pcm_s16le", "-ar", "16000",
+                                "-ac", "1", str(wav)]
+                        r = _sp.run(cmd, capture_output=True, text=True)
                         if r.returncode != 0:
                             raise RuntimeError(f"ffmpeg failed:\n{(r.stderr or '')[-600:]}")
                         audio_in = wav

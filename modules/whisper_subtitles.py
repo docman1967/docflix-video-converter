@@ -530,14 +530,19 @@ def find_media_files(directory: Path) -> list[Path]:
 
 
 def subtitle_exists(input_path: Path, output_dir: str | None,
-                    formats: list[str]) -> bool:
-    """Return True if a subtitle file already exists for *input_path*."""
+                    formats: list[str], suffix: str = "") -> bool:
+    """Return True if a subtitle file already exists for *input_path*.
+
+    *suffix* is the per-track tag (e.g. ".commentary2") added when one video
+    yields several transcripts. It must match what write_output() will use, or
+    skip-existing checks a name that is never written and re-does every file.
+    """
     for fmt in formats:
         ext = f".{fmt}"
         if output_dir:
-            check = Path(output_dir) / (input_path.stem + ext)
+            check = Path(output_dir) / (input_path.stem + suffix + ext)
         else:
-            check = input_path.with_suffix(ext)
+            check = input_path.with_name(input_path.stem + suffix + ext)
         if check.exists():
             return True
     return False
@@ -546,10 +551,21 @@ def subtitle_exists(input_path: Path, output_dir: str | None,
 # ── audio extraction ─────────────────────────────────────────────────────────
 
 
-def extract_audio(input_path: Path, tmp_dir: str) -> Path:
+def extract_audio(input_path: Path, tmp_dir: str,
+                  track_index: int | None = None) -> Path:
     """
     If the input is a video file, extract a mono 16 kHz WAV with ffmpeg.
     If it's already audio, return as-is (whisper handles most audio formats).
+
+    *track_index* is an ABSOLUTE ffprobe stream index (see
+    ``utils.get_audio_streams``). Pass None to keep ffmpeg's own choice.
+
+    ⚠️ WHICH TRACK. With no ``-map``, ffmpeg does not take the first audio
+    stream — it takes the one with the MOST CHANNELS. On a disc rip that is
+    the 5.1 feature track, so a stereo commentary could never be reached and
+    a two-commentary disc could only ever yield one transcript. Discovered
+    2026-08-22 on a Haven box set, where transcribing 46 commentary tracks
+    would have quietly produced 46 transcripts of the episodes instead.
     """
     suffix = input_path.suffix.lower()
     if suffix in AUDIO_EXTENSIONS:
@@ -560,10 +576,14 @@ def extract_audio(input_path: Path, tmp_dir: str) -> Path:
         print(f"⚠️  Unknown file extension '{suffix}', attempting to extract audio…")
 
     out_audio = Path(tmp_dir) / "audio.wav"
-    print("🎬  Extracting audio from video…")
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(input_path),
+    if track_index is None:
+        print("🎬  Extracting audio from video…")
+    else:
+        print(f"🎬  Extracting audio stream {track_index} from video…")
+    cmd = ["ffmpeg", "-y", "-i", str(input_path)]
+    if track_index is not None:
+        cmd += ["-map", f"0:{track_index}"]
+    cmd += [
         "-vn",                  # drop video
         "-acodec", "pcm_s16le", # 16-bit PCM
         "-ar", "16000",         # 16 kHz (Whisper native)
@@ -621,11 +641,18 @@ def transcribe(
     try:
         from tqdm import tqdm
         collected = []
+        # ⚠️ Progress bar ONLY on a terminal. With stdout piped (which is how the
+        # isolated engine's worker runs, and how any caller capturing output runs),
+        # tqdm cannot determine a width, falls into its "nobar" branch, and formats a
+        # None with "{total:.0f}" -> TypeError: unsupported format string passed to
+        # NoneType.__format__. The transcription itself was fine; the progress bar
+        # killed it. Same rule as os_backup.sh: live progress is for humans at a tty.
         with tqdm(
             total=duration,
             unit="s",
             unit_scale=True,
             desc="   Progress",
+            disable=not sys.stdout.isatty(),
             bar_format="{l_bar}{bar}| {n:.0f}/{total:.0f}s [{elapsed}<{remaining}]",
         ) as pbar:
             prev = 0.0
@@ -1116,7 +1143,13 @@ def transcribe_whisperx(
 
 
 def write_output(segments, input_path: Path, output: str | None, fmt: str,
-                 vtt_style: str | None = None):
+                 vtt_style: str | None = None, suffix: str = ""):
+    """Write *segments* out in each requested format.
+
+    *suffix* is inserted before the extension (``name.commentary2.srt``) so a
+    video that yields more than one transcript cannot overwrite itself. Keep it
+    in step with subtitle_exists().
+    """
     formats = [f.strip().lower() for f in fmt.split(",")]
 
     for f in formats:
@@ -1134,11 +1167,11 @@ def write_output(segments, input_path: Path, output: str | None, fmt: str,
             out_path = Path(output)
             # If user gave a directory, auto-name the file
             if out_path.is_dir():
-                out_path = out_path / (input_path.stem + ext)
+                out_path = out_path / (input_path.stem + suffix + ext)
             elif not out_path.suffix:
                 out_path = out_path.with_suffix(ext)
         else:
-            out_path = input_path.with_suffix(ext)
+            out_path = input_path.with_name(input_path.stem + suffix + ext)
 
         out_path.write_text(text, encoding="utf-8")
         print(f"💾  Saved {f.upper():<4} → {out_path}")

@@ -136,7 +136,7 @@ def _run(mode, args, progress=None):
 def transcribe_batch(paths, model_size, language, device, engine="faster-whisper",
                      beam_size=5, vad=True, task="transcribe", word_timestamps=False,
                      batch_size=16, on_file=None, on_error=None, progress=None,
-                     should_stop=None, on_start=None):
+                     should_stop=None, on_start=None, tracks=None):
     """Transcribe many files with the model loaded ONCE.
 
     ⚠️ Use this for batches, never a loop over transcribe(). `medium` costs ~40s to
@@ -151,6 +151,11 @@ def transcribe_batch(paths, model_size, language, device, engine="faster-whisper
         progress(text)                 human-readable status
         should_stop()                  return True to cancel
 
+    *tracks*, if given, is a list the SAME LENGTH as *paths* holding an absolute
+    ffprobe audio stream index per entry (or None for "let ffmpeg choose"). The
+    same file may appear in *paths* more than once with different tracks — that
+    is how a disc with two commentary tracks becomes two jobs.
+
     ⚠️ Cancellation KILLS the worker, which interrupts mid-file. The old in-process loop
     could only check between files.
 
@@ -160,11 +165,17 @@ def transcribe_batch(paths, model_size, language, device, engine="faster-whisper
     if not py:
         raise EngineMissing("The Whisper engine is not installed.")
 
+    if tracks is not None and len(tracks) != len(paths):
+        raise ValueError(
+            f"tracks has {len(tracks)} entries but paths has {len(paths)}; "
+            "they are positional and must line up")
+
     job = {"mode": "batch", "suite_dir": SUITE_DIR, "args": {
         "paths": [str(p) for p in paths], "engine": engine,
         "model_size": model_size, "language": language, "device": device,
         "beam_size": beam_size, "vad": vad, "task": task,
-        "word_timestamps": word_timestamps, "batch_size": batch_size}}
+        "word_timestamps": word_timestamps, "batch_size": batch_size,
+        "tracks": list(tracks) if tracks is not None else None}}
 
     jf = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
     json.dump(job, jf)

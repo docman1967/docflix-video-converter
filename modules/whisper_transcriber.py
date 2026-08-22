@@ -23,7 +23,8 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 
 from .constants import VIDEO_EXTENSIONS
-from .utils import scaled_geometry, scaled_minsize, ask_open_files, ask_directory
+from .utils import (scaled_geometry, scaled_minsize, ask_open_files, ask_directory,
+                    get_audio_streams, describe_audio_stream)
 from .whisper_subtitles import (
     BACKENDS,
     VIDEO_EXTENSIONS as WS_VIDEO_EXTENSIONS,
@@ -85,6 +86,21 @@ TASKS = {
 }
 
 DEVICES = ["auto", "cpu", "cuda"]
+
+# ── audio track selection ────────────────────────────────────────────────────
+# A file may hold several audio tracks and only one of them is usually the one
+# you want transcribed. These are BULK choices applied to every queued file;
+# each file contributes whatever it actually has, and a file that offers
+# nothing matching is skipped with a reason rather than silently transcribed
+# from the wrong track.
+AUDIO_TRACK_DEFAULT = "Default track"
+AUDIO_TRACK_MODES = (
+    AUDIO_TRACK_DEFAULT,   # ffmpeg's own pick -- behaviour before this existed
+    "All tracks",
+    "Commentary only",
+    "Main only",
+    "Track 1", "Track 2", "Track 3", "Track 4",
+)
 
 ALL_EXTS = (
     [f"*{e}" for e in sorted(WS_VIDEO_EXTENSIONS)]
@@ -222,10 +238,18 @@ class BatchTranscribeWorker(threading.Thread):
                  skip_existing: bool = False, output_dir: str | None = None,
                  output_formats: list[str] | None = None,
                  backend: str = "faster-whisper", batch_size: int = 16,
-                 device_index: int = 0):
+                 device_index: int = 0,
+                 tracks: list[int | None] | None = None,
+                 tags: list[str] | None = None):
         super().__init__(daemon=True)
         self.q = q
         self.paths = paths
+        # One entry per path. `tracks` is the absolute ffprobe audio stream to
+        # feed whisper (None = ffmpeg's own pick); `tags` is the filename suffix
+        # that keeps two transcripts of the same video apart. The same path can
+        # appear twice with different tracks — that is a two-commentary disc.
+        self.tracks = tracks if tracks is not None else [None] * len(paths)
+        self.tags = tags if tags is not None else [""] * len(paths)
         self.model_size = model_size
         self.language = language
         self.device = device
@@ -299,10 +323,11 @@ class BatchTranscribeWorker(threading.Thread):
         # Filter first, announcing skips against their ORIGINAL index.
         keep = []
         for idx, path in enumerate(self.paths):
+            tag = self.tags[idx] if idx < len(self.tags) else ""
             if self.skip_existing and subtitle_exists(
-                    path, self.output_dir, self.output_formats):
+                    path, self.output_dir, self.output_formats, suffix=tag):
                 self.q.put(("skip_file", (idx, path, "subtitle already exists")))
-                self.q.put(("log", f"Skipping (already exists): {path.name}"))
+                self.q.put(("log", f"Skipping (already exists): {path.name}{tag}"))
                 continue
             keep.append((idx, path))
 
@@ -339,6 +364,8 @@ class BatchTranscribeWorker(threading.Thread):
         try:
             wc.transcribe_batch(
                 [p for _, p in keep],
+                tracks=[self.tracks[i] if i < len(self.tracks) else None
+                        for i, _ in keep],
                 model_size=self.model_size,
                 language=self.language,
                 device=self.device,
@@ -597,9 +624,15 @@ def open_whisper_transcriber(app):
     _processing = [False]
     _worker = [None]
     _queue = queue.Queue()
-    _file_paths = []       # list of Path objects
-    _results = {}          # index -> list of segments
+    _file_paths = []       # list of Path objects  (one entry per LIST ROW)
+    _results = {}          # job index -> list of segments
     _preview_idx = [None]
+    # ⚠️ A JOB IS NOT A FILE. With audio-track selection one video can produce
+    # several transcripts, so the batch runs over jobs while the listbox still
+    # shows files. Every queue event carries a JOB index; use _job_row() before
+    # touching the listbox, and _jobs[idx] (never _file_paths[idx]) to find the
+    # source file. Built fresh by _build_jobs() at the start of every run.
+    _jobs = []             # list of {"path", "track", "row", "tag", "label"}
 
     # ── Load saved preferences ──
     _wp = getattr(app, '_whisper_prefs', {})
@@ -733,11 +766,18 @@ def open_whisper_transcriber(app):
         sel = file_listbox.curselection()
         if not sel:
             return
-        idx = sel[0]
-        if idx in _results:
-            _show_preview(idx)
-        else:
-            _status_var.set("File not yet transcribed -- run extraction first.")
+        row = sel[0]
+        # A row can own several jobs (one per audio track); preview the first
+        # of its jobs that finished. Falls back to treating row as job index
+        # for the plain one-track-per-file case.
+        for j_idx, job in enumerate(_jobs):
+            if job["row"] == row and j_idx in _results:
+                _show_preview(j_idx)
+                return
+        if not _jobs and row in _results:
+            _show_preview(row)
+            return
+        _status_var.set("File not yet transcribed -- run extraction first.")
 
     file_listbox.bind("<Double-Button-1>", _on_list_double_click)
 
@@ -767,6 +807,12 @@ def open_whisper_transcriber(app):
     def _refresh_count():
         n = len(_file_paths)
         _file_count_var.set(f"{n} file{'s' if n != 1 else ''}")
+        # The audio-track hint counts transcripts, so it goes stale whenever the
+        # file list moves. Defined later in this function; guard for early calls.
+        try:
+            _refresh_audio_hint()
+        except NameError:
+            pass
 
     def _on_drop(event):
         if _processing[0]:
@@ -984,6 +1030,23 @@ def open_whisper_transcriber(app):
     task_cb = ttk.Combobox(lt_frame, textvariable=_task_var,
                             values=list(TASKS.keys()), state='readonly', width=18)
     task_cb.grid(row=0, column=3, sticky='ew')
+
+    # ── Audio track ──
+    # ⚠️ Why this exists: with no -map, ffmpeg extracts the audio stream with the
+    # MOST CHANNELS. On a disc rip that is the 5.1 feature, so a stereo commentary
+    # was unreachable and a second commentary invisible. Default stays 'Default
+    # track', which is the old behaviour exactly.
+    ttk.Label(lt_frame, text="Audio:").grid(row=1, column=0, sticky='w',
+                                            padx=(0, 4), pady=(4, 0))
+    _audio_var = tk.StringVar(value=_wp.get('audio_tracks', AUDIO_TRACK_DEFAULT))
+    audio_cb = ttk.Combobox(lt_frame, textvariable=_audio_var,
+                            values=list(AUDIO_TRACK_MODES), state='readonly',
+                            width=14)
+    audio_cb.grid(row=1, column=1, sticky='ew', padx=(0, 10), pady=(4, 0))
+
+    _audio_hint_var = tk.StringVar(value="")
+    ttk.Label(lt_frame, textvariable=_audio_hint_var, anchor='w').grid(
+        row=1, column=2, columnspan=2, sticky='ew', pady=(4, 0))
 
     # ── Output format ──
     fmt_frame = ttk.Frame(settings_frame)
@@ -1336,6 +1399,7 @@ def open_whisper_transcriber(app):
             "model": _model_var.get(),
             "language": _lang_var.get(),
             "task": _task_var.get(),
+            "audio_tracks": _audio_var.get(),
             "device": _device_var.get(),
             "beam_size": _beam_var.get(),
             "vad": _vad_var.get(),
@@ -1362,6 +1426,7 @@ def open_whisper_transcriber(app):
             ("model", _model_var),
             ("language", _lang_var),
             ("task", _task_var),
+            ("audio_tracks", _audio_var),
             ("device", _device_var),
             ("outdir", _outdir_var),
             ("vtt_style", _vtt_style_var),
@@ -1423,6 +1488,97 @@ def open_whisper_transcriber(app):
 
     # ── start / cancel ──
 
+    def _build_jobs(mode: str):
+        """Expand the file list into (file, audio track) jobs.
+
+        Returns (jobs, notes). One job per transcript that will be produced, so
+        a video with two commentary tracks yields two. `row` points back at the
+        listbox line the job came from — several jobs can share one row.
+
+        ⚠️ The suffix is only added when a file yields MORE THAN ONE job. A
+        single-track file keeps its plain `name.srt`, so turning this feature on
+        does not silently rename everything that already worked.
+        """
+        jobs, notes = [], []
+        for row_idx, path in enumerate(_file_paths):
+            if path.suffix.lower() in AUDIO_EXTENSIONS:
+                # Already audio -- there is no track to choose.
+                jobs.append({"path": path, "track": None, "row": row_idx,
+                             "tag": "", "label": path.name})
+                continue
+
+            if mode == AUDIO_TRACK_DEFAULT:
+                jobs.append({"path": path, "track": None, "row": row_idx,
+                             "tag": "", "label": path.name})
+                continue
+
+            streams = get_audio_streams(str(path))
+            if not streams:
+                notes.append(f"{path.name}: no audio tracks found -- using default")
+                jobs.append({"path": path, "track": None, "row": row_idx,
+                             "tag": "", "label": path.name})
+                continue
+
+            if mode == "All tracks":
+                chosen = streams
+            elif mode == "Commentary only":
+                chosen = [s for s in streams if s["role"] == "commentary"]
+            elif mode == "Main only":
+                chosen = [s for s in streams if s["role"] == "main"]
+            elif mode.startswith("Track "):
+                want = int(mode.split()[1]) - 1
+                chosen = [s for s in streams if s["ord"] == want]
+            else:
+                chosen = streams[:1]
+
+            if not chosen:
+                notes.append(f"{path.name}: nothing matches '{mode}' -- skipped")
+                continue
+
+            for s in chosen:
+                # Tag by role when that is unambiguous, else by position.
+                if len(chosen) == 1:
+                    tag = ""
+                elif s["role"] == "commentary":
+                    same = [x for x in chosen if x["role"] == "commentary"]
+                    tag = (".commentary" if len(same) == 1
+                           else f".commentary{same.index(s) + 1}")
+                else:
+                    tag = f".track{s['ord'] + 1}"
+                jobs.append({"path": path, "track": s["index"], "row": row_idx,
+                             "tag": tag,
+                             "label": f"{path.name}  [{describe_audio_stream(s)}]"})
+        return jobs, notes
+
+    def _job_row(idx: int) -> int:
+        """Listbox row for a job index (-1 if it has none)."""
+        if 0 <= idx < len(_jobs):
+            return _jobs[idx]["row"]
+        return -1
+
+    def _refresh_audio_hint(_event=None):
+        """Show what the current mode would actually select, before committing."""
+        mode = _audio_var.get()
+        if mode == AUDIO_TRACK_DEFAULT:
+            _audio_hint_var.set("highest-channel track (ffmpeg default)")
+            return
+        if not _file_paths:
+            _audio_hint_var.set("add files to preview")
+            return
+        try:
+            jobs, notes = _build_jobs(mode)
+        except Exception:
+            _audio_hint_var.set("")
+            return
+        skipped = sum(1 for n in notes if "skipped" in n)
+        msg = f"{len(jobs)} transcript{'s' if len(jobs) != 1 else ''} from {len(_file_paths)} file(s)"
+        if skipped:
+            msg += f"  --  {skipped} with no match"
+        _audio_hint_var.set(msg)
+
+    audio_cb.bind("<<ComboboxSelected>>", _refresh_audio_hint)
+    _refresh_audio_hint()
+
     def _start():
         try:
             _start_inner()
@@ -1481,7 +1637,29 @@ def open_whisper_transcriber(app):
         for i in range(file_listbox.size()):
             file_listbox.itemconfig(i, fg=COLOR_QUEUED)
 
-        n = len(_file_paths)
+        # Expand files into per-track jobs BEFORE anything else uses a count --
+        # from here on "n" means transcripts to produce, not files queued.
+        audio_mode = _audio_var.get()
+        jobs, notes = _build_jobs(audio_mode)
+        for note in notes:
+            _log_write(note, "warning")
+        if not jobs:
+            messagebox.showwarning(
+                "No matching audio",
+                f"No queued file has an audio track matching '{audio_mode}'.",
+                parent=win)
+            _processing[0] = False
+            start_btn.config(state="normal")
+            cancel_btn.config(state="disabled")
+            _set_file_buttons_state("normal")
+            return
+        _jobs.clear()
+        _jobs.extend(jobs)
+        for j in jobs:
+            if j["row"] < file_listbox.size():
+                file_listbox.itemconfig(j["row"], fg=COLOR_QUEUED)
+
+        n = len(_jobs)
         _status_var.set(f"Processing 0 / {n}...")
 
         lang_code = LANGUAGES[_lang_var.get()]
@@ -1498,15 +1676,20 @@ def open_whisper_transcriber(app):
         backend = _backend_var.get()
         task_label = "translate->en" if task_code == "translate" else "transcribe"
         _log_write(
-            f"Starting batch: {n} file(s)  "
+            f"Starting batch: {n} transcript(s) from {len(_file_paths)} file(s)  "
             f"[backend={backend} model={_model_var.get()} lang={lang_code or 'auto'} "
-            f"task={task_label} device={device}]",
+            f"task={task_label} device={device} audio={audio_mode}]",
             "info",
         )
+        if audio_mode != AUDIO_TRACK_DEFAULT:
+            for j in _jobs:
+                _log_write(f"   {j['label']}", "info")
 
         _worker[0] = BatchTranscribeWorker(
             q=_queue,
-            paths=list(_file_paths),
+            paths=[j["path"] for j in _jobs],
+            tracks=[j["track"] for j in _jobs],
+            tags=[j["tag"] for j in _jobs],
             model_size=_model_var.get(),
             language=lang_code,
             device=device,
@@ -1555,12 +1738,16 @@ def open_whisper_transcriber(app):
         fmt = ",".join(fmt_parts)
         vtt_style = _vtt_style_var.get().strip() or None
 
-        path = _file_paths[idx]
+        # ⚠️ _jobs[idx], not _file_paths[idx] -- with track selection the two
+        # lists are different lengths and idx counts jobs.
+        job = _jobs[idx] if idx < len(_jobs) else {"path": _file_paths[idx], "tag": ""}
+        path, tag = job["path"], job.get("tag", "")
         try:
-            write_output(segments, path, output, fmt, vtt_style=vtt_style)
+            write_output(segments, path, output, fmt, vtt_style=vtt_style,
+                         suffix=tag)
             base = Path(output) if output else path.parent
             for ext in fmt_parts:
-                saved = str(base / (path.stem + f".{ext}"))
+                saved = str(base / (path.stem + tag + f".{ext}"))
                 _log_write(f"Saved -> {saved}", "success")
         except Exception as exc:
             _log_write(f"Save failed for {path.name}: {exc}", "error")
@@ -1570,7 +1757,7 @@ def open_whisper_transcriber(app):
     def _on_batch_done():
         progress_var.set(100)
         done = len(_results)
-        total = len(_file_paths)
+        total = len(_jobs) or len(_file_paths)
         failed = total - done
         _processing[0] = False
         start_btn.config(state="normal")
@@ -1611,15 +1798,18 @@ def open_whisper_transcriber(app):
 
                 elif event == "next_file":
                     idx, total, path = data
-                    _safe_itemconfig(idx, fg=COLOR_ACTIVE)
-                    if 0 <= idx < file_listbox.size():
-                        file_listbox.see(idx)
+                    row = _job_row(idx)
+                    _safe_itemconfig(row, fg=COLOR_ACTIVE)
+                    if 0 <= row < file_listbox.size():
+                        file_listbox.see(row)
                     progress_var.set(0)
-                    _status_var.set(f"Processing {idx+1} / {total}  --  {path.name}")
+                    label = (_jobs[idx].get("label") if idx < len(_jobs)
+                             else path.name) or path.name
+                    _status_var.set(f"Processing {idx+1} / {total}  --  {label}")
 
                 elif event == "skip_file":
                     idx, path, reason = data
-                    _safe_itemconfig(idx, fg=COLOR_SKIP)
+                    _safe_itemconfig(_job_row(idx), fg=COLOR_SKIP)
 
                 elif event == "progress":
                     current, total = data
@@ -1633,12 +1823,12 @@ def open_whisper_transcriber(app):
                 elif event == "file_done":
                     idx, path, segments = data
                     _results[idx] = segments
-                    _safe_itemconfig(idx, fg=COLOR_DONE)
+                    _safe_itemconfig(_job_row(idx), fg=COLOR_DONE)
                     _save_one(idx)
 
                 elif event == "file_error":
                     idx, path, exc = data
-                    _safe_itemconfig(idx, fg=COLOR_ERROR)
+                    _safe_itemconfig(_job_row(idx), fg=COLOR_ERROR)
                     _log_write(f"Error: {path.name}: {exc}", "error")
 
                 elif event == "batch_done":
