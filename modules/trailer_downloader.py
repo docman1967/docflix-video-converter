@@ -217,6 +217,11 @@ CONTAINER_CODECS = {
 }
 
 
+# Exported cookie jar. ~/.cache is excluded from os_backup.sh on purpose — this file
+# is a signed-in Google session in plaintext and must not travel.
+_COOKIE_FILE = os.path.expanduser("~/.cache/docflix/yt-cookies.txt")
+
+
 def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
                      log=lambda s: None, stop_flag=None, vcodec="copy",
                      cookies_from=None):
@@ -284,7 +289,18 @@ def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
         #      with a key in the GNOME keyring. Without it yt-dlp extracts the rows
         #      and cannot decrypt them, reporting "N could not be decrypted" and
         #      failing anyway. Installed here 2026-08-22 from apt.
-        if cookies_from:
+        # A previously EXPORTED cookie file wins over live browser extraction: it works
+        # with the browser OPEN, which --cookies-from-browser cannot (Chrome holds the
+        # DB lock). Export once with:
+        #   yt-dlp --cookies-from-browser chrome --cookies <file> --skip-download --simulate <url>
+        # ⚠️ That file is a LIVE CREDENTIAL — it carries SAPISID/LOGIN_INFO, i.e. a
+        # signed-in Google session in plaintext. It lives under ~/.cache/docflix/
+        # deliberately: ~/.cache is in os_backup.sh's EXCLUDES, so it does not
+        # propagate to the backup server or the rescue box. Mode 600.
+        # ⚠️ Cookies expire. When they do, the bot-check simply returns — re-export.
+        if cookies_from == "file" or (cookies_from and os.path.isfile(_COOKIE_FILE)):
+            cmd += ["--cookies", _COOKIE_FILE]
+        elif cookies_from:
             cmd += ["--cookies-from-browser", cookies_from]
         cmd.append(url)
         # ── Retry on failure ──────────────────────────────────────────────
@@ -724,6 +740,57 @@ def open_trailer_downloader(app):
                           command=_save_cookie_pref)
     kmenu.add_radiobutton(label="Firefox", variable=v_cookies, value="firefox",
                           command=_save_cookie_pref)
+    kmenu.add_separator()
+
+    def _export_cookies():
+        """Export the browser's cookies to a file so the browser can stay OPEN."""
+        import subprocess as _sp
+        src = v_cookies.get() or "chrome"
+        if src == "file":
+            src = "chrome"
+        os.makedirs(os.path.dirname(_COOKIE_FILE), exist_ok=True)
+        try:
+            os.chmod(os.path.dirname(_COOKIE_FILE), 0o700)
+        except OSError:
+            pass
+        if not messagebox.askyesno(
+                "Export cookies",
+                f"Export {src} cookies to a file?\n\n"
+                f"{_COOKIE_FILE}\n\n"
+                f"⚠  {src.title()} must be CLOSED right now, or the cookies\n"
+                f"    cannot be decrypted.\n\n"
+                f"⚠  The file is a signed-in Google session in plain text.\n"
+                f"    It is written with owner-only permissions, in a folder\n"
+                f"    excluded from backups. Cookies expire — re-export when\n"
+                f"    the bot-check returns.\n\n"
+                f"Afterwards the browser can stay open.", parent=win):
+            return
+        r = _sp.run([ytdlp_path[0] or "yt-dlp", "--ignore-config", "--no-warnings",
+                     "--cookies-from-browser", src, "--cookies", _COOKIE_FILE,
+                     "--skip-download", "--simulate",
+                     "https://www.youtube.com/watch?v=jRkM_VroEsE"],
+                    capture_output=True, text=True)
+        if os.path.isfile(_COOKIE_FILE) and os.path.getsize(_COOKIE_FILE) > 1000:
+            try:
+                os.chmod(_COOKIE_FILE, 0o600)
+            except OSError:
+                pass
+            v_cookies.set("file")
+            _save_cookie_pref()
+            messagebox.showinfo("Export cookies",
+                                "Exported. The browser can stay open from now on.",
+                                parent=win)
+        else:
+            err = (r.stderr or r.stdout or "").strip()[-300:]
+            messagebox.showerror(
+                "Export failed",
+                "Could not export cookies.\n\n"
+                "Most likely the browser is still running, or\n"
+                "python3-secretstorage is not installed.\n\n" + err, parent=win)
+
+    kmenu.add_radiobutton(label="Use exported cookie file  (browser can stay open)",
+                          variable=v_cookies, value="file", command=_save_cookie_pref)
+    kmenu.add_command(label="Export cookies to file now…", command=_export_cookies)
     kmenu.add_separator()
     kmenu.add_command(
         label="⚠  Browser must be CLOSED, and needs python3-secretstorage",
