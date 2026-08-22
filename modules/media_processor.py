@@ -2136,10 +2136,23 @@ def open_media_processor(app):
                         # Shared helper now; do not inline mkvpropedit again.
                         strip_mkv_tags_keeping_stamp(final_path, _log)
 
-                    # Track whether subtitles were muxed for this file
+                    # Track whether external files were muxed for this file, so
+                    # the cleanup pass knows which sources are now redundant.
+                    #
+                    # ⚠️ `_completed` is set HERE, on the worker thread, and not
+                    # read back off f['status']. The status is written by
+                    # _update_tree_status through win.after(0, ...) — a MAIN
+                    # thread callback — so the worker can reach cleanup before it
+                    # lands. On a long file the GUI wins the race and cleanup
+                    # works; on a fast one it does not and the muxed files are
+                    # silently left behind. Never gate real work on a value whose
+                    # only job is to be displayed.
+                    f['_completed'] = True
                     do_mux = _ov(f, 'mux_subs', opt_mux_subs)
                     if do_mux and f.get('ext_subs'):
                         f['_subs_muxed'] = True
+                    if _ov(f, 'mux_audio', opt_mux_audio) and f.get('ext_audio'):
+                        f['_audio_muxed'] = True
 
                     out_size = os.path.getsize(final_path) if os.path.exists(final_path) else 0
                     out_mb = f'{out_size / (1024*1024):.1f} MB' if out_size else '?'
@@ -2241,21 +2254,42 @@ def open_media_processor(app):
                  f"{total - completed[0] - failed[0]} skipped/stopped", 'SUCCESS')
             _log("═" * 50, 'INFO')
 
-            # Clean up subtitle files only for files that had subs muxed
+            # Clean up the external files that were muxed in — their contents
+            # now live inside the output, so the loose copies are redundant.
+            #
+            # ⚠️ ONLY for files that actually completed AND actually had that
+            # kind muxed. The audio and subtitle flags are separate because the
+            # two toggles are separate: muxing subs while audio is switched off
+            # must not delete the .mka sitting next to the video.
             if completed[0] > 0:
-                cleaned = 0
+                cleaned_subs = cleaned_audio = 0
                 for f in mp_files:
-                    if f.get('_subs_muxed') and f['status'] == '✅ Done':
-                        for s in f.get('ext_subs', []):
-                            spath = s['path']
-                            if os.path.exists(spath):
-                                try:
-                                    os.remove(spath)
-                                    cleaned += 1
-                                except OSError:
-                                    pass
-                if cleaned:
-                    _log(f"Cleaned up {cleaned} subtitle file(s)", 'INFO')
+                    if not f.get('_completed'):
+                        continue
+                    victims = []
+                    if f.get('_subs_muxed'):
+                        victims += [(s['path'], 'sub') for s in f.get('ext_subs', [])]
+                    if f.get('_audio_muxed'):
+                        victims += [(a['path'], 'audio') for a in f.get('ext_audio', [])]
+                    for path, kind in victims:
+                        # Never delete the file we just wrote — an external
+                        # source living at the output path would be catastrophic.
+                        if os.path.abspath(path) == os.path.abspath(f['path']):
+                            continue
+                        if not os.path.exists(path):
+                            continue
+                        try:
+                            os.remove(path)
+                            if kind == 'sub':
+                                cleaned_subs += 1
+                            else:
+                                cleaned_audio += 1
+                        except OSError:
+                            pass
+                if cleaned_subs:
+                    _log(f"Cleaned up {cleaned_subs} subtitle file(s)", 'INFO')
+                if cleaned_audio:
+                    _log(f"Cleaned up {cleaned_audio} audio file(s)", 'INFO')
 
             # Re-probe completed files to update display
             if completed[0] > 0:
