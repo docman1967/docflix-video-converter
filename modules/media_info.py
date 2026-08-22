@@ -733,6 +733,74 @@ def _add_readonly_row(parent, row, label, value, col_offset=0):
         row=row, column=col_offset + 1, sticky='nw', padx=(0, 8), pady=1)
 
 
+def summarise_stream(stream):
+    """One line describing a stream, the way MediaInfo's front page does it.
+
+    ⚠️ Deliberately terse. This is the "what am I looking at" answer, not the
+    full record — every field here already exists in detail on its own tab.
+    Tony kept reaching for MediaInfo over this tool for quick checks
+    (2026-08-22) and the reason turned out to be shape, not speed: MediaInfo
+    answers on the page it opens on, while this made him tab across to find
+    the same facts.
+    """
+    kind = stream.get('codec_type', '?')
+    bits = []
+    lang = (stream.get('tags', {}) or {}).get('language', '')
+    if lang and lang != 'und':
+        bits.append(lang.upper())
+
+    if kind == 'video':
+        w, h = stream.get('width'), stream.get('height')
+        if w and h:
+            bits.append(f'{w}x{h}')
+        dar = stream.get('display_aspect_ratio')
+        if dar and dar not in ('0:1',):
+            bits.append(f'({dar})')
+        fps = _fmt_framerate(stream.get('r_frame_rate'))
+        if fps and fps != '?':
+            bits.append(fps)
+        codec = (stream.get('codec_name') or '?').upper()
+        prof = stream.get('profile')
+        bits.append(f'{codec} {prof}' if prof else codec)
+        br = stream.get('bit_rate')
+        if br:
+            bits.append(_fmt_bitrate(br))
+    elif kind == 'audio':
+        codec = (stream.get('codec_name') or '?').upper()
+        bits.append(codec)
+        layout = stream.get('channel_layout')
+        if layout:
+            bits.append(layout)
+        elif stream.get('channels'):
+            bits.append(f"{stream['channels']}ch")
+        br = stream.get('bit_rate')
+        if br:
+            bits.append(_fmt_bitrate(br))
+        sr = stream.get('sample_rate')
+        if sr:
+            try:
+                bits.append(f'{int(sr) / 1000:g} kHz')
+            except (TypeError, ValueError):
+                pass
+    else:
+        bits.append((stream.get('codec_name') or '?').upper())
+
+    # Flags last — they change what a track IS, so they earn a place here.
+    disp = stream.get('disposition', {}) or {}
+    flags = [n for k, n in (('default', 'Default'), ('forced', 'Forced'),
+                            ('comment', 'Commentary'),
+                            ('hearing_impaired', 'SDH'),
+                            ('descriptions', 'Descriptive'))
+             if disp.get(k)]
+    if flags:
+        bits.append('[' + ' / '.join(flags) + ']')
+
+    title = (stream.get('tags', {}) or {}).get('title', '')
+    if title:
+        bits.append(f'"{title[:44]}"')
+    return '  '.join(str(b) for b in bits)
+
+
 def _create_scrollable_frame(parent):
     """Create a scrollable frame. Returns (canvas, inner_frame)."""
     # Use the default ttk background so empty space matches the widget theme
@@ -1019,6 +1087,46 @@ def show_enhanced_media_info(app, filepath, parent=None):
     _add_readonly_row(gen_inner, grow, 'File Size:', _fmt_size(fmt.get('size'))); grow += 1
     _add_readonly_row(gen_inner, grow, 'Overall Bitrate:', _fmt_bitrate(fmt.get('bit_rate'))); grow += 1
     _add_readonly_row(gen_inner, grow, 'Streams:', fmt.get('nb_streams', '?')); grow += 1
+
+    # ── At a glance ───────────────────────────────────────────────────────
+    # One line per stream, on the page the window OPENS on. Everything here
+    # also lives in full on its own tab; the point is not having to go there
+    # to answer "what is this file".
+    _all = data.get('streams') or []
+    if _all:
+        _order = {'video': 0, 'audio': 1, 'subtitle': 2}
+        glance = ttk.LabelFrame(gen_inner, text='At a glance', padding=6)
+        glance.grid(row=grow, column=0, columnspan=2, sticky='ew',
+                    padx=8, pady=(10, 4))
+        glance.columnconfigure(1, weight=1)
+        grow += 1
+        gr = 0
+        for s in sorted(_all, key=lambda x: (_order.get(x.get('codec_type'), 9),
+                                             x.get('index', 0))):
+            kind = (s.get('codec_type') or '?').capitalize()
+            _add_readonly_row(glance, gr, f'{kind} #{s.get("index", "?")}:',
+                              summarise_stream(s))
+            gr += 1
+
+    # Container tags worth seeing without digging — the encode stamp most of
+    # all, since it says how the file was made and by which version.
+    _ctags = fmt.get('tags', {}) or {}
+    _shown = {'title'}
+    _wanted = [k for k in _ctags
+               if k.lower() in ('docflix_encode', 'encoder', 'writing_application',
+                                'writing_library', 'creation_time')]
+    if _wanted:
+        tagfr = ttk.LabelFrame(gen_inner, text='Container tags', padding=6)
+        tagfr.grid(row=grow, column=0, columnspan=2, sticky='ew',
+                   padx=8, pady=(4, 4))
+        tagfr.columnconfigure(1, weight=1)
+        grow += 1
+        tr = 0
+        for k in sorted(_wanted, key=lambda x: (x.lower() != 'docflix_encode', x)):
+            if k.lower() in _shown:
+                continue
+            _add_readonly_row(tagfr, tr, f'{k}:', _ctags[k])
+            tr += 1
 
     tab_widgets['General'] = None  # editable tab — no Text widget for copy
 
