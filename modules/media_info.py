@@ -907,6 +907,30 @@ def show_enhanced_media_info(app, filepath, parent=None):
         tab_widgets[tab_name] = text
 
     # ── Helper: add editable fields for a stream ──
+    def _watch(var):
+        """Fire the Save-button refresh whenever this variable changes.
+
+        ⚠️ Attached HERE, at creation, not by iterating edit_vars later. The later
+        approach shipped 2026-08-20 and left Save permanently greyed out: the stream
+        editors are built by _build_stream_editor, and iterating edit_vars after the
+        button bar attached traces to whatever happened to be in the dict at that
+        moment. Any var created on a different path got none, so editing it changed
+        _has_changes() (the Close prompt still worked) while nothing ever re-enabled
+        the button. Creation-time attachment cannot get the ordering wrong.
+        """
+        def _fire(*_a):
+            # _refresh_save_state is defined further down (with the button bar). A
+            # trace could in principle fire before then; swallow that rather than
+            # raising inside a Tk callback where it would be invisible.
+            try:
+                _refresh_save_state()
+            except NameError:
+                pass
+        try:
+            var.trace_add('write', _fire)
+        except Exception:
+            pass
+
     def _build_stream_editor(parent, stream, disp_flags, row_start):
         """Add editable Title, Language, and Disposition widgets for a stream.
         Returns the next available row number."""
@@ -919,6 +943,7 @@ def show_enhanced_media_info(app, filepath, parent=None):
         title_var = tk.StringVar(value=tags.get('title', ''))
         originals[(abs_idx, 'title')] = tags.get('title', '')
         edit_vars[(abs_idx, 'title')] = title_var
+        _watch(title_var)
         ttk.Label(parent, text='Title:', font=('Courier', 10),
                   foreground='#666666').grid(row=row, column=0, sticky='ne', padx=(8, 4), pady=2)
         ttk.Entry(parent, textvariable=title_var, width=40,
@@ -930,6 +955,7 @@ def show_enhanced_media_info(app, filepath, parent=None):
         lang_var = tk.StringVar(value=_lang_display(orig_lang))
         originals[(abs_idx, 'language')] = orig_lang
         edit_vars[(abs_idx, 'language')] = lang_var
+        _watch(lang_var)
         ttk.Label(parent, text='Language:', font=('Courier', 10),
                   foreground='#666666').grid(row=row, column=0, sticky='ne', padx=(8, 4), pady=2)
         lang_combo = ttk.Combobox(parent, textvariable=lang_var,
@@ -950,6 +976,7 @@ def show_enhanced_media_info(app, filepath, parent=None):
                 flag_var = tk.BooleanVar(value=orig_val)
                 originals[(abs_idx, f'disp_{flag_key}')] = orig_val
                 edit_vars[(abs_idx, f'disp_{flag_key}')] = flag_var
+                _watch(flag_var)
                 ttk.Checkbutton(flags_fr, text=flag_label,
                                 variable=flag_var).pack(side='left', padx=(0, 12))
             row += 1
