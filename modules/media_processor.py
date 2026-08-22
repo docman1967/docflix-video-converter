@@ -145,6 +145,11 @@ def open_media_processor(app):
         opt_meta_audio     = tk.StringVar(value=_mp.get('meta_audio', 'eng'))
         opt_meta_sub       = tk.StringVar(value=_mp.get('meta_sub', 'eng'))
         opt_mux_subs       = tk.BooleanVar(value=_mp.get('mux_subs', False))
+        # Sibling commentary audio (Show - S01E05.commentary1.mka). Defaults ON:
+        # detection only ever matches commentary-tagged files, so there is
+        # nothing to accidentally sweep up, and a found commentary is one you
+        # put there on purpose.
+        opt_mux_audio      = tk.BooleanVar(value=_mp.get('mux_audio', True))
         opt_sub_lang       = tk.StringVar(value=_mp.get('sub_lang', 'eng'))
         opt_all_subs       = tk.BooleanVar(value=_mp.get('all_subs', False))
         opt_output_mode    = tk.StringVar(value=_mp.get('output_mode', 'inplace'))
@@ -289,6 +294,11 @@ def open_media_processor(app):
             _lang_entry = ttk.Entry(sr, textvariable=opt_sub_lang, width=4)
             _lang_entry.pack(side='left', padx=(0, 4))
             ttk.Button(sr, text="Rescan", command=_rescan_subs, width=7).pack(side='left', padx=4)
+
+            sr_a = ttk.Frame(sub_fr)
+            sr_a.pack(fill='x', pady=(4, 0))
+            ttk.Checkbutton(sr_a, text="Mux commentary audio (.mka / .ac3 beside the video)",
+                            variable=opt_mux_audio).pack(side='left', padx=(4, 8))
 
             sr2 = ttk.Frame(sub_fr)
             sr2.pack(fill='x', pady=(4, 0))
@@ -527,6 +537,9 @@ def open_media_processor(app):
         _ALL_LANG_CODES.update(_lang_alt3.keys())        # /B 3-letter alternates
         _TAG_FORCED = {'forced'}
         _TAG_SDH = {'sdh', 'hi', 'cc'}
+        # Commentary tokens, with the trailing number stripped first, so
+        # "commentary1"/"comm2" match as well as bare "commentary".
+        _TAG_COMMENTARY = {'commentary', 'comment', 'comm'}
         _SUB_EXTENSIONS = SUBTITLE_EXTENSIONS  # .srt .ass .ssa .vtt .sub .idx .sup
 
         def _normalize_lang(code):
@@ -629,9 +642,19 @@ def open_media_processor(app):
                 lang = None
                 is_forced = False
                 is_sdh = False
+                is_comment = False
+                comment_num = 0
 
                 for tok in tokens:
-                    if tok in _TAG_FORCED:
+                    # "commentary1" / "comm2" — split the trailing number off so
+                    # the word still matches and the number gives us the order.
+                    m = re.match(r'^([a-z]+?)(\d*)$', tok)
+                    word, num = (m.group(1), m.group(2)) if m else (tok, '')
+                    if word in _TAG_COMMENTARY:
+                        is_comment = True
+                        if num:
+                            comment_num = int(num)
+                    elif tok in _TAG_FORCED:
                         is_forced = True
                     elif tok in _TAG_SDH:
                         is_sdh = True
@@ -649,23 +672,102 @@ def open_media_processor(app):
                     if lang != target_norm:
                         continue
 
-                stype = 'forced' if is_forced else 'main'
+                stype = ('commentary' if is_comment
+                         else 'forced' if is_forced else 'main')
 
                 if fpath not in seen_paths:
                     seen_paths.add(fpath)
                     ext_subs_found.append({
                         'path': fpath, 'lang': lang,
                         'type': stype, 'sdh': is_sdh,
+                        'num': comment_num,
                     })
 
-            # Sort: English first, then by language, forced/sdh after main
+            # Sort: English first, then by language, forced/sdh after main,
+            # commentary last and in its numbered order (commentary1 before 2).
             def _sort_key(s):
                 type_order = 0 if s['type'] == 'main' and not s['sdh'] else (
-                    1 if s['type'] == 'forced' else 2)
-                return (0 if s['lang'] == 'eng' else 1, s['lang'], type_order)
+                    1 if s['type'] == 'forced' else
+                    3 if s['type'] == 'commentary' else 2)
+                return (0 if s['lang'] == 'eng' else 1, s['lang'],
+                        type_order, s.get('num', 0))
             ext_subs_found.sort(key=_sort_key)
 
             return ext_subs_found
+
+        _AUDIO_EXTENSIONS = {'.mka', '.ac3', '.eac3', '.dts', '.flac', '.aac',
+                             '.m4a', '.mp3', '.opus', '.wav', '.thd', '.truehd'}
+
+        def _detect_ext_audio(filepath):
+            """Find sibling audio files that belong to this video.
+
+            Same stem-prefix rule as _detect_ext_subs, so
+            "Show - S01E05.commentary1.mka" attaches to
+            "Show - S01E05.mkv".
+
+            ⚠️ ONLY commentary-tagged files are picked up. Muxing in every
+            stray audio file next to a video would quietly add tracks nobody
+            asked for — a spare .ac3 from an old encode would ride along and
+            the file would gain a duplicate main track.
+
+            ⚠️ A .mka ALREADY CARRIES title/language/disposition, so those are
+            read back and left alone. Measured 2026-08-22: via .mka everything
+            survives, via raw .ac3 it is all lost, which is exactly when the
+            filename has to supply it instead.
+            """
+            found = []
+            video_dir = os.path.dirname(filepath) or '.'
+            video_stem = os.path.splitext(os.path.basename(filepath))[0]
+            video_stem_lower = video_stem.lower()
+            try:
+                entries = sorted(os.listdir(video_dir))
+            except OSError:
+                return found
+
+            for fname in entries:
+                if fname.startswith('.'):
+                    continue
+                fpath = os.path.join(video_dir, fname)
+                if not os.path.isfile(fpath) or fpath == filepath:
+                    continue
+                stem, ext = os.path.splitext(fname)
+                if ext.lower() not in _AUDIO_EXTENSIONS:
+                    continue
+                if not stem.lower().startswith(video_stem_lower):
+                    continue
+
+                suffix = stem[len(video_stem):]
+                tokens = [t for t in re.split(r'[\.\s_\-]+', suffix.lower()) if t]
+                lang, is_comment, num = None, False, 0
+                for tok in tokens:
+                    m = re.match(r'^([a-z]+?)(\d*)$', tok)
+                    word, n = (m.group(1), m.group(2)) if m else (tok, '')
+                    if word in _TAG_COMMENTARY:
+                        is_comment = True
+                        if n:
+                            num = int(n)
+                    elif tok in _ALL_LANG_CODES and lang is None:
+                        lang = _normalize_lang(tok)
+                if not is_comment:
+                    continue
+
+                # What the file itself knows always beats the filename.
+                info = (get_audio_info(fpath) or [{}])[0]
+                found.append({
+                    'path':       fpath,
+                    'stream':     0,
+                    'label':      fname,
+                    'num':        num,
+                    'codec':      info.get('codec_name', ''),
+                    'bit_rate':   info.get('bit_rate', ''),
+                    'language':   info.get('language') if info.get('language') not in (None, 'und') else (lang or 'eng'),
+                    'title':      info.get('title') or '',
+                    'commentary': True,
+                    'descriptive': bool(info.get('descriptive')),
+                })
+
+            found.sort(key=lambda a: (a.get('num', 0), a['label']))
+            return found
 
         def _add_one_file(filepath):
             # Skip duplicates
@@ -677,6 +779,7 @@ def open_media_processor(app):
             audio = get_audio_info(filepath)
             subs = get_subtitle_streams(filepath)
             ext_subs_found = _detect_ext_subs(filepath)
+            ext_audio_found = _detect_ext_audio(filepath)
             # Audio codec display
             if audio:
                 acodec = audio[0]['codec_name'].upper()
@@ -697,6 +800,7 @@ def open_media_processor(app):
                 'sub_info': subs,
                 'sub_count': len(subs),
                 'ext_subs': ext_subs_found,
+                'ext_audio': ext_audio_found,
                 'video_codec': vcodec,
                 'has_cc': has_cc,
                 'status': 'Ready',
@@ -1466,9 +1570,10 @@ def open_media_processor(app):
             #   via raw .ac3 -> ALL THREE LOST; an elementary stream has
             #                   nowhere to put them
             audio_inputs = []
-            for a in (f.get('ext_audio') or []):
-                cmd.extend(['-i', a['path']])
-                audio_inputs.append(a)
+            if _ov(f, 'mux_audio', opt_mux_audio):
+                for a in (f.get('ext_audio') or []):
+                    cmd.extend(['-i', a['path']])
+                    audio_inputs.append(a)
 
             # Chapter injection
             ch_meta_path = None
@@ -1666,7 +1771,19 @@ def open_media_processor(app):
                     lang = a.get('language') or 'und'
                     if lang and lang != 'und':
                         cmd.extend([f'-metadata:s:a:{oi}', f'language={lang}'])
+                    # A title from the FILE always wins — a .mka carries the real
+                    # one ("Commentary with Co-Creators Sam Ernst and Jim Dunn")
+                    # and no generated string beats it. Raw .ac3/.dts have nowhere
+                    # to keep one, so those get a readable stand-in built the same
+                    # way the subtitle side builds its own.
                     title = (a.get('title') or '').strip()
+                    if not title and a.get('commentary'):
+                        lang_name = LANG_CODE_TO_NAME.get(lang, lang.upper()
+                                                          if lang != 'und' else '')
+                        n = a.get('num', 0)
+                        multi = len(audio_inputs) > 1
+                        title = (f"{lang_name} - Commentary"
+                                 f"{f' {n}' if (multi and n) else ''}").strip(' -')
                     if title:
                         cmd.extend([f'-metadata:s:a:{oi}', f'title={title}'])
                     # ⚠️ -disposition REPLACES the whole set for that stream, so
@@ -1714,28 +1831,44 @@ def open_media_processor(app):
                         'codec_name': 'subrip',
                         'forced': stype == 'forced',
                         'sdh': sdh,
+                        'comment': stype == 'commentary',
                     }
                     title = _resolve_track_name(opt_name_sub.get(), sub_tpl_info)
                     if title:
                         cmd.extend([f'-metadata:s:s:{si}', f'title={title}'])
                 else:
                     lang_name = LANG_CODE_TO_NAME.get(sub_lang, sub_lang)
-                    if stype == 'forced':
+                    if stype == 'commentary':
+                        # Number it only when there is more than one, so a lone
+                        # commentary reads "English - Commentary", not "... 1".
+                        n = s.get('num', 0)
+                        multi = sum(1 for x in sub_inputs
+                                    if x.get('type') == 'commentary') > 1
+                        suffix = f' {n}' if (multi and n) else ''
+                        cmd.extend([f'-metadata:s:s:{si}',
+                                    f'title={lang_name} - Commentary{suffix}'])
+                    elif stype == 'forced':
                         cmd.extend([f'-metadata:s:s:{si}', f'title={lang_name} - Forced'])
                     elif sdh:
                         cmd.extend([f'-metadata:s:s:{si}', f'title={lang_name} - SDH'])
                     else:
                         cmd.extend([f'-metadata:s:s:{si}', f'title={lang_name}'])
                 # Disposition: English main (non-SDH) gets default; forced gets forced;
-                # SDH gets hearing_impaired
+                # SDH gets hearing_impaired; commentary gets comment
                 disp_parts = []
-                if stype == 'main' and not sdh and sub_lang == 'eng' and not eng_default_set:
+                if (stype == 'main' and not sdh and sub_lang == 'eng'
+                        and not eng_default_set):
                     disp_parts.append('default')
                     eng_default_set = True
                 if stype == 'forced':
                     disp_parts.append('forced')
                 if sdh:
                     disp_parts.append('hearing_impaired')
+                if stype == 'commentary':
+                    # ⚠️ Commentary must never be `default`. SubtitleMode 0 picks
+                    # on IsExternal||IsDefault||IsForced, so a defaulted commentary
+                    # transcript would auto-select over the real English subs.
+                    disp_parts.append('comment')
                 if disp_parts:
                     cmd.extend([f'-disposition:s:{si}', '+'.join(disp_parts)])
 
@@ -2231,6 +2364,7 @@ def open_media_processor(app):
                 'meta_audio':     opt_meta_audio.get(),
                 'meta_sub':       opt_meta_sub.get(),
                 'mux_subs':       opt_mux_subs.get(),
+                'mux_audio':      opt_mux_audio.get(),
                 'sub_lang':       opt_sub_lang.get(),
                 'all_subs':       opt_all_subs.get(),
                 'output_mode':    opt_output_mode.get(),
