@@ -39,6 +39,87 @@ _COMMENTARY_WORDS = ('commentary', 'commentator', "director's comment",
                      'audio commentary')
 
 
+def _confirm_strip_subs(parent, losers, total):
+    """Ask before deleting embedded subtitles. Returns True to proceed.
+
+    ⚠️ A real dialog, not messagebox.askyesno. Tk's message boxes wrap at a
+    fixed ~30 characters, so a library filename ("Haven - S02E10 - Who, What,
+    Where, Wendigo {Commentary}.mkv") breaks across three lines and five of
+    them become a wall nobody reads — which defeats the entire point of
+    warning. A Listbox does not wrap, scrolls, and can show ALL the files
+    instead of an arbitrary five.
+    """
+    dlg = tk.Toplevel(parent)
+    dlg.title("Remove embedded subtitles?")
+    dlg.transient(parent)
+    dlg.resizable(True, True)
+    body = ttk.Frame(dlg, padding=12)
+    body.pack(fill='both', expand=True)
+    body.columnconfigure(0, weight=1)
+    body.rowconfigure(2, weight=1)
+
+    ttk.Label(body, text="'Remove embedded subtitles' is ON",
+              font=('TkDefaultFont', 11, 'bold')).grid(
+        row=0, column=0, sticky='w')
+    ttk.Label(body,
+              text=(f"This deletes {total} subtitle track"
+                    f"{'s' if total != 1 else ''} already inside "
+                    f"{len(losers)} file{'s' if len(losers) != 1 else ''}:")
+              ).grid(row=1, column=0, sticky='w', pady=(4, 6))
+
+    lf = ttk.Frame(body)
+    lf.grid(row=2, column=0, sticky='nsew')
+    lf.columnconfigure(0, weight=1)
+    lf.rowconfigure(0, weight=1)
+    rows = []
+    for f in losers:
+        n = os.path.splitext(f['name'])[0]
+        n = re.sub(r'\s*\{[^{}]*\}', '', n).strip()
+        rows.append(f"  {f.get('sub_count', 0)}  {n}")
+
+    # Width from the CONTENT, not a guess — a list you have to scroll
+    # sideways to read is no better than one that wraps. Capped so a stray
+    # 200-character name can't throw the dialog off the screen.
+    width = min(72, max(34, max((len(r) for r in rows), default=34) + 2))
+    lb = tk.Listbox(lf, height=min(12, max(4, len(rows))), width=width,
+                    activestyle='none', highlightthickness=0,
+                    font=('Courier', 10))
+    lb.grid(row=0, column=0, sticky='nsew')
+    sb = ttk.Scrollbar(lf, orient='vertical', command=lb.yview)
+    sb.grid(row=0, column=1, sticky='ns')
+    lb['yscrollcommand'] = sb.set
+    for r in rows:
+        lb.insert('end', r)
+
+    ttk.Label(body, text="External subtitles being muxed in are not affected.",
+              foreground='#666666').grid(row=3, column=0, sticky='w',
+                                         pady=(8, 0))
+
+    answer = {'ok': False}
+
+    def _yes():
+        answer['ok'] = True
+        dlg.destroy()
+
+    btns = ttk.Frame(body)
+    btns.grid(row=4, column=0, sticky='e', pady=(10, 0))
+    ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side='right')
+    ttk.Button(btns, text="Remove them", command=_yes).pack(side='right',
+                                                            padx=(0, 6))
+    dlg.bind('<Escape>', lambda e: dlg.destroy())
+
+    dlg.update_idletasks()
+    try:
+        x = parent.winfo_rootx() + (parent.winfo_width() - dlg.winfo_width()) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - dlg.winfo_height()) // 3
+        dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+    except Exception:
+        pass
+    dlg.grab_set()
+    parent.wait_window(dlg)
+    return answer['ok']
+
+
 def _is_commentary(info):
     """True if this stream is a commentary track.
 
@@ -2390,18 +2471,7 @@ def open_media_processor(app):
                       and f.get('sub_count', 0) > 0]
             if losers:
                 total = sum(f.get('sub_count', 0) for f in losers)
-                names = [f['name'] for f in losers[:6]]
-                if not messagebox.askyesno(
-                        "Remove embedded subtitles?",
-                        f"'Remove embedded subtitles' is ON.\n\n"
-                        f"{total} existing subtitle track(s) will be DELETED "
-                        f"from {len(losers)} file(s):\n\n"
-                        + "\n".join(f"   {n[:58]}" for n in names)
-                        + ("\n   ..." if len(losers) > 6 else "")
-                        + "\n\nExternal subtitles being muxed in are NOT "
-                          "affected — this only removes the tracks already "
-                          "inside the files.\n\nContinue?",
-                        parent=win):
+                if not _confirm_strip_subs(win, losers, total):
                     _log("Cancelled — 'Remove embedded subtitles' is still on",
                          'WARNING')
                     return
