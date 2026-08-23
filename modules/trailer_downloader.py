@@ -306,8 +306,14 @@ def download_trailer(ytdlp, url, out_path, container="mkv", strip=True,
         # deliberately: ~/.cache is in os_backup.sh's EXCLUDES, so it does not
         # propagate to the backup server or the rescue box. Mode 600.
         # ⚠️ Cookies expire. When they do, the bot-check simply returns — re-export.
+        # ⚠️ An explicit PATH wins over everything else. The bulk job runs on a
+        # throwaway account with its own jar, deliberately kept apart from the
+        # GUI's — mass downloading while signed in as yourself is attributable
+        # in a way anonymous throttling is not (Tony's call, 2026-08-23).
         _cj = cookie_file_path()
-        if cookies_from == "file" or (cookies_from and os.path.isfile(_cj)):
+        if cookies_from and os.path.isfile(str(cookies_from)):
+            cmd += ["--cookies", str(cookies_from)]
+        elif cookies_from == "file" or (cookies_from and os.path.isfile(_cj)):
             cmd += ["--cookies", _cj]
         elif cookies_from:
             cmd += ["--cookies-from-browser", cookies_from]

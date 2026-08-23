@@ -191,7 +191,7 @@ def worklist(st):
     return [(p, v) for p, v in st["items"].items() if v.get("status") == "pending"]
 
 
-def run(st, limit=None, dry=False, vcodec="h265"):
+def run(st, limit=None, dry=False, vcodec="h265", cookies=None):
     ytdlp = find_ytdlp()
     if not ytdlp:
         print("  yt-dlp not found."); return st
@@ -267,7 +267,8 @@ def run(st, limit=None, dry=False, vcodec="h265"):
         ok, msg = False, "no candidates"
         for ci, url in enumerate(urls, 1):
             ok, msg = download_trailer(ytdlp, url, tmp, container=ext.lstrip("."),
-                                       strip=True, log=lambda s: None, vcodec=vc)
+                                       strip=True, log=lambda s: None, vcodec=vc,
+                                       cookies_from=cookies)
             if ok:
                 if ci > 1:
                     print(f"  {label}  (candidate {ci} of {len(urls)})", flush=True)
@@ -279,6 +280,22 @@ def run(st, limit=None, dry=False, vcodec="h265"):
             info["status"] = "pending"
             info["last_error"] = msg[:120]
             print(f"  {label}  FAIL {msg[:52]}", flush=True)
+            # ⚠️ STOP DEAD on a bot-check. It is not a per-video failure — it
+            # is YouTube saying no to THIS MACHINE, so every subsequent request
+            # will fail the same way and each one digs the hole deeper. On
+            # 2026-08-21 the job ran on for 100 more items after the first
+            # challenge, turning a soft flag into a real block. Backoff is the
+            # wrong tool: there is nothing to back off from.
+            _e = (msg or "").lower()
+            if ("not a bot" in _e or "sign in to confirm" in _e
+                    or "please sign in" in _e):
+                print("\n  ⛔ BOT-CHECK — stopping the run.\n"
+                      "     Every further request would fail the same way.\n"
+                      "     Fix: export fresh cookies and pass --cookies FILE,\n"
+                      "     or wait this one out. Nothing is lost; the manifest\n"
+                      "     resumes where it stopped.", flush=True)
+                save_state(st)
+                return st
         else:
             new_h = probe_height(tmp)
             if new_h > cur_h:
@@ -328,19 +345,67 @@ def _yt_search(title, kind, year=None):
     return "https://www.youtube.com/results?search_query=" + urllib.parse.quote(q.strip())
 
 
-def write_report(st):
-    """A worklist Tony can actually work from.
+def classify_error(err):
+    """Bucket a recorded failure by WHAT CAN STILL BE DONE ABOUT IT.
 
-    Not just names: what he HAS, why the job couldn't do it, a ready-made
-    YouTube search, and the folder to drop the file in. Checkboxes because it's
-    a list to work through over time, not a status dump.
-    ⚠️ Everything here is a JUDGEMENT case -- the automated pass handles the
-    labour, these are the ones that need a person to go looking.
+    ⚠️ Sorting by error text alone is misleading. On 2026-08-23 the manifest
+    held 404 'failures', and 380 of them were not failures any more:
+
+        275  HTTP 403      the stale yt-dlp era, fixed by the nightly
+         92  bot-check     Friday's IP flag, cleared by cookies
+        ~15  "Please sign in"   same thing, message truncated
+
+    Only ~23 were genuinely dead. A report that treats every error as a
+    judgement case hands over 404 things to do by hand instead of 23.
+
+    Returns (bucket, retryable).
     """
-    no_tr = [(p, v) for p, v in st["items"].items() if v.get("status") == "no_trailer"]
-    low   = [(p, v) for p, v in st["items"].items() if v.get("status") == "source_limited"]
-    errs  = [(p, v) for p, v in st["items"].items()
-             if v.get("status") == "pending" and v.get("last_error")]
+    e = (err or "").lower()
+    if "not a bot" in e or "sign in to confirm" in e or "please sign in" in e \
+            or "exporting-youtube-cookies" in e:
+        return "blocked without cookies", True
+    if "403" in e or "forbidden" in e:
+        return "HTTP 403 (stale yt-dlp era)", True
+    if "private" in e:
+        return "private video", False
+    if "removed" in e or "unavailable" in e or "not available" in e:
+        return "removed or unavailable", False
+    if "region" in e or "country" in e or "geo" in e:
+        return "region blocked", False
+    if "drm" in e:
+        return "DRM protected", False
+    if "age" in e:
+        return "age-gated", False
+    return "other", False
+
+
+def write_report(st):
+    """The whole worklist, split by who does it.
+
+    ⚠️ Two halves on purpose. Tony's plan (2026-08-23) is "some manually and
+    some not", so the report has to show BOTH: what the bulk job will take
+    care of, and what genuinely needs a person to go looking. An earlier
+    version only listed the judgement cases, which made the backlog look 195
+    items long when it was really 1,500.
+
+    Not just names: what he HAS, why it stalled, a ready-made YouTube search,
+    and the folder to drop the file in. Checkboxes because it's a list to work
+    through over time, not a status dump.
+    """
+    from collections import Counter
+    items = st["items"]
+    no_tr = [(p, v) for p, v in items.items() if v.get("status") == "no_trailer"]
+    low   = [(p, v) for p, v in items.items() if v.get("status") == "source_limited"]
+    pend  = [(p, v) for p, v in items.items() if v.get("status") == "pending"]
+
+    fresh, retry, dead = [], [], []
+    for p, v in pend:
+        if not v.get("last_error"):
+            fresh.append((p, v))
+        else:
+            bucket, ok = classify_error(v["last_error"])
+            (retry if ok else dead).append((p, v, bucket))
+    errs = [(p, v) for p, v, _b in dead]
 
     def entry(f, v, note):
         yr = f" ({v['year']})" if v.get("year") else ""
@@ -350,11 +415,44 @@ def write_report(st):
 
     os.makedirs(os.path.dirname(REPORT), exist_ok=True)
     with open(REPORT, "w") as f:
-        f.write("# Trailers needing a human\n\n")
-        f.write(f"_Generated {datetime.now():%Y-%m-%d %H:%M} — "
-                f"{len(no_tr) + len(low) + len(errs)} items_\n\n")
-        f.write("The bulk job handles everything it can. These need someone to go\n"
-                "looking. Paste a YouTube URL straight into the Trailer Grabber\n"
+        machine = len(fresh) + len(retry)
+        human = len(no_tr) + len(low) + len(dead)
+        f.write("# Trailers still to do\n\n")
+        f.write(f"_Generated {datetime.now():%Y-%m-%d %H:%M}_\n\n")
+        f.write(f"**{machine + human} outstanding** — "
+                f"{machine} the bulk job can take, {human} need a person.\n\n")
+        f.write("| | count | |\n|---|---:|---|\n")
+        f.write(f"| Never attempted | {len(fresh)} | bulk job |\n")
+        f.write(f"| Failed, but retryable | {len(retry)} | bulk job |\n")
+        f.write(f"| No trailer in either database | {len(no_tr)} | **you** |\n")
+        f.write(f"| Source genuinely low-res | {len(low)} | **you** |\n")
+        f.write(f"| Genuinely dead | {len(dead)} | **you** |\n\n")
+        f.write(f"Done so far: {sum(1 for v in items.values() if v.get('status') == 'done')} "
+                f"replaced, {sum(1 for v in items.values() if v.get('status') == 'ok')} "
+                f"already fine, "
+                f"{sum(1 for v in items.values() if v.get('status') == 'keep')} kept by choice.\n\n")
+
+        # ── the machine's half ────────────────────────────────────────────
+        f.write("---\n\n## The bulk job's queue "
+                f"({machine})\n\n")
+        f.write("Nothing to do here by hand — listed so you can see what's coming and\n"
+                "pull anything out you'd rather do yourself.\n\n")
+        heights = Counter(int(v.get("height") or 0) for _p, v in fresh + [(p, v) for p, v, _b in retry])
+        f.write("**What they are now:** ")
+        f.write(", ".join(f"{h}p × {n}" for h, n in sorted(heights.items())[:8]))
+        f.write("\n\n")
+        if retry:
+            rb = Counter(b for _p, _v, b in retry)
+            f.write(f"**{len(retry)} previously failed for reasons that no longer apply:**\n\n")
+            for b, n in rb.most_common():
+                f.write(f"- {n} — {b}\n")
+            f.write("\n⚠️ The bulk job still needs the cookie file to get past the\n"
+                    "bot-check. Unauthenticated, the first request or two succeed and\n"
+                    "then the challenge returns.\n\n")
+
+        # ── the human half ────────────────────────────────────────────────
+        f.write("---\n\n# Needs a person\n\n")
+        f.write("Paste a YouTube URL straight into the Trailer Grabber\n"
                 "(Media Suite → Trailer Grabber → Trailer URL) and it'll download,\n"
                 "encode to HEVC and drop it in the right folder.\n\n")
 
@@ -371,12 +469,12 @@ def write_report(st):
             entry(f, v, f"have {v.get('height')}p, best on TMDB was "
                         f"{v.get('best_available')}p")
 
-        f.write(f"\n## Failed for a reason worth reading ({len(errs)})\n\n")
-        f.write("Region blocks, private or removed videos, age-gates. The reason is\n"
-                "verbatim from yt-dlp — a region block usually just means finding a\n"
-                "different upload of the same trailer.\n\n")
-        for _p, v in sorted(errs, key=lambda x: x[1]["title"].lower()):
-            entry(f, v, f"{v.get('last_error', '?')} (have {v.get('height', '?')}p)")
+        f.write(f"\n## Genuinely dead ({len(dead)})\n\n")
+        f.write("Private, removed, region-blocked, DRM'd or age-gated. Retrying will\n"
+                "not help — but a region block usually just means a different upload\n"
+                "of the same trailer exists somewhere.\n\n")
+        for _p, v, bucket in sorted(dead, key=lambda x: (x[2], x[1]["title"].lower())):
+            entry(f, v, f"**{bucket}** — have {v.get('height', '?')}p")
     print(f"  report -> {REPORT}", flush=True)
 
 
@@ -402,6 +500,10 @@ def main():
     ap.add_argument("--report", action="store_true", help="regenerate the manual worklist")
     ap.add_argument("--status", action="store_true", help="progress so far")
     ap.add_argument("--limit", type=int, help="only attempt N items this run")
+    ap.add_argument("--cookies", metavar="FILE",
+                    help="cookie jar for yt-dlp. ⚠️ Use a THROWAWAY account: "
+                         "bulk downloading while signed in as yourself is "
+                         "attributable in a way anonymous throttling is not.")
     ap.add_argument("--dry-run", action="store_true", help="resolve URLs, download nothing")
     # ⚠️ Default is h265, NOT copy: Tony wants trailers to match the library
     # (HEVC CQ32 10-bit). YouTube never serves HEVC, so this is always a local
@@ -415,8 +517,18 @@ def main():
         st = scan(st)
         save_state(st)
     if a.run:
+        if a.cookies:
+            _cf = os.path.expanduser(a.cookies)
+            if not os.path.isfile(_cf):
+                print(f"  cookie file not found: {_cf}")
+                return
+            print(f"  using cookies: {_cf}", flush=True)
+        else:
+            _cf = None
+            print("  no --cookies given; unauthenticated requests get "
+                  "bot-checked after the first few", flush=True)
         st = run(st, limit=a.limit, dry=a.dry_run,
-                 vcodec="copy" if a.copy else "h265")
+                 vcodec="copy" if a.copy else "h265", cookies=_cf)
         save_state(st)
     if a.report:
         write_report(st)
