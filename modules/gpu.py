@@ -21,6 +21,14 @@ import tempfile
 # is invisible until a rarely-taken branch runs.
 # tests/test_no_undefined_names.py now catches this across the package.
 from .constants import GPU_BACKENDS, VIDEO_CODEC_MAP
+
+# How much of a file to feed through the CC pipe when only a yes/no is
+# wanted. Cost is the ffmpeg remux, not the length — 30 s and 120 s both
+# measured ~1.2 s — so this is set for CONTENT, not speed: a cold open,
+# a network ident and a title sequence can all run before the first
+# caption. The UnXplained's first cue lands at 5.6 s; a documentary with
+# a long silent opener could go further.
+CC_PROBE_SECONDS = 180
 from .utils import get_video_duration, format_size, format_time
 
 # Module-level flag — set via --gpu-test-mode CLI flag
@@ -97,7 +105,61 @@ def detect_cc_types(filepath):
                 pass
         except Exception:
             pass
-    # Fallback: if ccextractor found nothing (or isn't installed),
+    # ── Fallback 1: ccextractor through an MPEG-TS pipe ──────────────────
+    # ⚠️ THE DETECTOR HAS TO KNOW WHAT THE EXTRACTOR KNOWS. Running
+    # ccextractor DIRECTLY on a file is what the block above does, and on
+    # .mp4 that can core-dump inside its GPAC parser — which reports as
+    # "no captions" rather than as a failure. extract_closed_captions_to_srt
+    # already works around this with a TS-pipe tier; detection never learned
+    # the same trick, so a file the Suite could extract perfectly well was
+    # refused before it ever got there.
+    #
+    # Found 2026-08-23 on The.UnXplained.S08E17 (.mp4, H.264 SEI EIA-608):
+    #   ffprobe A53 side data       -> nothing
+    #   ccextractor direct on .mp4  -> CORE DUMPED, 0 cues
+    #   ccextractor via TS pipe     -> 827 cues in 4 seconds
+    #
+    # ⚠️ Report mode (-out=report) produces NO OUTPUT over stdin, so this
+    # probes by doing a bounded real extraction and asking whether any cues
+    # came out. Time-boxed to the opening minutes: ~1.2 s either way,
+    # measured, because the cost is the ffmpeg remux, not the file length.
+    # It cannot tell 608 from 708 — plain stdin output is 608 — so a hit is
+    # reported as eia_608, matching what the extractor will actually produce.
+    if not ccx_ok and shutil.which('ccextractor'):
+        tmpdir = None
+        try:
+            tmpdir = tempfile.mkdtemp(prefix='docflix_ccpipe_')
+            probe_srt = os.path.join(tmpdir, 'probe.srt')
+            # ⚠️ Judge by the OUTPUT, not the return value. _run_ccx_pipe
+            # returns None on this path, so `if _run_ccx_pipe(...)` throws
+            # away a perfectly good result — which is exactly what it did on
+            # the first attempt at this fix.
+            _run_ccx_pipe(filepath, probe_srt, cc_type='eia_608',
+                          timeout=90, probe_seconds=CC_PROBE_SECONDS)
+            for name in os.listdir(tmpdir):
+                path = os.path.join(tmpdir, name)
+                if not os.path.isfile(path) or os.path.getsize(path) == 0:
+                    continue
+                # ccextractor writes the 608 stream to the name it was given
+                # and drops any CEA-708 services alongside as
+                # "<stem>.p<n>.svc<nn>.srt" — so the side files it leaves
+                # behind are what tell 608 from 708.
+                if '.svc' in name:
+                    result['eia_708'] = True
+                    ccx_ok = True
+                elif os.path.abspath(path) == os.path.abspath(probe_srt):
+                    result['eia_608'] = True
+                    ccx_ok = True
+        except Exception:
+            pass
+        finally:
+            if tmpdir:
+                try:
+                    shutil.rmtree(tmpdir)
+                except OSError:
+                    pass
+
+    # Fallback 2: if ccextractor found nothing (or isn't installed),
     # use ffprobe ATSC A53 side data scan — can only detect that CC
     # exists, not distinguish 608 from 708
     if not ccx_ok and not result['eia_708']:
@@ -107,7 +169,8 @@ def detect_cc_types(filepath):
 
 
 def _run_ccx_pipe(filepath, output_srt_path, cc_type, timeout,
-                   duration=None, progress_callback=None):
+                   duration=None, progress_callback=None,
+                   probe_seconds=None):
     """Extract CC via ffmpeg→ccextractor pipe.
 
     Pipes the video stream as MPEG-TS (stream copy, no decode) into
@@ -118,12 +181,22 @@ def _run_ccx_pipe(filepath, output_srt_path, cc_type, timeout,
     If *duration* (seconds) and *progress_callback* are provided,
     ffmpeg's stderr is parsed for ``time=`` progress and the callback
     is called with a percentage (0-99).
+
+    *probe_seconds* caps how much of the file is fed through, for callers
+    that only need a yes/no rather than a transcript. ⚠️ Detection only —
+    never pass it on a real extraction, or the output stops early and the
+    truncation looks like a file with captions that simply stop.
     """
     import re as _re
     report_progress = (duration and duration > 0
                        and progress_callback is not None)
     ffmpeg_cmd = [
         'ffmpeg', '-v', 'error',
+    ]
+    if probe_seconds:
+        # Before -i, so ffmpeg stops READING rather than filtering later.
+        ffmpeg_cmd += ['-t', str(int(probe_seconds))]
+    ffmpeg_cmd += [
         '-i', filepath,
         '-map', '0:v:0',
         '-c:v', 'copy',
