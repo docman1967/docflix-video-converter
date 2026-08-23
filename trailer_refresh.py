@@ -81,6 +81,11 @@ SLEEP_MAX    = 60
 BACKOFF_CAP  = 900     # a single sleep never exceeds this
 PAUSE_AFTER  = 6       # consecutive failures before a long pause
 PAUSE_SECS   = 3600
+# ⚠️ Consecutive BOT-CHECKS before giving up. One is weather — YouTube
+# challenges individual requests at random even on a signed-in session. Three
+# in a row means the machine or account is genuinely flagged and every further
+# request is just digging. Measured both regimes on 2026-08-21 and 08-23.
+BOTCHECK_LIMIT = 3
 
 _stop = {"now": False}
 
@@ -213,6 +218,7 @@ def run(st, limit=None, dry=False, vcodec="h265", cookies=None):
     print(f"  {len(todo)} to attempt (of {len(worklist(st))} pending)\n", flush=True)
 
     fails = 0
+    botchecks = 0          # CONSECUTIVE bot-checks; reset by any other outcome
     for n, (path, info) in enumerate(todo, 1):
         if _stop["now"]:
             break
@@ -280,22 +286,40 @@ def run(st, limit=None, dry=False, vcodec="h265", cookies=None):
             info["status"] = "pending"
             info["last_error"] = msg[:120]
             print(f"  {label}  FAIL {msg[:52]}", flush=True)
-            # ⚠️ STOP DEAD on a bot-check. It is not a per-video failure — it
-            # is YouTube saying no to THIS MACHINE, so every subsequent request
-            # will fail the same way and each one digs the hole deeper. On
-            # 2026-08-21 the job ran on for 100 more items after the first
-            # challenge, turning a soft flag into a real block. Backoff is the
-            # wrong tool: there is nothing to back off from.
+            # ⚠️ BOT-CHECKS COME IN TWO REGIMES and only one is fatal.
+            #
+            #   OCCASIONAL — YouTube challenges individual requests at random,
+            #     even on a signed-in session. Measured 2026-08-23: one blocked
+            #     video, then a clean fetch seconds later on the same cookies,
+            #     then another block. Stopping on the first of these threw away
+            #     14 good items for nothing.
+            #
+            #   SUSTAINED — the machine or account is actually flagged and
+            #     EVERYTHING fails. 2026-08-21: from item 2371 onward, every
+            #     single request. Carrying on there turned a soft flag into a
+            #     real block over ~100 items.
+            #
+            # So: count CONSECUTIVE challenges. One is weather; three in a row
+            # is a wall. Backoff is the wrong tool for the second case — there
+            # is nothing to back off from.
             _e = (msg or "").lower()
             if ("not a bot" in _e or "sign in to confirm" in _e
                     or "please sign in" in _e):
-                print("\n  ⛔ BOT-CHECK — stopping the run.\n"
-                      "     Every further request would fail the same way.\n"
-                      "     Fix: export fresh cookies and pass --cookies FILE,\n"
-                      "     or wait this one out. Nothing is lost; the manifest\n"
-                      "     resumes where it stopped.", flush=True)
-                save_state(st)
-                return st
+                botchecks += 1
+                if botchecks >= BOTCHECK_LIMIT:
+                    print(f"\n  ⛔ {botchecks} BOT-CHECKS IN A ROW — stopping.\n"
+                          "     This is the sustained kind, not the occasional\n"
+                          "     kind; every further request would fail too.\n"
+                          "     Fix: refresh the cookies\n"
+                          "       ~/.cache/docflix/refresh-bulk-cookies.sh\n"
+                          "     or wait it out. Nothing is lost; the manifest\n"
+                          "     resumes where it stopped.", flush=True)
+                    save_state(st)
+                    return st
+                print(f"     (bot-check {botchecks}/{BOTCHECK_LIMIT} — "
+                      f"carrying on)", flush=True)
+            else:
+                botchecks = 0
         else:
             new_h = probe_height(tmp)
             if new_h > cur_h:
@@ -304,6 +328,7 @@ def run(st, limit=None, dry=False, vcodec="h265", cookies=None):
                             done_at=datetime.now().isoformat(timespec="seconds"))
                 print(f"  {label}  {cur_h}p -> {new_h}p", flush=True)
                 fails = 0
+                botchecks = 0
             else:
                 # ⚠️ Not a failure. The upload itself is this small -- mark it so
                 # the job never returns to it, and put it on the manual list.
