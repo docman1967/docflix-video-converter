@@ -2375,6 +2375,37 @@ def open_media_processor(app):
                     return
                 os.makedirs(folder, exist_ok=True)
 
+            # ── "Remove embedded subtitles" is easy to forget it's on ────────
+            # It is a saved preference, so it survives from whatever job it was
+            # last wanted for and then quietly applies to the next batch. On
+            # 2026-08-23 it stripped the English subtitles from 78 Haven files
+            # during what Tony intended as an ADD-commentary run; the tool did
+            # exactly what it was told and never said so.
+            #
+            # ⚠️ Only warn when subtitles would ACTUALLY be lost. A dialog that
+            # fires on files with nothing to lose is noise, and noise is what
+            # teaches you to click straight through the one that mattered.
+            losers = [f for f in mp_files
+                      if _ov(f, 'strip_subs', opt_strip_subs)
+                      and f.get('sub_count', 0) > 0]
+            if losers:
+                total = sum(f.get('sub_count', 0) for f in losers)
+                names = [f['name'] for f in losers[:6]]
+                if not messagebox.askyesno(
+                        "Remove embedded subtitles?",
+                        f"'Remove embedded subtitles' is ON.\n\n"
+                        f"{total} existing subtitle track(s) will be DELETED "
+                        f"from {len(losers)} file(s):\n\n"
+                        + "\n".join(f"   {n[:58]}" for n in names)
+                        + ("\n   ..." if len(losers) > 6 else "")
+                        + "\n\nExternal subtitles being muxed in are NOT "
+                          "affected — this only removes the tracks already "
+                          "inside the files.\n\nContinue?",
+                        parent=win):
+                    _log("Cancelled — 'Remove embedded subtitles' is still on",
+                         'WARNING')
+                    return
+
             # Run preflight
             if not _preflight():
                 return
