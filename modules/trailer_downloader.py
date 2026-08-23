@@ -179,12 +179,29 @@ ATTEMPT_TIMEOUT_SECS = 150
 #  hammered them 16 times and reported it as a plain failure. 2026-08-18.)
 PERMANENT_ERRORS = (
     "not made this video available in your country",
-    "video is unavailable",
+    # ⚠️ "video unavailable", NOT "video is unavailable" — yt-dlp says
+    # "Video unavailable. It was blocked on copyright grounds". The old
+    # pattern never matched, so every one of these was retried FOUR times
+    # for nothing. Found 2026-08-23 by a test expectation, not by a report.
+    "video unavailable",
     "video is private",
     "video has been removed",
     "account associated with this video has been terminated",
     "sign in to confirm your age",
     "members-only content",
+    # ⚠️ A BOT-CHECK IS NOT WORTH RETRYING, and retrying makes it worse.
+    # The retry loop exists for 403s, which really are probabilistic —
+    # identical requests give OK, OK, OK, 403. A bot-check is different: it is
+    # YouTube refusing this MACHINE, so all four attempts fail identically and
+    # each one adds to the very count that caused it. Measured 2026-08-23: with
+    # the IP flagged, every account and every video was refused, while each
+    # manual attempt in the GUI silently spent FOUR requests learning that
+    # once. During a manual grind of ~1,500 trailers that is the whole daily
+    # budget, gone four times faster than it looks.
+    "sign in to confirm you're not a bot",
+    "sign in to confirm you’re not a bot",     # yt-dlp uses a curly apostrophe
+    "please sign in",
+    "cookies are no longer valid",
 )
 
 # ── Output codecs ─────────────────────────────────────────────────────────

@@ -405,17 +405,25 @@ def classify_error(err):
 
 
 def write_report(st):
-    """The whole worklist, split by who does it.
+    """A list built for a person to grind through, worst first.
 
-    ⚠️ Two halves on purpose. Tony's plan (2026-08-23) is "some manually and
-    some not", so the report has to show BOTH: what the bulk job will take
-    care of, and what genuinely needs a person to go looking. An earlier
-    version only listed the judgement cases, which made the backlog look 195
-    items long when it was really 1,500.
+    ⚠️ This is now a MANUAL worklist, not a status report. Tony's call
+    2026-08-23: the IP tolerates roughly 25 automated items a day, so the bulk
+    job cannot finish the remaining ~1,300 in any reasonable time. He has done
+    this before — "I downloaded thousands of trailers manually" — and would
+    rather just work it. See [[feedback_hands-on-not-a-manager]]: the job is to
+    make each manual action cheap, NOT to keep trying to remove it.
 
-    Not just names: what he HAS, why it stalled, a ready-made YouTube search,
-    and the folder to drop the file in. Checkboxes because it's a list to work
-    through over time, not a status dump.
+    So: every outstanding item, in ONE list, ordered by how bad the current
+    trailer is. A 240p trailer is a bigger win than a 480p one, and if he only
+    gets through fifty in a sitting they should be the fifty that matter most.
+
+    Each entry carries what he needs to act without going and looking it up:
+    current height, a ready-made YouTube search, the destination folder, and —
+    where there is one — the reason the automated pass could not do it.
+
+    ⚠️ Rescan clears finished work: `--scan` re-probes anything still `pending`
+    and flips it to `ok` at >=720p. It does NOT re-probe `source_limited`.
     """
     from collections import Counter
     items = st["items"]
@@ -438,68 +446,56 @@ def write_report(st):
         f.write(f"      [search YouTube]({_yt_search(v['title'], v.get('kind'), v.get('year'))})  \n")
         f.write(f"      `{v['folder']}`\n")
 
+    # Everything outstanding, in one pile, worst first.
+    todo = []
+    for pth, v in fresh:
+        todo.append((v, None))
+    for pth, v, bucket in retry:
+        todo.append((v, None))          # retryable = no lasting reason
+    for pth, v, bucket in dead:
+        todo.append((v, bucket))
+    for pth, v in no_tr:
+        todo.append((v, "no trailer on TMDB or TVDB"))
+    for pth, v in low:
+        todo.append((v, f"best source found was {v.get('best_available', '?')}p"))
+
+    def _h(v):
+        try:    return int(v.get("height") or 0)
+        except (TypeError, ValueError): return 0
+    # ⚠️ Worst FIRST. If he only gets through fifty in a sitting, they should be
+    # the fifty with the most to gain.
+    todo.sort(key=lambda t: (_h(t[0]), t[0]["title"].lower()))
+
+    bands = [(0, 300, "Under 300p — the worst of it"),
+             (300, 400, "300-399p"),
+             (400, 600, "400-599p"),
+             (600, 10000, "600p and up — marginal gains")]
+
     os.makedirs(os.path.dirname(REPORT), exist_ok=True)
     with open(REPORT, "w") as f:
-        machine = len(fresh) + len(retry)
-        human = len(no_tr) + len(low) + len(dead)
-        f.write("# Trailers still to do\n\n")
-        f.write(f"_Generated {datetime.now():%Y-%m-%d %H:%M}_\n\n")
-        f.write(f"**{machine + human} outstanding** — "
-                f"{machine} the bulk job can take, {human} need a person.\n\n")
-        f.write("| | count | |\n|---|---:|---|\n")
-        f.write(f"| Never attempted | {len(fresh)} | bulk job |\n")
-        f.write(f"| Failed, but retryable | {len(retry)} | bulk job |\n")
-        f.write(f"| No trailer in either database | {len(no_tr)} | **you** |\n")
-        f.write(f"| Source genuinely low-res | {len(low)} | **you** |\n")
-        f.write(f"| Genuinely dead | {len(dead)} | **you** |\n\n")
-        f.write(f"Done so far: {sum(1 for v in items.values() if v.get('status') == 'done')} "
-                f"replaced, {sum(1 for v in items.values() if v.get('status') == 'ok')} "
-                f"already fine, "
+        f.write("# Trailers to do\n\n")
+        f.write(f"_Generated {datetime.now():%Y-%m-%d %H:%M}_ — "
+                f"**{len(todo)} outstanding**\n\n")
+        f.write(f"Done so far: "
+                f"{sum(1 for v in items.values() if v.get('status') == 'done')} replaced, "
+                f"{sum(1 for v in items.values() if v.get('status') == 'ok')} already fine, "
                 f"{sum(1 for v in items.values() if v.get('status') == 'keep')} kept by choice.\n\n")
+        f.write("Worst first. Paste a YouTube URL into the Trailer Grabber\n"
+                "(Media Suite → Trailer Grabber → Trailer URL); it downloads,\n"
+                "encodes to HEVC and drops it in the right folder.\n\n")
+        f.write("When you have done a batch, run `trailer_refresh.py --scan` and\n"
+                "anything now 720p or better disappears off this list.\n\n")
 
-        # ── the machine's half ────────────────────────────────────────────
-        f.write("---\n\n## The bulk job's queue "
-                f"({machine})\n\n")
-        f.write("Nothing to do here by hand — listed so you can see what's coming and\n"
-                "pull anything out you'd rather do yourself.\n\n")
-        heights = Counter(int(v.get("height") or 0) for _p, v in fresh + [(p, v) for p, v, _b in retry])
-        f.write("**What they are now:** ")
-        f.write(", ".join(f"{h}p × {n}" for h, n in sorted(heights.items())[:8]))
-        f.write("\n\n")
-        if retry:
-            rb = Counter(b for _p, _v, b in retry)
-            f.write(f"**{len(retry)} previously failed for reasons that no longer apply:**\n\n")
-            for b, n in rb.most_common():
-                f.write(f"- {n} — {b}\n")
-            f.write("\n⚠️ The bulk job still needs the cookie file to get past the\n"
-                    "bot-check. Unauthenticated, the first request or two succeed and\n"
-                    "then the challenge returns.\n\n")
-
-        # ── the human half ────────────────────────────────────────────────
-        f.write("---\n\n# Needs a person\n\n")
-        f.write("Paste a YouTube URL straight into the Trailer Grabber\n"
-                "(Media Suite → Trailer Grabber → Trailer URL) and it'll download,\n"
-                "encode to HEVC and drop it in the right folder.\n\n")
-
-        f.write(f"## No trailer on TMDB or TVDB ({len(no_tr)})\n\n")
-        f.write("Neither database has a video entry, so there was nothing to try.\n\n")
-        for _p, v in sorted(no_tr, key=lambda x: x[1]["title"].lower()):
-            entry(f, v, f"nothing on TMDB or TVDB — currently {v.get('height', '?')}p")
-
-        f.write(f"\n## Source is genuinely low-res ({len(low)})\n\n")
-        f.write("A trailer was found and downloaded, but it was no better than what\n"
-                "you already have — that's all the uploader ever posted. Only worth\n"
-                "chasing if a different upload exists.\n\n")
-        for _p, v in sorted(low, key=lambda x: x[1]["title"].lower()):
-            entry(f, v, f"have {v.get('height')}p, best on TMDB was "
-                        f"{v.get('best_available')}p")
-
-        f.write(f"\n## Genuinely dead ({len(dead)})\n\n")
-        f.write("Private, removed, region-blocked, DRM'd or age-gated. Retrying will\n"
-                "not help — but a region block usually just means a different upload\n"
-                "of the same trailer exists somewhere.\n\n")
-        for _p, v, bucket in sorted(dead, key=lambda x: (x[2], x[1]["title"].lower())):
-            entry(f, v, f"**{bucket}** — have {v.get('height', '?')}p")
+        for lo, hi, label in bands:
+            chunk = [(v, why) for v, why in todo if lo <= _h(v) < hi]
+            if not chunk:
+                continue
+            f.write(f"\n## {label} ({len(chunk)})\n\n")
+            for v, why in chunk:
+                note = f"have {_h(v)}p"
+                if why:
+                    note += f" — {why}"
+                entry(f, v, note)
     print(f"  report -> {REPORT}", flush=True)
 
 
