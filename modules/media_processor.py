@@ -22,7 +22,7 @@ from .constants import (VIDEO_EXTENSIONS, SUBTITLE_EXTENSIONS, EDITION_PRESETS,
 from .chapters import generate_auto_chapters, chapters_to_ffmetadata
 from .utils import (get_audio_info, get_subtitle_streams, ask_directory,
                     ask_open_files, scaled_geometry, scaled_minsize,
-                    strip_mkv_tags_keeping_stamp)
+                    strip_mkv_tags_keeping_stamp, save_module_prefs)
 from .gpu import detect_closed_captions, get_video_codec, CC_STRIP_BSF
 
 try:
@@ -40,7 +40,9 @@ _COMMENTARY_WORDS = ('commentary', 'commentator', "director's comment",
 
 
 def _confirm_strip_subs(parent, losers, total):
-    """Ask before deleting embedded subtitles. Returns True to proceed.
+    """Ask before deleting embedded subtitles.
+
+    Returns ``(proceed, never_ask_again)``.
 
     ⚠️ A real dialog, not messagebox.askyesno. Tk's message boxes wrap at a
     fixed ~30 characters, so a library filename ("Haven - S02E10 - Who, What,
@@ -96,13 +98,25 @@ def _confirm_strip_subs(parent, losers, total):
                                          pady=(8, 0))
 
     answer = {'ok': False}
+    dont_ask = tk.BooleanVar(value=False)
 
     def _yes():
         answer['ok'] = True
         dlg.destroy()
 
-    btns = ttk.Frame(body)
-    btns.grid(row=4, column=0, sticky='e', pady=(10, 0))
+    row = ttk.Frame(body)
+    row.grid(row=4, column=0, sticky='ew', pady=(10, 0))
+
+    # ⚠️ Dismissing this is only safe because the checkbox that ARMS the strip
+    # turns red and says "(deletes)" while it's on — see _sync_strip_subs_label.
+    # The warning moves from a modal you dismiss to a state you can see. Take
+    # the label away and this checkbox re-creates the 2026-08-23 footgun exactly:
+    # strip_subs ON in saved prefs, no warning, 78 files quietly stripped.
+    ttk.Checkbutton(row, text="Don't show this again",
+                    variable=dont_ask).pack(side='left')
+
+    btns = ttk.Frame(row)
+    btns.pack(side='right')
     ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side='right')
     ttk.Button(btns, text="Remove them", command=_yes).pack(side='right',
                                                             padx=(0, 6))
@@ -117,7 +131,9 @@ def _confirm_strip_subs(parent, losers, total):
         pass
     dlg.grab_set()
     parent.wait_window(dlg)
-    return answer['ok']
+    # Cancelling never sets the dismissal — you don't get to silence a warning
+    # by backing out of it.
+    return answer['ok'], (dont_ask.get() and answer['ok'])
 
 
 def _is_commentary(info):
@@ -358,8 +374,33 @@ def open_media_processor(app):
                             variable=opt_strip_chapters).pack(side='left', padx=4)
             ttk.Checkbutton(cr, text="Strip tags",
                             variable=opt_strip_tags).pack(side='left', padx=4)
-            ttk.Checkbutton(cr, text="Strip existing subtitles",
-                            variable=opt_strip_subs).pack(side='left', padx=4)
+            # ⚠️ THIS ONE IS NOT LIKE ITS NEIGHBOURS. "Strip chapters" and
+            # "Strip tags" are cosmetic and reversible; this DELETES subtitle
+            # tracks that are not coming back. On 2026-08-23 it sat ON in saved
+            # prefs, looking identical to the other three, and quietly stripped
+            # the English subs from 78 Haven files during an add-commentary run.
+            #
+            # So it announces itself whenever it is armed. This is the half that
+            # makes the dialog's "Don't show this again" safe to offer: the
+            # warning stops being a modal you dismiss and becomes a state you can
+            # see. If you ever remove this label, remove the dismissal too.
+            try:
+                ttk.Style().configure('Warn.TCheckbutton', foreground='#c0392b')
+            except Exception:
+                pass
+            cb_strip_subs = ttk.Checkbutton(cr, text="Strip existing subtitles",
+                                            variable=opt_strip_subs)
+            cb_strip_subs.pack(side='left', padx=4)
+
+            def _sync_strip_subs_label(*_a):
+                on = opt_strip_subs.get()
+                cb_strip_subs.configure(
+                    text=("⚠ Strip existing subtitles (deletes)" if on
+                          else "Strip existing subtitles"),
+                    style=('Warn.TCheckbutton' if on else 'TCheckbutton'))
+
+            opt_strip_subs.trace_add('write', _sync_strip_subs_label)
+            _sync_strip_subs_label()   # armed from saved prefs? say so at launch
             ttk.Checkbutton(cr, text="Strip closed captions",
                             variable=opt_strip_cc).pack(side='left', padx=4)
 
@@ -2469,12 +2510,28 @@ def open_media_processor(app):
             losers = [f for f in mp_files
                       if _ov(f, 'strip_subs', opt_strip_subs)
                       and f.get('sub_count', 0) > 0]
-            if losers:
+            if losers and not _mp.get('strip_subs_no_warn', False):
                 total = sum(f.get('sub_count', 0) for f in losers)
-                if not _confirm_strip_subs(win, losers, total):
+                ok, never = _confirm_strip_subs(win, losers, total)
+                if not ok:
                     _log("Cancelled — 'Remove embedded subtitles' is still on",
                          'WARNING')
                     return
+                if never:
+                    # Persist immediately, not at window close — the point of
+                    # "don't show this again" is that a crash mid-batch doesn't
+                    # resurrect it. Written to BOTH prefs stores; saving only one
+                    # is why the caps-filter names setting looked broken in 3.19.2.
+                    _mp['strip_subs_no_warn'] = True
+                    save_module_prefs('media_processor', _mp)
+                    _log("Won't warn about stripping subtitles again — the "
+                         "checkbox stays red while it's armed", 'INFO')
+            elif losers:
+                # Dismissed, but never let it happen in complete silence.
+                total = sum(f.get('sub_count', 0) for f in losers)
+                _log(f"Stripping {total} embedded subtitle track"
+                     f"{'s' if total != 1 else ''} from {len(losers)} file"
+                     f"{'s' if len(losers) != 1 else ''}", 'WARNING')
 
             # Run preflight
             if not _preflight():
@@ -2571,6 +2628,11 @@ def open_media_processor(app):
                 'name_audio':     opt_name_audio.get(),
                 'name_sub':       opt_name_sub.get(),
                 'notify_sound':   opt_notify_sound.get(),
+                # ⚠️ Has no Var — it is set from the warning dialog, not the UI.
+                # This dict REPLACES app._media_proc_prefs wholesale, so leaving
+                # it out silently un-dismisses the warning every time the window
+                # closes: it would look like "Don't show this again" never worked.
+                'strip_subs_no_warn': _mp.get('strip_subs_no_warn', False),
             }
             app._media_proc_prefs = mp_prefs
             # Write to shared preferences file
