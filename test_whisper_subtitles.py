@@ -176,3 +176,31 @@ def test_orphan_not_merged_across_a_long_silence():
         t += d + g
     out = segment_into_cues([_Seg(ws)])
     assert len(out) == 2, f"merged across 2.2s of silence: {[c.text for c in out]}"
+
+
+def test_orphan_rebalances_when_previous_cue_is_full():
+    """A budget break must not split a compound noun and strand the tail.
+
+    Real output before the fix:
+        290  00:17:54,374 --> 00:17:58,861  ...fasten your seat   (83 chars)
+        291  00:17:58,901 --> 00:17:59,162  belt.                 (5 chars, 0.26s)
+
+    Merging is impossible (83 + 6 > 84), so words are pushed BACK from the full
+    cue into the orphan until both are viable — combine, then re-split sensibly.
+    """
+    text = ("And if you think Air Force One has always looked as classy as this, "
+            "fasten your seat belt.")
+    ws, t = [], 0.0
+    for w in text.split():
+        ws.append(_W(w, t, t + 0.22))
+        t += 0.24
+    out = segment_into_cues([_Seg(ws)])
+    flats = [c.text.replace("\n", " ") for c in out]
+    assert all(len(f) >= 15 for f in flats), f"orphan left stranded: {flats}"
+    assert any("seat belt." in f for f in flats), \
+        f"compound noun split across cues: {flats}"
+    # timings must still be monotonic and drawn from the real words
+    for a, b in zip(out, out[1:]):
+        assert a.end <= b.start, "rebalance produced overlapping cues"
+    got = " ".join(flats).split()
+    assert got == text.split(), "words lost during rebalance"

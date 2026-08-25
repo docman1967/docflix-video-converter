@@ -323,6 +323,11 @@ def _ends_sentence(token: str) -> bool:
     return t.endswith(_SENTENCE_END)
 
 
+def _toks_text(toks) -> str:
+    """Flatten a cue's (start, end, token) triples into its display text."""
+    return " ".join(t for _s, _e, t in toks)
+
+
 def balance_lines(text: str, max_len: int = 42, max_lines: int = 2) -> str:
     """Wrap a cue's text into at most *max_lines* visually balanced lines.
 
@@ -448,19 +453,22 @@ def segment_into_cues(segments, *, max_line_length: int = 42, max_lines: int = 2
     if not stream:
         return []
 
-    cues = []          # list of [start, end, [tokens]]
+    # ⚠️ Each cue keeps its WORD TRIPLES (start, end, token), not bare strings.
+    # The orphan pass below has to be able to move a word from one cue to the
+    # next, and that is only honest if the word's real timing moves with it.
+    cues = []          # list of [start, end, [(ws, we, tok), ...]]
     for ws, we, tok in stream:
         if not cues:
-            cues.append([ws, we, [tok]])
+            cues.append([ws, we, [(ws, we, tok)]])
             continue
 
         cur = cues[-1]
         prev_end = cur[1]
-        cur_text = " ".join(cur[2])
+        cur_text = _toks_text(cur[2])
         gap = ws - prev_end
         would_len = len(cur_text) + 1 + len(tok)
 
-        ends_sent = _ends_sentence(cur[2][-1])
+        ends_sent = _ends_sentence(cur[2][-1][2])
         # Budget breaks are absolute — there is no room left, so the cue must end.
         hard_break = (would_len > max_chars
                       or (we - cur[0]) > max_duration)
@@ -480,16 +488,16 @@ def segment_into_cues(segments, *, max_line_length: int = 42, max_lines: int = 2
         # re-decide. Sentence endings and budget breaks still win, because the
         # first is a correct place to stop and the second has no alternative.
         if pause_break and not ends_sent and not hard_break:
-            last = cur[2][-1].strip('.,!?;:—–"\'’”)]}»').lower()
+            last = cur[2][-1][2].strip('.,!?;:—–"\'’”)]}»').lower()
             if last in _NO_BREAK_AFTER:
                 pause_break = False
 
         force_break = ends_sent or pause_break or hard_break
         if force_break:
-            cues.append([ws, we, [tok]])
+            cues.append([ws, we, [(ws, we, tok)]])
         else:
             cur[1] = we
-            cur[2].append(tok)
+            cur[2].append((ws, we, tok))
 
     # ── orphan pass ───────────────────────────────────────────────────────
     # ⚠️ The `gap >= split_gap` rule above is right in principle — it lines cues
@@ -533,22 +541,52 @@ def segment_into_cues(segments, *, max_line_length: int = 42, max_lines: int = 2
     if min_cue_chars > 0 and len(cues) > 1:
         merged = []
         for cue in cues:
-            text = " ".join(cue[2])
+            text = _toks_text(cue[2])
             if merged and len(text) < min_cue_chars:
                 prev = merged[-1]
-                prev_text = " ".join(prev[2])
-                if (len(prev_text) + 1 + len(text) <= max_chars
-                        and (cue[1] - prev[0]) <= max_duration
-                        and not _ends_sentence(prev[2][-1])          # (a)
-                        and (cue[0] - prev[1]) < merge_gap_limit):   # (b)
+                prev_text = _toks_text(prev[2])
+                joinable = (not _ends_sentence(prev[2][-1][2])        # (a)
+                            and (cue[0] - prev[1]) < merge_gap_limit  # (b)
+                            and (cue[1] - prev[0]) <= max_duration)
+                if joinable and len(prev_text) + 1 + len(text) <= max_chars:
                     prev[1] = cue[1]
                     prev[2].extend(cue[2])
                     continue
+                # ⚠️ REBALANCE when the previous cue is too FULL to take the orphan.
+                #
+                # A budget break fills a cue to the brim and then cuts wherever it
+                # lands — which split a compound noun across two cues:
+                #
+                #   290  ...fasten your seat      83 chars
+                #   291  belt.                     5 chars, 0.26s
+                #
+                # Merging is impossible (83+6 > 84) so the fragment was stranded.
+                # Instead push words BACK from the full cue into the orphan until
+                # the orphan is viable, which is exactly the fix by hand: combine,
+                # then re-split somewhere sensible. Word timings move with the
+                # words, so both cues stay honest.
+                if joinable:
+                    moved = 0
+                    while (len(_toks_text(cue[2])) < min_cue_chars
+                           and len(prev[2]) - moved > 1):
+                        cand = prev[2][-1]
+                        # Don't strip the previous cue below viability itself, and
+                        # never move a word across a sentence ending.
+                        if _ends_sentence(prev[2][-2][2]):
+                            break
+                        remaining = _toks_text(prev[2][:-1])
+                        if len(remaining) < min_cue_chars:
+                            break
+                        prev[2].pop()
+                        cue[2].insert(0, cand)
+                        prev[1] = prev[2][-1][1]
+                        cue[0] = cue[2][0][0]
+                        moved += 1
             merged.append(cue)
         # A leading orphan has no previous cue — pull it FORWARD into the next.
-        if len(merged) > 1 and len(" ".join(merged[0][2])) < min_cue_chars:
+        if len(merged) > 1 and len(_toks_text(merged[0][2])) < min_cue_chars:
             first, second = merged[0], merged[1]
-            if (len(" ".join(first[2])) + 1 + len(" ".join(second[2])) <= max_chars
+            if (len(_toks_text(first[2])) + 1 + len(_toks_text(second[2])) <= max_chars
                     and (second[1] - first[0]) <= max_duration):
                 second[0] = first[0]
                 second[2] = first[2] + second[2]
@@ -559,7 +597,7 @@ def segment_into_cues(segments, *, max_line_length: int = 42, max_lines: int = 2
     result = []
     n = len(cues)
     for i, (start, end, toks) in enumerate(cues):
-        text = balance_lines(" ".join(toks), max_len=max_line_length,
+        text = balance_lines(_toks_text(toks), max_len=max_line_length,
                              max_lines=max_lines)
         chars = len(text.replace("\n", " "))
         dur = end - start
