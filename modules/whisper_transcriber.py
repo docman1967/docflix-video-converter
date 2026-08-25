@@ -39,6 +39,7 @@ from .whisper_subtitles import (
     subtitle_exists,
     is_backend_available,
 )
+from .subtitle_filter_panel import SubtitleFilterPanel
 
 # ── optional drag-and-drop support ───────────────────────────────────────────
 try:
@@ -1324,6 +1325,14 @@ def open_whisper_transcriber(app):
                textvariable=_max_lead_var, width=5).pack(side='left', padx=(0, 4))
     ttk.Label(adv2, text="(0=off, 0.5 rec.)").pack(side='left')
 
+    # Post-transcription filters — the same set the Sub Extractor offers, applied
+    # to each .srt after it is written. Shared panel so the two lists can't drift.
+    _filter_panel = SubtitleFilterPanel(
+        win, app, adv2, saved=_wp.get('filters', {}),
+        title="Post-Transcription Filters",
+        blurb=("Selected filters are applied to each .srt\n"
+               "after it is written. VTT output is not filtered."))
+
     # Row 2b: readability — reading speed + pause-split threshold (cue segmenter)
     adv2b = ttk.Frame(adv_frame)
     adv2b.pack(fill='x', padx=4, pady=2)
@@ -1627,6 +1636,7 @@ def open_whisper_transcriber(app):
             "device_index": _gpu_choices.get(_gpu_var.get(), 0),
             "reading_speed": _cps_var.get(),
             "split_gap": _gap_var.get(),
+            "filters": _filter_panel.get_prefs(),
         }
 
     def _apply_settings(settings: dict):
@@ -1990,6 +2000,23 @@ def open_whisper_transcriber(app):
             for ext in fmt_parts:
                 saved = str(base / (path.stem + tag + f".{ext}"))
                 _log_write(f"Saved -> {saved}", "success")
+                # ⚠️ SRT only — the filters parse and rewrite SubRip. Running
+                # them on a .vtt would strip its header and corrupt the file.
+                if ext != "srt":
+                    continue
+                try:
+                    counts = _filter_panel.apply_to_file(saved)
+                except Exception as exc:
+                    # ⚠️ Say so. sub_ripper's copy swallows this and returns
+                    # None, which reads exactly like "no filters selected" —
+                    # the file is left unfiltered and nobody finds out.
+                    _log_write(f"  Filters FAILED on {Path(saved).name}: {exc}"
+                               "  (file left unfiltered)", "error")
+                else:
+                    if counts:
+                        before, after = counts
+                        _log_write(f"  Filters applied: {before} -> {after} cues",
+                                   "info")
         except Exception as exc:
             _log_write(f"Save failed for {path.name}: {exc}", "error")
 
