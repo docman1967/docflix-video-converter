@@ -584,10 +584,18 @@ def segment_into_cues(segments, *, max_line_length: int = 42, max_lines: int = 2
                         moved += 1
             merged.append(cue)
         # A leading orphan has no previous cue — pull it FORWARD into the next.
+        #
+        # ⚠️ THE SAME TWO GUARDS APPLY HERE. They were originally only on the
+        # backward merge, and the pre-existing suite caught it: "I don't know."
+        # (13 chars, a complete sentence) was swallowed forward into "Get out
+        # now!" across a 2-second pause. Identical to the documentary bug, in the
+        # one position that wasn't guarded. If you add a merge path, guard it.
         if len(merged) > 1 and len(_toks_text(merged[0][2])) < min_cue_chars:
             first, second = merged[0], merged[1]
             if (len(_toks_text(first[2])) + 1 + len(_toks_text(second[2])) <= max_chars
-                    and (second[1] - first[0]) <= max_duration):
+                    and (second[1] - first[0]) <= max_duration
+                    and not _ends_sentence(first[2][-1][2])
+                    and (second[0] - first[1]) < merge_gap_limit):
                 second[0] = first[0]
                 second[2] = first[2] + second[2]
                 merged.pop(0)
