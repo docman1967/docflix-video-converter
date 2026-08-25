@@ -358,7 +358,18 @@ def balance_lines(text: str, max_len: int = 42, max_lines: int = 2) -> str:
     if best is None:
         # No single split fits within max_len — fall back to a greedy wrap.
         wrapped = textwrap.wrap(text, width=max_len)
-        return "\n".join(wrapped[:max_lines])
+        # ⚠️ NEVER DISCARD TEXT. This used to `return "\n".join(wrapped[:max_lines])`,
+        # which silently deleted every line past the second. A cue of 83 chars that
+        # had no clean 2-way split wrapped to 3 lines and lost the last word —
+        # producing a perfectly valid-looking subtitle with a word missing from the
+        # transcript. Nothing errored; the words were just gone. Found 2026-08-25
+        # while testing the orphan pass, by asserting output words == input words.
+        #
+        # An over-long final line is bad typography. Losing what the speaker said
+        # is worse and unrecoverable. Fold the overflow in instead.
+        if len(wrapped) > max_lines:
+            wrapped = wrapped[:max_lines - 1] + [" ".join(wrapped[max_lines - 1:])]
+        return "\n".join(wrapped)
     return best[1] + "\n" + best[2]
 
 
@@ -413,7 +424,8 @@ def _word_stream(segments):
 
 def segment_into_cues(segments, *, max_line_length: int = 42, max_lines: int = 2,
                       reading_speed: float = 17.0, split_gap: float = 0.5,
-                      min_duration: float = 0.8, max_duration: float = 7.0):
+                      min_duration: float = 0.8, max_duration: float = 7.0,
+                      min_cue_chars: int = 10):
     """Re-cut transcript segments into broadcast-style subtitle cues.
 
     A new cue is started when any of these happen (checked before each word):
@@ -422,6 +434,9 @@ def segment_into_cues(segments, *, max_line_length: int = 42, max_lines: int = 2
         lines up with scene cuts and speaker hand-offs)
       • adding the word would exceed the character budget (max_lines × width)
       • the cue would exceed *max_duration* seconds
+
+    Cues left shorter than *min_cue_chars* are then merged back into a
+    neighbour — see the orphan pass below.
 
     Afterwards each cue's duration is stretched (without overlapping the next)
     so it never reads faster than *reading_speed* chars/sec and never flashes
@@ -455,6 +470,47 @@ def segment_into_cues(segments, *, max_line_length: int = 42, max_lines: int = 2
         else:
             cur[1] = we
             cur[2].append(tok)
+
+    # ── orphan pass ───────────────────────────────────────────────────────
+    # ⚠️ The `gap >= split_gap` rule above is right in principle — it lines cues
+    # up with real pauses — but it never asked whether the cue it *creates* is
+    # viable. A speaker pausing before a short trailing word left cues like:
+    #
+    #     00:00:12,378 --> 00:00:14,789   I'm John Hamm, I play Don Draper with me,
+    #     00:00:15,020 --> 00:00:15,820   R.
+    #
+    # Two characters, alone, for 0.8s. The text was only 44 chars against an 84
+    # budget, so nothing was too long — the speaker just breathed in the wrong
+    # place. Tony was fixing these by hand: merge the pair, then re-split so it
+    # reads naturally. That IS this pass — merge here, and balance_lines() below
+    # does the re-split for free.
+    #
+    # Merge BACKWARD by preference: an orphan is nearly always a continuation of
+    # what came before, so joining it to the previous cue preserves reading order.
+    # ⚠️ Guarded on both budgets — an orphan is annoying, but a cue that blows
+    # past max_chars or max_duration is worse. When in doubt, leave it alone.
+    if min_cue_chars > 0 and len(cues) > 1:
+        merged = []
+        for cue in cues:
+            text = " ".join(cue[2])
+            if merged and len(text) < min_cue_chars:
+                prev = merged[-1]
+                prev_text = " ".join(prev[2])
+                if (len(prev_text) + 1 + len(text) <= max_chars
+                        and (cue[1] - prev[0]) <= max_duration):
+                    prev[1] = cue[1]
+                    prev[2].extend(cue[2])
+                    continue
+            merged.append(cue)
+        # A leading orphan has no previous cue — pull it FORWARD into the next.
+        if len(merged) > 1 and len(" ".join(merged[0][2])) < min_cue_chars:
+            first, second = merged[0], merged[1]
+            if (len(" ".join(first[2])) + 1 + len(" ".join(second[2])) <= max_chars
+                    and (second[1] - first[0]) <= max_duration):
+                second[0] = first[0]
+                second[2] = first[2] + second[2]
+                merged.pop(0)
+        cues = merged
 
     # Build SubSegments with wrapped text, then polish timing for readability.
     result = []
