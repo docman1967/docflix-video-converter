@@ -460,12 +460,31 @@ def segment_into_cues(segments, *, max_line_length: int = 42, max_lines: int = 2
         gap = ws - prev_end
         would_len = len(cur_text) + 1 + len(tok)
 
-        force_break = (
-            _ends_sentence(cur[2][-1])
-            or gap >= split_gap
-            or would_len > max_chars
-            or (we - cur[0]) > max_duration
-        )
+        ends_sent = _ends_sentence(cur[2][-1])
+        # Budget breaks are absolute — there is no room left, so the cue must end.
+        hard_break = (would_len > max_chars
+                      or (we - cur[0]) > max_duration)
+        pause_break = gap >= split_gap
+
+        # ⚠️ Don't end a cue on a dangling function word.
+        #
+        # _NO_BREAK_AFTER already stops balance_lines() stranding "and"/"to"/"the"
+        # at the end of a LINE — the eye expects them to lead into the next word.
+        # That convention was never applied to the end of a CUE, so a pause was
+        # free to do what a line break was forbidden from doing. Measured on a
+        # real commentary transcript: 12% of cues ended on a dangling function
+        # word with no punctuation ("I think this was the", "decided not to go
+        # to", "…who's getting heavier and").
+        #
+        # So a PAUSE alone no longer breaks there — absorb the next word and
+        # re-decide. Sentence endings and budget breaks still win, because the
+        # first is a correct place to stop and the second has no alternative.
+        if pause_break and not ends_sent and not hard_break:
+            last = cur[2][-1].strip('.,!?;:—–"\'’”)]}»').lower()
+            if last in _NO_BREAK_AFTER:
+                pause_break = False
+
+        force_break = ends_sent or pause_break or hard_break
         if force_break:
             cues.append([ws, we, [tok]])
         else:

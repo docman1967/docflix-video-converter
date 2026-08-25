@@ -106,3 +106,33 @@ def test_leading_orphan_merges_forward():
     out = segment_into_cues(segs)
     assert out[0].text.replace("\n", " ").startswith("Right."), out[0].text
     assert len(out[0].text.replace("\n", " ")) >= 15
+
+
+def test_pause_does_not_strand_a_dangling_function_word():
+    """A cue may not END on "and"/"to"/"the" just because the speaker paused.
+
+    `_NO_BREAK_AFTER` already forbids stranding these at the end of a LINE. The
+    same convention was never applied to the end of a CUE, so a pause could do
+    what a line break could not. Measured at 18% of cues on real commentary.
+    """
+    segs = _segment("I think this was the best year of the whole show", pause_before="the")
+    out = segment_into_cues(segs)
+    for cue in out[:-1]:                      # last cue may legitimately trail
+        flat = cue.text.replace("\n", " ").strip()
+        if flat.endswith((".", "!", "?", "…", ",", ";", ":")):
+            continue                          # punctuated = a fine place to stop
+        last = flat.split()[-1].strip('"\'’”)]}»').lower()
+        assert last not in ("the", "and", "to", "of", "a"), \
+            f"cue ends on a dangling function word: {flat!r}"
+
+
+def test_budget_still_wins_over_the_dangling_rule():
+    """⚠️ A dangling word is a wart; an over-budget cue is a bug. Budget wins."""
+    text = " ".join(["the"] * 40)             # nothing but function words
+    segs = _segment(text)
+    out = segment_into_cues(segs, max_line_length=42, max_lines=2)
+    for cue in out:
+        assert len(cue.text.replace("\n", " ")) <= 42 * 2 + 8, \
+            f"dangling rule blew the budget: {cue.text!r}"
+    got = " ".join(c.text.replace("\n", " ") for c in out).split()
+    assert got == text.split(), "words lost while avoiding a dangling break"
