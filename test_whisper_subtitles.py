@@ -136,3 +136,43 @@ def test_budget_still_wins_over_the_dangling_rule():
             f"dangling rule blew the budget: {cue.text!r}"
     got = " ".join(c.text.replace("\n", " ") for c in out).split()
     assert got == text.split(), "words lost while avoiding a dangling break"
+
+
+# ── documentary structure ───────────────────────────────────────────────────
+# ⚠️ The orphan pass was tuned on COMMENTARY and broke scripted narration.
+# Tony caught it by asking "a documentary is structurally different" BEFORE
+# spending GPU time on one. These two tests are that question, frozen.
+
+def test_documentary_beat_is_not_swallowed():
+    """A short cue after a full stop and a held pause must stand on its own.
+
+    Narration uses short cues deliberately:
+        'For thirty years the colony thrived here.'   0.00 -> 2.41
+        'Until now.'                                  4.12 -> 4.92
+    Merging produced one 4.84s cue containing 1.7s of silence, and put
+    "Until now." on screen 1.7s BEFORE it was spoken.
+    """
+    words = [("For", .2, .02), ("thirty", .2, .02), ("years", .2, .02),
+             ("the", .2, .02), ("colony", .2, .02), ("thrived", .2, .02),
+             ("here.", .3, 2.50), ("Until", .3, .02), ("now.", .4, 0)]
+    ws, t = [], 0.0
+    for w, d, g in words:
+        ws.append(_W(w, t, t + d))
+        t += d + g
+    out = segment_into_cues([_Seg(ws)])
+    assert len(out) == 2, f"the beat was swallowed: {[c.text for c in out]}"
+    assert out[1].text.strip() == "Until now."
+    assert out[1].start > out[0].end, "punchline must not appear before it is spoken"
+
+
+def test_orphan_not_merged_across_a_long_silence():
+    """Even mid-sentence, a held pause is not something to paper over."""
+    words = [(w, .22, .02) for w in "and then the whole thing just".split()]
+    words[-1] = ("just", .22, 2.2)
+    words.append(("collapsed", .35, 0))
+    ws, t = [], 0.0
+    for w, d, g in words:
+        ws.append(_W(w, t, t + d))
+        t += d + g
+    out = segment_into_cues([_Seg(ws)])
+    assert len(out) == 2, f"merged across 2.2s of silence: {[c.text for c in out]}"

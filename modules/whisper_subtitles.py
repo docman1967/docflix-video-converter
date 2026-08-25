@@ -509,6 +509,27 @@ def segment_into_cues(segments, *, max_line_length: int = 42, max_lines: int = 2
     # what came before, so joining it to the previous cue preserves reading order.
     # ⚠️ Guarded on both budgets — an orphan is annoying, but a cue that blows
     # past max_chars or max_duration is worse. When in doubt, leave it alone.
+    #
+    # ⚠️⚠️ AN ORPHAN IS ONLY MERGEABLE IF IT IS A CONTINUATION.
+    #
+    # Two guards below exist because commentary and documentary are structurally
+    # different, and the first version of this pass was tuned only on commentary.
+    # Scripted narration uses SHORT CUES DELIBERATELY, after a beat held for the
+    # visuals:
+    #
+    #     'For thirty years the colony thrived here.'   0.00 -> 2.41
+    #     'Until now.'                                  4.12 -> 4.92
+    #
+    # Merging those produced one 4.84s cue containing 1.7s of silence — and put
+    # "Until now." on screen 1.7s BEFORE it is spoken, spoiling its own punchline.
+    #
+    #   (a) never merge BACKWARD across a sentence ending. A cue after a full stop
+    #       is a new thought, not a fragment of the last one.
+    #   (b) never merge across a long silence. The break was caused by a pause of
+    #       >= split_gap, so the threshold has to be higher than that or nothing
+    #       would ever merge — 3x split_gap separates a breath (~0.5s) from a
+    #       dramatic beat (~1.5s+), and scales if split_gap is retuned.
+    merge_gap_limit = split_gap * 3
     if min_cue_chars > 0 and len(cues) > 1:
         merged = []
         for cue in cues:
@@ -517,7 +538,9 @@ def segment_into_cues(segments, *, max_line_length: int = 42, max_lines: int = 2
                 prev = merged[-1]
                 prev_text = " ".join(prev[2])
                 if (len(prev_text) + 1 + len(text) <= max_chars
-                        and (cue[1] - prev[0]) <= max_duration):
+                        and (cue[1] - prev[0]) <= max_duration
+                        and not _ends_sentence(prev[2][-1])          # (a)
+                        and (cue[0] - prev[1]) < merge_gap_limit):   # (b)
                     prev[1] = cue[1]
                     prev[2].extend(cue[2])
                     continue
