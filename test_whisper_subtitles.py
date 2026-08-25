@@ -63,7 +63,7 @@ def test_segment_into_cues_never_drops_words():
     text = ("I'm John Hamm, I play Don Draper with me, R. the back? That, if you "
             "recognize that, that is the house that the farmer, the guy in")
     segs = _segment(text, pause_before="me,")
-    out = segment_into_cues(segs, min_cue_chars=10)
+    out = segment_into_cues(segs)
     got = " ".join(c.text.replace("\n", " ") for c in out).split()
     assert got == text.split(), f"expected {len(text.split())} words, got {len(got)}"
 
@@ -78,7 +78,7 @@ def test_pause_does_not_strand_a_tiny_cue():
         00:00:15,020 --> 00:00:15,820   R.
     """
     segs = _segment("I'm John Hamm, I play Don Draper with me, R.", pause_before="me,")
-    out = segment_into_cues(segs, min_cue_chars=10)
+    out = segment_into_cues(segs)
     assert len(out) == 1, f"expected the orphan merged away, got {[c.text for c in out]}"
     assert "R." in out[0].text
 
@@ -94,7 +94,7 @@ def test_orphan_not_merged_past_the_character_budget():
     full = ("this is a deliberately long stretch of speech that runs right up "
             "against the eighty four character budget indeed")
     segs = _segment(full + " Ah.", pause_before="indeed")
-    out = segment_into_cues(segs, min_cue_chars=10, max_line_length=42, max_lines=2)
+    out = segment_into_cues(segs, max_line_length=42, max_lines=2)
     for cue in out:
         flat = cue.text.replace("\n", " ")
         assert len(flat) <= 42 * 2 + 8, f"cue blew the budget: {flat!r}"
@@ -103,6 +103,6 @@ def test_orphan_not_merged_past_the_character_budget():
 def test_leading_orphan_merges_forward():
     """The first cue has no predecessor — it must pull forward, not survive alone."""
     segs = _segment("Right. so anyway that is what happened next", pause_before="Right.")
-    out = segment_into_cues(segs, min_cue_chars=10)
+    out = segment_into_cues(segs)
     assert out[0].text.replace("\n", " ").startswith("Right."), out[0].text
-    assert len(out[0].text.replace("\n", " ")) >= 10
+    assert len(out[0].text.replace("\n", " ")) >= 15

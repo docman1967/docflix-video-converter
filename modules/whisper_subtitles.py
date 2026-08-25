@@ -425,7 +425,7 @@ def _word_stream(segments):
 def segment_into_cues(segments, *, max_line_length: int = 42, max_lines: int = 2,
                       reading_speed: float = 17.0, split_gap: float = 0.5,
                       min_duration: float = 0.8, max_duration: float = 7.0,
-                      min_cue_chars: int = 10):
+                      min_cue_chars: int = 15):
     """Re-cut transcript segments into broadcast-style subtitle cues.
 
     A new cue is started when any of these happen (checked before each word):
@@ -435,7 +435,8 @@ def segment_into_cues(segments, *, max_line_length: int = 42, max_lines: int = 2
       • adding the word would exceed the character budget (max_lines × width)
       • the cue would exceed *max_duration* seconds
 
-    Cues left shorter than *min_cue_chars* are then merged back into a
+    Cues left shorter than *min_cue_chars* (default 15 — 10 still left too many
+    stragglers in practice) are merged back into a
     neighbour — see the orphan pass below.
 
     Afterwards each cue's duration is stretched (without overlapping the next)
