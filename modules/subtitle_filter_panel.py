@@ -82,7 +82,14 @@ class SubtitleFilterPanel:
     """
 
     def __init__(self, parent_win, app, container, saved=None,
-                 title="Post-Processing Filters", blurb=None, on_change=None):
+                 title="Post-Processing Filters", blurb=None, on_change=None,
+                 side='left'):
+        """*side* is where the button packs in *container*.
+
+        'right' anchors it to the far edge of a row of left-packed settings,
+        which reads better for an action sitting among spinboxes and keeps it
+        clear of them as the row fills up.
+        """
         self.win = parent_win
         self.app = app
         self._on_change = on_change
@@ -96,7 +103,7 @@ class SubtitleFilterPanel:
 
         self.button = ttk.Button(container, text="🔧 Filters...",
                                  command=self.open_dialog)
-        self.button.pack(side='left', padx=(8, 4))
+        self.button.pack(side=side, padx=(8, 4))
         self._refresh_button()
 
     # ── state ──────────────────────────────────────────────────────────────
