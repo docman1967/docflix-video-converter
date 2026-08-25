@@ -754,6 +754,21 @@ def open_whisper_transcriber(app):
         btn.pack(side='left', padx=(0, 4))
         _file_btns.append(btn)
 
+    # Post-transcription filters — the same set the Sub Extractor offers, applied
+    # to each .srt after it is written. Shared panel so the two lists can't drift.
+    #
+    # ⚠️ Lives in the TOP toolbar next to Clear, not in Advanced. It started in the
+    # Advanced row and Tony could not find it — that whole box sits below the file
+    # list, so a short window pushes it off the bottom entirely. A control you have
+    # to resize the window to reach is one nobody uses. Up here it is always
+    # visible, and it reads as an action alongside the other actions rather than
+    # as a setting among spinboxes.
+    _filter_panel = SubtitleFilterPanel(
+        win, app, file_toolbar, saved=_wp.get('filters', {}),
+        title="Post-Transcription Filters",
+        blurb=("Selected filters are applied to each .srt\n"
+               "after it is written. VTT output is not filtered."))
+
     # ── file tree: one parent per file, one child per audio track ───────────
     # Mirrors the Sub Extractor's "global defaults + per-file override": the
     # Audio dropdown SEEDS the ticks, then you hand-correct any file. Audio
@@ -1327,17 +1342,7 @@ def open_whisper_transcriber(app):
 
     # Post-transcription filters — the same set the Sub Extractor offers, applied
     # to each .srt after it is written. Shared panel so the two lists can't drift.
-    # side='right' so the action sits clear of the spinboxes rather than trailing
-    # after "(0=off, 0.5 rec.)".
-    # ⚠️ Note this is NOT what hid it from Tony on 2026-08-25 — that was vertical:
-    # the whole Advanced box lives below the file list, so a short window pushes
-    # it out of view. Horizontal clipping was tested at 900/620/520px and the
-    # button stayed on screen either way.
-    _filter_panel = SubtitleFilterPanel(
-        win, app, adv2, saved=_wp.get('filters', {}), side='right',
-        title="Post-Transcription Filters",
-        blurb=("Selected filters are applied to each .srt\n"
-               "after it is written. VTT output is not filtered."))
+    # (the Filters button lives in the top toolbar next to Clear — see above)
 
     # Row 2b: readability — reading speed + pause-split threshold (cue segmenter)
     adv2b = ttk.Frame(adv_frame)
