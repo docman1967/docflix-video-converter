@@ -499,6 +499,10 @@ def _ocr_overlay_approach(filepath, stream_index, language, tess_lang,
             if _is_music_note_frame(img):
                 return (start_s, end_s - start_s, '♪', frame_path)
 
+            # Notes sharing a line with lyrics — cut them out before Tesseract
+            # (which cannot emit ♪ at all) and put them back afterwards.
+            img, _notes = _strip_music_notes(img)
+
             # Invert: subtitle text is light on black bg → make dark on white
             corners = [img.getpixel((0, 0)),
                        img.getpixel((img.width - 1, 0)),
@@ -525,7 +529,7 @@ def _ocr_overlay_approach(filepath, stream_index, language, tess_lang,
                 img, lang=tess_lang,
                 config='--psm 6 --oem 3'
             ).strip()
-            text = _fix_ocr_text(text)
+            text = _reinsert_music_notes(_fix_ocr_text(text), _notes)
             return (start_s, end_s - start_s, text, processed_path)
         except Exception:
             return (start_s, end_s - start_s, '', frame_path)
@@ -950,6 +954,10 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                     img.save(img_path)
                     return (pts, dur, '♪', img_path)
 
+                # Notes sharing a line with lyrics — cut them out before
+                # Tesseract (which cannot emit ♪) and put them back afterwards.
+                img, _notes = _strip_music_notes(img)
+
                 # ── Upscale for Tesseract ──
                 if img.height < 100:
                     scale = max(2, 100 // img.height)
@@ -968,7 +976,7 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                     img, lang=tess_lang,
                     config='--psm 6 --oem 3'
                 ).strip()
-                text = _fix_ocr_text(text)
+                text = _reinsert_music_notes(_fix_ocr_text(text), _notes)
                 return (pts, dur, text, img_path)
             except Exception:
                 return (pts, dur, '', img_path)
@@ -1096,6 +1104,37 @@ def _is_music_note_frame(img):
     except Exception:
         pass
     return False
+
+
+def _strip_music_notes(img):
+    """Erase ♪ glyphs before OCR. Returns ``(image, marks)``.
+
+    ⚠️ `_is_music_note_frame` above only catches a cue that is *nothing but*
+    notes, by measuring how little ink is in the frame. It can do nothing for
+    `♪ Don't stop believin' ♪`, where notes share a line with lyrics — Tesseract
+    reads those as `J`, `Jo`, `Js` or `2` and `filter_fix_music_notes` is left
+    guessing which stray letters were really notes. This removes the guess.
+
+    ⚠️ **Fails open on purpose.** A note that stays in the bitmap costs one bad
+    character, which is the status quo. An exception here would cost the entire
+    cue, and OCR runs across a whole episode unattended.
+    """
+    try:
+        from .music_notes import strip_notes
+        return strip_notes(img)
+    except Exception:
+        return img, []
+
+
+def _reinsert_music_notes(text, marks):
+    """Put stripped ♪ back into Tesseract's output. Fails open like the strip."""
+    if not marks:
+        return text
+    try:
+        from .music_notes import reinsert_notes
+        return reinsert_notes(text, marks)
+    except Exception:
+        return text
 
 
 def _fix_ocr_text(text):
