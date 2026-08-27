@@ -10,10 +10,15 @@ lists that drift, which is the failure the two-prefs-store split already caused
 once (a Fix-ALL-CAPS setting written in one store and read from the other, so it
 silently did nothing). One list, one dialog, one apply path.
 
-⚠️ **`sub_ripper` has NOT been migrated onto this yet** — deliberately. It is the
-most-used tool in the Suite and a refactor of it deserves its own change that can
-be tested on its own. Until then the definitions live in BOTH places: if you add a
-filter here, add it there too, or the two panels disagree.
+✅ **`sub_ripper` was migrated onto this on 2026-08-27.** This is now the ONLY
+definition of the filter set — add a filter here and both tools get it.
+
+⚠️ sub_ripper's five call sites were left UNCHANGED on purpose; it keeps two thin
+wrappers with the old signatures so the migration could not alter behaviour in
+its OCR, extraction or CC paths. The one deliberate difference: this panel RAISES
+where sub_ripper's old copy swallowed the exception and returned None — which was
+indistinguishable from "no filters selected", so a throwing filter left the file
+untouched and nobody found out. The wrappers log and continue.
 """
 import tkinter as tk
 from tkinter import ttk

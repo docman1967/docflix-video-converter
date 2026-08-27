@@ -21,6 +21,7 @@ from tkinter import ttk, messagebox
 
 from .constants import (APP_NAME, VIDEO_EXTENSIONS, BITMAP_SUB_CODECS,
                         SUBTITLE_LANGUAGES, LANG_CODE_TO_NAME)
+from .subtitle_filter_panel import SubtitleFilterPanel
 from .gpu import (detect_closed_captions, detect_cc_types,
                   extract_closed_captions_to_srt)
 from .utils import (load_module_prefs, save_module_prefs,
@@ -608,210 +609,48 @@ def open_sub_ripper(app):
                 width=3).pack(side='left')
 
     # ── Post-extraction filters ──
-    _FILTER_DEFS = [
-        ('remove_hi',      "Remove HI  [brackets] (parens) Speaker:"),
-        ('remove_tags',    "Remove Tags  <i> {\\an8}"),
-        ('remove_ads',     "Remove Ads / Credits"),
-        ('remove_music',   "Remove Stray Notes  ♪ ♫"),
-        ('fix_music',      "Fix Music Notes  ♪ (OCR)"),
-        ('fix_ocr',        "Fix OCR Errors  '' | 0"),
-        ('remove_dashes',  "Remove Leading Dashes  -"),
-        ('remove_caps_hi', "Remove ALL CAPS HI (UK)"),
-        ('remove_quotes',  "Remove Off-Screen Quotes (UK)"),
-        ('remove_dupes',   "Remove Duplicates"),
-        ('merge_dupes',    "Merge Duplicates"),
-        ('merge_short',    "Merge Short Cues"),
-        ('reduce_lines',   "Reduce to 2 Lines"),
-        ('collapse_cc',    "Collapse Paint-On CC"),
-        ('fix_caps',       "Fix ALL CAPS"),
-    ]
-
+    # ── post-extraction filters ──────────────────────────────────────────
+    #
+    # ⚠️ SHARED with the Whisper Transcriber via modules/subtitle_filter_panel.
+    # This tool grew the filter set first and the Transcriber needed the same
+    # one; keeping two copies would have let the lists drift, which is exactly
+    # the failure the two-prefs-store split already caused once (a Fix-ALL-CAPS
+    # setting written to one store and read from the other, silently doing
+    # nothing). Migrated 2026-08-27.
+    #
+    # The five call sites below are UNCHANGED — the two wrappers preserve the
+    # old signatures on purpose, so this refactor cannot alter behaviour in the
+    # OCR, extraction or CC paths.
     _saved_filters = _sr_prefs.get('filters', {})
-    filter_vars = {key: tk.BooleanVar(value=_saved_filters.get(key, False))
-                   for key, _ in _FILTER_DEFS}
-    opt_apply_sr = tk.BooleanVar(
-        value=_saved_filters.get('search_replace', False))
-
-    def _active_filter_count():
-        n = sum(1 for v in filter_vars.values() if v.get())
-        if opt_apply_sr.get():
-            n += 1
-        return n
-
-    def _update_filter_btn_text():
-        n = _active_filter_count()
-        if n:
-            filter_btn.configure(text=f"🔧 Filters ({n})")
-        else:
-            filter_btn.configure(text="🔧 Filters...")
-
-    def _open_filter_dialog():
-        dlg = tk.Toplevel(win)
-        dlg.title("Post-Extraction Filters")
-        dlg.transient(win)
-        dlg.grab_set()
-        dlg.resizable(False, False)
-
-        frm = ttk.Frame(dlg, padding=12)
-        frm.pack(fill='both', expand=True)
-        ttk.Label(frm,
-                  text="Selected filters are applied to each subtitle\n"
-                       "file after extraction (two-pass when multiple).",
-                  wraplength=340).pack(pady=(0, 8))
-
-        chk_frame = ttk.Frame(frm)
-        chk_frame.pack(fill='x')
-        for i, (key, label) in enumerate(_FILTER_DEFS):
-            ttk.Checkbutton(chk_frame, text=label,
-                            variable=filter_vars[key]).grid(
-                row=i, column=0, sticky='w', pady=1)
-
-        # Search & Replace checkbox
-        sr_pairs = getattr(app, 'custom_replacements', [])
-        sr_count = len(sr_pairs)
-        sr_label = f"Search && Replace ({sr_count} pairs)" \
-            if sr_count else "Search && Replace (none configured)"
-        sr_row = len(_FILTER_DEFS)
-        ttk.Separator(chk_frame, orient='horizontal').grid(
-            row=sr_row, column=0, sticky='ew', pady=4)
-        sr_chk = ttk.Checkbutton(chk_frame, text=sr_label,
-                                  variable=opt_apply_sr)
-        sr_chk.grid(row=sr_row + 1, column=0, sticky='w', pady=1)
-        if not sr_count:
-            sr_chk.configure(state='disabled')
-            opt_apply_sr.set(False)
-
-        btn_frame = ttk.Frame(frm)
-        btn_frame.pack(fill='x', pady=(10, 0))
-
-        def _select_all():
-            for v in filter_vars.values():
-                v.set(True)
-
-        def _select_none():
-            for v in filter_vars.values():
-                v.set(False)
-
-        ttk.Button(btn_frame, text="Select All",
-                   command=_select_all).pack(side='left', padx=(0, 4))
-        ttk.Button(btn_frame, text="Select None",
-                   command=_select_none).pack(side='left')
-        ttk.Button(btn_frame, text="Close",
-                   command=dlg.destroy).pack(side='right')
-
-        dlg.protocol('WM_DELETE_WINDOW', dlg.destroy)
-        center_window_on_parent(dlg, win)
-
-        def _on_close():
-            _update_filter_btn_text()
-        dlg.bind('<Destroy>', lambda e: _on_close()
-                 if e.widget == dlg else None)
-
-    filter_btn = ttk.Button(options_frame, text="🔧 Filters...",
-                            command=_open_filter_dialog)
-    filter_btn.pack(side='left', padx=(8, 4))
-    _update_filter_btn_text()
-
-    def _get_filter_funcs():
-        """Return list of (label, func) for active filters, in order."""
-        from .subtitle_filters import (
-            filter_remove_hi, filter_remove_tags, filter_remove_ads,
-            filter_remove_music_notes, filter_fix_music_notes,
-            filter_fix_ocr, filter_remove_leading_dashes,
-            filter_remove_caps_hi, filter_remove_offscreen_quotes,
-            filter_remove_duplicates, filter_merge_duplicates,
-            filter_merge_short, filter_reduce_lines,
-            filter_collapse_paint_on, filter_fix_caps,
-        )
-        func_map = {
-            'remove_hi':      filter_remove_hi,
-            'remove_tags':    filter_remove_tags,
-            'remove_ads':     lambda c: filter_remove_ads(
-                c, getattr(app, 'custom_ad_patterns', [])),
-            'remove_music':   filter_remove_music_notes,
-            'fix_music':      filter_fix_music_notes,
-            'fix_ocr':        filter_fix_ocr,
-            'remove_dashes':  filter_remove_leading_dashes,
-            'remove_caps_hi': filter_remove_caps_hi,
-            'remove_quotes':  filter_remove_offscreen_quotes,
-            'remove_dupes':   filter_remove_duplicates,
-            'merge_dupes':    filter_merge_duplicates,
-            'merge_short':    filter_merge_short,
-            'reduce_lines':   filter_reduce_lines,
-            'collapse_cc':    filter_collapse_paint_on,
-            'fix_caps':       lambda c: filter_fix_caps(
-                c, getattr(app, 'custom_cap_words', []),
-                use_names_db=getattr(app, 'use_names_db', False)),
-        }
-        active = []
-        for key, label in _FILTER_DEFS:
-            if filter_vars[key].get():
-                active.append((label, func_map[key]))
-        return active
-
-    def _apply_search_replace(cues):
-        """Apply search & replace pairs to cues."""
-        sr_pairs = getattr(app, 'custom_replacements', [])
-        if not opt_apply_sr.get() or not sr_pairs:
-            return cues
-        for pair in sr_pairs:
-            find_str, repl_str = pair[0], pair[1]
-            case_sensitive = pair[2] if len(pair) > 2 else False
-            flags = 0 if case_sensitive else re.IGNORECASE
-            pattern = re.escape(find_str)
-            for cue in cues:
-                cue['text'] = re.sub(pattern, repl_str,
-                                     cue['text'], flags=flags)
-        # Remove cues that became empty after replacements
-        return [c for c in cues if c['text'].strip()]
+    _filter_panel = SubtitleFilterPanel(
+        win, app, options_frame, saved=_saved_filters,
+        title="Post-Extraction Filters",
+        blurb=("Selected filters are applied to each subtitle\n"
+               "file after extraction (two-pass when multiple)."))
 
     def _apply_post_filters(srt_path):
-        """Apply selected filters to an extracted SRT file in-place.
-        Returns (original_count, filtered_count) or None if no filters."""
-        active = _get_filter_funcs()
-        has_sr = opt_apply_sr.get() and bool(
-            getattr(app, 'custom_replacements', []))
-        if not active and not has_sr:
-            return None
+        """Filter an extracted SRT in place. Returns (before, after) or None.
+
+        ⚠️ The shared panel RAISES where this tool's old version swallowed the
+        exception and returned None — which was indistinguishable from "no
+        filters selected", so a throwing filter left the file untouched and
+        nobody found out. Log it and carry on: a failed filter must not kill a
+        batch, but it must not be silent either.
+        """
         try:
-            from .subtitle_filters import parse_srt, write_srt
-            with open(srt_path, 'r', encoding='utf-8',
-                      errors='replace') as f:
-                srt_text = f.read()
-            cues = parse_srt(srt_text)
-            if not cues:
-                return None
-            before = len(cues)
-            # Two passes when multiple filters selected
-            if active:
-                passes = 2 if len(active) > 1 else 1
-                for _pass in range(passes):
-                    for _label, func in active:
-                        cues = func(cues)
-            # Search & replace after filters
-            cues = _apply_search_replace(cues)
-            after = len(cues)
-            with open(srt_path, 'w', encoding='utf-8') as f:
-                f.write(write_srt(cues))
-            return (before, after)
-        except Exception:
+            return _filter_panel.apply_to_file(srt_path)
+        except Exception as exc:
+            _log(f"  Filters FAILED on {os.path.basename(srt_path)}: {exc}"
+                 "  (file left unfiltered)", 'ERROR')
             return None
 
     def _apply_post_filters_cues(cues):
-        """Apply selected filters to a list of cues (for OCR output).
-        Returns the filtered cues list."""
-        active = _get_filter_funcs()
-        has_sr = opt_apply_sr.get() and bool(
-            getattr(app, 'custom_replacements', []))
-        if not active and not has_sr:
+        """Filter a list of cues (the OCR path). Returns the cues either way."""
+        try:
+            return _filter_panel.apply_to_cues(cues)
+        except Exception as exc:
+            _log(f"  Filters FAILED: {exc}  (cues left unfiltered)", 'ERROR')
             return cues
-        if active:
-            passes = 2 if len(active) > 1 else 1
-            for _pass in range(passes):
-                for _label, func in active:
-                    cues = func(cues)
-        cues = _apply_search_replace(cues)
-        return cues
 
     # NOTE: _on_language_change() is called after tree is built (below)
 
@@ -1720,8 +1559,7 @@ def open_sub_ripper(app):
             'ocr':         opt_ocr.get(),
             'parallel':    opt_parallel.get(),
             'max_jobs':    opt_max_jobs.get(),
-            'filters':     {**{k: v.get() for k, v in filter_vars.items()},
-                            'search_replace': opt_apply_sr.get()},
+                'filters':     _filter_panel.get_prefs(),
         }
         # Write BOTH prefs files (main-app store and standalone store) so the same
         # settings come back whichever way this tool is launched, and refresh the
