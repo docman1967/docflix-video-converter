@@ -105,6 +105,15 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     const txt = msg.total ? `${msg.have}/${msg.total}` : "ad";
     flash(sender.tab.id, txt, "#b06000", false);   // no auto-clear while waiting
   }
+  // The real outcome, arriving independently of the request that started it.
+  if (msg && msg.__tc === "done" && sender.tab) {
+    const r = msg.res || {};
+    if (r.ok) flash(sender.tab.id, String(r.height || "ok"), "#2e7d32");
+    else {
+      flash(sender.tab.id, "err", "#c62828");
+      console.error("Trailer Catcher:", r.error || "unknown failure");
+    }
+  }
 });
 
 // ⚠️ Track the clear timer so a later badge can cancel an earlier one's. The
@@ -128,23 +137,40 @@ function flash(tabId, text, colour, autoClear = true) {
 chrome.action.onClicked.addListener(async (tab) => {
   // ⚠️ MSE PATH — the only one that works. Ask the page for the media it has
   // already buffered. See inject.js for why re-fetching the URL cannot work.
-  flash(tab.id, "…", "#3a5a8a");
+  flash(tab.id, "…", "#3a5a8a", false);
   try {
+    // ⚠️ Fire and forget. The outcome comes back as a separate "done" message
+    // (see content.js) because the harvest can wait minutes for buffering and
+    // the reply channel does not survive that. Awaiting it here reported
+    // failure over successful captures.
     const res = await chrome.tabs.sendMessage(tab.id, { __tc: "harvest" });
     if (res && res.ok) {
       flash(tab.id, String(res.height || "ok"), "#2e7d32");
       if (res.total && res.captured < res.total - 2) {
         console.warn(`Trailer Catcher: captured ${res.captured}s of ${res.total}s`);
       }
+    } else if (res === undefined) {
+      // Channel closed while waiting — the "done" message will land later.
+      console.log("Trailer Catcher: waiting for the page to finish…");
     } else {
       flash(tab.id, "err", "#c62828");
       console.warn("Trailer Catcher:", (res && res.error) || "no reply from page");
     }
   } catch (e) {
-    // Almost always: page loaded before the extension, so no content script.
-    flash(tab.id, "load", "#b06000");
-    console.warn("Trailer Catcher: no content script in this tab — reload the "
-                 + "YouTube page after loading/reloading the extension.", e.message);
+    // ⚠️ Do NOT label every failure "load". This used to blame the content
+    // script for any exception at all, which hid whatever actually went wrong.
+    const msg = String(e && e.message || e);
+    const noScript = /Receiving end does not exist|Could not establish connection/i.test(msg);
+    if (noScript) {
+      flash(tab.id, "load", "#b06000");
+      console.warn("Trailer Catcher: no content script in this tab. Reload the "
+                   + "YouTube page (the hook must exist before the player starts).");
+    } else {
+      flash(tab.id, "!", "#c62828");
+      console.error("Trailer Catcher failed:", msg, e);
+    }
+    // Also say which page it was, since acting on the wrong tab looks identical.
+    console.warn("Trailer Catcher: tab was", tab.url);
   }
   return;
 

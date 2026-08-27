@@ -19,8 +19,16 @@
       chrome.runtime.sendMessage({ __tc: "waiting", have: ev.data.have,
                                    total: ev.data.total });
     }
-    if (ev.data.__tc === "result" && pending.harvest) {
-      pending.harvest(ev.data.res); delete pending.harvest;
+    if (ev.data.__tc === "result") {
+      // ⚠️ Report the outcome as a NEW message, not as a reply.
+      //
+      // The harvest waits for the video to finish buffering, which can take
+      // minutes. A sendMessage response channel does not survive that — MV3
+      // evicts the idle service worker, the reply is lost, and the background
+      // reads "no reply" as failure. The result was a red badge over a
+      // perfectly good capture, which made Tony click again (twice).
+      chrome.runtime.sendMessage({ __tc: "done", res: ev.data.res });
+      if (pending.harvest) { pending.harvest(ev.data.res); delete pending.harvest; }
     }
     if (ev.data.__tc === "status_result" && pending.status) {
       pending.status(ev.data); delete pending.status;
