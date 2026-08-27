@@ -496,11 +496,9 @@ def _ocr_overlay_approach(filepath, stream_index, language, tess_lang,
             y2 = min(img.height, bbox[3] + pad)
             img = img.crop((x1, y1, x2, y2))
 
-            if _is_music_note_frame(img):
-                return (start_s, end_s - start_s, '♪', frame_path)
-
-            # Notes sharing a line with lyrics — cut them out before Tesseract
-            # (which cannot emit ♪ at all) and put them back afterwards.
+            # Cut ♪ out before Tesseract (which cannot emit it at all) and put
+            # them back afterwards — both notes sharing a line with lyrics and
+            # cues that are nothing but notes.
             img, _notes = _strip_music_notes(img)
 
             # Invert: subtitle text is light on black bg → make dark on white
@@ -950,12 +948,9 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                     y2 = min(img.height, bbox[3] + pad)
                     img = img.crop((x1, y1, x2, y2))
 
-                if _is_music_note_frame(img):
-                    img.save(img_path)
-                    return (pts, dur, '♪', img_path)
-
-                # Notes sharing a line with lyrics — cut them out before
-                # Tesseract (which cannot emit ♪) and put them back afterwards.
+                # Cut ♪ out before Tesseract (which cannot emit it at all) and
+                # put them back afterwards — both notes sharing a line with
+                # lyrics and cues that are nothing but notes.
                 img, _notes = _strip_music_notes(img)
 
                 # ── Upscale for Tesseract ──
@@ -1081,39 +1076,13 @@ def write_srt_file(cues, output_path):
             f.write(f"{cue['text']}\n\n")
 
 
-def _is_music_note_frame(img):
-    """Detect if a subtitle image likely contains only music notes (♪/♫).
-    Music note frames have small, isolated content with very few non-black pixels
-    compared to normal text subtitles."""
-    try:
-        w, h = img.size
-        total_pixels = w * h
-        if total_pixels == 0:
-            return False
-        # Count non-white pixels (after inversion, text is dark on white)
-        pixels = list(img.getdata())
-        dark_pixels = sum(1 for p in pixels if p < 128)
-        dark_ratio = dark_pixels / total_pixels
-        # Music notes: very small content area (< 3% of frame)
-        # and narrow width (< 15% of original 1920px frame)
-        if dark_ratio < 0.03 and w < 300:
-            return True
-        # Also check: very few dark pixels total (music notes are tiny)
-        if dark_pixels < 500 and w < 400:
-            return True
-    except Exception:
-        pass
-    return False
-
-
 def _strip_music_notes(img):
     """Erase ♪ glyphs before OCR. Returns ``(image, marks)``.
 
-    ⚠️ `_is_music_note_frame` above only catches a cue that is *nothing but*
-    notes, by measuring how little ink is in the frame. It can do nothing for
-    `♪ Don't stop believin' ♪`, where notes share a line with lyrics — Tesseract
-    reads those as `J`, `Jo`, `Js` or `2` and `filter_fix_music_notes` is left
-    guessing which stray letters were really notes. This removes the guess.
+    Tesseract reads `♪ Don't stop believin' ♪` as `J`, `Jo`, `Js` or `2`, and
+    `filter_fix_music_notes` is left guessing which stray letters were really
+    notes. This removes the guess — see `modules/music_notes.py`, which also
+    documents the ink-volume heuristic that used to live here and never worked.
 
     ⚠️ **Fails open on purpose.** A note that stays in the bitmap costs one bad
     character, which is the status quo. An exception here would cost the entire

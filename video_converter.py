@@ -922,12 +922,6 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                     x2 = min(img.width, bbox[2] + pad)
                     y2 = min(img.height, bbox[3] + pad)
                     img = img.crop((x1, y1, x2, y2))
-                if _is_music_note_frame(img):
-                    try:
-                        img.save(img_path)
-                    except Exception:
-                        pass
-                    return (pts, dur, '♪', img_path)
                 # Upscale small images for better OCR accuracy
                 if img.height < 80:
                     scale = max(2, 80 // img.height)
@@ -1052,31 +1046,6 @@ def write_srt_file(cues, output_path):
             f.write(f"{cue['index']}\n")
             f.write(f"{cue['start']} --> {cue['end']}\n")
             f.write(f"{cue['text']}\n\n")
-
-
-def _is_music_note_frame(img):
-    """Detect if a subtitle image likely contains only music notes (♪/♫).
-    Music note frames have small, isolated content with very few non-black pixels
-    compared to normal text subtitles."""
-    try:
-        w, h = img.size
-        total_pixels = w * h
-        if total_pixels == 0:
-            return False
-        # Count non-white pixels (after inversion, text is dark on white)
-        pixels = list(img.getdata())
-        dark_pixels = sum(1 for p in pixels if p < 128)
-        dark_ratio = dark_pixels / total_pixels
-        # Music notes: very small content area (< 3% of frame)
-        # and narrow width (< 15% of original 1920px frame)
-        if dark_ratio < 0.03 and w < 300:
-            return True
-        # Also check: very few dark pixels total (music notes are tiny)
-        if dark_pixels < 500 and w < 400:
-            return True
-    except Exception:
-        pass
-    return False
 
 
 def _fix_ocr_text(text):

@@ -8,10 +8,19 @@ fine-tuning a model was more than the problem is worth. Tony chose the third
 route on 2026-08-27: **find the notes geometrically, erase them, OCR the rest,
 then put them back.**
 
-`subtitle_ocr._is_music_note_frame` already handles the easy case — a cue that
-is *nothing but* notes — by measuring how little ink is in the frame. It cannot
-help with `♪ Don't stop believin' ♪`, where the notes sit on the same line as
-lyrics. That is what this module is for.
+⚠️ **There was an older `_is_music_note_frame` heuristic and it never once
+fired.** It claimed to catch a cue that is *nothing but* notes by measuring how
+little ink was in the frame — but its comment said "after inversion, text is
+dark on white" while it ran *before* the inversion, so it counted the black
+background. A real note-only cue measured 0.88 against a `< 0.03` threshold.
+Zero claims across 925 real frames, in either polarity. **Deleted 2026-08-27**
+once this module was shown to cover both cases.
+
+⚠️ Its obvious one-line polarity "fix" would have been a bug: the tiny cues in a
+real episode are `Yeah.` `Mom.` `Hi.` `[ Sighs ]`, and every one of them fits
+"small content area, narrow width". They were safe only because the gate was
+broken. If you are ever tempted to reinstate an ink-volume shortcut, that is
+what it costs.
 
 ## How a note is told apart from a letter
 
