@@ -27,7 +27,8 @@ import re
 from .utils import center_window_on_parent
 
 
-# ⚠️ Keep in step with sub_ripper._FILTER_DEFS until that tool is migrated.
+# ⚠️ THE definition. Both the Sub Extractor and the Whisper Transcriber read
+# this list — add a filter here and both get it. There is no second copy.
 FILTER_DEFS = [
     ('remove_hi',      "Remove HI  [brackets] (parens) Speaker:"),
     ('remove_tags',    "Remove Tags  <i> {\\an8}"),
