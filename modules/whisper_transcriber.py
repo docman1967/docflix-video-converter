@@ -296,15 +296,16 @@ class BatchTranscribeWorker(threading.Thread):
             root_logger.removeHandler(log_handler)
 
     def _run(self):
-        # ⚠️ Both backends now run in the ISOLATED ENGINE (a dedicated venv), not in
-        # this process. The Suite no longer imports whisperx/torch at all and no longer
-        # installs them into the user's Python. See modules/whisper_engine.py for why:
-        # on 2026-08-18 installing WhisperX for the Suite reached into shared
-        # site-packages and took an unrelated always-on voice assistant's STT offline.
+        # ⚠️ Both backends run in the ISOLATED ENGINE (a dedicated venv), not in this
+        # process. The Suite does not import whisperx/torch at all and does not install
+        # them into the user's Python. See modules/whisper_engine.py for why: on
+        # 2026-08-18 installing WhisperX for the Suite reached into shared site-packages
+        # and took an unrelated always-on voice assistant's STT offline.
         #
-        # The old in-process paths (_run_whisperx / _run_faster_whisper) are kept below
-        # for reference but are no longer reachable. They are the last remaining callers
-        # of `import whisperx` in the Suite.
+        # The old in-process paths (_run_whisperx / _run_faster_whisper) were removed
+        # 2026-08-29 — confirmed unreachable (no caller but themselves, no fallback
+        # branch ever reaches them, not even the "engine not installed" case below) and
+        # they were the last remaining callers of `import whisperx` in the Suite.
         self._run_isolated()
 
     # ── isolated engine path ────────────────────────────────────────────────────
@@ -393,204 +394,6 @@ class BatchTranscribeWorker(threading.Thread):
         if self._stop_event.is_set():
             self.q.put(("log", "Batch cancelled."))
         self.q.put(("batch_done", None))
-
-    # ── legacy in-process paths (no longer called; see _run) ────────────────────
-    def _run_whisperx(self):
-        import warnings
-        warnings.filterwarnings("ignore", message="TensorFloat-32.*",
-                                module="pyannote")
-        import whisperx
-
-        compute_type = "float16" if self.device == "cuda" else "int8"
-        self.q.put(("log", f"Loading WhisperX model '{self.model_size}'  [{self.device}:{self.device_index}, {compute_type}]..."))
-        model = whisperx.load_model(
-            self.model_size, self.device,
-            device_index=self.device_index,
-            compute_type=compute_type,
-            language=self.language,
-            task=self.task,
-        )
-        self.q.put(("log", "WhisperX model ready."))
-
-        total = len(self.paths)
-        for idx, path in enumerate(self.paths):
-            if self._stop_event.is_set():
-                self.q.put(("log", "Batch cancelled."))
-                break
-
-            if self.skip_existing and subtitle_exists(
-                    path, self.output_dir, self.output_formats):
-                self.q.put(("skip_file", (idx, path, "subtitle already exists")))
-                self.q.put(("log", f"Skipping (already exists): {path.name}"))
-                continue
-
-            self.q.put(("next_file", (idx, total, path)))
-            self.q.put(("log", f"\n-- [{idx+1}/{total}] {path.name}"))
-
-            try:
-                segments = self._process_one_whisperx(whisperx, model, path)
-                self.q.put(("file_done", (idx, path, segments)))
-                self.q.put(("log", f"Done: {len(segments)} segments  ->  {path.name}"))
-            except Exception as exc:
-                self.q.put(("file_error", (idx, path, exc)))
-                self.q.put(("log", f"Error: {path.name}: {exc}"))
-
-        self.q.put(("batch_done", None))
-
-    def _process_one_whisperx(self, whisperx, model, path: Path) -> list:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            suffix = path.suffix.lower()
-            if suffix not in AUDIO_EXTENSIONS:
-                self.q.put(("log", "   Extracting audio..."))
-                out_audio = Path(tmp_dir) / "audio.wav"
-                cmd = [
-                    "ffmpeg", "-y", "-i", str(path),
-                    "-vn", "-acodec", "pcm_s16le",
-                    "-ar", "16000", "-ac", "1",
-                    str(out_audio),
-                ]
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode != 0:
-                    raise RuntimeError(f"ffmpeg failed:\n{result.stderr[-800:]}")
-                audio_path = out_audio
-            else:
-                audio_path = path
-
-            if self._stop_event.is_set():
-                raise RuntimeError("Cancelled")
-
-            task_label = "Translating" if self.task == "translate" else "Transcribing"
-            self.q.put(("log", f"   {task_label} with WhisperX..."))
-
-            audio = whisperx.load_audio(str(audio_path))
-            wx_result = model.transcribe(audio, batch_size=self.batch_size, language=self.language)
-
-            detected_lang = wx_result.get("language", self.language or "unknown")
-            n_segs = len(wx_result.get("segments", []))
-            self.q.put(("log", f"   Language: {detected_lang}  Segments: {n_segs}"))
-
-            if self.word_timestamps and wx_result.get("segments"):
-                self.q.put(("log", f"   Aligning words ({detected_lang})..."))
-                try:
-                    model_a, metadata = whisperx.load_align_model(
-                        language_code=detected_lang, device=self.device,
-                    )
-                    wx_result = whisperx.align(
-                        wx_result["segments"], model_a, metadata, audio,
-                        self.device, return_char_alignments=False,
-                    )
-                    self.q.put(("log", "   Forced alignment complete."))
-                except Exception as exc:
-                    self.q.put(("log", f"   Alignment failed ({exc}), using unaligned timestamps."))
-
-            if self._stop_event.is_set():
-                raise RuntimeError("Cancelled")
-
-            segments = []
-            for seg_dict in wx_result.get("segments", []):
-                start = seg_dict.get("start", 0.0)
-                end = seg_dict.get("end", 0.0)
-                text = seg_dict.get("text", "").strip()
-                if not text:
-                    continue
-
-                words = []
-                if self.word_timestamps and "words" in seg_dict:
-                    for w in seg_dict["words"]:
-                        words.append(SubSegment(
-                            start=w.get("start", start),
-                            end=w.get("end", end),
-                            text=w.get("word", "").strip(),
-                        ))
-
-                segments.append(SubSegment(start=start, end=end, text=text, words=words))
-
-            self.q.put(("progress", (1, 1)))
-            return segments
-
-    def _run_faster_whisper(self):
-        from faster_whisper import WhisperModel
-
-        self.q.put(("log", f"Loading model '{self.model_size}'  [{self.device}:{self.device_index}]..."))
-        model = WhisperModel(self.model_size, device=self.device,
-                             device_index=self.device_index,
-                             compute_type="auto")
-        self.q.put(("log", "Model ready."))
-
-        total = len(self.paths)
-        for idx, path in enumerate(self.paths):
-            if self._stop_event.is_set():
-                self.q.put(("log", "Batch cancelled."))
-                break
-
-            if self.skip_existing and subtitle_exists(
-                    path, self.output_dir, self.output_formats):
-                self.q.put(("skip_file", (idx, path, "subtitle already exists")))
-                self.q.put(("log", f"Skipping (already exists): {path.name}"))
-                continue
-
-            self.q.put(("next_file", (idx, total, path)))
-            self.q.put(("log", f"\n-- [{idx+1}/{total}] {path.name}"))
-
-            try:
-                segments = self._process_one(model, path)
-                self.q.put(("file_done", (idx, path, segments)))
-                self.q.put(("log", f"Done: {len(segments)} segments  ->  {path.name}"))
-            except Exception as exc:
-                self.q.put(("file_error", (idx, path, exc)))
-                self.q.put(("log", f"Error: {path.name}: {exc}"))
-
-        self.q.put(("batch_done", None))
-
-    def _process_one(self, model, path: Path) -> list:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            suffix = path.suffix.lower()
-            if suffix not in AUDIO_EXTENSIONS:
-                self.q.put(("log", "   Extracting audio..."))
-                out_audio = Path(tmp_dir) / "audio.wav"
-                cmd = [
-                    "ffmpeg", "-y", "-i", str(path),
-                    "-vn", "-acodec", "pcm_s16le",
-                    "-ar", "16000", "-ac", "1",
-                    str(out_audio),
-                ]
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode != 0:
-                    raise RuntimeError(f"ffmpeg failed:\n{result.stderr[-800:]}")
-                audio_path = out_audio
-            else:
-                audio_path = path
-
-            if self._stop_event.is_set():
-                raise RuntimeError("Cancelled")
-
-            task_label = "Translating" if self.task == "translate" else "Transcribing"
-            self.q.put(("log", f"   {task_label}..."))
-
-            segments_gen, info = model.transcribe(
-                str(audio_path),
-                beam_size=self.beam_size,
-                language=self.language,
-                vad_filter=self.vad,
-                vad_parameters=dict(min_silence_duration_ms=500),
-                task=self.task,
-                word_timestamps=self.word_timestamps,
-            )
-            duration = info.duration
-            lang = info.language
-            conf = info.language_probability
-            self.q.put(("log",
-                f"   Language: {lang} ({conf:.0%})  Duration: {timedelta(seconds=int(duration))}"))
-            self.q.put(("progress", (0, duration)))
-
-            collected = []
-            for seg in segments_gen:
-                if self._stop_event.is_set():
-                    raise RuntimeError("Cancelled")
-                collected.append(seg)
-                self.q.put(("progress", (seg.end, duration)))
-
-            return collected
 
 
 # ── main GUI window ──────────────────────────────────────────────────────────

@@ -1245,6 +1245,7 @@ def transcribe_whisperx(
     print(f"   Segments (pre-align): {len(result.get('segments', []))}")
 
     # ── forced alignment for precise word timestamps ────────────────────────
+    model_a = metadata = None
     if word_timestamps and result.get("segments"):
         align_lang = detected_lang
         print(f"   🔧  Loading alignment model for '{align_lang}'…")
@@ -1279,6 +1280,22 @@ def transcribe_whisperx(
                 ))
 
         segments.append(SubSegment(start=start, end=end, text=text, words=words))
+
+    # ⚠️ THE BATCH OOM FIX (2026-08-29). `whisper_worker.py` calls this function once
+    # PER FILE inside a single long-lived batch loop — this is NOT a fresh process per
+    # file, so nothing frees the GPU automatically between files. Yet `model` and
+    # `model_a` are loaded fresh EVERY call and never released: PyTorch's CUDA caching
+    # allocator does not reliably hand memory back to the driver just because a Python
+    # object goes out of scope. On a 16GB card that measured 79-100% VRAM used from ONE
+    # file's processing alone, that is enough for file 2's fresh model load to blow
+    # past the ceiling — "works once, OOMs after" is the exact resulting symptom.
+    # `segments` above is already built from plain Python data (no model reference), so
+    # it is safe to tear everything down here before returning.
+    del model, model_a, metadata
+    import gc
+    gc.collect()
+    if device == "cuda":
+        torch.cuda.empty_cache()
 
     print(f"\n✅  {len(segments)} subtitle segments generated (WhisperX).")
     return segments
