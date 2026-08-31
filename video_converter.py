@@ -31,6 +31,8 @@ import sys
 import json
 import subprocess
 import threading
+import queue
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 from datetime import datetime
@@ -3623,6 +3625,14 @@ class VideoConverterApp:
         )
         self.is_converting = False
         self._scanning_files = False
+        # Independent probe worker (see _enqueue_probe) — one long-lived thread
+        # fed by a queue, deliberately NOT tied to the encode's lifetime.
+        self._probe_queue = queue.Queue()
+        self._probe_thread = None
+        self._probe_lock = threading.Lock()
+        self._probe_total = 0
+        self._probe_done = 0
+        self._probe_started = None
         self.current_file_index = 0
         self.conversion_thread = None
         self.start_time = None
@@ -3935,9 +3945,9 @@ class VideoConverterApp:
 
     def open_files(self):
         """Open a file picker and add selected video files to the queue."""
-        if self._scanning_files:
-            self.add_log("File scan already in progress — please wait.", 'WARNING')
-            return
+        # No scan-in-progress lockout: probing is a queue now, so new files
+        # simply join it. (It used to refuse, which would block adding files
+        # for the whole length of an encode now that probing outlives one.)
         filetypes = [
             ("Video files", " ".join(f"*{e}" for e in sorted(VIDEO_EXTENSIONS))),
             ("All files", "*.*")
@@ -6884,9 +6894,7 @@ class VideoConverterApp:
                         paths.append(raw[i:end])
                         i = end + 1
 
-        if self._scanning_files:
-            self.add_log("File scan already in progress — please wait.", 'WARNING')
-            return
+        # Dropped files join the probe queue whatever it's doing — see open_files.
 
         # Separate dropped paths into video files and subtitle files
         video_paths = []
@@ -7008,14 +7016,12 @@ class VideoConverterApp:
         return file_info
 
     def _add_files_threaded(self, video_paths, sub_paths=None, source_label="files"):
-        """Add video files with placeholder rows immediately, then probe metadata
-        in a background thread with progress bar feedback.
+        """Add video files with placeholder rows immediately, then hand them to
+        the background probe worker.
 
-        For small batches (≤3 files), probes synchronously for snappiness.
-        For larger batches, shows scanning progress in the progress bar.
+        Rows appear instantly showing '…' and fill in as the worker reaches
+        them. Adding files is never refused — see _enqueue_probe.
         """
-        if self._scanning_files:
-            return
         if not video_paths:
             return
 
@@ -7059,83 +7065,156 @@ class VideoConverterApp:
                 extra = f" (and {len(unmatched_subs) - 5} more)" if len(unmatched_subs) > 5 else ""
                 self.add_log(f"Could not match subtitle(s): {names}{extra}", 'WARNING')
 
-        # Small batches: probe synchronously for snappiness
-        if added_count <= 3:
+        self._enqueue_probe(added_infos)
+
+    # ── Independent probe worker ───────────────────────────────────────────
+    #
+    # Probing runs in its OWN long-lived thread, fed by a queue, and is never
+    # interrupted by an encode.
+    #
+    # It used to be two ad-hoc threads that each did `if self.is_converting:
+    # break`.  `break` leaves the loop permanently, so starting a batch
+    # mid-scan abandoned every file that hadn't been reached yet, and adding
+    # more than 3 files while an encode was already running probed *nothing* —
+    # the guard tripped on the very first iteration.  Neither case was visible,
+    # because the "Metadata loaded for N file(s)" message ran unconditionally
+    # afterwards and reported success either way.
+    #
+    # ⚠️ Missing probe data is NOT cosmetic.  `has_closed_captions` defaults to
+    # False and is only ever set true here; it feeds straight into the encode
+    # (see the settings dict built in run_conversion), where converter.py gates
+    # the A53 CC passthrough flag on it.  An unprobed file therefore comes out
+    # of a re-encode with its closed captions silently dropped.
+    #
+    # While an encode is running we THROTTLE rather than stop —
+    # detect_closed_captions() runs a real bounded ccextractor pass and is
+    # genuinely CPU-heavy, which is what the original guard was protecting.
+    # Slower is fine; abandoned is not.
+
+    PROBE_THROTTLE_SECS = 2.0   # pause between files while an encode is running
+
+    def _enqueue_probe(self, file_infos, settings=None):
+        """Queue *file_infos* for background metadata probing.
+
+        Safe to call at any time — during a scan, during an encode, or both.
+        Files that already carry probe data are skipped, so re-queueing the
+        whole list is free and idempotent.
+        """
+        if not file_infos:
+            return
+        if settings is None:
             settings = self._current_settings()
-            for file_info in added_infos:
-                dur_secs = get_video_duration(file_info['path'])
-                file_info['duration_str'] = format_duration(dur_secs)
-                file_info['duration_secs'] = dur_secs
-                file_info['est_size'] = estimate_output_size(file_info['path'], settings)
-                has_cc = detect_closed_captions(file_info['path'])
-                file_info['has_closed_captions'] = has_cc
-                # extract_cc stays False — CC passthrough is automatic; SRT extraction is opt-in
-                # Update tree row
-                try:
-                    idx = self.files.index(file_info)
-                    items = self.file_tree.get_children()
-                    if idx < len(items):
-                        self._refresh_tree_row(items[idx], file_info)
-                except (ValueError, Exception):
-                    pass
-            self.add_log(f"Metadata loaded for {added_count} file(s).", 'INFO')
+
+        queued = 0
+        for file_info in file_infos:
+            if file_info.get('duration_secs') is not None:
+                continue                    # already probed
+            self._probe_queue.put((file_info, settings))
+            queued += 1
+        if not queued:
             return
 
-        # Phase 2 (background): probe metadata with progress feedback
-        self._scanning_files = True
-        settings = self._current_settings()
+        with self._probe_lock:
+            if self._probe_started is None:
+                self._probe_started = time.monotonic()
+                self._probe_total = 0
+                self._probe_done = 0
+            self._probe_total += queued
+            self._scanning_files = True
+            # Start the worker only if one isn't already draining the queue.
+            # The worker clears _probe_thread under this same lock, and only
+            # when the queue is genuinely empty, so we can't lose a wake-up.
+            if self._probe_thread is None:
+                self._probe_thread = threading.Thread(
+                    target=self._probe_worker_loop, daemon=True, name='probe-worker')
+                self._probe_thread.start()
 
-        def _probe_worker():
-            import time as _time
-            start = _time.monotonic()
-            for i, file_info in enumerate(added_infos):
-                if not self._scanning_files:
-                    break  # cancelled
-                if self.is_converting:
-                    break  # don't hog CPU during active conversion
+    def _probe_worker_loop(self):
+        """Drain the probe queue one file at a time until it's empty."""
+        while True:
+            try:
+                file_info, settings = self._probe_queue.get(timeout=0.5)
+            except queue.Empty:
+                with self._probe_lock:
+                    if self._probe_queue.empty():
+                        self._probe_thread = None
+                        break           # genuinely drained — _enqueue_probe restarts us
+                continue                # something landed while we were checking
 
-                # Probe metadata
-                dur_secs = get_video_duration(file_info['path'])
-                file_info['duration_str'] = format_duration(dur_secs)
-                file_info['duration_secs'] = dur_secs
-                file_info['est_size'] = estimate_output_size(file_info['path'], settings)
-                has_cc = detect_closed_captions(file_info['path'])
-                file_info['has_closed_captions'] = has_cc
-                # extract_cc stays False — CC passthrough is automatic; SRT extraction is opt-in
+            try:
+                # The user may have removed the file from the queue since it was
+                # enqueued; probing it would resurrect nothing but cost time.
+                if file_info in self.files and file_info.get('duration_secs') is None:
+                    self._probe_one(file_info, settings)
+            except Exception as e:
+                self.root.after(0, lambda p=file_info.get('path'), err=e: self.add_log(
+                    f"Could not read metadata for {os.path.basename(str(p))}: {err}", 'WARNING'))
+            finally:
+                with self._probe_lock:
+                    self._probe_done += 1
+                    done, total = self._probe_done, self._probe_total
+                self._probe_queue.task_done()
+                self.root.after(0, lambda d=done, t=total: self._update_probe_progress(d, t))
 
-                # Progress update
-                elapsed = _time.monotonic() - start
-                rate = (i + 1) / elapsed if elapsed > 0.1 else 0
-                eta_str = f" — ETA {int((added_count - i - 1) / rate)}s" if rate > 0 else ""
-                pct = ((i + 1) / added_count) * 100
+            # Yield to the encode rather than competing with it.
+            if self.is_converting:
+                time.sleep(self.PROBE_THROTTLE_SECS)
 
-                def _update_progress(p=pct, n=i+1, t=added_count, e=eta_str, fi=file_info):
-                    try:
-                        self.progress_var.set(p)
-                        self.progress_label.configure(
-                            text=f"Scanning {n}/{t}{e}")
-                        self.status_label.configure(
-                            text=f"Loading metadata {n}/{t}...")
-                        # Update tree row
-                        idx = self.files.index(fi)
-                        items = self.file_tree.get_children()
-                        if idx < len(items):
-                            self._refresh_tree_row(items[idx], fi)
-                    except Exception:
-                        pass
-                self.root.after(0, _update_progress)
+        self.root.after(0, self._probe_drained)
 
-            # Done
-            elapsed = _time.monotonic() - start
-            def _done():
+    def _probe_one(self, file_info, settings):
+        """Probe a single file and refresh its row. Runs on the worker thread."""
+        dur_secs = get_video_duration(file_info['path'])
+        file_info['duration_str'] = format_duration(dur_secs)
+        file_info['duration_secs'] = dur_secs
+        file_info['est_size'] = estimate_output_size(file_info['path'], settings)
+        # extract_cc stays False — CC passthrough is automatic; SRT extraction is opt-in
+        file_info['has_closed_captions'] = detect_closed_captions(file_info['path'])
+        self.root.after(0, lambda fi=file_info: self._refresh_row_for(fi))
+
+    def _refresh_row_for(self, file_info):
+        """Repaint the tree row belonging to *file_info*, if it still has one."""
+        try:
+            idx = self.files.index(file_info)
+            items = self.file_tree.get_children()
+            if idx < len(items):
+                self._refresh_tree_row(items[idx], file_info)
+        except Exception:
+            pass
+
+    def _update_probe_progress(self, done, total):
+        # During an encode the progress bar belongs to the conversion — don't
+        # fight it for the widget. Rows still update live; only the bar waits.
+        if self.is_converting or not total:
+            return
+        try:
+            elapsed = time.monotonic() - (self._probe_started or time.monotonic())
+            rate = done / elapsed if elapsed > 0.1 else 0
+            eta_str = f" — ETA {int((total - done) / rate)}s" if rate > 0 and done < total else ""
+            self.progress_var.set((done / total) * 100)
+            self.progress_label.configure(text=f"Scanning {done}/{total}{eta_str}")
+            self.status_label.configure(text=f"Loading metadata {done}/{total}...")
+        except Exception:
+            pass
+
+    def _probe_drained(self):
+        """Queue is empty — report honestly and reset the counters."""
+        with self._probe_lock:
+            total = self._probe_total
+            elapsed = time.monotonic() - (self._probe_started or time.monotonic())
+            self._probe_total = 0
+            self._probe_done = 0
+            self._probe_started = None
+            self._scanning_files = False
+        if total:
+            self.add_log(f"Metadata loaded for {total} file(s) ({elapsed:.1f}s).", 'INFO')
+        if not self.is_converting:
+            try:
                 self.progress_var.set(0)
-                self.progress_label.configure(text=f"0 / 0 files (0%)")
+                self.progress_label.configure(text="0 / 0 files (0%)")
                 self.status_label.configure(text="Ready")
-                self.add_log(f"Metadata loaded for {added_count} file(s) ({elapsed:.1f}s).", 'INFO')
-                self._scanning_files = False
-            self.root.after(0, _done)
-
-        threading.Thread(target=_probe_worker, daemon=True).start()
+            except Exception:
+                pass
 
     def _associate_external_sub(self, sub_path):
         """Try to auto-associate an external subtitle file with a video in the queue.
@@ -8403,57 +8482,8 @@ class VideoConverterApp:
         if count > 0:
             self._offer_subtitle_association()
 
-        # ── Phase 2: background ffprobe pass ──
-        self._scanning_files = True
-
-        def _load_metadata():
-            import time as _time
-            start = _time.monotonic()
-            for idx, file_info in enumerate(self.files):
-                if self.is_converting:
-                    break  # don't probe during active conversion
-                if not self._scanning_files:
-                    break  # cancelled
-                dur_secs = get_video_duration(file_info['path'])
-                dur_str = format_duration(dur_secs)
-                est = estimate_output_size(file_info['path'], settings)
-                file_info['duration_str'] = dur_str
-                file_info['duration_secs'] = dur_secs
-                file_info['est_size'] = est
-                # Detect closed captions
-                has_cc = detect_closed_captions(file_info['path'])
-                file_info['has_closed_captions'] = has_cc
-                # extract_cc stays False — CC passthrough is automatic; SRT extraction is opt-in
-
-                # Progress + tree row update on the main thread
-                elapsed = _time.monotonic() - start
-                rate = (idx + 1) / elapsed if elapsed > 0.1 else 0
-                eta_str = f" — ETA {int((count - idx - 1) / rate)}s" if rate > 0 else ""
-                pct = ((idx + 1) / count) * 100
-
-                def _update_row(i=idx, fi=file_info, p=pct, n=idx+1, t=count, e=eta_str):
-                    try:
-                        items = self.file_tree.get_children()
-                        if i < len(items):
-                            self._refresh_tree_row(items[i], fi)
-                        self.progress_var.set(p)
-                        self.progress_label.configure(
-                            text=f"Scanning {n}/{t}{e}")
-                    except Exception:
-                        pass
-                self.root.after(0, _update_row)
-
-            # Done
-            elapsed = _time.monotonic() - start
-            def _done():
-                self.progress_var.set(0)
-                self.progress_label.configure(text=f"0 / 0 files (0%)")
-                self.status_label.configure(text="Ready")
-                self.add_log(f"Metadata loaded for {count} file(s) ({elapsed:.1f}s).", 'INFO')
-                self._scanning_files = False
-            self.root.after(0, _done)
-
-        threading.Thread(target=_load_metadata, daemon=True).start()
+        # ── Phase 2: background ffprobe pass (own worker — see _enqueue_probe) ──
+        self._enqueue_probe(list(self.files), settings)
 
     def _offer_subtitle_association(self):
         """Check for subtitle files in the working directory and offer to attach them."""
