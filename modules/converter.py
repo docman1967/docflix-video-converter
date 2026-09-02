@@ -21,7 +21,7 @@ from .constants import (
     get_gpu_encoder,
 )
 from .utils import (
-    get_video_duration, get_subtitle_streams,
+    get_video_duration, get_subtitle_streams, exclude_unreadable_subs,
 )
 from .gpu import (
     get_video_pix_fmt, detect_closed_captions,
@@ -1022,6 +1022,12 @@ class VideoConverter:
     def _run_process(self, cmd, input_path, pass_label=None):
         """Run an ffmpeg subprocess, parse progress, handle pause/stop. Returns True on success."""
         import time
+        # ⚠️ Subtract subtitle streams ffmpeg cannot decode (e.g. WebVTT in
+        # Matroska). Their mere presence aborts the whole encode with
+        # "Function not implemented" and produces NO output file. A negative
+        # map subtracts from whatever the mapping above already selected, so
+        # every existing -map path is left alone. No-op on normal files.
+        cmd = exclude_unreadable_subs(cmd, input_path, self.log)
         try:
             self.current_process = subprocess.Popen(
                 cmd,

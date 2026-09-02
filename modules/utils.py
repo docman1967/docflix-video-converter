@@ -1169,6 +1169,68 @@ def read_encode_stamp(path):
         return None
 
 
+def unreadable_sub_indices(filepath):
+    """Subtitle streams ffmpeg cannot decode, as 0:s:N positions.
+
+    ⚠️ WHY THIS EXISTS. A WEB-DL screener arrived carrying WebVTT subtitles
+    (Matroska CodecID S_TEXT/WEBVTT). ffmpeg cannot read that back out of
+    Matroska — verified against four builds on this box, including
+    jellyfin 7.1.3 and a 2026 git build; all four write a ZERO-BYTE file and
+    exit 0. ffprobe reports the stream as codec_name "unknown".
+
+    ⚠️⚠️ AND ITS MERE PRESENCE KILLS THE WHOLE ENCODE:
+        Error sending frames to consumers: Function not implemented
+        Task finished with error code: -38
+    No output file at all — not "the subtitle is dropped". So without this the
+    user gets a cryptic failure and no way forward, which for a tool other
+    people use is worse than the missing feature.
+
+    The caller appends `-map -0:s:N` for each index returned, which SUBTRACTS
+    from whatever the existing mapping already selected. That keeps every
+    existing -map path untouched — the alternative was editing subtitle mapping
+    in 8+ places.
+
+    ⚠️ Returns positions among SUBTITLE streams (0:s:N), not absolute stream
+    indices. Getting that wrong silently drops the wrong track.
+
+    fix_webvtt_subs.py converts these tracks to SRT properly; this is the
+    fallback for when the user declines that.
+    """
+    try:
+        r = subprocess.run(
+            ['ffprobe', '-v', 'quiet', '-print_format', 'json',
+             '-show_streams', '-select_streams', 's', filepath],
+            capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return []
+        streams = json.loads(r.stdout).get('streams', [])
+    except Exception:
+        return []
+    return [i for i, st in enumerate(streams)
+            if (st.get('codec_name') or 'unknown').lower() == 'unknown']
+
+
+def exclude_unreadable_subs(cmd, filepath, log=None):
+    """Append negative -map args so undecodable subtitle streams are skipped.
+
+    Returns the command unchanged when there is nothing to exclude, so this is
+    safe to call on every encode.
+    """
+    bad = unreadable_sub_indices(filepath)
+    if not bad:
+        return cmd
+    # ⚠️ Insert BEFORE the output path (the last argument), or ffmpeg treats the
+    # maps as applying to a later output that does not exist.
+    negs = []
+    for i in bad:
+        negs += ['-map', '-0:s:%d' % i]
+    if log:
+        log("  %d subtitle track(s) unreadable by ffmpeg — excluding so the "
+            "encode can proceed. Run fix_webvtt_subs.py to convert them to SRT "
+            "and keep them." % len(bad), 'WARNING')
+    return list(cmd[:-1]) + negs + [cmd[-1]]
+
+
 def is_matroska(path):
     """True only if this really is a Matroska file.
 

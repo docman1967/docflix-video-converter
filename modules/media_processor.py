@@ -21,6 +21,7 @@ from .constants import (VIDEO_EXTENSIONS, SUBTITLE_EXTENSIONS, EDITION_PRESETS,
                         LANG_CODE_TO_NAME, SUBTITLE_LANGUAGES)
 from .chapters import generate_auto_chapters, chapters_to_ffmetadata
 from .utils import (get_audio_info, get_subtitle_streams, ask_directory,
+                    exclude_unreadable_subs,
                     ask_open_files, scaled_geometry, scaled_minsize,
                     strip_mkv_tags_keeping_stamp, save_module_prefs)
 from .gpu import detect_closed_captions, get_video_codec, CC_STRIP_BSF
@@ -2155,6 +2156,10 @@ def open_media_processor(app):
                     _log(f"  Skipped (could not build command)", 'WARNING')
                     win.after(0, lambda idx=i: _update_tree_status(idx, '⏭️ Skipped'))
                     return ('skipped', i)
+
+                # ⚠️ See converter.py — subtitle streams ffmpeg cannot decode
+                # abort the entire encode. Subtract them with a negative map.
+                cmd = exclude_unreadable_subs(cmd, f['path'], _log)
 
                 _log(f"  Command: {' '.join(cmd)}", 'INFO')
 
