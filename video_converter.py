@@ -3644,7 +3644,6 @@ class VideoConverterApp:
         self._probe_total = 0
         self._probe_done = 0
         self._probe_started = None
-        self._webvtt_asked = set()   # offered once per session, never nag
         self.current_file_index = 0
         self.conversion_thread = None
         self.start_time = None
@@ -7210,10 +7209,17 @@ class VideoConverterApp:
         """
         if self.is_converting:
             return
+        # ⚠️ "Asked" is recorded ON THE FILE'S OWN RECORD, not in a session-wide
+        # set. A session set was too blunt — Tony removed a file and re-added
+        # it, which is someone deliberately revisiting it, and got silence.
+        # Removing a file discards its dict, so re-adding builds a fresh one
+        # with no memory: suppression lasts exactly as long as the file sits in
+        # the queue, which is the behaviour we actually want. Keeping this state
+        # in the object it describes makes the lifetime correct by construction
+        # rather than by remembering to clean up.
         affected = self._affected_webvtt_files()
         if not from_menu:
-            affected = [f for f in affected
-                        if f['path'] not in self._webvtt_asked]
+            affected = [f for f in affected if not f.get('_webvtt_asked')]
         if not affected:
             if from_menu:
                 messagebox.showinfo(
@@ -7222,7 +7228,7 @@ class VideoConverterApp:
                     parent=self.root)
             return
         for f in affected:
-            self._webvtt_asked.add(f['path'])
+            f['_webvtt_asked'] = True
 
         names = "\n".join("  \u2022 " + os.path.basename(f['path'])
                            for f in affected[:8])
