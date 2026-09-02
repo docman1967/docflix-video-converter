@@ -7261,13 +7261,32 @@ class VideoConverterApp:
                 f"Could not load the subtitle converter: {exc}", 'ERROR'))
             return
         ok = bad = 0
-        for f in affected:
+        total_files = len(affected)
+        for i, f in enumerate(affected):
             name = os.path.basename(f['path'])
             self.root.after(0, lambda n=name: self.add_log(
                 f"Converting subtitles: {n}", 'INFO'))
             lines = []
+
+            # ⚠️ Real progress, not a spinner. A 3.3GB film takes ~25s and most
+            # of that is the md5 verification reading the whole file twice —
+            # with no feedback the window looks hung. mkvmerge reports a true
+            # percentage for the remux; the phase weights cover the rest.
+            def _prog(msg, frac, idx=i, name=name):
+                overall = (idx + max(0.0, min(1.0, frac))) / float(total_files)
+                def _ui():
+                    try:
+                        self.progress_var.set(overall * 100.0)
+                        self.progress_label.configure(
+                            text="Subtitles %d/%d — %s" % (idx + 1, total_files, msg))
+                        self.status_label.configure(text="%s — %s" % (name, msg))
+                    except Exception:
+                        pass
+                self.root.after(0, _ui)
+
             try:
-                good = _webvtt_fix(f['path'], replace=True, verbose=False)
+                good = _webvtt_fix(f['path'], replace=True, verbose=False,
+                                   progress=_prog)
             except Exception as exc:
                 lines.append(str(exc)); good = False
             if good:
@@ -7280,9 +7299,18 @@ class VideoConverterApp:
                 self.root.after(0, lambda n=name, l=lines: self.add_log(
                     f"  \u2717 {n} \u2014 conversion failed, file left "
                     f"untouched. {' '.join(l)[:200]}", 'ERROR'))
-        self.root.after(0, lambda: self.add_log(
-            f"Subtitle conversion finished: {ok} converted, {bad} failed.",
-            'INFO' if not bad else 'WARNING'))
+        def _done():
+            self.add_log(
+                f"Subtitle conversion finished: {ok} converted, {bad} failed.",
+                'INFO' if not bad else 'WARNING')
+            # ⚠️ Hand the progress bar back — it belongs to the encode.
+            try:
+                self.progress_var.set(0)
+                self.progress_label.configure(text="0 / 0 files (0%)")
+                self.status_label.configure(text="Ready")
+            except Exception:
+                pass
+        self.root.after(0, _done)
 
     def _probe_one(self, file_info, settings):
         """Probe a single file and refresh its row. Runs on the worker thread."""

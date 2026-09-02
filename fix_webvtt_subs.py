@@ -62,6 +62,7 @@ import re
 import os
 import subprocess
 import sys
+import types
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -77,6 +78,37 @@ UNREADABLE_TEXT_CODECS = {
 
 def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def run_with_progress(cmd, on_pct=None):
+    """Run mkvmerge, forwarding its real percentage.
+
+    ⚠️ mkvmerge prints "Progress: 12%" with NO newline between updates, so a
+    readline() loop stalls until it finishes. Read raw chunks instead.
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=0)
+    buf = ''
+    out = []
+    last = -1
+    while True:
+        ch = proc.stdout.read(64)
+        if not ch:
+            break
+        out.append(ch)
+        buf += ch
+        for m in re.finditer(r'Progress:\s*(\d+)%', buf):
+            pct = int(m.group(1))
+            # ⚠️ MONOTONIC ONLY. The retained tail below gets re-scanned on the
+            # next read, so old percentages re-match and the bar jumps
+            # backwards — which reads as "broken", worse than showing nothing.
+            if pct > last:
+                last = pct
+                if on_pct:
+                    on_pct(pct)
+        buf = buf[-40:]
+    proc.wait()
+    return proc.returncode, ''.join(out)
 
 
 def stream_md5(path, spec):
@@ -215,10 +247,19 @@ def repair_zero_durations(srt_text):
     return '\n\n'.join(out) + '\n', fixed
 
 
-def fix(path, replace=False, dry_run=False, verbose=True):
+def fix(path, replace=False, dry_run=False, verbose=True, progress=None):
     def say(msg):
         if verbose:
             print(msg)
+
+    # ⚠️ Phase weights, so the bar moves smoothly across steps of very different
+    # cost. Measured on the 3.3GB Mongoose: extract+convert ~1s, remux ~6s, and
+    # the md5 verification ~17s because it reads the whole file TWICE. Without
+    # this the bar would sit at 100% through the slowest part, which is worse
+    # than no bar at all.
+    def step(label, frac):
+        if progress:
+            progress(label, frac)
 
     if not os.path.isfile(path):
         say('  not a file: %s' % path)
@@ -245,6 +286,7 @@ def fix(path, replace=False, dry_run=False, verbose=True):
         for s in subs:
             ext = UNREADABLE_TEXT_CODECS[s['codec_id']]
             raw = os.path.join(workdir, 'track%s%s' % (s['id'], ext))
+            step('Extracting subtitles\u2026', 0.05)
             r = run(['mkvextract', 'tracks', path, '%s:%s' % (s['id'], raw)])
             if r.returncode != 0 or not os.path.exists(raw):
                 say('  ✗ mkvextract failed on track %s: %s'
@@ -278,7 +320,10 @@ def fix(path, replace=False, dry_run=False, verbose=True):
             cmd += ['--default-track', '0:%s' % ('yes' if s['default'] else 'no'),
                     '--forced-track', '0:%s' % ('yes' if s['forced'] else 'no'),
                     s['srt']]
-        r = run(cmd)
+        step('Remuxing\u2026', 0.15)
+        rc, rout = run_with_progress(
+            cmd, lambda pct: step('Remuxing\u2026 %d%%' % pct, 0.15 + 0.45 * pct / 100.0))
+        r = types.SimpleNamespace(returncode=rc, stdout=rout, stderr='')
         if r.returncode not in (0, 1) or not os.path.exists(out):
             say('  ✗ mkvmerge remux failed: %s'
                 % (r.stderr or r.stdout or '').strip()[:300])
@@ -293,7 +338,9 @@ def fix(path, replace=False, dry_run=False, verbose=True):
         present = {t.get('type') for t in
                    json.loads(run(['mkvmerge', '-J', path]).stdout).get('tracks', [])}
         checks = [('0:v', 'video', 'video'), ('0:a', 'audio', 'audio')]
+        _vpos = {'video': 0.62, 'audio': 0.80}
         for spec, label, kind in checks:
+            step('Verifying %s\u2026' % label, _vpos.get(kind, 0.7))
             if kind not in present:
                 say('  · no %s track in the source (nothing to compare)' % label)
                 continue
@@ -321,6 +368,7 @@ def fix(path, replace=False, dry_run=False, verbose=True):
         # mkvmerge. Checking the input to a step cannot detect the step losing
         # things — and mkvmerge silently dropped 5 zero-duration cues the first
         # time this ran. Verify the artifact you are actually shipping.
+        step('Verifying subtitles\u2026', 0.92)
         expect = sum(s['cues'] for s in subs)
         rt = os.path.join(workdir, 'roundtrip.srt')
         rr = run(['ffmpeg', '-v', 'error', '-y', '-i', out, '-map', '0:s', rt])
