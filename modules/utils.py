@@ -1225,9 +1225,13 @@ def exclude_unreadable_subs(cmd, filepath, log=None):
     for i in bad:
         negs += ['-map', '-0:s:%d' % i]
     if log:
-        log("  %d subtitle track(s) unreadable by ffmpeg — excluding so the "
-            "encode can proceed. Run fix_webvtt_subs.py to convert them to SRT "
-            "and keep them." % len(bad), 'WARNING')
+        # ⚠️ Point at the GUI, not a command line. Tony, 2026-09-02:
+        # "Everything should be gui driven" — a log line that sends the user to
+        # a terminal is the same dead end this whole feature exists to remove.
+        log("  %d subtitle track(s) unreadable by ffmpeg — excluded so the "
+            "encode can proceed. The output will have NO subtitles. To keep "
+            "them, use Tools > Fix Unreadable Subtitles..." % len(bad),
+            'WARNING')
     return list(cmd[:-1]) + negs + [cmd[-1]]
 
 
