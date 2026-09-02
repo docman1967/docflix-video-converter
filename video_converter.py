@@ -3443,6 +3443,17 @@ class VideoConverter:
     def _run_process(self, cmd, input_path, pass_label=None):
         """Run an ffmpeg subprocess, parse progress, handle pause/stop. Returns True on success."""
         import time
+        # ⚠️ Subtract subtitle streams ffmpeg cannot decode (WebVTT in Matroska).
+        # Their presence aborts the whole encode with "Function not implemented"
+        # and produces NO output file. A negative map subtracts from whatever
+        # the mapping already selected, so every -map path is left alone.
+        #
+        # ⚠️ THIS IS A SECOND COPY. modules/converter.py has a near-identical
+        # _run_process, and the GUI calls THIS one — patching only the module
+        # copy looked correct, passed every headless test, and did nothing at
+        # all when Tony ran the app. If you change one, change both.
+        from modules.utils import exclude_unreadable_subs
+        cmd = exclude_unreadable_subs(cmd, input_path, self.log)
         try:
             _env = None
             if self.gpu is not None:
@@ -6970,6 +6981,16 @@ class VideoConverterApp:
         dur_str = format_duration(dur_secs)
         # Detect ATSC A53 closed captions (EIA-608/CEA-708 embedded in video stream)
         has_cc = detect_closed_captions(str(filepath))
+        # ⚠️ SECOND ADD PATH. Drag-and-drop and Open File go through
+        # _add_files_threaded -> the probe worker, which records this. Launching
+        # the app WITH a filename argument comes through here instead and
+        # probes inline, so it needs its own copy or the WebVTT prompt never
+        # fires for that user. Two add paths, same as the two _run_process.
+        try:
+            from modules.utils import unreadable_sub_indices
+            _unreadable = unreadable_sub_indices(str(filepath))
+        except Exception:
+            _unreadable = []
 
         file_info = {
             'name': f,
@@ -6981,6 +7002,7 @@ class VideoConverterApp:
             'status': 'Pending',
             'external_subs': [],
             'has_closed_captions': has_cc,
+            'unreadable_subs': _unreadable,
             'extract_cc': False,  # CC passthrough is automatic; extraction to SRT is opt-in via subtitle dialog
         }
         self.files.append(file_info)
