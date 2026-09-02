@@ -743,9 +743,127 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
 
             editor.after(50, _check_scan)
 
-        def _finish_load_video(video_path, streams, cc_types):
+        def _convert_unreadable_subs(video_path, on_done):
+            """Convert WebVTT tracks to SRT, with a real progress dialog.
+
+            ⚠️ The completion callback is PASSED IN, not looked up. The first
+            version called a helper defined one scope deeper (inside
+            load_video_subtitle) — it compiled, and test_no_undefined_names did
+            not flag it because the name IS bound in the file, just nowhere
+            reachable from here. It would have been a NameError the first time
+            anyone converted from the editor.
+
+            ⚠️ Same underlying fix() the main window uses — imported, not
+            copied. Two implementations of a media-rewriting operation would
+            drift, and only one of them would have the verification.
+            """
+            dlg = tk.Toplevel(editor)
+            dlg.title("Converting subtitles")
+            dlg.resizable(False, False)
+            dlg.transient(editor)
+            fr = ttk.Frame(dlg, padding=20)
+            fr.pack(fill='both', expand=True)
+            lbl = ttk.Label(fr, text="Preparing\u2026", wraplength=380)
+            lbl.pack(pady=(0, 10))
+            bar = ttk.Progressbar(fr, mode='determinate', length=340, maximum=100)
+            bar.pack(pady=(0, 5))
+            note = ttk.Label(fr, text=os.path.basename(video_path),
+                             wraplength=380, foreground='#888')
+            note.pack()
+            app._center_on_main(dlg)
+            dlg.grab_set()
+            dlg.protocol('WM_DELETE_WINDOW', lambda: None)
+
+            state = {'done': False, 'ok': False}
+
+            def _prog(msg, frac):
+                def _ui():
+                    try:
+                        bar['value'] = max(0.0, min(1.0, frac)) * 100.0
+                        lbl.configure(text=msg)
+                    except Exception:
+                        pass
+                editor.after(0, _ui)
+
+            def _work():
+                try:
+                    # ⚠️ Defensive: the app normally runs as
+                    # `python3 .../video_converter.py`, which puts the project
+                    # root on sys.path[0] automatically. Do not rely on that —
+                    # a failed import here surfaces to the user as a confusing
+                    # "conversion failed" rather than as a missing file.
+                    import sys as _sys, os as _os
+                    _root = _os.path.dirname(_os.path.dirname(
+                        _os.path.abspath(__file__)))
+                    if _root not in _sys.path:
+                        _sys.path.insert(0, _root)
+                    from fix_webvtt_subs import fix as _fix
+                    state['ok'] = _fix(video_path, replace=True, verbose=False,
+                                       progress=_prog)
+                except Exception as exc:
+                    state['err'] = str(exc)
+                    state['ok'] = False
+                state['done'] = True
+
+            threading.Thread(target=_work, daemon=True).start()
+
+            def _wait():
+                if not state['done']:
+                    editor.after(80, _wait)
+                    return
+                try:
+                    dlg.grab_release(); dlg.destroy()
+                except Exception:
+                    pass
+                if not state['ok']:
+                    messagebox.showerror(
+                        "Conversion failed",
+                        "The subtitles could not be converted.\n\n%s\n\n"
+                        "The file was left unchanged."
+                        % state.get('err', 'Verification did not pass.'),
+                        parent=editor)
+                on_done(state['ok'])
+
+            editor.after(80, _wait)
+
+        def _finish_load_video(video_path, streams, cc_types, _converted=False):
             """Continue loading after subtitle/CC scanning completes."""
             nonlocal cues, original_cues
+
+            # ⚠️ Subtitle tracks ffmpeg cannot decode (WebVTT in Matroska) come
+            # back as codec_name "unknown". They are NOT bitmap, so they fall
+            # through into text_streams below and are offered to the user as
+            # normal — and then extract to an EMPTY file. The editor would open
+            # with no cues and no explanation.
+            #
+            # Same offer as the main window, so a user who lives in the editor
+            # is not sent to a command line. See fix_webvtt_subs.py.
+            if not _converted:
+                unreadable = [s for s in streams
+                              if (s.get('codec_name') or '').lower() == 'unknown']
+                if unreadable:
+                    if messagebox.askyesno(
+                            "Subtitles ffmpeg cannot read",
+                            "This file stores its subtitles in a format ffmpeg "
+                            "cannot read (WebVTT inside Matroska), so they "
+                            "cannot be loaded for editing.\n\n"
+                            "Convert them to SRT now? The video and audio are "
+                            "NOT re-encoded, and nothing is changed unless "
+                            "every check passes.",
+                            parent=editor):
+                        def _resume(_ok):
+                            # ⚠️ Re-scan rather than reusing the old list: after
+                            # a successful convert the codec is subrip instead
+                            # of "unknown", and indices may have moved.
+                            _finish_load_video(video_path,
+                                               get_subtitle_streams(video_path),
+                                               detect_cc_types(video_path),
+                                               _converted=True)
+                        _convert_unreadable_subs(video_path, _resume)
+                        return          # _resume continues the load
+                    # Declined: drop them so they are not offered as options
+                    # that would silently load nothing.
+                    streams = [s for s in streams if s not in unreadable]
 
             BITMAP_CODECS = {'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle',
                              'dvb_teletext', 'xsub'}
