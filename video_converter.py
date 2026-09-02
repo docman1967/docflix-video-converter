@@ -3633,6 +3633,7 @@ class VideoConverterApp:
         self._probe_total = 0
         self._probe_done = 0
         self._probe_started = None
+        self._webvtt_asked = set()   # offered once per session, never nag
         self.current_file_index = 0
         self.conversion_thread = None
         self.start_time = None
@@ -3880,6 +3881,12 @@ class VideoConverterApp:
         tools_menu.add_command(label="▶ Play Output File",
                                accelerator="Ctrl+Shift+P",
                                command=self.play_output_file)
+        tools_menu.add_separator()
+        # ⚠️ Discoverable + re-runnable. The add-time prompt covers the user who
+        # does not know this problem exists; this covers the one who declined
+        # earlier, or who wants to check a list they did not just add.
+        tools_menu.add_command(label="Fix Unreadable Subtitles...",
+                               command=lambda: self._offer_webvtt_fix(from_menu=True))
         tools_menu.add_separator()
         tools_menu.add_command(label="Media Details...",
                                accelerator="Ctrl+I",
@@ -7162,6 +7169,93 @@ class VideoConverterApp:
 
         self.root.after(0, self._probe_drained)
 
+    def _affected_webvtt_files(self):
+        """Files whose subtitles ffmpeg cannot read."""
+        return [f for f in self.files if f.get('unreadable_subs')]
+
+    def _offer_webvtt_fix(self, from_menu=False):
+        """Offer to convert unreadable subtitle tracks to SRT.
+
+        ⚠️ EXISTS BECAUSE THIS TOOL HAS OTHER USERS. Tony hits this roughly once
+        in 900 files and would happily run a command; someone else gets an
+        encode with no subtitles and no idea why. A dead end with no visible way
+        out is the problem, not the frequency.
+
+        ⚠️ Never converts without asking, and never nags: a file is offered once
+        per session. Declining is a real choice — the encode still succeeds on
+        video and audio (utils.exclude_unreadable_subs), the file is left
+        exactly as it is, and only the subtitles are absent from the output.
+        """
+        if self.is_converting:
+            return
+        affected = self._affected_webvtt_files()
+        if not from_menu:
+            affected = [f for f in affected
+                        if f['path'] not in self._webvtt_asked]
+        if not affected:
+            if from_menu:
+                messagebox.showinfo(
+                    "Subtitle check",
+                    "No files in the list have subtitles that ffmpeg cannot read.",
+                    parent=self.root)
+            return
+        for f in affected:
+            self._webvtt_asked.add(f['path'])
+
+        names = "\n".join("  \u2022 " + os.path.basename(f['path'])
+                           for f in affected[:8])
+        if len(affected) > 8:
+            names += "\n  \u2026 and %d more" % (len(affected) - 8)
+        msg = (
+            "%d file(s) store their subtitles in a format ffmpeg cannot read "
+            "(WebVTT inside Matroska):\n\n%s\n\n"
+            "These files WILL still encode \u2014 but the subtitles cannot be "
+            "carried into the output and will be missing.\n\n"
+            "Convert them to SRT now? The video and audio are NOT re-encoded, "
+            "and nothing is changed unless every check passes."
+            % (len(affected), names))
+        if not messagebox.askyesno("Subtitles ffmpeg cannot read", msg,
+                                   parent=self.root):
+            self.add_log("Subtitle conversion declined \u2014 those files will "
+                         "encode without subtitles.", 'WARNING')
+            return
+        threading.Thread(target=self._run_webvtt_fix, args=(affected,),
+                         daemon=True).start()
+
+    def _run_webvtt_fix(self, affected):
+        """Convert on a worker thread. Reuses fix_webvtt_subs, which verifies
+        by CONTENT (stream md5s, cue count in the FINISHED file) and refuses to
+        replace anything that does not pass."""
+        try:
+            from fix_webvtt_subs import fix as _webvtt_fix
+        except Exception as exc:
+            self.root.after(0, lambda: self.add_log(
+                f"Could not load the subtitle converter: {exc}", 'ERROR'))
+            return
+        ok = bad = 0
+        for f in affected:
+            name = os.path.basename(f['path'])
+            self.root.after(0, lambda n=name: self.add_log(
+                f"Converting subtitles: {n}", 'INFO'))
+            lines = []
+            try:
+                good = _webvtt_fix(f['path'], replace=True, verbose=False)
+            except Exception as exc:
+                lines.append(str(exc)); good = False
+            if good:
+                ok += 1
+                f['unreadable_subs'] = []
+                self.root.after(0, lambda n=name: self.add_log(
+                    f"  \u2713 {n} \u2014 subtitles converted to SRT", 'SUCCESS'))
+            else:
+                bad += 1
+                self.root.after(0, lambda n=name, l=lines: self.add_log(
+                    f"  \u2717 {n} \u2014 conversion failed, file left "
+                    f"untouched. {' '.join(l)[:200]}", 'ERROR'))
+        self.root.after(0, lambda: self.add_log(
+            f"Subtitle conversion finished: {ok} converted, {bad} failed.",
+            'INFO' if not bad else 'WARNING'))
+
     def _probe_one(self, file_info, settings):
         """Probe a single file and refresh its row. Runs on the worker thread."""
         dur_secs = get_video_duration(file_info['path'])
@@ -7170,6 +7264,20 @@ class VideoConverterApp:
         file_info['est_size'] = estimate_output_size(file_info['path'], settings)
         # extract_cc stays False — CC passthrough is automatic; SRT extraction is opt-in
         file_info['has_closed_captions'] = detect_closed_captions(file_info['path'])
+        # ⚠️ Subtitle streams ffmpeg cannot decode (WebVTT in Matroska). Their
+        # presence used to abort the whole encode with "Function not
+        # implemented" and no output file. The encode now survives by excluding
+        # them, but the SUBTITLES are silently absent from the result — so the
+        # user has to be told, here, while they are adding the file, rather than
+        # discovering it from a log line after a batch.
+        try:
+            # ⚠️ Local import — this module imports from modules.utils inside
+            # functions, not at the top. A top-level addition here silently
+            # became a NameError; tests/test_no_undefined_names.py caught it.
+            from modules.utils import unreadable_sub_indices
+            file_info['unreadable_subs'] = unreadable_sub_indices(file_info['path'])
+        except Exception:
+            file_info['unreadable_subs'] = []
         self.root.after(0, lambda fi=file_info: self._refresh_row_for(fi))
 
     def _refresh_row_for(self, file_info):
@@ -7208,6 +7316,9 @@ class VideoConverterApp:
             self._scanning_files = False
         if total:
             self.add_log(f"Metadata loaded for {total} file(s) ({elapsed:.1f}s).", 'INFO')
+        # ⚠️ ONE prompt for the whole batch, not one per file — a modal per file
+        # during a 200-file add would be unusable.
+        self.root.after(0, self._offer_webvtt_fix)
         if not self.is_converting:
             try:
                 self.progress_var.set(0)

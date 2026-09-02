@@ -286,7 +286,17 @@ def fix(path, replace=False, dry_run=False, verbose=True):
 
         # ── VERIFY BY CONTENT, before anything is replaced ───────────────────
         ok = True
-        for spec, label in (('0:v', 'video'), ('0:a', 'audio')):
+        # ⚠️ Only compare streams the SOURCE actually has. A file with no audio
+        # (silent clip, video-only rip) yields None on both sides, and treating
+        # that as a mismatch made the tool refuse a perfectly good conversion.
+        # An absent stream is not a difference.
+        present = {t.get('type') for t in
+                   json.loads(run(['mkvmerge', '-J', path]).stdout).get('tracks', [])}
+        checks = [('0:v', 'video', 'video'), ('0:a', 'audio', 'audio')]
+        for spec, label, kind in checks:
+            if kind not in present:
+                say('  · no %s track in the source (nothing to compare)' % label)
+                continue
             a, b = stream_md5(path, spec), stream_md5(out, spec)
             same = (a is not None and a == b)
             say('  %s %s stream md5 %s' % ('✓' if same else '✗', label,
