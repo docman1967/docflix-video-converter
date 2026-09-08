@@ -72,12 +72,37 @@ He also judged the disk cost a non-issue (*"I don't think it will be too much pe
 and the short lifetime makes it moot regardless — worth a single measurement when building, not a
 design constraint.
 
+## Pre-flagging suspect cues — WANTED, and also prior art
+
+Tony, 2026-09-08: *"a pre-flag on things that might be suspect is a good thing to add and in fact
+subtitle edit does that as well."* So this is settled in principle too — the only open part is
+which checks to run.
+
+⚠️⚠️ **It must PROPOSE, never FILTER.** Show every cue, mark the suspicious ones. Hiding a cue he
+would have caught is the one unforgivable failure here — exactly the rule
+[[project_forced-subtitle-editor]]'s language scan already follows (it labels music as "Norwegian
+87%", so it gets a vote, never a veto). The flag is a hint about where to look first, not a claim.
+
+Candidate checks, cheapest first — most of the ingredients already exist in this repo:
+- **Non-dictionary words**, subtracting a system dictionary AND the 1.1M-name DB in
+  `~/.local/share/docflix/names/` (already loaded by `subtitle_filters`). ⚠️ The names DB is what
+  keeps every proper noun from flagging — but see [[reference_caps-filter-and-names]]: it also
+  matches contraction fragments (`didn`, `wasn`, `aren` are all real surnames), so a naive lookup
+  will *suppress* flags it should raise.
+- **Classic OCR confusions** — `l`/`1`/`I`/`|`, `0`/`O`, `rn`→`m`, `cl`→`d`. A word that is
+  non-dictionary *and* becomes a dictionary word after one such substitution is a strong signal.
+- **Empty or near-empty OCR from a non-empty bitmap** — the bitmap has ink, the text does not.
+  ⚠️ This one is nearly free and catches total failures, which are the worst kind because they are
+  invisible in the output.
+- **Text length wildly out of proportion to bitmap width** — a wide image yielding three characters.
+- **Suspicious characters** that should never survive `_vtt_to_srt`/OCR cleanup at all.
+
+⚠️ Whatever the check set, it needs the same discipline as the ♪ band work: **measure it against
+real output before trusting it** ([[project_music-note-ocr]] — a band that was measured, then
+widened by hand and not re-tested, silently ate the letter `u` out of live dialogue; caught by a
+contact sheet, not by a count).
+
 ## Open questions for when we build it
-- **What counts as "suspect"?** Cheap heuristics could pre-flag likely errors (non-dictionary
-  words, `|`/`1`/`l` confusions, zero-length OCR from a non-empty bitmap, unusually short text for
-  a wide bitmap) so he is not reading all 1,200 cues. ⚠️ Must PROPOSE, never filter — hiding a cue
-  he would have caught is the one unforgivable failure here, same rule as
-  [[project_forced-subtitle-editor]]'s language scan.
 - **Where it lives.** New pane in the OCR window, or a mode of the existing Subtitle Editor? The
   editor already has cue navigation and text editing; the bitmap panel may be the only genuinely
   new widget.
