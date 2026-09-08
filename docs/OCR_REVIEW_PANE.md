@@ -46,14 +46,33 @@ So the work is roughly:
 - **Carry `img_path` out** with the cues rather than dropping it at the return boundary.
 - **A review pane** — cue list on one side, bitmap + editable text on the other.
 
-## Open questions for when we build it
+## ⭐ Prior art: this is a SubtitleEdit feature
 
-- **Lifetime/ownership.** Who deletes the temp dir, and what guarantees it happens if the app
-  crashes mid-review? ⚠️ A PGS stream for a film is thousands of frames; leaking that per job would
-  quietly fill a disk. Options: keep the `finally` but gate it on a "review requested" flag, or
-  move the frames somewhere owned and reap on next launch.
-- **Disk cost.** Worth measuring actual bytes for a feature-length PGS stream before deciding
-  whether to keep BMPs, convert to PNG, or keep only frames for cues flagged suspect.
+Tony, 2026-09-08: *"This design isn't really my design. It's one of the features of Subtitle Edit
+that I really like. Problem is that program doesn't do as well or as fast as ours and they don't
+have music note support."*
+
+That matters for two reasons. The interaction is **proven**, not speculative — there is a working
+reference to look at rather than a UI to invent. And the framing is not "build a new thing," it is
+"port a known-good feature into a pipeline that is already faster and already handles ♪"
+([[project_music-note-ocr]] — Tesseract cannot emit U+266A at all, so the Suite erases the glyph
+geometrically first; SubtitleEdit has no equivalent).
+
+## Lifetime — SETTLED, per Tony
+
+**The bitmaps live exactly as long as the review session. Saving the file, or opening it in the
+Subtitle Editor, ends the review and deletes them.** Tony, 2026-09-08: *"Once the job is done and
+the file is either saved or opened with the subtitle editor, they can be deleted."*
+
+⚠️ Arthur had written this up as an open question with orphan-reaping and a "review requested" flag
+as options. That was over-thinking it: **the action that ends the review is the trigger**, and both
+of those actions are already explicit user gestures the code can hook. No background reaper needed.
+
+He also judged the disk cost a non-issue (*"I don't think it will be too much per video file"*),
+and the short lifetime makes it moot regardless — worth a single measurement when building, not a
+design constraint.
+
+## Open questions for when we build it
 - **What counts as "suspect"?** Cheap heuristics could pre-flag likely errors (non-dictionary
   words, `|`/`1`/`l` confusions, zero-length OCR from a non-empty bitmap, unusually short text for
   a wide bitmap) so he is not reading all 1,200 cues. ⚠️ Must PROPOSE, never filter — hiding a cue
