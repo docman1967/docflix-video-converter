@@ -42,6 +42,67 @@ Relevant context: `scan_dlg.grab_set()` is called at line 722, and the dialog is
 while the polling callback is scheduled on **`editor`**, not on `scan_dlg` — so the poll survives
 the dialog, but the work after the teardown does not.
 
+## ⭐⭐ THE REAL ROOT CAUSE — the dialog never centres, so he moves it
+
+Tony, 2026-09-12: *"I'm a fidgiter when it comes to my windows. The scan window doesn't center when
+it runs and part of me wants it centered so I move it without thinking about it."*
+
+**The moving is a SYMPTOM, not the cause.** The chain is:
+
+    centring fails -> dialog lands off-centre -> he drags it without thinking
+    -> scan finishes mid-drag -> track list lost
+
+⭐ **Fix the centring and the trigger disappears.** That is a better fix than tolerating the race,
+and it also removes a papercut he hits every single time he opens a video.
+
+### Why the centring fails — two separate faults
+
+**1. The scan dialog uses the path that is documented not to work.** `video_converter.py:4784`
+carries a long comment from measurements on 2026-08-05:
+
+    d.geometry("520x640")   -> still reports "1x1+0+0"
+    d.update_idletasks()    -> reports correctly ...and MAPS it (the flash)
+    withdraw() first        -> stays "1x1" forever; the request is lost
+
+The documented escape is for the **caller** to withdraw at creation and pass its known size:
+
+    dlg = tk.Toplevel(self.root); dlg.withdraw()
+    ...build widgets...
+    self._center_on_main(dlg, size=(W, H))
+    dlg.deiconify()
+
+`subtitle_editor.py` ~line 706 does **neither** — no `withdraw()`, no `size=`. So the geometry is
+read as 1x1 and the placement maths is wrong.
+
+**2. ⚠️ The two `_center_on_main` implementations have DIFFERENT SIGNATURES:**
+
+| where | signature |
+|---|---|
+| `video_converter.py:4784` | `_center_on_main(self, dlg, size=None)` |
+| `modules/standalone.py:192` | `_center_on_main(self, win)` — **no `size` at all** |
+
+So the documented fix cannot be applied in standalone mode without a `TypeError`. ⚠️ **Fix the
+signature mismatch first**, or the fix works in the Suite and crashes the standalone tool.
+
+Also in standalone mode, `_center_on_main` walks `self.root.winfo_children()` for a *viewable*
+sibling Toplevel and **silently returns without centring** if it finds none — "let the window
+manager place it". A plausible third path to "it didn't centre".
+
+### ⚠️ Which path actually runs for him is NOT yet established
+
+Confirmed by reading code, not by running it. Before fixing: determine whether he hits the Suite
+copy or the standalone copy, and whether centring is computing wrong coordinates or being skipped
+entirely. `center_window_on_parent()` (`modules/utils.py`) does call `update_idletasks()` first, so
+in the Suite path the size *should* resolve — meaning a wrong-parent or skipped-centring
+explanation is more likely than a 1x1 one. **Measure before changing.**
+
+### Suggested order of work
+
+1. **Fix the centring** — removes the trigger and a daily annoyance. Highest value.
+2. **Unify the two `_center_on_main` signatures** — otherwise (1) breaks standalone.
+3. **Make the teardown non-fatal** (below) — belt and braces, since any modal dialog can be dragged
+   at the wrong moment and losing the scan result should never be the consequence.
+
 ## Likely fix shape (do NOT apply before reproducing)
 
 Make the teardown incapable of preventing the payload:
