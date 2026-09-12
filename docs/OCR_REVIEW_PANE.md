@@ -114,3 +114,5 @@ contact sheet, not by a count).
 
 - [[project_music-note-ocr]] — the ♪ erase-before-Tesseract work; same OCR path.
 - ⚠️ PGS sources live in `~/downloads/dst`, **not** the library — the library is all subrip.
+- `docs/SUBTITLE_EDITOR_SCAN_MOVE_BUG.md` — separate bug queued for the same session:
+  moving the scan dialog mid-scan loses the subtitle track list (Subtitle Editor, not OCR).
