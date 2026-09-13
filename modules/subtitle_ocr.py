@@ -211,9 +211,21 @@ def _ensure_tesseract_deps(language='eng', progress_callback=None):
     return True, tess_lang
 
 
+class _CueList(list):
+    """A plain list that can also carry `bitmap_dir`.
+
+    Used only when ocr_bitmap_subtitle(for_review=True) keeps the rendered
+    bitmaps alive, so the caller knows which directory it now owns and must
+    delete when the review ends. Subclassing list rather than returning a
+    tuple keeps every existing caller working unchanged — they see a list,
+    because it is one.
+    """
+    bitmap_dir = None
+
+
 def _ocr_overlay_approach(filepath, stream_index, language, tess_lang,
                           tmpdir, progress_callback=None, frame_callback=None,
-                          cancel_event=None):
+                          cancel_event=None, for_review=False):
     """OCR bitmap subtitles (DVB/VobSub) via ffmpeg overlay rendering.
 
     Renders subtitles on a black canvas at the video's native resolution,
@@ -580,15 +592,24 @@ def _ocr_overlay_approach(filepath, stream_index, language, tess_lang,
 
     # ── Sort by timestamp and build cue list ──
     raw_results.sort(key=lambda r: r[0])
-    cues = []
+    cues = _CueList() if for_review else []
     for pts, dur, text, img_path in raw_results:
-        if text:
-            cues.append({
-                'index': len(cues) + 1,
-                'start': _seconds_to_srt_time(pts),
-                'end': _seconds_to_srt_time(pts + dur),
-                'text': text,
-            })
+        # ⚠️ Empty-OCR frames are dropped unless a review asked for them — see
+        # the for_review note in ocr_bitmap_subtitle's docstring.
+        if not text and not for_review:
+            continue
+        cue = {
+            'index': len(cues) + 1,
+            'start': _seconds_to_srt_time(pts),
+            'end': _seconds_to_srt_time(pts + dur),
+            'text': text,
+        }
+        if for_review:
+            cue['img'] = img_path
+            cue['empty'] = not text
+        cues.append(cue)
+    if for_review:
+        cues.bitmap_dir = tmpdir
 
     with_text = sum(1 for r in raw_results if r[2])
     empty = sum(1 for r in raw_results if not r[2])
@@ -605,7 +626,7 @@ def _ocr_overlay_approach(filepath, stream_index, language, tess_lang,
 
 def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                         progress_callback=None, frame_callback=None,
-                        cancel_event=None):
+                        cancel_event=None, for_review=False):
     """OCR a bitmap subtitle stream (PGS/VobSub) to a list of SRT cues.
 
     Uses ffmpeg to render each subtitle event as an image on a black canvas,
@@ -619,11 +640,34 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
         frame_callback: Optional callable(frame_index, total, img_path,
                         ocr_text, start_time, end_time) called after each frame.
         cancel_event: Optional threading.Event — if set, OCR aborts early.
+        for_review: Opt in to everything the OCR review pane needs. OFF by
+                    default so that **no existing caller changes behaviour** —
+                    see the warning below for why that matters.
 
     Returns:
         List of dicts: [{'index': 1, 'start': '00:01:23,456',
                          'end': '00:01:26,789', 'text': 'Hello'}, ...]
         Returns empty list on failure.
+
+    ── for_review=True changes three things, and only together ──────────────
+      1. The bitmap temp dir is NOT deleted, so a cue can still be shown next
+         to the image it came from after OCR has finished. ⚠️ The CALLER then
+         owns cleanup: read `cues.bitmap_dir` and remove it when the review
+         ends (saving, or opening in the editor — docs/OCR_REVIEW_PANE.md).
+      2. Each cue gains `'img'` — the bitmap it was read from. Only meaningful
+         while the dir is alive, which is why it is tied to the same flag
+         rather than being attached unconditionally; a path to a deleted file
+         is a trap.
+      3. Cues whose OCR produced NO text are INCLUDED, marked `'empty': True`,
+         instead of being dropped. A bitmap with ink that OCR'd to nothing is
+         the worst failure mode — invisible in the output — and it cannot be
+         flagged for review if it never reaches the caller.
+
+    ⚠️⚠️ WHY THIS IS OPT-IN: callers write these cues straight out as SRT
+    (sub_ripper.py ~1252 does `f.write(f"{cue['end']}\\n{cue['text']}\\n")`).
+    Including empty cues by default would silently emit blank subtitle entries
+    into finished files. Four call sites take this function; three of them must
+    keep the old behaviour exactly.
     """
     import tempfile
 
@@ -654,7 +698,8 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
         if codec_name in ('dvb_subtitle', 'dvd_subtitle'):
             return _ocr_overlay_approach(
                 filepath, stream_index, language, tess_lang,
-                tmpdir, progress_callback, frame_callback, cancel_event)
+                tmpdir, progress_callback, frame_callback, cancel_event,
+                for_review)
 
         # ── Phase 1: Extract PGS stream and decode bitmaps directly ──
         # Much faster than the ffmpeg overlay approach — only reads the
@@ -1023,15 +1068,25 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
 
         # Sort results by timestamp and build cue list
         raw_results.sort(key=lambda r: r[0])
-        cues = []
+        cues = _CueList() if for_review else []
         for pts, dur, text, img_path in raw_results:
-            if text:
-                cues.append({
-                    'index': len(cues) + 1,
-                    'start': _seconds_to_srt_time(pts),
-                    'end': _seconds_to_srt_time(pts + dur),
-                    'text': text,
-                })
+            # ⚠️ Empty-OCR frames are dropped unless a review asked for them.
+            # See the for_review note in the docstring — callers write these
+            # straight to SRT and blank entries would land in real files.
+            if not text and not for_review:
+                continue
+            cue = {
+                'index': len(cues) + 1,
+                'start': _seconds_to_srt_time(pts),
+                'end': _seconds_to_srt_time(pts + dur),
+                'text': text,
+            }
+            if for_review:
+                cue['img'] = img_path
+                cue['empty'] = not text
+            cues.append(cue)
+        if for_review:
+            cues.bitmap_dir = tmpdir
 
         # Count how many had text vs empty
         with_text = sum(1 for r in raw_results if r[2])
@@ -1051,8 +1106,14 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
             progress_callback(traceback.format_exc()[-500:])
         return []
     finally:
-        import shutil as _shutil_cleanup
-        _shutil_cleanup.rmtree(tmpdir, ignore_errors=True)
+        # ⚠️ for_review hands ownership of tmpdir to the CALLER so cues stay
+        # clickable-to-their-bitmap after OCR ends. The review pane must delete
+        # cues.bitmap_dir when the user saves or opens the result — that action
+        # is the trigger (docs/OCR_REVIEW_PANE.md). Without for_review the old
+        # unconditional cleanup is unchanged.
+        if not for_review:
+            import shutil as _shutil_cleanup
+            _shutil_cleanup.rmtree(tmpdir, ignore_errors=True)
 
 
 def _seconds_to_srt_time(seconds):
@@ -1068,10 +1129,22 @@ def _seconds_to_srt_time(seconds):
 
 def write_srt_file(cues, output_path):
     """Write a list of SRT cue dicts to an SRT file.
-    Each cue: {'index': 1, 'start': '00:01:23,456', 'end': '00:01:26,789', 'text': 'Hello'}"""
+    Each cue: {'index': 1, 'start': '00:01:23,456', 'end': '00:01:26,789', 'text': 'Hello'}
+
+    ⚠️ Cues with no text are SKIPPED and the remaining ones are renumbered.
+    A review cue list (ocr_bitmap_subtitle(for_review=True)) deliberately
+    contains empty-OCR frames so they can be flagged for a human — they must
+    never reach a finished .srt as blank entries. Renumbering matters too: SRT
+    indices have to be contiguous, and the review list's indices include the
+    empties.
+    """
     with open(output_path, 'w', encoding='utf-8') as f:
+        n = 0
         for cue in cues:
-            f.write(f"{cue['index']}\n")
+            if not (cue.get('text') or '').strip():
+                continue
+            n += 1
+            f.write(f"{n}\n")
             f.write(f"{cue['start']} --> {cue['end']}\n")
             f.write(f"{cue['text']}\n\n")
 
