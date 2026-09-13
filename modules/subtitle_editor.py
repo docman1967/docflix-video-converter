@@ -1508,6 +1508,18 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # column, which is colour-independent. Never rely on colour
                 # alone for something that has to be noticed.
                 cue_tree.tag_configure('music',      background='#8fbcff')
+                # ⭐ Tony, 2026-09-13: "those two little dots are a little hard
+                # to see. I don't mind having the whole line highlighted. It's
+                # a pretty rare occurrence so it won't be distracting or become
+                # noise." Right on the frequency — 1 cue in 102.
+                # ⚠️ Teal, CHOSEN BY MEASUREMENT against every other row colour
+                # under all three CVD simulations: worst-case separation 28.2,
+                # against the palette's own baseline of 22.5. Mint (#a8e6c0)
+                # scored higher at 32.3 but is plainly green, and green is
+                # exactly the hue he cannot see — teal reads blue-green, and
+                # blue is the safe one. Grey scored well and was rejected for
+                # meaning "disabled" rather than "look here".
+                cue_tree.tag_configure('colon',      background='#7fd8c8')
                 cue_scroll = ttk.Scrollbar(cue_frame, orient='vertical',
                                             command=cue_tree.yview)
                 cue_scroll.grid(row=0, column=1, sticky='ns')
@@ -1917,7 +1929,16 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                           f"{cue.get('start','')} → "
                                           f"{cue.get('end','')}",
                                           disp, reason),
+                                  # ⚠️ PRECEDENCE: flag > colon > music. The
+                                  # first tag carrying `background` wins, so
+                                  # order is by RARITY — a flag is a problem
+                                  # (rare, urgent), a colon is 1 cue in 102 and
+                                  # actively hunted, music is 28% and ambient.
+                                  # Whichever loses the background still keeps
+                                  # its Note-column marker, so nothing is lost.
                                   tags=(((tag,) if tag else ())
+                                        + (('colon',) if cue_has_colon(cue)
+                                           else ())
                                         + (('music',) if cue_has_music(cue)
                                            else ())))
 
