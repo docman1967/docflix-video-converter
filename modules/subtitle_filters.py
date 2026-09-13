@@ -486,6 +486,33 @@ def _build_caps_hi_checker():
 # Filter Functions
 # ═══════════════════════════════════════════════════════════════════
 
+def _looks_like_speaker_label(name):
+    """True if *name* has the shape of a speaker label rather than prose.
+
+    ⚠️ MEASURED on 250 of Tony's subtitle files. Of labels with speech after
+    the colon (so, definitely labels): 85% are ONE word, 95% are three or
+    fewer. Every real one is capitalised, ALL-CAPS or numeric per word —
+    `NARRATOR`, `CHILDREN`, `MAN 2`, `Dr. Smith`, `Ron`.
+
+    A lowercase word is the tell that this is a sentence with a colon in it,
+    not a label: "Here's the deal", "One more thing", "Tonight's top story",
+    "Previously on Warehouse 13". The speaker pattern allows spaces inside the
+    name, so without this check it swallows most of a line.
+    """
+    words = name.split()
+    if not words or len(words) > 3:
+        return False
+    for w in words:
+        core = w.strip("'’.#-")
+        if not core:
+            continue
+        # A word may be ALL-CAPS, Capitalised, or numeric. Anything starting
+        # lowercase ("the", "on", "deal") means this is prose.
+        if not (core[0].isupper() or core[0].isdigit()):
+            return False
+    return True
+
+
 def filter_remove_hi(cues):
     """Remove hearing-impaired annotations and speaker labels.
 
@@ -520,6 +547,18 @@ def filter_remove_hi(cues):
         # Don't strip single-character labels
         if len(name_part) <= 1:
             return full_match
+        # ⚠️⚠️ EVERY WORD OF A SPEAKER LABEL IS CAPITALISED, ALL-CAPS OR A
+        # NUMBER — "NARRATOR", "MAN 2", "Dr. Smith". A lowercase word means
+        # this is an ordinary sentence that happens to contain a colon, and
+        # stripping it DELETES THE FIRST HALF OF THE LINE:
+        #     "Here's the deal: you leave now."  ->  "you leave now."
+        #     "One more thing: be careful."      ->  "be careful."
+        # The pattern allows spaces inside the name, so without this it
+        # matches most of a sentence. Found by Tony 2026-09-13 from the
+        # opposite symptom (a whole cue vanishing); this is the same defect
+        # eating the front of a line instead, which is quieter and worse.
+        if not _looks_like_speaker_label(name_part):
+            return full_match
         # Don't strip if the colon is part of a time (digits:digits)
         # Check if char before colon is a digit AND char after colon
         # (in the source text, not just the match) is a digit.
@@ -541,6 +580,10 @@ def filter_remove_hi(cues):
         text = caps_hi_label.sub(r'\1', text)
         for pat in hi_patterns:
             text = pat.sub('', text)
+        # ⚠️ Snapshot AFTER bracket/caps-label removal but BEFORE the speaker
+        # strip — see the restore below. Taking it earlier would resurrect
+        # "[DOOR SLAMS]", which genuinely should go.
+        before_speaker = text
         _speaker_source_text[0] = text
         text = speaker_pattern.sub(_speaker_replace, text)
         # Second speaker pattern: "Name :" (space before colon)
@@ -556,6 +599,30 @@ def filter_remove_hi(cues):
         text = re.sub(r'\n{2,}', '\n', text)
         text = re.sub(r'^\n+', '', text)
         text = text.strip()
+
+        # ⚠️⚠️ A SPEAKER LABEL INTRODUCES SPEECH. If removing it left NOTHING
+        # AT ALL, it was never a label — it was the cue's content, and the cue
+        # is about to be deleted outright.
+        #
+        # Tony, 2026-09-13: "a lot of times the first cue reads Previously on
+        # show_name: ... that whole cue disappears." Also killed: "Next week
+        # on X:", "Chapter One:", "Dear John:", "Meanwhile in Boston:" —
+        # anything starting with a capital and ending in a colon.
+        #
+        # ⚠️ Single bare words are still removed ("Announcer:", "Ron:"), which
+        # are genuine labels stranded on their own line; measured at 155 across
+        # 250 files, versus multi-word cases that are always real content.
+        if not text and before_speaker.strip():
+            core = before_speaker.strip().rstrip(':').strip()
+            # ⚠️ Count only words containing a LETTER OR DIGIT. Counting raw
+            # whitespace tokens treats "- \n-" — an empty two-speaker dialogue
+            # pair, which genuinely should be dropped — as two words and
+            # resurrects it. 152 of those came back in the first measurement
+            # of this very fix.
+            real = [w for w in core.split() if any(ch.isalnum() for ch in w)]
+            if len(real) > 1:
+                text = before_speaker.strip()
+
         if text:
             result.append({**cue, 'text': text})
     return result
