@@ -1181,17 +1181,30 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # Multi-line because subtitle cues are — a single-line Entry
                 # would silently eat the line break on two-line cues.
                 ocr_text_var = tk.StringVar(value="")   # kept: live-run display
+                # ⚠️ Starts READ-ONLY. While OCR runs, every incoming frame
+                # overwrites this box — so a box you can type into is a box
+                # that eats your work on the next cue. It is enabled only when
+                # the run finishes and editing becomes meaningful.
                 ocr_text_box = tk.Text(text_frame, height=3, wrap='word',
                                        font=('Courier', 11),
-                                       relief='sunken', borderwidth=1)
+                                       relief='sunken', borderwidth=1,
+                                       state='disabled')
                 ocr_text_box.grid(row=1, column=0, sticky='nsew')
                 text_frame.rowconfigure(1, weight=1)
 
                 def _set_ocr_text(s):
-                    """Replace the box contents without disturbing edit state."""
+                    """Replace the box contents, honouring its read-only state.
+
+                    ⚠️ A disabled tk.Text rejects programmatic writes too, so
+                    the state has to be lifted and restored around the edit —
+                    otherwise the live display silently stops updating.
+                    """
                     try:
+                        was = str(ocr_text_box.cget('state'))
+                        ocr_text_box.configure(state='normal')
                         ocr_text_box.delete('1.0', 'end')
                         ocr_text_box.insert('1.0', s or '')
+                        ocr_text_box.configure(state=was)
                     except tk.TclError:
                         pass
 
@@ -1830,6 +1843,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                             # Editing is only meaningful once the run is over —
                             # during it, incoming frames own the text box.
                             apply_btn.configure(state='normal')
+                            ocr_text_box.configure(state='normal')
 
                             def _load_into_editor():
                                 mon.destroy()
