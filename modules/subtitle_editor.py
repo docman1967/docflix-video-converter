@@ -348,6 +348,53 @@ def _vtt_to_srt(vtt_text):
     return "\n".join(f"{n}\n{s} --> {e}\n{txt}\n" for n, (s, e, txt) in enumerate(cues, 1))
 
 
+# ── OCR review: advisory flags ───────────────────────────────────────────────
+# Characters that essentially never occur in real subtitle text but are classic
+# Tesseract misreads. MEASURED 2026-09-13 against 135,847 real cues from 250
+# library .srt files: 10 hits total, all of them '¤' (0.007%).
+#
+# ⚠️ '<' and '>' were candidates and measured ZERO — but that is a property of
+# THIS library (the subtitle filters strip markup), not of subtitles generally,
+# where <i> is ordinary. OCR cannot emit them either, so they buy nothing and
+# were dropped rather than shipped on a misleading zero.
+_OCR_JUNK_CHARS = set('|\\~^¤¶×÷_{}')
+
+# "Almost no letters" — strips everything except alphanumerics to spot OCR
+# noise fragments. MEASURED: 24 of 135,847 real cues (0.018%), e.g. 'I...'.
+_ALNUM_RE = re.compile(r'[^0-9A-Za-zÀ-ÿ]')
+
+
+def flag_ocr_cue(cue):
+    """Advisory review flag for one OCR cue. Returns (tag, reason) or (None,'').
+
+    ⚠️⚠️ PROPOSES, NEVER FILTERS. Every cue stays in the list; a flag only
+    colours the row and fills the Note column. Hiding a cue Tony would have
+    caught is the one unforgivable failure here (docs/OCR_REVIEW_PANE.md).
+
+    ⚠️ Deliberately small. A heuristic that fires on good text trains you to
+    ignore the column, which is worse than not having one. Measured against
+    135,847 real cues from 250 library .srt files on 2026-09-13:
+        junk chars  10 hits (0.007%)   all '¤'
+        few letters 24 hits (0.018%)   e.g. 'I...'
+    Combined ≈ 1 false positive per 4,000 cues.
+
+    Module level on purpose: it is pure logic and must stay testable. Burying
+    it in the monitor's closure would have made it unverifiable, which is
+    exactly how an unmeasured band ships.
+    """
+    text = (cue.get('text') or '')
+    if not text.strip():
+        # Highest-value check: a bitmap that produced no text at all. It is
+        # invisible in the output, so this is the only place it can be caught.
+        return 'flag_empty', 'no text from bitmap'
+    junk = {c for c in text if c in _OCR_JUNK_CHARS}
+    if junk:
+        return 'flag_junk', 'odd char ' + ''.join(sorted(junk))
+    if len(_ALNUM_RE.sub('', text)) <= 1:
+        return 'flag_short', 'almost no letters'
+    return None, ''
+
+
 def _real_cue_count(cues):
     """How many cues actually carry text.
 
@@ -1129,11 +1176,30 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 ttk.Label(text_frame, text="OCR Text:",
                           font=('Helvetica', 9, 'bold')).grid(
                     row=0, column=0, sticky='nw')
-                ocr_text_var = tk.StringVar(value="")
-                ocr_text_label = ttk.Label(text_frame, textvariable=ocr_text_var,
-                                            wraplength=350, justify='left',
-                                            font=('Courier', 11))
-                ocr_text_label.grid(row=1, column=0, sticky='nw')
+                # ⚠️ An editable Text, not a Label. This is the whole point of
+                # the review pane: read the bitmap, fix the text in place.
+                # Multi-line because subtitle cues are — a single-line Entry
+                # would silently eat the line break on two-line cues.
+                ocr_text_var = tk.StringVar(value="")   # kept: live-run display
+                ocr_text_box = tk.Text(text_frame, height=3, wrap='word',
+                                       font=('Courier', 11),
+                                       relief='sunken', borderwidth=1)
+                ocr_text_box.grid(row=1, column=0, sticky='nsew')
+                text_frame.rowconfigure(1, weight=1)
+
+                def _set_ocr_text(s):
+                    """Replace the box contents without disturbing edit state."""
+                    try:
+                        ocr_text_box.delete('1.0', 'end')
+                        ocr_text_box.insert('1.0', s or '')
+                    except tk.TclError:
+                        pass
+
+                def _get_ocr_text():
+                    try:
+                        return ocr_text_box.get('1.0', 'end-1c')
+                    except tk.TclError:
+                        return ''
                 time_label = ttk.Label(text_frame, text="", foreground='gray')
                 time_label.grid(row=2, column=0, sticky='sw', pady=(4, 0))
 
@@ -1143,16 +1209,24 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 cue_frame.columnconfigure(0, weight=1)
                 cue_frame.rowconfigure(0, weight=1)
 
-                cue_columns = ('idx', 'time', 'text')
+                cue_columns = ('idx', 'time', 'text', 'note')
                 cue_tree = ttk.Treeview(cue_frame, columns=cue_columns,
                                         show='headings', height=8)
                 cue_tree.grid(row=0, column=0, sticky='nsew')
                 cue_tree.heading('idx',  text='#')
                 cue_tree.heading('time', text='Time')
                 cue_tree.heading('text', text='Text')
+                cue_tree.heading('note', text='Note')
                 cue_tree.column('idx',  width=40,  minwidth=30, anchor='center')
                 cue_tree.column('time', width=180, minwidth=140)
-                cue_tree.column('text', width=400, minwidth=200)
+                cue_tree.column('text', width=340, minwidth=180)
+                cue_tree.column('note', width=140, minwidth=90)
+                # ⚠️ Colour only — flagged rows stay in the list and stay
+                # selectable. The flag is a hint about where to look first,
+                # never a filter (docs/OCR_REVIEW_PANE.md).
+                cue_tree.tag_configure('flag_empty', background='#ffe0e0')
+                cue_tree.tag_configure('flag_junk',  background='#fff0d0')
+                cue_tree.tag_configure('flag_short', background='#fff8d0')
                 cue_scroll = ttk.Scrollbar(cue_frame, orient='vertical',
                                             command=cue_tree.yview)
                 cue_scroll.grid(row=0, column=1, sticky='ns')
@@ -1186,7 +1260,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         # The dir is gone once the review has been released —
                         # say so rather than showing a stale image.
                         img_label.configure(image='', text='[bitmap released]')
-                    ocr_text_var.set(txt if txt else '[empty]')
+                    _set_ocr_text(txt or '')
                     time_label.configure(text=f"{s_t} → {e_t}")
 
                 cue_tree.bind('<<TreeviewSelect>>', _show_cue_bitmap)
@@ -1226,6 +1300,83 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
 
                 mon.bind('<Destroy>', _on_mon_destroy)
 
+                # ── Review: edit a cue's text in place ────────────────────
+                # tree item id -> index into ocr_result[0]. Built by
+                # _rebuild_cue_tree once OCR has finished, so the mapping is
+                # exact by construction. ⚠️ Reconciling the LIVE rows against
+                # the final cue list was the alternative and it is subtly wrong
+                # — live rows skip ghosts and empties, so their positions do
+                # not correspond to cue indices.
+                _row_cue = {}
+
+                def _apply_cue_edit(_event=None):
+                    """Write the edited text back to the cue and the row."""
+                    sel = cue_tree.selection()
+                    if not sel:
+                        return
+                    idx = _row_cue.get(sel[0])
+                    cues = ocr_result[0]
+                    if idx is None or not cues or idx >= len(cues):
+                        return
+                    new_text = _get_ocr_text().strip('\n')
+                    if new_text == cues[idx].get('text', ''):
+                        return
+                    cues[idx]['text'] = new_text
+                    cues[idx]['edited'] = True
+                    # A cue that was empty and now has text is no longer empty.
+                    cues[idx]['empty'] = not new_text.strip()
+                    _refresh_row(sel[0], idx)
+                    status_label.configure(
+                        text=f"Cue {cues[idx].get('index', idx + 1)} edited")
+
+                ocr_text_box.bind('<Control-Return>', _apply_cue_edit)
+
+                _flag_cue = flag_ocr_cue     # module-level, unit-tested
+
+                def _refresh_row(item, idx):
+                    """Redraw one row from its cue."""
+                    cues = ocr_result[0]
+                    if not cues or idx >= len(cues):
+                        return
+                    cue = cues[idx]
+                    tag, reason = _flag_cue(cue)
+                    disp = (cue.get('text') or '').replace('\n', ' ⏎ ')
+                    if cue.get('edited'):
+                        reason = (reason + ' · edited').strip(' ·')
+                    cue_tree.item(item,
+                                  values=(cue.get('index', idx + 1),
+                                          f"{cue.get('start','')} → "
+                                          f"{cue.get('end','')}",
+                                          disp, reason),
+                                  tags=((tag,) if tag else ()))
+
+                def _rebuild_cue_tree():
+                    """Repopulate the list from the finished cue list.
+
+                    Live rows are a running commentary; this is the reviewable
+                    record. Rebuilding also brings in the empty-OCR cues, which
+                    the live view deliberately skips as ghost/noise.
+                    """
+                    cues = ocr_result[0]
+                    if not cues:
+                        return
+                    for item in cue_tree.get_children():
+                        cue_tree.delete(item)
+                    _row_cue.clear()
+                    _row_bitmap.clear()
+                    flagged = 0
+                    for i, cue in enumerate(cues):
+                        item = cue_tree.insert('', 'end', values=())
+                        _row_cue[item] = i
+                        _row_bitmap[item] = (cue.get('img'),
+                                             cue.get('text', ''),
+                                             cue.get('start', ''),
+                                             cue.get('end', ''))
+                        _refresh_row(item, i)
+                        if _flag_cue(cue)[0]:
+                            flagged += 1
+                    return flagged
+
                 # ── Log window ──
                 log_frame = ttk.LabelFrame(main_f, text="Log", padding=5)
                 log_frame.grid(row=4, column=0, sticky='nsew', pady=(4, 0))
@@ -1245,6 +1396,15 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # ── Cancel button ──
                 btn_f = ttk.Frame(main_f)
                 btn_f.grid(row=5, column=0, sticky='e', pady=(8, 0))
+
+                # Enabled only once OCR finishes — while frames are still
+                # arriving they own the text box, so an edit would be
+                # overwritten by the next cue and look like the app ate it.
+                apply_btn = ttk.Button(btn_f, text="Apply Edit",
+                                       state='disabled',
+                                       command=lambda: _apply_cue_edit())
+                apply_btn.pack(side='left', padx=(0, 8))
+
                 def _kill_ocr_processes():
                     """Kill any running ffmpeg/ffprobe/tesseract children."""
                     try:
@@ -1512,7 +1672,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                             else:
                                 img_label.configure(image='', text='[no image]')
 
-                            ocr_text_var.set(text if text else '[empty]')
+                            _set_ocr_text(text if text else '')
                             time_label.configure(text=f"{start_t} → {end_t}")
 
                             # Filter ghost/noise from the cue list display.
@@ -1522,7 +1682,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                 display_text = text.replace('\n', ' ⏎ ')
                                 item = cue_tree.insert('', 'end', values=(
                                     cue_count[0], f"{start_t} → {end_t}",
-                                    display_text))
+                                    display_text, ''))
                                 # Remember which bitmap this row came from, so
                                 # selecting it later can show the image the text
                                 # was read from. The association is free here —
@@ -1654,11 +1814,22 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                             # into a real .srt.
                             write_srt_file(ocr_cues, tmp_srt.name)
 
+                            # ── Hand over to the review pane ──
+                            # Replace the running commentary with the
+                            # reviewable record: every cue including the
+                            # empties, each linked to its bitmap and its
+                            # position in the cue list, flags applied.
+                            flagged = _rebuild_cue_tree() or 0
+                            flag_txt = (f"  |  {flagged} to check"
+                                        if flagged else "")
                             status_label.configure(
                                 text=f"Done — {_real_cue_count(ocr_cues)} cues in "
-                                     f"{elapsed_m}m {elapsed_s}s")
+                                     f"{elapsed_m}m {elapsed_s}s{flag_txt}")
                             progress_var.set(100)
                             cancel_btn.configure(text="Close", command=mon.destroy)
+                            # Editing is only meaningful once the run is over —
+                            # during it, incoming frames own the text box.
+                            apply_btn.configure(state='normal')
 
                             def _load_into_editor():
                                 mon.destroy()
