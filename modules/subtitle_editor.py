@@ -1181,10 +1181,10 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # Multi-line because subtitle cues are — a single-line Entry
                 # would silently eat the line break on two-line cues.
                 ocr_text_var = tk.StringVar(value="")   # kept: live-run display
-                # ⚠️ Starts READ-ONLY. While OCR runs, every incoming frame
-                # overwrites this box — so a box you can type into is a box
-                # that eats your work on the next cue. It is enabled only when
-                # the run finishes and editing becomes meaningful.
+                # ⚠️ READ-ONLY throughout. Editing happens inline in the cue
+                # list (double-click); this panel is the view of the selected
+                # cue beside its bitmap. Two places to type the same text
+                # would just be two places to lose it.
                 ocr_text_box = tk.Text(text_frame, height=3, wrap='word',
                                        font=('Courier', 11),
                                        relief='sunken', borderwidth=1,
@@ -1244,6 +1244,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                             command=cue_tree.yview)
                 cue_scroll.grid(row=0, column=1, sticky='ns')
                 cue_tree.configure(yscrollcommand=cue_scroll.set)
+
+                # Set once OCR finishes — telling someone how to edit while
+                # the list is still filling would be telling them to do
+                # something that does not work yet.
+                hint_label = ttk.Label(cue_frame, text="", foreground='gray')
+                hint_label.grid(row=1, column=0, columnspan=2, sticky='w',
+                                pady=(3, 0))
 
                 # ── Review: click a cue, see the bitmap it was read from ──
                 # tree item id -> (img_path, text, start, end). Populated as
@@ -1322,27 +1329,94 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # not correspond to cue indices.
                 _row_cue = {}
 
-                def _apply_cue_edit(_event=None):
-                    """Write the edited text back to the cue and the row."""
-                    sel = cue_tree.selection()
-                    if not sel:
-                        return
-                    idx = _row_cue.get(sel[0])
+                def _write_cue_text(idx, item, new_text):
+                    """Commit new text to cue `idx` and redraw row `item`."""
                     cues = ocr_result[0]
                     if idx is None or not cues or idx >= len(cues):
-                        return
-                    new_text = _get_ocr_text().strip('\n')
+                        return False
+                    new_text = (new_text or '').strip('\n')
                     if new_text == cues[idx].get('text', ''):
-                        return
+                        return False
                     cues[idx]['text'] = new_text
                     cues[idx]['edited'] = True
-                    # A cue that was empty and now has text is no longer empty.
+                    # A cue that was empty and now has text is no longer empty,
+                    # so its flag must be recomputed rather than left stale.
                     cues[idx]['empty'] = not new_text.strip()
-                    _refresh_row(sel[0], idx)
+                    _refresh_row(item, idx)
+                    _row_bitmap[item] = (cues[idx].get('img'), new_text,
+                                         cues[idx].get('start', ''),
+                                         cues[idx].get('end', ''))
+                    _set_ocr_text(new_text)
                     status_label.configure(
                         text=f"Cue {cues[idx].get('index', idx + 1)} edited")
+                    return True
 
-                ocr_text_box.bind('<Control-Return>', _apply_cue_edit)
+                # ── Inline cell editing ──────────────────────────────────
+                # Double-click a cue's Text cell to edit it in place; click
+                # any other cue (or anywhere else) to commit. No Apply button.
+                #
+                # ⚠️ A tk.Text, not an Entry. Subtitle cues are frequently two
+                # lines — the list renders them 'line one ⏎ line two' — and an
+                # Entry would silently flatten that on the first edit.
+                _inline = {'w': None, 'item': None}
+
+                def _end_inline(save=True):
+                    w = _inline['w']
+                    if w is None:
+                        return
+                    item = _inline['item']
+                    text = None
+                    if save:
+                        try:
+                            text = w.get('1.0', 'end-1c')
+                        except tk.TclError:
+                            text = None
+                    # Clear state BEFORE destroying: destroy fires <FocusOut>,
+                    # which re-enters here and would commit twice.
+                    _inline['w'] = None
+                    _inline['item'] = None
+                    try:
+                        w.destroy()
+                    except tk.TclError:
+                        pass
+                    if save and text is not None and item is not None:
+                        _write_cue_text(_row_cue.get(item), item, text)
+
+                def _begin_inline(event):
+                    # Any editor already open commits first — that is what
+                    # makes "click another cue" work as the commit gesture.
+                    _end_inline(True)
+                    item = cue_tree.identify_row(event.y)
+                    col = cue_tree.identify_column(event.x)
+                    if not item or col != '#3':      # Text column only
+                        return
+                    idx = _row_cue.get(item)
+                    if idx is None:
+                        return   # live rows aren't backed by a cue yet
+                    cues = ocr_result[0]
+                    if not cues or idx >= len(cues):
+                        return
+                    bbox = cue_tree.bbox(item, col)
+                    if not bbox:
+                        return   # row scrolled out of view
+                    x, y, w, h = bbox
+                    cur = cues[idx].get('text', '') or ''
+                    lines = max(1, cur.count('\n') + 1)
+                    ed = tk.Text(cue_tree, wrap='none', height=lines,
+                                 font=('Courier', 10), relief='solid',
+                                 borderwidth=1, undo=True)
+                    ed.place(x=x, y=y, width=w, height=h * lines)
+                    ed.insert('1.0', cur)
+                    ed.focus_set()
+                    ed.mark_set('insert', '1.0')
+                    ed.bind('<FocusOut>', lambda e: _end_inline(True))
+                    ed.bind('<Escape>', lambda e: (_end_inline(False), 'break')[1])
+                    ed.bind('<Control-Return>',
+                            lambda e: (_end_inline(True), 'break')[1])
+                    _inline['w'] = ed
+                    _inline['item'] = item
+
+                cue_tree.bind('<Double-1>', _begin_inline)
 
                 _flag_cue = flag_ocr_cue     # module-level, unit-tested
 
@@ -1409,14 +1483,6 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # ── Cancel button ──
                 btn_f = ttk.Frame(main_f)
                 btn_f.grid(row=5, column=0, sticky='e', pady=(8, 0))
-
-                # Enabled only once OCR finishes — while frames are still
-                # arriving they own the text box, so an edit would be
-                # overwritten by the next cue and look like the app ate it.
-                apply_btn = ttk.Button(btn_f, text="Apply Edit",
-                                       state='disabled',
-                                       command=lambda: _apply_cue_edit())
-                apply_btn.pack(side='left', padx=(0, 8))
 
                 def _kill_ocr_processes():
                     """Kill any running ffmpeg/ffprobe/tesseract children."""
@@ -1840,10 +1906,12 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                      f"{elapsed_m}m {elapsed_s}s{flag_txt}")
                             progress_var.set(100)
                             cancel_btn.configure(text="Close", command=mon.destroy)
-                            # Editing is only meaningful once the run is over —
-                            # during it, incoming frames own the text box.
-                            apply_btn.configure(state='normal')
-                            ocr_text_box.configure(state='normal')
+                            # Editing happens inline in the cue list now, so
+                            # the side box stays a read-only view of the
+                            # selected cue beside its bitmap.
+                            hint_label.configure(
+                                text="Double-click a cue's text to edit · "
+                                     "click another cue to commit · Esc cancels")
 
                             def _load_into_editor():
                                 mon.destroy()
