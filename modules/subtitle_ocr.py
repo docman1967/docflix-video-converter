@@ -1180,11 +1180,27 @@ def normalise_for_ocr(img):
     text. It returns nothing at all: no error, no partial read, no low
     confidence — an empty string that is indistinguishable from a blank frame.
 
-    Measured on Warehouse 13 S01E01 (1278 PGS cues) before the fix:
-        131 cues (10.3%) returned nothing, 91 of them real dialogue.
-        Every single one was a SHORT cue — "Pete?", "Okay.", "Hey." — because
-        a small box is likelier to be written off as a picture than a wide one.
-    After: 0 empty, 0 regressions, on the same 1278.
+    ⚠️ AND IT IS WORSE THAN "SOME CUES COME BACK EMPTY". Tesseract's models
+    are trained on dark-text-on-light. Handed the inverse it refuses some
+    bitmaps outright and reads the rest BADLY — so the damage splits in two,
+    and only the first half is visible by counting empty cues.
+
+    Measured on Warehouse 13 S01E01 (1278 PGS cues), old vs new on the SAME
+    bitmaps:
+        131 (10.3%)  returned nothing at all — all SHORT cues ("Pete?",
+                     "Okay.", "Hey."), because a small box is likelier to be
+                     written off as a picture than a wide one
+        173 (15.1% of those that did read) returned DIFFERENT, worse text
+        ---------
+        304 (23.8% of the episode) wrong in some way
+
+    ⭐ Tony spotted the second half; the first measurement missed it entirely
+    by only counting empties. The mangling ranges from full stops read as
+    commas ("-Bye now," for "-Bye now.") through `1` for `I`, up to DROPPING
+    WHOLE LINES — "-Myka." where the cue really said "-Myka? -Myka.", and
+    "-Well, that's a relief." missing the "-Mrs. Frederic." before it.
+
+    After: 0 empty and 0 text differences, on the same 1278.
 
     ⚠️ Decide on the CORNERS, not the mean. A mostly-dark image can still be
     dark-on-light (a long line of heavy text), and a mostly-light one can be

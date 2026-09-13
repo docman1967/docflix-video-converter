@@ -10,8 +10,15 @@ no error, no partial read and no low confidence, which is indistinguishable
 from a genuinely blank frame.
 
 Measured on Warehouse 13 S01E01 (1278 real PGS cues) on 2026-09-13:
-    before  131 cues (10.3%) empty, 91 of them real dialogue
-    after     0 empty, 0 regressions
+    before  131 (10.3%) empty, PLUS 173 more that read as different, worse
+            text = 304 cues (23.8% of the episode) wrong in some way
+    after   0 empty, 0 text differences
+
+⚠️ The first pass counted ONLY empty cues and reported 10.3%. That missed more
+than half the damage: Tesseract's models expect dark-on-light, so given the
+inverse it refuses some bitmaps and misreads the others. Tony caught the second
+half from the output ("[Phone Rings]" arriving as "SSFFGHUYJI"). Counting total
+failures is not the same as measuring quality.
 
 Every lost cue was a SHORT one ("Pete?", "Okay.", "Hey.") — a small box is
 likelier to be written off as a picture than a wide one. That is why this was
