@@ -1350,6 +1350,34 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     tool_f, text="Discard Unreadable", state='disabled',
                     command=lambda: _remove_empty_cues())
                 remove_empty_btn.pack(side='right')
+
+                # ── Post-processing filters, in the review pane ──
+                # ⭐ Tony, 2026-09-13: the filters he meant were these — Remove
+                # HI, Remove Tags, the standard post-processing set — applied
+                # HERE, while the bitmaps are still alive, so he can see what a
+                # filter did and undo it by hand before anything is saved.
+                # ⚠️ Reuses SubtitleFilterPanel: one definition of the filter
+                # set for every tool. Do NOT hand-roll a second list here; a
+                # duplicated filter list is the exact failure the shared panel
+                # was built to end (see its module docstring).
+                from .subtitle_filter_panel import SubtitleFilterPanel
+                filter_panel = SubtitleFilterPanel(
+                    mon, app, tool_f, side='right',
+                    title="OCR Post-Processing Filters",
+                    blurb=("Applied to the cues below, with the bitmaps still\n"
+                           "attached — check the result and edit by hand\n"
+                           "before saving."))
+                apply_filters_btn = ttk.Button(
+                    tool_f, text="Apply Filters", state='disabled',
+                    command=lambda: _apply_filters())
+                apply_filters_btn.pack(side='right', padx=(0, 4))
+                # One undo level. Filters are destructive and the only other
+                # way back is re-running OCR, which is minutes per episode.
+                filter_undo = [None]
+                undo_filters_btn = ttk.Button(
+                    tool_f, text="Undo", state='disabled',
+                    command=lambda: _undo_filters())
+                undo_filters_btn.pack(side='right', padx=(0, 4))
                 # Rebuild on change; the handler stores true cue indices, so
                 # switching filters can never reorder or mis-target a cue.
                 filter_box.bind('<<ComboboxSelected>>',
@@ -1599,6 +1627,92 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     else:
                         filter_count.configure(text=f"{len(cues)} cues")
                     return flagged
+
+                def _apply_filters():
+                    """Run the ticked post-processing filters over the cues.
+
+                    ⚠️ WRITES BACK IN PLACE. apply_to_cues returns a NEW list,
+                    but ocr_result[0] is held by identity everywhere in this
+                    pane (and by the save path), so the result has to be
+                    spliced into the same object — cues[:] = out.
+
+                    ⚠️ Filters REMOVE cues, so every row->cue index mapping is
+                    stale afterwards. _rebuild_cue_tree re-derives it from the
+                    current list; nothing may touch _row_cue between the splice
+                    and the rebuild.
+
+                    ⚠️ One undo level is kept because this is destructive and
+                    the alternative is re-running a multi-minute OCR. It is a
+                    deep copy: a shallow one would alias the cue dicts and the
+                    'undo' would restore the filtered text.
+                    """
+                    _end_inline(True)
+                    cues = ocr_result[0]
+                    if not cues:
+                        return
+                    if not filter_panel.active_filters() and \
+                            not filter_panel.apply_sr.get():
+                        status_label.configure(
+                            text="No filters selected — open 🔧 Filters first")
+                        return
+                    # ⚠️⚠️ Filters drop any cue whose text is empty, which
+                    # includes every unresolved OCR MISS — a bitmap that had
+                    # text on it and read as nothing. Applying filters would
+                    # therefore silently delete exactly the cues this pane
+                    # exists to surface, and they are unrecoverable without
+                    # re-running OCR. Measured, not assumed: Remove HI +
+                    # Remove Tags over a review list takes them every time.
+                    # Ask; never decide for him.
+                    unread = [c for c in cues
+                              if not (c.get('text') or '').strip()]
+                    if unread and not messagebox.askyesno(
+                            "Unread cues will be discarded",
+                            f"{len(unread)} cue(s) still have a bitmap that OCR "
+                            f"could not read.\n\nThe filters will DISCARD them, "
+                            f"because they have no text. They are real "
+                            f"subtitles.\n\nType them in first (double-click to "
+                            f"edit), or continue and accept the gaps.\n\n"
+                            f"Apply filters anyway?",
+                            parent=mon, icon='warning', default='no'):
+                        return
+                    import copy as _copy
+                    before_n = len(cues)
+                    filter_undo[0] = _copy.deepcopy(cues)
+                    try:
+                        out = filter_panel.apply_to_cues([dict(c) for c in cues])
+                    except Exception as e:
+                        # ⚠️ The shared panel RAISES where sub_ripper's old copy
+                        # swallowed — deliberately, so a throwing filter can't
+                        # look like "nothing was selected". Say so and change
+                        # nothing.
+                        filter_undo[0] = None
+                        status_label.configure(text=f"Filter failed: {e}")
+                        _log(f"Filter error: {e}")
+                        return
+                    for n, c in enumerate(out, 1):
+                        c['index'] = n
+                    cues[:] = out
+                    _rebuild_cue_tree()
+                    undo_filters_btn.configure(state='normal')
+                    lost_imgs = sum(1 for c in cues if 'img' not in c)
+                    warn = (f"  ⚠ {lost_imgs} lost their bitmap"
+                            if lost_imgs else "")
+                    status_label.configure(
+                        text=f"Filters applied — {before_n} → {len(cues)} "
+                             f"cues{warn}")
+
+                def _undo_filters():
+                    """Restore the snapshot taken before the last Apply."""
+                    _end_inline(True)
+                    snap = filter_undo[0]
+                    if not snap:
+                        return
+                    ocr_result[0][:] = snap
+                    filter_undo[0] = None
+                    _rebuild_cue_tree()
+                    undo_filters_btn.configure(state='disabled')
+                    status_label.configure(
+                        text=f"Filters undone — {len(ocr_result[0])} cues")
 
                 def _remove_empty_cues():
                     """Drop the remaining empty cues. Destructive, on request.
@@ -2112,6 +2226,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                 text="Double-click a cue's text to edit · "
                                      "click another cue to commit · Esc cancels")
                             remove_empty_btn.configure(state='normal')
+                            apply_filters_btn.configure(state='normal')
 
                             def _load_into_editor():
                                 mon.destroy()
