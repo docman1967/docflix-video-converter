@@ -1371,6 +1371,48 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 cue_scroll.grid(row=0, column=1, sticky='ns')
                 cue_tree.configure(yscrollcommand=cue_scroll.set)
 
+                # ⚠️ Read the prefs file ONCE here. Both the filter ticks and
+                # the log-pane toggle come out of it, and load_module_prefs
+                # reads two files off disk on every call.
+                _saved_ui = load_module_prefs('subtitle_editor') or {}
+
+                def _save_ui_pref(key, value):
+                    """Persist one review-pane preference immediately.
+
+                    ⚠️ On CHANGE, not on close — this monitor is destroyed by
+                    Close, by Load into Editor, and by the WM, and a
+                    save-on-close would be skipped by most of those.
+                    ⚠️ save_module_prefs writes BOTH stores; writing one leaves
+                    the other stale (the Fix-ALL-CAPS split, 3.19.3).
+                    """
+                    try:
+                        prefs = load_module_prefs('subtitle_editor') or {}
+                        prefs[key] = value
+                        save_module_prefs('subtitle_editor', prefs)
+                    except Exception:
+                        pass        # a prefs failure must never break the pane
+
+                def _toggle_log():
+                    """Show/hide the log pane, giving its height to the cues.
+
+                    ⚠️ grid_remove(), not grid_forget() — remove REMEMBERS the
+                    row/column options so re-showing restores the layout
+                    exactly. grid_forget() drops them and the pane comes back
+                    in the wrong place.
+
+                    ⚠️ The row weight has to move too. Leaving row 4 at weight=1
+                    holds the space open with nothing in it, which is the whole
+                    problem Tony was asking to solve.
+                    """
+                    on = show_log_var.get()
+                    if on:
+                        log_frame.grid()
+                        main_f.rowconfigure(4, weight=1)
+                    else:
+                        log_frame.grid_remove()
+                        main_f.rowconfigure(4, weight=0)
+                    _save_ui_pref('show_log', on)
+
                 # ── Filter / tidy row, under the list ──
                 tool_f = ttk.Frame(cue_frame)
                 tool_f.grid(row=1, column=0, columnspan=2, sticky='ew',
@@ -1383,6 +1425,19 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 filter_box.pack(side='left', padx=(4, 8))
                 filter_count = ttk.Label(tool_f, text="", foreground='gray')
                 filter_count.pack(side='left')
+
+                # ── Hide the log to give the cue list its height ──
+                # Tony, 2026-09-13: "a way to hide the log file to claim that
+                # real estate at the bottom of the window... every little bit
+                # helps when you are scanning subtitles." Sits with the other
+                # VIEW controls rather than by the log itself, because that is
+                # where his attention already is while proofreading.
+                show_log_var = tk.BooleanVar(
+                    value=bool(_saved_ui.get('show_log', True)))
+                show_log_cb = ttk.Checkbutton(
+                    tool_f, text="Log", variable=show_log_var,
+                    command=lambda: _toggle_log())
+                show_log_cb.pack(side='left', padx=(12, 0))
                 # Blank frames go automatically; whatever is left is a bitmap
                 # OCR couldn't read, so the label says "unreadable", not
                 # "empty" — the button discards real subtitles.
@@ -1424,15 +1479,9 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     """
                     if not _panel:
                         return          # first call, from inside __init__
-                    try:
-                        prefs = load_module_prefs('subtitle_editor') or {}
-                        prefs['ocr_filters'] = _panel[0].get_prefs()
-                        save_module_prefs('subtitle_editor', prefs)
-                    except Exception:
-                        pass        # a prefs failure must never break the pane
+                    _save_ui_pref('ocr_filters', _panel[0].get_prefs())
 
-                _saved_filters = (load_module_prefs('subtitle_editor')
-                                  or {}).get('ocr_filters', {})
+                _saved_filters = _saved_ui.get('ocr_filters', {})
                 filter_panel = SubtitleFilterPanel(
                     mon, app, tool_f, side='right',
                     saved=_saved_filters,
@@ -1875,6 +1924,11 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 log_scroll = ttk.Scrollbar(log_frame, orient='vertical',
                                            command=log_text.yview)
                 log_scroll.grid(row=0, column=1, sticky='ns')
+                # Apply the remembered show/hide state now that log_frame
+                # exists. ⚠️ Must be AFTER creation — the checkbutton is built
+                # further up (with the other view controls) and its command
+                # closes over a name that does not exist yet at that point.
+                _toggle_log()
                 log_text.configure(yscrollcommand=log_scroll.set)
 
                 # ── Cancel button ──
