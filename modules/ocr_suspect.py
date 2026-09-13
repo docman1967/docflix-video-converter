@@ -152,6 +152,36 @@ def lowercase_tokens(text):
     return _LOWER_TOKEN_RE.findall(_prose_of(text))
 
 
+def unbalanced_brackets(text):
+    """True if `[` and `]` do not pair up — a mangled HI annotation.
+
+    ⭐ Tony, 2026-09-13: "Some cues slip past the filter because a [ is mistaken
+    for an I or L so a cue like Iscreams] makes it past the filter." Once the
+    opening bracket is gone the cue no longer looks like an annotation to
+    filter_remove_hi, so it survives into the .srt as nonsense.
+
+    ⚠️⚠️ SQUARE BRACKETS ONLY — do NOT add parentheses. Measured over 368,196
+    library cues:
+        [ ] and ( )   13 hits = 1 in 28,322   — ELEVEN of them wrong
+        [ ] alone      2 hits = 1 in 184,098  — BOTH genuine OCR damage
+    Parentheses contributed every single false positive: `A)` / `B)` list
+    markers, and asides that legitimately open in one cue and close in the
+    next ("in recent times (but goes back" / "to the '70s, I've found), is:").
+    Brackets never span cues, which is what makes them safe to check.
+
+    ⚠️ And do not count `{`/`}` as bracket-like either. `[CELL DOOR UNLOCKS}`
+    — a real hit — has one `[` and no `]`; treating the stray `}` as a closer
+    would balance it and lose the catch. It would also flag every `{\\an8}`
+    positioning tag.
+
+    The two real hits in the whole library:
+        `[Soneji's] Taped Voice, / Indistinct]`   (a doubled `]`)
+        `[CELL DOOR UNLOCKS}`                    (`}` misread for `]`)
+    """
+    t = text or ''
+    return t.count('[') != t.count(']')
+
+
 def get_caps_only():
     """The acronym set. ⚠️ ALWAYS call this, never import `_caps_only`.
 

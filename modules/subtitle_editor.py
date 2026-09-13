@@ -532,6 +532,18 @@ def flag_ocr_cue(cue):
         if is_blank_frame(cue):
             return 'flag_empty', 'blank frame'
         return 'flag_lost', 'BITMAP HAD TEXT — OCR read nothing'
+    # ⭐ A mangled HI annotation — "[SCREAMS]" read as "Iscreams]". With the
+    # opening bracket gone it no longer looks like an annotation to any filter,
+    # so it survives into the .srt as nonsense. Measured at 1 in 184,098 cues
+    # with ZERO false positives over the library; see unbalanced_brackets for
+    # why parentheses are deliberately excluded.
+    try:
+        from .ocr_suspect import unbalanced_brackets
+        if unbalanced_brackets(text):
+            return 'flag_junk', 'unmatched [ ] — mangled HI?'
+    except Exception:
+        pass
+
     junk = {c for c in text if c in _OCR_JUNK_CHARS}
     if junk:
         return 'flag_junk', 'odd char ' + ''.join(sorted(junk))

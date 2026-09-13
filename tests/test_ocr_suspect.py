@@ -260,5 +260,53 @@ def test_caps_only_set_is_reachable():
     assert len(get_caps_only()) > 100
 
 
+# ── Unmatched brackets: a mangled HI annotation ─────────────────────────────
+# ⭐ Tony, 2026-09-13: "a [ is mistaken for an I or L so a cue like Iscreams]
+# makes it past the filter." With the opening bracket gone it stops looking
+# like an annotation to filter_remove_hi and survives into the .srt.
+
+from modules.ocr_suspect import unbalanced_brackets               # noqa: E402
+
+
+@pytest.mark.parametrize("text", [
+    "Iscreams]", "lscreams]", "[SCREAMS", "Indistinct]",
+    "[CELL DOOR UNLOCKS}",                 # real: `}` misread for `]`
+    "[Soneji's] Taped Voice,\nIndistinct]",  # real: a doubled `]`
+])
+def test_mangled_annotations_are_caught(text):
+    assert unbalanced_brackets(text), text
+
+
+@pytest.mark.parametrize("text", [
+    "[SCREAMS]", "[DOOR SLAMS]", "Hello there.", "MAN: Over here",
+    "\u266a Set me free \u266a", "",
+    # ⚠️⚠️ PARENTHESES ARE DELIBERATELY NOT CHECKED. Measured over 368,196
+    # library cues: adding ( ) took the rate from 1-in-184,098 with ZERO false
+    # positives to 1-in-28,322 with ELEVEN. Every one of these is a real line.
+    "(sighs)",
+    "A) Terror as a political instrument",
+    "I was working on C).",
+    "in recent times (but goes back",              # opens, closes NEXT cue
+    "to the '70s, I've found), is:",               # the closing half
+])
+def test_legitimate_text_is_not_flagged(text):
+    assert not unbalanced_brackets(text), text
+
+
+def test_curly_braces_are_not_treated_as_brackets():
+    """⚠️ Counting `{`/`}` as bracket-like would BALANCE "[CELL DOOR UNLOCKS}"
+    and lose the catch — and would flag every {\\an8} positioning tag."""
+    assert unbalanced_brackets("[CELL DOOR UNLOCKS}")
+    assert not unbalanced_brackets("{\\an8}Hello there")
+
+
+def test_bracket_flag_end_to_end():
+    from modules.subtitle_editor import flag_ocr_cue
+    tag, reason = flag_ocr_cue({'text': 'Iscreams]'})
+    assert tag == 'flag_junk', tag
+    assert 'unmatched' in reason
+    assert flag_ocr_cue({'text': '[SCREAMS]'})[0] is None
+
+
 if __name__ == '__main__':
     sys.exit(pytest.main([__file__, '-q']))
