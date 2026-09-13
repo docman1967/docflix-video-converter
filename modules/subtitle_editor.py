@@ -348,6 +348,20 @@ def _vtt_to_srt(vtt_text):
     return "\n".join(f"{n}\n{s} --> {e}\n{txt}\n" for n, (s, e, txt) in enumerate(cues, 1))
 
 
+def _real_cue_count(cues):
+    """How many cues actually carry text.
+
+    ⚠️ OCR runs with for_review=True, so the cue list deliberately includes
+    empty-OCR frames (marked 'empty') so the review pane can flag them — a
+    bitmap with ink that OCR'd to nothing is the failure that is otherwise
+    invisible. Those must never be counted as extracted cues, or every status
+    message overstates the result.
+    """
+    if not cues:
+        return 0
+    return sum(1 for c in cues if (c.get('text') or '').strip())
+
+
 def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto_external=None):
         import tempfile
 
@@ -1144,6 +1158,74 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 cue_scroll.grid(row=0, column=1, sticky='ns')
                 cue_tree.configure(yscrollcommand=cue_scroll.set)
 
+                # ── Review: click a cue, see the bitmap it was read from ──
+                # tree item id -> (img_path, text, start, end). Populated as
+                # rows are inserted during the run; survives afterwards because
+                # OCR is called with for_review=True, which keeps the bitmaps.
+                _row_bitmap = {}
+
+                def _show_cue_bitmap(_event=None):
+                    """Display the selected cue's source bitmap and text."""
+                    sel = cue_tree.selection()
+                    if not sel:
+                        return
+                    entry = _row_bitmap.get(sel[0])
+                    if not entry:
+                        return
+                    img_p, txt, s_t, e_t = entry
+                    if _has_pil and img_p and os.path.exists(img_p):
+                        try:
+                            pil_img = Image.open(img_p)
+                            pil_img.thumbnail((320, 80), Image.LANCZOS)
+                            photo = ImageTk.PhotoImage(pil_img)
+                            img_label.configure(image=photo, text='')
+                            img_label._photo = photo
+                        except Exception:
+                            img_label.configure(image='', text='[error]')
+                    else:
+                        # The dir is gone once the review has been released —
+                        # say so rather than showing a stale image.
+                        img_label.configure(image='', text='[bitmap released]')
+                    ocr_text_var.set(txt if txt else '[empty]')
+                    time_label.configure(text=f"{s_t} → {e_t}")
+
+                cue_tree.bind('<<TreeviewSelect>>', _show_cue_bitmap)
+
+                def _release_bitmaps():
+                    """Delete the kept bitmaps. The review is over.
+
+                    ⚠️ for_review=True handed us ownership of the temp dir, so
+                    nothing else will clean it up. Saving or opening the result
+                    is the action that ends the review
+                    (docs/OCR_REVIEW_PANE.md), and closing the window counts
+                    too — otherwise a cancelled run leaks a few hundred MB of
+                    bitmaps for the rest of the session.
+                    """
+                    cues = ocr_result[0]
+                    d = getattr(cues, 'bitmap_dir', None) if cues else None
+                    if not d:
+                        return
+                    try:
+                        import shutil as _sh
+                        _sh.rmtree(d, ignore_errors=True)
+                    except Exception:
+                        pass
+                    try:
+                        cues.bitmap_dir = None
+                    except Exception:
+                        pass
+
+                # ⚠️ Bound to <Destroy> rather than patched into each
+                # `mon.destroy` call site — there are five of them (Close,
+                # cancel, save, load, WM close) and a missed one leaks the
+                # bitmap dir silently. Guard on event.widget so child-widget
+                # destroys don't trigger it.
+                def _on_mon_destroy(event):
+                    if event.widget is mon:
+                        _release_bitmaps()
+
+                mon.bind('<Destroy>', _on_mon_destroy)
+
                 # ── Log window ──
                 log_frame = ttk.LabelFrame(main_f, text="Log", padding=5)
                 log_frame.grid(row=4, column=0, sticky='nsew', pady=(4, 0))
@@ -1438,9 +1520,15 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                 cue_count[0] += 1
                                 # Replace newlines with ⏎ for single-line display
                                 display_text = text.replace('\n', ' ⏎ ')
-                                cue_tree.insert('', 'end', values=(
+                                item = cue_tree.insert('', 'end', values=(
                                     cue_count[0], f"{start_t} → {end_t}",
                                     display_text))
+                                # Remember which bitmap this row came from, so
+                                # selecting it later can show the image the text
+                                # was read from. The association is free here —
+                                # img_path is already in hand.
+                                _row_bitmap[item] = (img_path, text,
+                                                     start_t, end_t)
                                 children = cue_tree.get_children()
                                 if children:
                                     cue_tree.see(children[-1])
@@ -1461,11 +1549,19 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 def _ocr_thread():
                     # Use current cancel_event (may be reassigned on retry)
                     _cancel = cancel_event
+                    # for_review=True keeps the rendered bitmaps alive and
+                    # attaches 'img' to each cue, so a finished run stays
+                    # reviewable — click a cue, see the image it was read from.
+                    # ⚠️ It also includes empty-OCR cues; everything that writes
+                    # or counts these cues must go through write_srt_file /
+                    # _real_cue_count. The bitmap dir is OURS to delete now —
+                    # see _release_bitmaps().
                     ocr_cues = ocr_bitmap_subtitle(
                         video_path, stream_index, ocr_lang,
                         progress_callback=_on_progress,
                         frame_callback=_on_frame,
-                        cancel_event=_cancel)
+                        cancel_event=_cancel,
+                        for_review=True)
                     ocr_result[0] = ocr_cues
 
                     def _finish():
@@ -1473,7 +1569,10 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         elapsed_m, elapsed_s = divmod(int(elapsed), 60)
 
                         if cancel_event.is_set():
-                            cue_n = len(ocr_cues) if ocr_cues else 0
+                            # ⚠️ Count only cues with text. for_review=True means
+                            # ocr_cues also holds empty-OCR frames, and reporting
+                            # those as "cues completed" would overstate the result.
+                            cue_n = _real_cue_count(ocr_cues)
                             status_label.configure(
                                 text=f"OCR cancelled — {cue_n} cues completed")
                             cancel_btn.configure(text="Close", command=mon.destroy)
@@ -1481,14 +1580,12 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                        command=_do_retry).pack(
                                            side='right', padx=(0, 8))
 
-                            # Save partial results if any cues were completed
+                            # Save partial results if any cues were completed.
+                            # ⚠️ Same reason as the completion path below: goes
+                            # through write_srt_file so empty-OCR review cues
+                            # never reach a real .srt.
                             if ocr_cues:
-                                srt_lines = []
-                                for i, cue in enumerate(ocr_cues, 1):
-                                    srt_lines.append(
-                                        f"{i}\n{cue['start']} --> {cue['end']}\n{cue['text']}\n")
-                                with open(tmp_srt.name, 'w', encoding='utf-8') as f:
-                                    f.write('\n'.join(srt_lines))
+                                write_srt_file(ocr_cues, tmp_srt.name)
 
                                 def _save_partial():
                                     video_dir = os.path.dirname(video_path)
@@ -1548,17 +1645,17 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                             return
 
                         if ocr_cues:
-                            # Write OCR results as SRT
-                            srt_lines = []
-                            for i, cue in enumerate(ocr_cues, 1):
-                                srt_lines.append(
-                                    f"{i}\n{cue['start']} --> {cue['end']}\n{cue['text']}\n")
-                            srt_text = '\n'.join(srt_lines)
-                            with open(tmp_srt.name, 'w', encoding='utf-8') as f:
-                                f.write(srt_text)
+                            # ⚠️ Must go through write_srt_file, NOT a hand-rolled
+                            # loop. OCR now runs with for_review=True, so ocr_cues
+                            # deliberately contains empty-OCR frames (marked
+                            # 'empty') for the review pane to flag. write_srt_file
+                            # skips textless cues and renumbers contiguously;
+                            # writing cue['text'] directly would put blank entries
+                            # into a real .srt.
+                            write_srt_file(ocr_cues, tmp_srt.name)
 
                             status_label.configure(
-                                text=f"Done — {len(ocr_cues)} cues in "
+                                text=f"Done — {_real_cue_count(ocr_cues)} cues in "
                                      f"{elapsed_m}m {elapsed_s}s")
                             progress_var.set(100)
                             cancel_btn.configure(text="Close", command=mon.destroy)
