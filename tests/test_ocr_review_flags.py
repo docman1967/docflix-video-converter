@@ -294,6 +294,72 @@ def test_music_check_never_mutates():
     assert cue == before
 
 
+# ── Deleting cues ───────────────────────────────────────────────────────────
+# ⭐ Tony, 2026-09-13: "I need to be able to delete cues. Some cues slip past
+# the filter because a [ is mistaken for an I or L so a cue like Iscreams]
+# makes it past the filter." No rule catches those reliably — a human deletes
+# them. ⚠️ Plain-assert style to match this file's own __main__ runner.
+
+from modules.subtitle_editor import delete_cues                   # noqa: E402
+
+
+def _del_cues():
+    return [{'index': i + 1, 'text': t, 'img': f'/t/{i + 1}.bmp'}
+            for i, t in enumerate(['one', 'Iscreams]', 'three',
+                                   '[DOOR]', 'five'])]
+
+
+def test_delete_one_cue_and_renumber():
+    cues = _del_cues()
+    assert delete_cues(cues, [1]) == 1
+    assert [c['text'] for c in cues] == ['one', 'three', '[DOOR]', 'five']
+    assert [c['index'] for c in cues] == [1, 2, 3, 4], "not renumbered"
+    assert [c['img'] for c in cues] == ['/t/1.bmp', '/t/3.bmp',
+                                        '/t/4.bmp', '/t/5.bmp'], "bitmap lost"
+
+
+def test_delete_several_at_once():
+    cues = _del_cues()
+    assert delete_cues(cues, [1, 3]) == 2
+    assert [c['text'] for c in cues] == ['one', 'three', 'five']
+
+
+def test_indices_need_not_be_sorted():
+    """⚠️ Removing a low index first shifts everything after it, so a naive
+    loop would take the wrong cue on the second pass — the classic off-by-one
+    that silently eats a neighbour."""
+    cues = _del_cues()
+    assert delete_cues(cues, [3, 1]) == 2
+    assert [c['text'] for c in cues] == ['one', 'three', 'five']
+
+
+def test_nothing_selected_is_a_noop():
+    cues = _del_cues()
+    assert delete_cues(cues, []) == 0
+    assert len(cues) == 5
+
+
+def test_out_of_range_indices_are_ignored():
+    cues = _del_cues()
+    assert delete_cues(cues, [99, -1, 500]) == 0
+    assert len(cues) == 5
+
+
+def test_delete_is_in_place():
+    """⚠️ The caller holds this exact list (ocr_result[0]); rebinding would
+    leave every other reference pointing at the old one."""
+    cues = _del_cues()
+    same = cues
+    delete_cues(cues, [0])
+    assert same is cues and len(same) == 4
+
+
+def test_deleting_everything_is_allowed():
+    cues = _del_cues()
+    assert delete_cues(cues, list(range(5))) == 5
+    assert cues == []
+
+
 if __name__ == '__main__':
     fails = 0
     for name, fn in sorted(globals().items()):

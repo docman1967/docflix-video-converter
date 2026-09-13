@@ -423,6 +423,34 @@ def cue_has_music(cue):
     return any(c in _MUSIC_CHARS for c in (cue.get('text') or ''))
 
 
+def delete_cues(cues, indices):
+    """Remove cues at *indices* IN PLACE and renumber. Returns how many went.
+
+    ⭐ Tony, 2026-09-13: some HI cues survive Remove HI because OCR misread a
+    bracket — `[SCREAMS]` arrives as `Iscreams]`, which no longer looks like a
+    bracketed annotation to any filter. There is no rule that catches those
+    reliably, so the answer is a human deleting them.
+
+    ⚠️ Deletes in DESCENDING index order. Removing index 3 first would shift
+    everything after it and the next removal would take the wrong cue — the
+    classic off-by-one that silently eats a neighbour.
+
+    ⚠️ In place (`cues[:] = kept`) because the caller holds this exact list
+    object — ocr_result[0] — and rebinding a local would leave every other
+    reference pointing at the old one. Same reason as drop_empty_cues.
+    """
+    if not cues or not indices:
+        return 0
+    doomed = {i for i in indices if 0 <= i < len(cues)}
+    if not doomed:
+        return 0
+    kept = [c for i, c in enumerate(cues) if i not in doomed]
+    cues[:] = kept
+    for n, c in enumerate(cues, 1):
+        c['index'] = n
+    return len(doomed)
+
+
 def is_blank_frame(cue):
     """True when this cue had NO INK on the frame — nothing was ever there.
 
@@ -1563,8 +1591,12 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     tool_f, text="Apply Filters", state='disabled',
                     command=lambda: _apply_filters())
                 apply_filters_btn.pack(side='right', padx=(0, 4))
-                # One undo level. Filters are destructive and the only other
-                # way back is re-running OCR, which is minutes per episode.
+                # One undo level, shared by the filters AND cue deletion.
+                # Both are destructive and the only other way back is
+                # re-running OCR, which is minutes per episode.
+                # ⚠️ Deliberately ONE snapshot for both — two independent
+                # one-level undos in the same pane would have the button
+                # restoring whichever action the other had not recorded.
                 filter_undo = [None]
                 undo_filters_btn = ttk.Button(
                     tool_f, text="Undo", state='disabled',
@@ -1798,6 +1830,12 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     _inline['item'] = item
 
                 cue_tree.bind('<Double-1>', _begin_inline)
+                # ⚠️ Bound on the TREE, not the window: the inline editor is a
+                # Text widget living inside the tree, and a window-level
+                # binding would delete the selected CUE while he is pressing
+                # Delete to remove a character mid-edit.
+                cue_tree.bind('<Delete>', lambda e: _delete_selected_cues(e))
+                cue_tree.bind('<BackSpace>', lambda e: _delete_selected_cues(e))
 
                 _flag_cue = flag_ocr_cue     # module-level, unit-tested
 
@@ -1999,6 +2037,47 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     cues_now = ocr_result[0]
                     if cues_now:
                         write_srt_file(cues_now, tmp_srt.name)
+
+                def _delete_selected_cues(_event=None):
+                    """Delete the selected cue(s). Undoable.
+
+                    ⭐ Tony, 2026-09-13: "I need to be able to delete cues. Some
+                    cues slip past the filter because a [ is mistaken for an I
+                    or L so a cue like Iscreams] makes it past the filter."
+
+                    ⚠️ Maps rows to TRUE cue indices via _row_cue, never row
+                    position — with a filter active the visible rows are a
+                    sparse view and deleting by position would remove entirely
+                    different cues. Same hazard the inline editor guards.
+
+                    ⚠️ Shares the filter Undo rather than adding a second undo
+                    system. Two independent one-level undos in the same pane is
+                    a trap: the button would restore whichever action the OTHER
+                    one had not recorded.
+
+                    ⚠️ No confirmation dialog. Deleting a cue is a deliberate
+                    keypress on a selected row and it is undoable; a modal on
+                    every one would make the common case tedious, which is how
+                    people start clicking Yes without reading.
+                    """
+                    _end_inline(True)
+                    cues = ocr_result[0]
+                    if not cues:
+                        return 'break'
+                    idxs = [_row_cue[i] for i in cue_tree.selection()
+                            if i in _row_cue]
+                    if not idxs:
+                        status_label.configure(text="Select a cue to delete")
+                        return 'break'
+                    import copy as _copy
+                    filter_undo[0] = _copy.deepcopy(cues)
+                    gone = delete_cues(cues, idxs)
+                    _rebuild_cue_tree()
+                    undo_filters_btn.configure(state='normal')
+                    status_label.configure(
+                        text=f"Deleted {gone} cue(s) — {len(cues)} remain "
+                             f"· Undo to restore")
+                    return 'break'
 
                 def _undo_filters():
                     """Restore the snapshot taken before the last Apply."""
@@ -2528,9 +2607,14 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                             # Editing happens inline in the cue list now, so
                             # the side box stays a read-only view of the
                             # selected cue beside its bitmap.
+                            # ⚠️ Delete is a keystroke with no button, so it has
+                            # to be named here or it does not exist as far as
+                            # anyone using the pane is concerned.
                             hint_label.configure(
                                 text="Double-click a cue's text to edit · "
-                                     "click another cue to commit · Esc cancels")
+                                     "click another cue to commit · Esc cancels"
+                                     " · Del removes the selected cue (Undo "
+                                     "restores)")
                             remove_empty_btn.configure(state='normal')
                             apply_filters_btn.configure(state='normal')
 
