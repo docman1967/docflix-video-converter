@@ -517,12 +517,7 @@ def _ocr_overlay_approach(filepath, stream_index, language, tess_lang,
             img, _notes = _strip_music_notes(img)
 
             # Invert: subtitle text is light on black bg → make dark on white
-            corners = [img.getpixel((0, 0)),
-                       img.getpixel((img.width - 1, 0)),
-                       img.getpixel((0, img.height - 1)),
-                       img.getpixel((img.width - 1, img.height - 1))]
-            if sum(corners) / len(corners) < 128:
-                img = ImageOps.invert(img)
+            img = normalise_for_ocr(img)
 
             # Upscale small text
             if img.height < 100:
@@ -987,8 +982,11 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                 # Composite on BLACK background: 0*(1-a) + lum*a = lum*a
                 # Result: bright text stays bright, dark shadow stays dark,
                 # transparent background = black (0).
-                # The _ocr_one function will then see dark corners (bg),
-                # invert the image → white bg, dark text, light shadow.
+                # ⚠️ This comment used to say "_ocr_one will then see dark
+                # corners and invert" — _ocr_one is a DIFFERENT path and does
+                # not run on these cues. Nothing inverted them, and it cost
+                # 10% of the dialogue. The inversion now happens below, in
+                # this function, just before the white border is added.
                 gray = (lum * a_arr).clip(0, 255).astype(np.uint8)
 
                 if gray.max() < 10:
@@ -1017,8 +1015,14 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                     img = img.resize((img.width * scale, img.height * scale),
                                      Image.LANCZOS)
 
-                # ── Add white border padding ──
                 from PIL import ImageOps
+
+                # ⚠️ MUST come before the white border below, or Tesseract
+                # silently reads nothing on ~10% of cues. This path was the
+                # one missing it; _ocr_frame has always inverted.
+                img = normalise_for_ocr(img)
+
+                # ── Add white border padding ──
                 img = ImageOps.expand(img, border=20, fill=255)
 
                 # Save for monitor preview
@@ -1164,6 +1168,37 @@ def write_srt_file(cues, output_path):
             f.write(f"{n}\n")
             f.write(f"{cue['start']} --> {cue['end']}\n")
             f.write(f"{cue['text']}\n\n")
+
+
+def normalise_for_ocr(img):
+    """Return `img` oriented dark-text-on-light, inverting if it isn't.
+
+    ⭐⭐ NOT COSMETIC — this is worth 10% of the dialogue. Subtitle bitmaps are
+    light text on a dark/transparent background. Tesseract is then given that
+    image wrapped in a white border, and its layout analysis classifies a small
+    black rectangle sitting on a white page as an IMAGE rather than a block of
+    text. It returns nothing at all: no error, no partial read, no low
+    confidence — an empty string that is indistinguishable from a blank frame.
+
+    Measured on Warehouse 13 S01E01 (1278 PGS cues) before the fix:
+        131 cues (10.3%) returned nothing, 91 of them real dialogue.
+        Every single one was a SHORT cue — "Pete?", "Okay.", "Hey." — because
+        a small box is likelier to be written off as a picture than a wide one.
+    After: 0 empty, 0 regressions, on the same 1278.
+
+    ⚠️ Decide on the CORNERS, not the mean. A mostly-dark image can still be
+    dark-on-light (a long line of heavy text), and a mostly-light one can be
+    light-on-dark. The corners are background by construction — the bitmap was
+    cropped to the ink's bounding box plus padding.
+    """
+    from PIL import ImageOps
+    corners = (img.getpixel((0, 0)),
+               img.getpixel((img.width - 1, 0)),
+               img.getpixel((0, img.height - 1)),
+               img.getpixel((img.width - 1, img.height - 1)))
+    if sum(corners) / len(corners) < 128:
+        return ImageOps.invert(img)
+    return img
 
 
 def _strip_music_notes(img):
