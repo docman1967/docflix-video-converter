@@ -380,8 +380,9 @@ FILTER_FLAGGED = 'Flagged only'
 FILTER_EMPTY = 'Empty only'
 FILTER_EDITED = 'Edited only'
 FILTER_MUSIC = 'Music only'
-OCR_FILTERS = (FILTER_ALL, FILTER_FLAGGED, FILTER_MUSIC, FILTER_EMPTY,
-               FILTER_EDITED)
+FILTER_COLON = 'Colons only'
+OCR_FILTERS = (FILTER_ALL, FILTER_FLAGGED, FILTER_MUSIC, FILTER_COLON,
+               FILTER_EMPTY, FILTER_EDITED)
 
 
 def cue_passes_ocr_filter(cue, mode):
@@ -392,6 +393,10 @@ def cue_passes_ocr_filter(cue, mode):
         return not (cue.get('text') or '').strip()
     if mode == FILTER_EDITED:
         return bool(cue.get('edited'))
+    if mode == FILTER_COLON:
+        # ⚠️ Like music: a highlight, NOT part of FILTER_FLAGGED. A surviving
+        # colon is usually a long speaker label that was correctly left alone.
+        return cue_has_colon(cue)
     if mode == FILTER_MUSIC:
         # ⚠️ Deliberately NOT part of FILTER_FLAGGED — see cue_has_music.
         # Music cues are ~28% of a musical episode; folding them into the
@@ -421,6 +426,35 @@ def cue_has_music(cue):
     shows both at once instead of one hiding the other.
     """
     return any(c in _MUSIC_CHARS for c in (cue.get('text') or ''))
+
+
+# ⚠️ `:(?!\d)` — a colon NOT followed by a digit. The obvious version,
+# `(?<!\d):(?!\d)`, also demands a non-digit BEFORE it and so misses `MAN 2:`
+# and `SOLDIER 3:` — numbered speaker labels, which are exactly the ones worth
+# marking. Only the FOLLOWING character distinguishes a clock time (`3:45`,
+# `12:30`), so only that side should be tested.
+_COLON_RE = re.compile(r':(?!\d)')
+
+
+def cue_has_colon(cue):
+    """True if the cue contains a colon that is not part of a clock time.
+
+    ⭐ Tony, 2026-09-13: "I've run into a few long speaker labels that didn't
+    get caught which is good because they were long. That's the design and I
+    don't want to change that but can we highlight : characters? When I'm
+    scrolling through, they can get lost in the sea of text."
+
+    ⚠️ A LOOK-AT-THIS, not a flag. Measured at 1 cue in 102 across the library
+    — an order of magnitude too common for "Flagged only", which exists to make
+    real problems findable. And a surviving colon is usually CORRECT: it is a
+    long label that filter_remove_hi rightly declined to strip, which is the
+    behaviour he explicitly asked not to change.
+
+    ⚠️ Skips digit:digit so "at 3:45" and "12:30" stay quiet — those are the
+    commonest colons in ordinary dialogue and flagging them would drown the
+    signal he actually wants.
+    """
+    return bool(_COLON_RE.search(cue.get('text') or ''))
 
 
 def delete_cues(cues, indices):
@@ -1868,6 +1902,14 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     # noticed.
                     if cue_has_music(cue):
                         reason = ('♪ ' + reason).strip()
+                    # ⚠️ A marker in a FIXED COLUMN beats highlighting the
+                    # character in place — a ttk.Treeview cannot style part of
+                    # a cell anyway (tags colour the whole row), and a glyph
+                    # that always lands in the same x-position is far easier to
+                    # scan down than one buried at a random offset in the text.
+                    # Colour-independent too, which matters here.
+                    if cue_has_colon(cue):
+                        reason = (': ' + reason).strip()
                     if cue.get('edited'):
                         reason = (reason + ' · edited').strip(' ·')
                     cue_tree.item(item,

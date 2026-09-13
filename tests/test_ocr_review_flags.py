@@ -360,6 +360,60 @@ def test_deleting_everything_is_allowed():
     assert cues == []
 
 
+# ── Colon marking ───────────────────────────────────────────────────────────
+# ⭐ Tony, 2026-09-13: "can we highlight : characters? When I'm scrolling
+# through, they can get lost in the sea of text." A LOOK-AT-THIS, not a flag —
+# 1 cue in 102 across the library, and a surviving colon is usually a long
+# speaker label that filter_remove_hi CORRECTLY declined to strip.
+
+from modules.subtitle_editor import cue_has_colon, FILTER_COLON   # noqa: E402
+
+
+def test_speaker_labels_are_marked():
+    for t in ("HOTCH: Today will change everything.", "Announcer:",
+              "Two words, honey:", "Question:", "Dr. Smith: Come in."):
+        assert cue_has_colon({'text': t}), t
+
+
+def test_numbered_speaker_labels_are_marked():
+    """⚠️ THE BUG THE TEST CAUGHT. The obvious regex `(?<!\\d):(?!\\d)` also
+    demands a non-digit BEFORE the colon, so it missed `MAN 2:` and
+    `SOLDIER 3:` — numbered labels, exactly the ones worth marking. Only the
+    FOLLOWING character distinguishes a clock time."""
+    for t in ("MAN 2: Gold clear.", "SOLDIER 3: Move out.", "UNIT 7:"):
+        assert cue_has_colon({'text': t}), t
+
+
+def test_clock_times_stay_quiet():
+    """The commonest colon in ordinary dialogue; marking it would drown the
+    signal he actually wants."""
+    for t in ("at 3:45 tomorrow", "It is 12:30 now", "Meet me at 9:00."):
+        assert not cue_has_colon({'text': t}), t
+
+
+def test_ordinary_text_has_no_colon_marker():
+    for t in ("Hello there.", "I don't know.", "[DOOR SLAMS]",
+              "\u266a Set me free \u266a", ""):
+        assert not cue_has_colon({'text': t}), t
+
+
+def test_colon_is_not_a_flag():
+    """⚠️ 1 in 102 cues — an order of magnitude too common for "Flagged only",
+    which exists to make real problems findable."""
+    cue = {'text': 'HOTCH: Today will change everything.'}
+    assert cue_has_colon(cue)
+    assert flag_ocr_cue(cue)[0] is None
+    assert not cue_passes_ocr_filter(cue, FILTER_FLAGGED)
+
+
+def test_colons_only_filter_selects_them():
+    cues = [{'text': 'HOTCH: Hello'}, {'text': 'Plain line.'},
+            {'text': 'at 3:45'}, {'text': 'MAN 2: Go'}]
+    got = [i for i, c in enumerate(cues)
+           if cue_passes_ocr_filter(c, FILTER_COLON)]
+    assert got == [0, 3], got
+
+
 if __name__ == '__main__':
     fails = 0
     for name, fn in sorted(globals().items()):
