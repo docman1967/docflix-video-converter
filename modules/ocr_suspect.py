@@ -39,6 +39,15 @@ _DICT_PATHS = (
 _words = set()
 _words_loaded = False
 
+# ⭐ Words the wordlist carries ONLY in capitalised form — 9,639 of them:
+# proper nouns and acronyms (NORAD, FBI, CIA, NASA, IBM, JFK, NAFTA).
+# ⚠️ THE CASE INFORMATION IS LOAD-BEARING AND WAS BEING THROWN AWAY. Storing
+# every entry lowercased made `norad`, `fbi` and `cia` look like ordinary
+# words, so a wrongly-lowercased acronym could never be flagged. Tony,
+# 2026-09-13: "I'd rather have them flagged and be right than not flagged and
+# be wrong." Keeping the caps-only set is what makes that possible.
+_caps_only = set()          # stored UPPERCASED, e.g. {'NORAD', 'FBI'}
+
 # ⚠️ CONTRACTION FRAGMENTS. Splitting "didn't" on the apostrophe leaves "didn",
 # which is in NO dictionary — and worse, IS in the surname DB, so the names
 # lookup does not rescue it either ([[reference_caps-filter-and-names]]).
@@ -70,11 +79,19 @@ _DIALOGUE_EXTRAS = {
 
 
 def load_dictionary():
-    """Load the system wordlist(s). Returns the word count. Idempotent."""
-    global _words, _words_loaded
+    """Load the system wordlist(s). Returns the word count. Idempotent.
+
+    ⚠️ Keeps TWO sets. `_words` is everything lowercased (for ordinary
+    lookups), and `_caps_only` holds entries that appear ONLY capitalised —
+    the proper nouns and acronyms. Without the second set a lowercase `norad`
+    matches `NORAD` and nothing can tell that the case is wrong.
+    """
+    global _words, _words_loaded, _caps_only
     if _words_loaded:
         return len(_words)
     words = set(_DIALOGUE_EXTRAS)
+    seen_lower = set()
+    seen_caps = set()
     for path in _DICT_PATHS:
         if not os.path.isfile(path):
             continue
@@ -89,11 +106,101 @@ def load_dictionary():
                     words.add(w.lower())
                     if "'" in w:
                         words.add(w.split("'")[0].lower())
+                    if w.isalpha():
+                        (seen_caps if w[0].isupper() else seen_lower).add(w)
         except Exception:
             continue
     _words = words
+    # ⚠️ ACRONYMS ONLY — entries that are wholly UPPERCASE in the wordlist,
+    # with no lowercase twin. Including merely Capitalised entries (English,
+    # Monday, Paris) breaks it: `english` would be "corrected" to `ENGLISH`,
+    # which is not the right answer even though the lowercase IS wrong.
+    # Restricting to isupper() keeps the suggestion exactly right or absent.
+    _caps_only = {w.upper() for w in seen_caps
+                  if w.isupper() and len(w) >= 2
+                  and w.lower() not in seen_lower
+                  and w.lower() not in _DIALOGUE_EXTRAS}
     _words_loaded = bool(words)
     return len(_words)
+
+
+# ⚠️ Grown ONLY from measured false positives on Tony's own library, never
+# from imagination. Each of these is in the wordlist as an acronym but reads
+# perfectly naturally in lowercase in a subtitle:
+#   www / http  — web addresses are lowercase by convention
+#   pow         — a comic-book sound effect far more often than a prisoner
+#   ing         — a Dutch bank; here, always a word fragment
+#   pac         — part of a rapper's name, not an acronym
+#   ira / isis  — genuine given names (Ira, Isis) as often as organisations
+_NOT_ACRONYMS = {'www', 'http', 'https', 'pow', 'ing', 'pac', 'ira', 'isis'}
+
+_LOWER_TOKEN_RE = re.compile(r"\b[a-z]{2,}\b")
+
+
+def lowercase_tokens(text):
+    """Whole all-lowercase words in the *prose* part of a cue.
+
+    ⚠️ WORD BOUNDARIES ARE LOAD-BEARING. Without `\\b` this matches the
+    lowercase RUN inside a mixed-case word — "Set" yields "et", which is a
+    real acronym (ET) and produced a confident nonsense flag on the lyric
+    "♪ Set me free ♪".
+
+    ⚠️ Runs on _prose_of, so ♪ lines, [HI] and speaker labels are skipped —
+    the same exclusions every other check here uses. Duplicating the scan
+    without them is how one check starts disagreeing with its neighbours.
+    """
+    return _LOWER_TOKEN_RE.findall(_prose_of(text))
+
+
+def get_caps_only():
+    """The acronym set. ⚠️ ALWAYS call this, never import `_caps_only`.
+
+    load_dictionary() REBINDS the module global, so a `from ... import
+    _caps_only` captures the empty set it had at import time and never
+    updates — the same trap that cost a full 371k-cue measurement pass with
+    the names DB earlier today. Arthur walked straight into it a second time
+    within the hour while testing this very function.
+    """
+    if not _words_loaded:
+        load_dictionary()
+    return _caps_only
+
+
+def wrongly_lowercased(word):
+    """If *word* is the lowercase form of a caps-only entry, return that form.
+
+    `norad` -> `NORAD`, `fbi` -> `FBI`. An exact wordlist lookup rather than a
+    heuristic, so it has no tuning and no false-positive band to manage.
+
+    ⭐ WHY IT MATTERS. Fix ALL CAPS lowercases anything it does not recognise,
+    and on a line that reads as shouting an acronym is exactly what it fails to
+    recognise: "NASA and NORAD." -> "NASA and norad.". Nothing downstream could
+    see that, because `norad` looked like a dictionary word.
+
+    ⚠️ Only fires on an ALL-LOWERCASE token. "Norad" mid-sentence is left
+    alone — that is a plausible proper noun and second-guessing capitalisation
+    is not this function's job.
+    """
+    if not _words_loaded:
+        load_dictionary()
+    w = word.strip("'’")
+    if not w or not w.isalpha() or not w.islower():
+        return None
+    # ⚠️ THREE CHARACTERS MINIMUM. Measured over 368,196 library cues:
+    #     min 2 -> 1 hit in 676 cues, almost all wrong
+    #     min 3 -> 1 hit in 5,844
+    #     min 4 -> 1 hit in 73,639 (but loses fbi, cia, atf — the whole point)
+    # The two-letter set is dominated by US STATE CODES (DE, AL, CO, NE, VA,
+    # WA, IL, RI) which collide with ordinary fragments and foreign words:
+    # `de`, `da`, `er`, `al`, `un`, `se`, `ne`. 114 of the 416 known acronyms
+    # are two letters and they are collectively worthless here.
+    if len(w) < 3:
+        return None
+    if w in _NOT_ACRONYMS:
+        return None
+    if w.upper() in _caps_only:
+        return w.upper()
+    return None
 
 
 def is_dictionary_word(word):

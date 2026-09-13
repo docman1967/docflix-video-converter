@@ -180,5 +180,85 @@ def test_flag_names_the_correction():
     assert 'like' in reason and '->' in reason
 
 
+
+
+# ── Lowercased acronyms ─────────────────────────────────────────────────────
+# ⭐ Tony, 2026-09-13: "I'd rather have them flagged and be right than not
+# flagged and be wrong." Fix ALL CAPS lowercases what it does not recognise,
+# and on a line that reads as shouting an acronym is exactly that:
+# "NASA and NORAD." -> "NASA and norad.". Nothing could see it, because the
+# dictionary loader lowercased every entry and `norad` looked like a word.
+
+from modules.ocr_suspect import (                               # noqa: E402
+    wrongly_lowercased, lowercase_tokens, get_caps_only, _NOT_ACRONYMS)
+
+
+@pytest.mark.parametrize("low,caps", [
+    ("norad", "NORAD"), ("fbi", "FBI"), ("cia", "CIA"),
+    ("nasa", "NASA"), ("dna", "DNA"), ("ibm", "IBM"),
+])
+def test_lowercased_acronyms_are_caught(low, caps):
+    assert wrongly_lowercased(low) == caps
+
+
+@pytest.mark.parametrize("word", [
+    "the", "deal", "warehouse", "police", "doctor", "well", "look",
+    # ⚠️ These broke the first cut. Restricting the set to entries that are
+    # wholly UPPERCASE in the wordlist fixed them — including only-capitalised
+    # entries flagged `english` -> `ENGLISH`, which is not even the right
+    # answer (it is `English`).
+    "english", "monday", "paris", "china", "march", "may", "august",
+])
+def test_ordinary_words_are_not_acronyms(word):
+    assert wrongly_lowercased(word) is None, word
+
+
+@pytest.mark.parametrize("word", ["de", "al", "co", "ne", "va", "er", "da"])
+def test_two_letter_acronyms_are_ignored(word):
+    """⚠️ 114 of the 416 known acronyms are two letters and they are US STATE
+    CODES colliding with ordinary fragments and foreign words. Measured: min 2
+    fires on 1 cue in 676 and is almost all wrong; min 3 on 1 in 5,844."""
+    assert wrongly_lowercased(word) is None, word
+
+
+@pytest.mark.parametrize("word", sorted(_NOT_ACRONYMS))
+def test_measured_exclusions_stay_excluded(word):
+    """Each was a real false positive on Tony's library, not a guess."""
+    assert wrongly_lowercased(word) is None, word
+
+
+def test_case_is_only_wrong_when_fully_lowercase():
+    """"Norad" mid-sentence is a plausible proper noun; second-guessing
+    capitalisation is not this check's job."""
+    assert wrongly_lowercased("Norad") is None
+    assert wrongly_lowercased("NORAD") is None
+
+
+def test_tokens_respect_word_boundaries():
+    """⚠️ Without \\b this matches the lowercase RUN inside a mixed-case word:
+    "Set" yields "et", a real acronym, and produced a confident nonsense flag
+    on the lyric "♪ Set me free ♪"."""
+    assert "et" not in lowercase_tokens("Set me free")
+    assert lowercase_tokens("♪ Set me free ♪") == []       # ♪ lines skipped
+    assert "norad" in lowercase_tokens("I work for norad.")
+
+
+def test_acronym_flag_end_to_end():
+    from modules.subtitle_editor import flag_ocr_cue
+    tag, reason = flag_ocr_cue({'text': 'NASA and norad.'})
+    assert tag == 'flag_ocr'
+    assert 'NORAD' in reason
+    # and the correct form must stay clean
+    assert flag_ocr_cue({'text': 'NASA and NORAD.'})[0] is None
+    assert flag_ocr_cue({'text': '♪ Set me free ♪'})[0] is None
+
+
+def test_caps_only_set_is_reachable():
+    """⚠️ load_dictionary REBINDS the global; importing `_caps_only` directly
+    captures an empty set. Arthur hit this trap twice in one day — once with
+    the names DB, once with this very set."""
+    assert len(get_caps_only()) > 100
+
+
 if __name__ == '__main__':
     sys.exit(pytest.main([__file__, '-q']))

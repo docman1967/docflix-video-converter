@@ -503,6 +503,18 @@ def flag_ocr_cue(cue):
             run = splits_into_words(w)
             if run:
                 return 'flag_ocr', f'{w} -> {run}?'
+        # ⭐ A lowercased acronym. Tony, 2026-09-13: "I'd rather have them
+        # flagged and be right than not flagged and be wrong." Fix ALL CAPS
+        # lowercases what it does not recognise, and on a shouted line an
+        # acronym is exactly that: "NASA and NORAD." -> "NASA and norad."
+        # ⚠️ An exact wordlist lookup (416 entries), not a heuristic — 0 false
+        # positives against ordinary words, including the near-misses that
+        # broke the first cut (english, monday, paris, china, march).
+        from .ocr_suspect import wrongly_lowercased, lowercase_tokens
+        for w in lowercase_tokens(text):
+            caps = wrongly_lowercased(w)
+            if caps:
+                return 'flag_ocr', f'{w} -> {caps}?'
     except Exception:
         pass        # a flag is advisory; never let it break the review pane
 
