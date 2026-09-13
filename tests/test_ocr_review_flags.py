@@ -245,6 +245,55 @@ def test_blank_only_false_restores_old_behaviour():
     assert len(cues) == 1
 
 
+
+# ── Music-note highlighting ─────────────────────────────────────────────────
+# ⭐ Tony, 2026-09-13: "If lines were highlighted that contain music notes, it
+# would be easier to spot errors."
+# ⚠️ Written in this file's plain-assert style on purpose — it has its own
+# __main__ runner that walks globals() for test_ functions, so a
+# pytest.mark.parametrize decorator would both fail to import and silently
+# break `python3 tests/test_ocr_review_flags.py`.
+
+from modules.subtitle_editor import cue_has_music, FILTER_MUSIC   # noqa: E402
+
+
+def test_music_cues_are_detected():
+    for text in ("\u266a Set me free \u266a", "\u266b la la \u266b",
+                 "\u2669 one note", "sing \u266c along", "\u266a\u266a\u266a"):
+        assert cue_has_music({'text': text}), text
+
+
+def test_non_music_cues_are_not():
+    for text in ("Hello there.", "[FJ]", "[DOOR SLAMS]", "", "MAN: Over here"):
+        assert not cue_has_music({'text': text}), text
+
+
+def test_music_is_not_a_flag():
+    """⚠️⚠️ THE POINT. Music cues are ~28% of a musical episode (228 of 822 in
+    Glee S01E01). Routing them through the flag would fill "Flagged only" with
+    a quarter of the file and destroy the one view that finds real problems."""
+    cue = {'text': '\u266a Set me free \u266a'}
+    assert cue_has_music(cue)
+    assert flag_ocr_cue(cue)[0] is None
+    assert not cue_passes_ocr_filter(cue, FILTER_FLAGGED)
+
+
+def test_music_only_filter_selects_them():
+    cues = [{'text': '\u266a la la \u266a'}, {'text': 'Hello.'},
+            {'text': 'sing \u266b'}]
+    got = [i for i, c in enumerate(cues)
+           if cue_passes_ocr_filter(c, FILTER_MUSIC)]
+    assert got == [0, 2], got
+
+
+def test_music_check_never_mutates():
+    cue = {'text': '\u266a la la \u266a', 'img': '/t/1.bmp'}
+    before = dict(cue)
+    cue_has_music(cue)
+    cue_passes_ocr_filter(cue, FILTER_MUSIC)
+    assert cue == before
+
+
 if __name__ == '__main__':
     fails = 0
     for name, fn in sorted(globals().items()):

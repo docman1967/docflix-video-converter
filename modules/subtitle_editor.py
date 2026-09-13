@@ -379,7 +379,9 @@ FILTER_ALL = 'All cues'
 FILTER_FLAGGED = 'Flagged only'
 FILTER_EMPTY = 'Empty only'
 FILTER_EDITED = 'Edited only'
-OCR_FILTERS = (FILTER_ALL, FILTER_FLAGGED, FILTER_EMPTY, FILTER_EDITED)
+FILTER_MUSIC = 'Music only'
+OCR_FILTERS = (FILTER_ALL, FILTER_FLAGGED, FILTER_MUSIC, FILTER_EMPTY,
+               FILTER_EDITED)
 
 
 def cue_passes_ocr_filter(cue, mode):
@@ -390,7 +392,35 @@ def cue_passes_ocr_filter(cue, mode):
         return not (cue.get('text') or '').strip()
     if mode == FILTER_EDITED:
         return bool(cue.get('edited'))
+    if mode == FILTER_MUSIC:
+        # ⚠️ Deliberately NOT part of FILTER_FLAGGED — see cue_has_music.
+        # Music cues are ~28% of a musical episode; folding them into the
+        # flagged view would bury the actual problems.
+        return cue_has_music(cue)
     return True          # FILTER_ALL and anything unrecognised: show it
+
+
+_MUSIC_CHARS = '♪♫♩♬'
+
+
+def cue_has_music(cue):
+    """True if the cue contains a music-note glyph.
+
+    ⭐ Tony, 2026-09-13: "The mechanism to catch the music notes works really
+    well but it's not 100%. If lines were highlighted that contain music notes,
+    it would be easier to spot errors."
+
+    ⚠️⚠️ THIS IS A HIGHLIGHT, NOT A FLAG, and the distinction is load-bearing.
+    Music cues are COMMON — 228 of 822 cues (28%) in Glee S01E01. Routing them
+    through flag_ocr_cue would fill "Flagged only" with a quarter of the file
+    and destroy the one view that makes real problems findable. A flag means
+    "something may be wrong here"; this means "here is where to look".
+
+    So it gets its own visual channel: the row's TEXT COLOUR, leaving the
+    background free for an actual flag. A cue that is both musical and suspect
+    shows both at once instead of one hiding the other.
+    """
+    return any(c in _MUSIC_CHARS for c in (cue.get('text') or ''))
 
 
 def is_blank_frame(cue):
@@ -1378,6 +1408,10 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # A named correction ("Iike -> like?"), so it reads as a
                 # suggestion to check rather than a warning to fear.
                 cue_tree.tag_configure('flag_ocr',   background='#e0eeff')
+                # ⚠️ FOREGROUND only. Music is a highlight, not a flag, so it
+                # must not consume the background channel a real flag needs —
+                # a cue that is both musical and suspect shows both.
+                cue_tree.tag_configure('music', foreground='#0b6d3f')
                 cue_scroll = ttk.Scrollbar(cue_frame, orient='vertical',
                                             command=cue_tree.yview)
                 cue_scroll.grid(row=0, column=1, sticky='ns')
@@ -1709,7 +1743,9 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                           f"{cue.get('start','')} → "
                                           f"{cue.get('end','')}",
                                           disp, reason),
-                                  tags=((tag,) if tag else ()))
+                                  tags=(((tag,) if tag else ())
+                                        + (('music',) if cue_has_music(cue)
+                                           else ())))
 
                 _cue_passes_filter = cue_passes_ocr_filter   # module-level, tested
 
