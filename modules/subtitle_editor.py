@@ -37,6 +37,11 @@ from .utils import (
     get_all_streams,
     scaled_geometry, scaled_minsize, ask_open_file, ask_save_file,
     center_window_on_parent,
+    # ⚠️ These read/write BOTH prefs stores. Do not reach for app._prefs
+    # instead — the main app never sets it, so a tool that trusts it starts
+    # from defaults every launch, and writing one store only is what made the
+    # Fix-ALL-CAPS setting silently do nothing (3.19.3).
+    load_module_prefs, save_module_prefs,
 )
 from .subtitle_filters import (
     parse_srt, write_srt, srt_ts_to_ms, ms_to_srt_ts,
@@ -1361,12 +1366,47 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # duplicated filter list is the exact failure the shared panel
                 # was built to end (see its module docstring).
                 from .subtitle_filter_panel import SubtitleFilterPanel
+
+                # ⚠️ Holder, not the name directly: SubtitleFilterPanel calls
+                # on_change from inside __init__ (via _refresh_button), so
+                # `filter_panel` is not bound yet on the first call. Referencing
+                # it there raises NameError, which the except below would
+                # swallow — leaving a save path that looks wired up and isn't.
+                _panel = []
+
+                def _save_filter_prefs():
+                    """Persist the tick boxes the moment they change.
+
+                    ⚠️ Saved on CHANGE, not on close. This monitor can be
+                    destroyed at any point — Close, Load into Editor, or the
+                    window being shut mid-OCR — and a save-on-close would be
+                    skipped by most of those paths. Tony: "the filter selects
+                    don't persist between file loads" (2026-09-13).
+
+                    ⚠️ save_module_prefs writes BOTH stores. Writing one leaves
+                    the other stale, which is how a Fix-ALL-CAPS tick could be
+                    set in one place and read back as off in another (3.19.3).
+                    """
+                    if not _panel:
+                        return          # first call, from inside __init__
+                    try:
+                        prefs = load_module_prefs('subtitle_editor') or {}
+                        prefs['ocr_filters'] = _panel[0].get_prefs()
+                        save_module_prefs('subtitle_editor', prefs)
+                    except Exception:
+                        pass        # a prefs failure must never break the pane
+
+                _saved_filters = (load_module_prefs('subtitle_editor')
+                                  or {}).get('ocr_filters', {})
                 filter_panel = SubtitleFilterPanel(
                     mon, app, tool_f, side='right',
+                    saved=_saved_filters,
+                    on_change=_save_filter_prefs,
                     title="OCR Post-Processing Filters",
                     blurb=("Applied to the cues below, with the bitmaps still\n"
                            "attached — check the result and edit by hand\n"
                            "before saving."))
+                _panel.append(filter_panel)
                 apply_filters_btn = ttk.Button(
                     tool_f, text="Apply Filters", state='disabled',
                     command=lambda: _apply_filters())
@@ -1700,6 +1740,34 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     status_label.configure(
                         text=f"Filters applied — {before_n} → {len(cues)} "
                              f"cues{warn}")
+
+                def _flush_cues_to_tmp():
+                    """Re-write the temp .srt from the CURRENT cue list.
+
+                    ⚠️⚠️ THE BUG THIS EXISTS TO KILL. tmp_srt is written ONCE,
+                    the moment OCR finishes, before the review pane can be
+                    touched. Save then did `shutil.copy2(tmp_srt.name, ...)` and
+                    Load into Editor re-read the same file — so everything done
+                    in the review pane was discarded: applied filters, and every
+                    inline edit. Silently, and with a "Saved:" confirmation.
+
+                    Tony found it through the filters (2026-09-13) because that
+                    is a bulk visible change. A single retyped cue had been
+                    vanishing exactly the same way and looked like it worked.
+
+                    ⚠️ _end_inline(True) FIRST. An edit still open in the
+                    overlay has not reached the cue dict yet, so flushing
+                    without committing loses the very cue he is looking at.
+
+                    ⚠️ Must be called by EVERY path that consumes tmp_srt —
+                    Save, Load into Editor, and the partial/cancel versions of
+                    both. A new consumer that forgets reintroduces the bug in
+                    its most deniable form: correct-looking output, no error.
+                    """
+                    _end_inline(True)
+                    cues_now = ocr_result[0]
+                    if cues_now:
+                        write_srt_file(cues_now, tmp_srt.name)
 
                 def _undo_filters():
                     """Restore the snapshot taken before the last Apply."""
@@ -2121,6 +2189,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                 write_srt_file(ocr_cues, tmp_srt.name)
 
                                 def _save_partial():
+                                    _flush_cues_to_tmp()
                                     video_dir = os.path.dirname(video_path)
                                     video_stem = Path(video_path).stem
                                     default_name = f"{video_stem}.{ocr_lang}.partial.srt"
@@ -2142,6 +2211,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                                 f"Failed to save:\n{e}", parent=mon)
 
                                 def _load_partial():
+                                    _flush_cues_to_tmp()
                                     mon.destroy()
                                     with open(tmp_srt.name, 'r', encoding='utf-8',
                                               errors='replace') as f:
@@ -2229,6 +2299,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                             apply_filters_btn.configure(state='normal')
 
                             def _load_into_editor():
+                                _flush_cues_to_tmp()
                                 mon.destroy()
                                 with open(tmp_srt.name, 'r', encoding='utf-8',
                                           errors='replace') as f:
@@ -2262,6 +2333,11 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
 
                             def _save_srt():
                                 """Save OCR'd SRT alongside the video file."""
+                                # ⚠️ Must flush the review pane's work into the
+                                # temp file first — see _flush_cues_to_tmp.
+                                # Without this, Save writes the pre-review OCR
+                                # and reports success.
+                                _flush_cues_to_tmp()
                                 video_dir = os.path.dirname(video_path)
                                 video_stem = Path(video_path).stem
                                 default_name = f"{video_stem}.{ocr_lang}.srt"
