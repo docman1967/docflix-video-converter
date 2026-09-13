@@ -96,6 +96,95 @@ def test_write_srt_skips_empties_and_renumbers():
         assert len(lines) >= 3, f"blank cue leaked: {block!r}"
 
 
+# ── Filtering and empty-removal ──────────────────────────────────────────────
+# ⚠️ Tony's two concerns, verbatim: "without losing the bitmaps or causing the
+# cues to get out of order". These pin both.
+
+from modules.subtitle_editor import (            # noqa: E402
+    cue_passes_ocr_filter, drop_empty_cues,
+    FILTER_ALL, FILTER_FLAGGED, FILTER_EMPTY, FILTER_EDITED)
+
+
+def _review_cues():
+    return [
+        {'index': 1, 'start': 'a', 'end': 'b', 'text': 'one',   'img': '/t/1.bmp'},
+        {'index': 2, 'start': 'a', 'end': 'b', 'text': '',      'img': '/t/2.bmp'},
+        {'index': 3, 'start': 'a', 'end': 'b', 'text': 'thr|ee', 'img': '/t/3.bmp'},
+        {'index': 4, 'start': 'a', 'end': 'b', 'text': 'four',  'img': '/t/4.bmp',
+         'edited': True},
+        {'index': 5, 'start': 'a', 'end': 'b', 'text': '   ',   'img': '/t/5.bmp'},
+    ]
+
+
+def test_filter_all_shows_everything():
+    cues = _review_cues()
+    assert all(cue_passes_ocr_filter(c, FILTER_ALL) for c in cues)
+
+
+def test_filter_selects_the_right_cues():
+    cues = _review_cues()
+    empty = [i for i, c in enumerate(cues)
+             if cue_passes_ocr_filter(c, FILTER_EMPTY)]
+    assert empty == [1, 4], empty
+    edited = [i for i, c in enumerate(cues)
+              if cue_passes_ocr_filter(c, FILTER_EDITED)]
+    assert edited == [3], edited
+    flagged = [i for i, c in enumerate(cues)
+               if cue_passes_ocr_filter(c, FILTER_FLAGGED)]
+    assert flagged == [1, 2, 4], flagged      # 2 empties + the '|' junk cue
+
+
+def test_filtering_never_mutates_cues():
+    cues = _review_cues()
+    import copy
+    before = copy.deepcopy(cues)
+    for mode in (FILTER_ALL, FILTER_FLAGGED, FILTER_EMPTY, FILTER_EDITED):
+        for c in cues:
+            cue_passes_ocr_filter(c, mode)
+    assert cues == before, "filtering altered the cue list"
+
+
+def test_filtered_view_maps_back_to_true_indices():
+    """⚠️ The order concern. A filtered view shows rows 0,1,2 — but they must
+    map to the ORIGINAL cue indices, or an edit lands on the wrong cue."""
+    cues = _review_cues()
+    view = [(i, c) for i, c in enumerate(cues)
+            if cue_passes_ocr_filter(c, FILTER_FLAGGED)]
+    assert [i for i, _ in view] == [1, 2, 4]
+    # editing the 2nd visible row must hit cue 2, not cue 1
+    true_idx = view[1][0]
+    cues[true_idx]['text'] = 'fixed'
+    assert cues[2]['text'] == 'fixed'
+    assert cues[1]['text'] == ''          # untouched
+    assert cues[4]['text'] == '   '       # untouched
+
+
+def test_drop_empty_preserves_order_and_bitmaps():
+    cues = _review_cues()
+    imgs_before = [c['img'] for c in cues if (c.get('text') or '').strip()]
+    texts_before = [c['text'] for c in cues if (c.get('text') or '').strip()]
+    gone = drop_empty_cues(cues)
+    assert gone == 2, gone
+    assert [c['text'] for c in cues] == texts_before, "order changed"
+    assert [c['img'] for c in cues] == imgs_before, "bitmap lost or remapped"
+    assert [c['index'] for c in cues] == [1, 2, 3], "not renumbered contiguously"
+
+
+def test_drop_empty_is_in_place():
+    """⚠️ The caller holds this exact list (ocr_result[0]); rebinding would
+    leave every other reference pointing at the old one."""
+    cues = _review_cues()
+    same = cues
+    drop_empty_cues(cues)
+    assert same is cues and len(same) == 3
+
+
+def test_drop_empty_on_clean_list_is_a_noop():
+    cues = [{'index': 1, 'text': 'a'}, {'index': 2, 'text': 'b'}]
+    assert drop_empty_cues(cues) == 0
+    assert [c['text'] for c in cues] == ['a', 'b']
+
+
 if __name__ == '__main__':
     fails = 0
     for name, fn in sorted(globals().items()):

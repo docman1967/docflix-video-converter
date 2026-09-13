@@ -363,6 +363,49 @@ _OCR_JUNK_CHARS = set('|\\~^¤¶×÷_{}')
 # noise fragments. MEASURED: 24 of 135,847 real cues (0.018%), e.g. 'I...'.
 _ALNUM_RE = re.compile(r'[^0-9A-Za-zÀ-ÿ]')
 
+# OCR review list filters. ⚠️ These are a VIEW the user chooses, not the tool
+# deciding what to show — the propose-never-filter rule in
+# docs/OCR_REVIEW_PANE.md is about the tool hiding cues on its own initiative.
+# Whenever a filter is active the count label says "showing N of M", because a
+# filtered list that looks like the whole list is how you conclude a cue does
+# not exist when it is merely out of view.
+FILTER_ALL = 'All cues'
+FILTER_FLAGGED = 'Flagged only'
+FILTER_EMPTY = 'Empty only'
+FILTER_EDITED = 'Edited only'
+OCR_FILTERS = (FILTER_ALL, FILTER_FLAGGED, FILTER_EMPTY, FILTER_EDITED)
+
+
+def cue_passes_ocr_filter(cue, mode):
+    """Does `cue` belong in the list under `mode`? Module level to stay testable."""
+    if mode == FILTER_FLAGGED:
+        return flag_ocr_cue(cue)[0] is not None
+    if mode == FILTER_EMPTY:
+        return not (cue.get('text') or '').strip()
+    if mode == FILTER_EDITED:
+        return bool(cue.get('edited'))
+    return True          # FILTER_ALL and anything unrecognised: show it
+
+
+def drop_empty_cues(cues):
+    """Remove textless cues IN PLACE and renumber. Returns how many went.
+
+    ⚠️ In place (`cues[:] = kept`) because the caller holds this exact list
+    object — ocr_result[0] — and rebinding a local would leave every other
+    reference pointing at the old one.
+
+    ⚠️ Order is preserved: a filtered rebuild of the list keeps original
+    sequence, and 'index' is renumbered 1..N afterwards so the # column stays
+    contiguous. Nothing here touches 'img', so bitmaps are untouched for the
+    cues that remain.
+    """
+    before = len(cues)
+    kept = [c for c in cues if (c.get('text') or '').strip()]
+    cues[:] = kept
+    for n, c in enumerate(cues, 1):
+        c['index'] = n
+    return before - len(cues)
+
 
 def flag_ocr_cue(cue):
     """Advisory review flag for one OCR cue. Returns (tag, reason) or (None,'').
@@ -1245,11 +1288,32 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 cue_scroll.grid(row=0, column=1, sticky='ns')
                 cue_tree.configure(yscrollcommand=cue_scroll.set)
 
+                # ── Filter / tidy row, under the list ──
+                tool_f = ttk.Frame(cue_frame)
+                tool_f.grid(row=1, column=0, columnspan=2, sticky='ew',
+                            pady=(4, 0))
+                ttk.Label(tool_f, text="Show:").pack(side='left')
+                filter_var = tk.StringVar(value=FILTER_ALL)
+                filter_box = ttk.Combobox(tool_f, textvariable=filter_var,
+                                          values=OCR_FILTERS, state='readonly',
+                                          width=14)
+                filter_box.pack(side='left', padx=(4, 8))
+                filter_count = ttk.Label(tool_f, text="", foreground='gray')
+                filter_count.pack(side='left')
+                remove_empty_btn = ttk.Button(
+                    tool_f, text="Remove Empty Cues", state='disabled',
+                    command=lambda: _remove_empty_cues())
+                remove_empty_btn.pack(side='right')
+                # Rebuild on change; the handler stores true cue indices, so
+                # switching filters can never reorder or mis-target a cue.
+                filter_box.bind('<<ComboboxSelected>>',
+                                lambda e: _rebuild_cue_tree())
+
                 # Set once OCR finishes — telling someone how to edit while
                 # the list is still filling would be telling them to do
                 # something that does not work yet.
                 hint_label = ttk.Label(cue_frame, text="", foreground='gray')
-                hint_label.grid(row=1, column=0, columnspan=2, sticky='w',
+                hint_label.grid(row=2, column=0, columnspan=2, sticky='w',
                                 pady=(3, 0))
 
                 # ── Review: click a cue, see the bitmap it was read from ──
@@ -1437,22 +1501,42 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                           disp, reason),
                                   tags=((tag,) if tag else ()))
 
+                _cue_passes_filter = cue_passes_ocr_filter   # module-level, tested
+
                 def _rebuild_cue_tree():
                     """Repopulate the list from the finished cue list.
 
                     Live rows are a running commentary; this is the reviewable
                     record. Rebuilding also brings in the empty-OCR cues, which
                     the live view deliberately skips as ghost/noise.
+
+                    ⚠️ _row_cue always stores the cue's TRUE index in
+                    ocr_result[0], never the row's position. That is what keeps
+                    editing correct while a filter is active — a filtered view
+                    shows rows 1,2,3 but they may be cues 7,19,204, and an edit
+                    must land on the cue, not the row.
+
+                    ⚠️ Closes any open inline editor first. Rebuilding
+                    invalidates every tree item id, so an editor left open
+                    would commit into a row that no longer exists.
                     """
+                    _end_inline(True)
                     cues = ocr_result[0]
                     if not cues:
-                        return
+                        return 0
+                    mode = filter_var.get()
                     for item in cue_tree.get_children():
                         cue_tree.delete(item)
                     _row_cue.clear()
                     _row_bitmap.clear()
                     flagged = 0
+                    shown = 0
                     for i, cue in enumerate(cues):
+                        if _flag_cue(cue)[0]:
+                            flagged += 1
+                        if not _cue_passes_filter(cue, mode):
+                            continue
+                        shown += 1
                         item = cue_tree.insert('', 'end', values=())
                         _row_cue[item] = i
                         _row_bitmap[item] = (cue.get('img'),
@@ -1460,9 +1544,52 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                              cue.get('start', ''),
                                              cue.get('end', ''))
                         _refresh_row(item, i)
-                        if _flag_cue(cue)[0]:
-                            flagged += 1
+                    # ⚠️ Say plainly when rows are being hidden. A filtered list
+                    # that looks like the whole list is how you conclude a cue
+                    # does not exist when it is merely out of view.
+                    if mode != FILTER_ALL:
+                        filter_count.configure(
+                            text=f"showing {shown} of {len(cues)}")
+                    else:
+                        filter_count.configure(text=f"{len(cues)} cues")
                     return flagged
+
+                def _remove_empty_cues():
+                    """Drop cues that produced no text. Destructive, on request.
+
+                    ⚠️ Only ever called from the button — the tool never does
+                    this by itself. An empty cue is the one failure that is
+                    invisible in the output, so it is removed when Tony has
+                    looked at it and decided, not before.
+
+                    Order is preserved (list order is not disturbed by removal)
+                    and 'index' is renumbered so the # column stays sensible.
+                    The bitmaps of removed cues stay on disk until the window
+                    closes, which costs nothing and keeps undo cheap if it is
+                    ever wanted.
+                    """
+                    _end_inline(True)
+                    cues = ocr_result[0]
+                    if not cues:
+                        return
+                    empties = [c for c in cues
+                               if not (c.get('text') or '').strip()]
+                    if not empties:
+                        status_label.configure(text="No empty cues to remove")
+                        return
+                    if not messagebox.askyesno(
+                            "Remove Empty Cues",
+                            f"Remove {len(empties)} cue(s) that produced no "
+                            f"text?\n\nThey are already excluded from any "
+                            f"saved .srt — this only clears them from the "
+                            f"list.",
+                            parent=mon):
+                        return
+                    gone = drop_empty_cues(cues)
+                    _rebuild_cue_tree()
+                    status_label.configure(
+                        text=f"Removed {gone} empty cue(s) — "
+                             f"{len(cues)} remain")
 
                 # ── Log window ──
                 log_frame = ttk.LabelFrame(main_f, text="Log", padding=5)
@@ -1912,6 +2039,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                             hint_label.configure(
                                 text="Double-click a cue's text to edit · "
                                      "click another cue to commit · Esc cancels")
+                            remove_empty_btn.configure(state='normal')
 
                             def _load_into_editor():
                                 mon.destroy()
