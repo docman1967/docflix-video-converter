@@ -43,6 +43,7 @@ from .utils import (
     # Fix-ALL-CAPS setting silently do nothing (3.19.3).
     load_module_prefs, save_module_prefs,
 )
+from .ocr_suspect import check_width_ratio
 from .subtitle_filters import (
     parse_srt, write_srt, srt_ts_to_ms, ms_to_srt_ts,
     cue_char_len, cue_start_ms, cue_duration_ms, cue_cps,
@@ -478,6 +479,37 @@ def flag_ocr_cue(cue):
         return 'flag_junk', 'odd char ' + ''.join(sorted(junk))
     if len(_ALNUM_RE.sub('', text)) <= 1:
         return 'flag_short', 'almost no letters'
+
+    # ── Word-level checks (modules/ocr_suspect.py) ──
+    # ⚠️ Both of these NAME THE CORRECTION rather than just saying "suspect",
+    # which is what makes them checkable at a glance against the bitmap sitting
+    # beside the cue. Measured over 368,196 library cues:
+    #     one-substitution   1 in 209 cues, ~all genuine (Iike -> like)
+    #     function-word run  1 in 856 cues, 2 visible FPs in the top 25
+    # ⛔ A third check — plain "word not in the dictionary" — was built,
+    # measured at 1 in 54 cues with roughly 7% precision, and DROPPED. Its real
+    # hits were already caught by the substitution check and the rest was the
+    # show's own vocabulary (Aquaman, Hotchner, bollocks, nowt). Do not
+    # reintroduce it; see docs/OCR_REVIEW_PANE.md for the numbers.
+    try:
+        from .ocr_suspect import check_confusions, splits_into_words, words_of
+        from .subtitle_filters import get_names_db
+        names = get_names_db()
+        hits = check_confusions(text, names)
+        if hits:
+            w, fix = hits[0]
+            return 'flag_ocr', f'{w} -> {fix}?'
+        for w in words_of(text):
+            run = splits_into_words(w)
+            if run:
+                return 'flag_ocr', f'{w} -> {run}?'
+    except Exception:
+        pass        # a flag is advisory; never let it break the review pane
+
+    # Text far too short for how wide the bitmap was = a partial read.
+    img_w = cue.get('img_w') or 0
+    if img_w and check_width_ratio(text, img_w):
+        return 'flag_short', f'{img_w}px bitmap, {len(text.strip())} chars'
     return None, ''
 
 
@@ -1331,6 +1363,9 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 cue_tree.tag_configure('flag_empty', background='#ffe0e0')
                 cue_tree.tag_configure('flag_junk',  background='#fff0d0')
                 cue_tree.tag_configure('flag_short', background='#fff8d0')
+                # A named correction ("Iike -> like?"), so it reads as a
+                # suggestion to check rather than a warning to fear.
+                cue_tree.tag_configure('flag_ocr',   background='#e0eeff')
                 cue_scroll = ttk.Scrollbar(cue_frame, orient='vertical',
                                             command=cue_tree.yview)
                 cue_scroll.grid(row=0, column=1, sticky='ns')

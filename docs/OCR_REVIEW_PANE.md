@@ -116,3 +116,50 @@ contact sheet, not by a count).
 - ⚠️ PGS sources live in `~/downloads/dst`, **not** the library — the library is all subrip.
 - `docs/SUBTITLE_EDITOR_SCAN_MOVE_BUG.md` — separate bug queued for the same session:
   moving the scan dialog mid-scan loses the subtitle track list (Subtitle Editor, not OCR).
+
+---
+
+## ✅ BUILT 2026-09-13 — and what the measurements decided
+
+All three candidate checks from the list above were built and measured against
+**368,196 real cues from 397 of Tony's own subtitle files**, plus **1,278 live PGS cues** from
+Warehouse 13 S01E01. Two shipped, one was dropped on the evidence.
+
+| check | measured | verdict |
+|---|---|---|
+| **One-substitution confusion** (`Iike`→`like`) | **1 in 209 cues**, ~all genuine | ✅ shipped |
+| **Function-word run-together** (`foryou`→`for you`) | **1 in 856 cues**, 2 visible FPs in top 25 | ✅ shipped |
+| **Text too short for bitmap width** | **0 of 1,278** on a clean episode | ✅ shipped as a net |
+| ⛔ **Plain non-dictionary word** | **1 in 54 cues, ~7% precision** | ❌ **DROPPED** |
+
+### ⛔ Why the non-dictionary check was dropped — do not rebuild it
+
+It fires on 1 cue in 8 raw, and **1 in 54** even after excluding the names DB, contraction fragments
+and dropped-g dialect. The residue is the show's own invented vocabulary, which is exactly what a
+fixed wordlist cannot know: `Aquaman` (432), `UnSub` (341), `Superfriends` (240), `Hotchner`,
+`Quantico`, `TroubAlert` — plus ordinary words a 1922 wordlist lacks: `bloke`, `ahold`, `bollocks`,
+`nowt`, `superhero`, `backseat`, `handedly`.
+
+⭐ **The decisive measurement:** of the words it uniquely found (6,710 hits that the substitution
+check did *not* already catch), roughly **2 in 30 were real errors**. Its true positives were
+largely a *subset* of a check with 4x better precision.
+
+⚠️ A "hapax" refinement — flag only words occurring ONCE in the file, since a proper noun recurs and
+a misread is usually a one-off — improved it from 1-in-8 to 1-in-54 and still was not enough.
+
+⭐ **But it earned its keep on the way out.** Looking at its unique residue is what surfaced
+`Wejust` → `We just`, the missing-space failure that became the second shipped check.
+
+### ⚠️ The trap that cost a full measurement pass
+
+`load_names_db()` **rebinds** the module global, so `from .subtitle_filters import _names_db`
+captures an empty set that never updates. The first pass over 371k cues ran with **no names DB at
+all** and "corrected" real surnames (`Arnie`→`Amie`, `Henning`→`Heming`). Fixed by adding
+`get_names_db()`; ⛔ **never import that global directly.**
+
+### ⚠️ The constraint that makes the split check work
+
+"Splits into any two dictionary words" measures at **1 in 67 and is almost entirely wrong** —
+`Aquaman`→`Aqua man`, `Batmobile`→`Bat mobile`, `thrusters`→`thrust ers`. Restricting the first part
+to a **closed set of function words** (which never begin an English compound) takes it to 1 in 856.
+⛔ Do not add `over`/`under`/`out`/`back` to that set.

@@ -243,6 +243,23 @@ def get_names_db_count():
     return len(_names_db)
 
 
+def get_names_db():
+    """Return the loaded names set — ALWAYS call this, never import the global.
+
+    ⚠️⚠️ `load_names_db()` REBINDS the module global (`_names_db = names`), so
+    `from .subtitle_filters import _names_db` captures whatever the set was at
+    import time — an EMPTY one — and it never updates. The caller then looks up
+    every name in an empty set, every check silently passes, and the code reads
+    as if the names DB is being consulted.
+
+    Cost the OCR suspect-flag work a full measurement pass on 371k cues before
+    it was spotted (2026-09-13): real surnames like `Arnie` and `Henning` were
+    being "corrected" into other words, which is exactly what the DB is there
+    to prevent.
+    """
+    return _names_db
+
+
 # ═══════════════════════════════════════════════════════════════════
 # SRT Parsing / Writing
 # ═══════════════════════════════════════════════════════════════════
