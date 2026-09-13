@@ -1743,6 +1743,57 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     ed.bind('<Escape>', lambda e: (_end_inline(False), 'break')[1])
                     ed.bind('<Control-Return>',
                             lambda e: (_end_inline(True), 'break')[1])
+
+                    def _paste_over_selection(_event=None):
+                        """Paste REPLACES the selection, as everywhere else.
+
+                        ⚠️ Tk's default Text paste inserts at the cursor and
+                        LEAVES THE SELECTION IN PLACE. Measured on Tk 8.6.14:
+                        selecting "quick" in "the quick brown fox" and pasting
+                        "REPLACED" gives "the quickREPLACED brown fox".
+                        Highlight-and-replace is muscle memory from every other
+                        editor, so this reads as the app eating your paste.
+                        ⚠️ Cut is NOT affected — only paste. Tony, 2026-09-13.
+
+                        ⚠️ clipboard_get() RAISES when the clipboard is empty
+                        or holds non-text (an image copied from a browser), so
+                        it must be guarded — an unhandled TclError here would
+                        propagate out of the Tk callback.
+
+                        ⚠️⚠️ autoseparators MUST be turned off around the pair.
+                        edit_separator() on its own is not enough: the Text
+                        widget inserts its OWN undo separator between the
+                        delete and the insert, so Ctrl-Z after a paste undid
+                        only the insert and left the text with the selection
+                        deleted — worse than either outcome. Caught by testing
+                        undo, not by reading.
+                        """
+                        try:
+                            data = ed.clipboard_get()
+                        except Exception:
+                            return 'break'      # nothing pasteable; do nothing
+                        if not data:
+                            return 'break'
+                        ed.edit_separator()
+                        try:
+                            auto = ed.cget('autoseparators')
+                        except Exception:
+                            auto = True
+                        ed.configure(autoseparators=False)
+                        try:
+                            if ed.tag_ranges('sel'):
+                                ed.delete('sel.first', 'sel.last')
+                            ed.insert('insert', data)
+                        finally:
+                            ed.configure(autoseparators=auto)
+                        ed.edit_separator()
+                        return 'break'          # stop Tk's own paste running too
+
+                    # ⚠️ Bind the VIRTUAL event, not <Control-v>. <<Paste>> is
+                    # what Ctrl-V, Shift-Insert and the menu all raise, so one
+                    # binding covers every route; binding the keystroke alone
+                    # would leave the others still broken.
+                    ed.bind('<<Paste>>', _paste_over_selection)
                     _inline['w'] = ed
                     _inline['item'] = item
 
