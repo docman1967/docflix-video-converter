@@ -28,11 +28,14 @@ def _cue(text, **kw):
 
 
 def test_empty_cue_is_flagged():
+    # No 'img' and no 'blank' key -> treated as a blank frame.
     tag, reason = flag_ocr_cue(_cue(''))
     assert tag == 'flag_empty', tag
-    assert 'no text' in reason
+    assert 'blank' in reason
     # whitespace-only counts as empty too
     assert flag_ocr_cue(_cue('   \n  '))[0] == 'flag_empty'
+    # ...but the same empty text WITH a bitmap behind it is the other event.
+    assert flag_ocr_cue(_cue('', img='/t/1.bmp'))[0] == 'flag_lost'
 
 
 def test_ordinary_text_is_not_flagged():
@@ -106,13 +109,19 @@ from modules.subtitle_editor import (            # noqa: E402
 
 
 def _review_cues():
+    """⚠️ Cue 2 is a BLANK frame (no bitmap was ever written) and cue 5 is an
+    OCR MISS (a bitmap with ink that read as nothing). Both are 'empty'; only
+    the first is safe to discard. Keeping both here is the point of the
+    fixture — a test set with only blanks cannot catch the dangerous case."""
     return [
         {'index': 1, 'start': 'a', 'end': 'b', 'text': 'one',   'img': '/t/1.bmp'},
-        {'index': 2, 'start': 'a', 'end': 'b', 'text': '',      'img': '/t/2.bmp'},
+        {'index': 2, 'start': 'a', 'end': 'b', 'text': '',      'img': None,
+         'blank': True},
         {'index': 3, 'start': 'a', 'end': 'b', 'text': 'thr|ee', 'img': '/t/3.bmp'},
         {'index': 4, 'start': 'a', 'end': 'b', 'text': 'four',  'img': '/t/4.bmp',
          'edited': True},
-        {'index': 5, 'start': 'a', 'end': 'b', 'text': '   ',   'img': '/t/5.bmp'},
+        {'index': 5, 'start': 'a', 'end': 'b', 'text': '   ',   'img': '/t/5.bmp',
+         'blank': False},
     ]
 
 
@@ -161,13 +170,12 @@ def test_filtered_view_maps_back_to_true_indices():
 
 def test_drop_empty_preserves_order_and_bitmaps():
     cues = _review_cues()
-    imgs_before = [c['img'] for c in cues if (c.get('text') or '').strip()]
-    texts_before = [c['text'] for c in cues if (c.get('text') or '').strip()]
     gone = drop_empty_cues(cues)
-    assert gone == 2, gone
-    assert [c['text'] for c in cues] == texts_before, "order changed"
-    assert [c['img'] for c in cues] == imgs_before, "bitmap lost or remapped"
-    assert [c['index'] for c in cues] == [1, 2, 3], "not renumbered contiguously"
+    assert gone == 1, gone                      # only the blank frame
+    assert [c['index'] for c in cues] == [1, 2, 3, 4], "not renumbered"
+    assert [c['img'] for c in cues] == ['/t/1.bmp', '/t/3.bmp',
+                                        '/t/4.bmp', '/t/5.bmp'], "bitmap lost"
+    assert [c['text'] for c in cues] == ['one', 'thr|ee', 'four', '   ']
 
 
 def test_drop_empty_is_in_place():
@@ -176,13 +184,65 @@ def test_drop_empty_is_in_place():
     cues = _review_cues()
     same = cues
     drop_empty_cues(cues)
-    assert same is cues and len(same) == 3
+    assert same is cues and len(same) == 4
 
 
 def test_drop_empty_on_clean_list_is_a_noop():
     cues = [{'index': 1, 'text': 'a'}, {'index': 2, 'text': 'b'}]
     assert drop_empty_cues(cues) == 0
     assert [c['text'] for c in cues] == ['a', 'b']
+
+
+# ── ⭐⭐ Blank frame vs lost dialogue ────────────────────────────────────────
+# Tony, 2026-09-13: "So are you saying that an empty cue could actually have
+# something in it and OCR just didn't find anything?" Yes — and these pin the
+# difference, because auto-removing empties would otherwise hide exactly that.
+
+from modules.subtitle_editor import is_blank_frame        # noqa: E402
+
+
+def test_blank_frame_vs_failed_ocr():
+    blank = {'text': '', 'img': None, 'blank': True}
+    lost = {'text': '', 'img': '/t/9.bmp', 'blank': False}
+    assert is_blank_frame(blank) is True
+    assert is_blank_frame(lost) is False
+    assert is_blank_frame({'text': 'hello', 'img': None}) is False
+
+
+def test_failed_ocr_is_never_auto_dropped():
+    """⚠️⚠️ THE ONE THAT MATTERS. A bitmap with ink that OCR'd to nothing is a
+    missing line of dialogue. Auto-removal must not take it."""
+    cues = [{'index': 1, 'text': 'real', 'img': '/t/1.bmp', 'blank': False},
+            {'index': 2, 'text': '', 'img': None, 'blank': True},
+            {'index': 3, 'text': '', 'img': '/t/3.bmp', 'blank': False}]
+    drop_empty_cues(cues)
+    survivors = [c['img'] for c in cues]
+    assert '/t/3.bmp' in survivors, "LOST DIALOGUE WAS SILENTLY DROPPED"
+    assert len(cues) == 2
+
+
+def test_the_two_empties_flag_differently():
+    blank = {'text': '', 'img': None, 'blank': True}
+    lost = {'text': '', 'img': '/t/9.bmp', 'blank': False}
+    assert flag_ocr_cue(blank)[0] == 'flag_empty'
+    tag, reason = flag_ocr_cue(lost)
+    assert tag == 'flag_lost', tag
+    assert 'OCR read nothing' in reason
+
+
+def test_missing_blank_key_errs_toward_keeping():
+    """Old cue dicts have no 'blank'. Guessing wrong must not delete data."""
+    legacy_with_bitmap = {'text': '', 'img': '/t/1.bmp'}
+    assert is_blank_frame(legacy_with_bitmap) is False
+    cues = [dict(legacy_with_bitmap, index=1)]
+    assert drop_empty_cues(cues) == 0, "legacy cue with a bitmap was dropped"
+
+
+def test_blank_only_false_restores_old_behaviour():
+    cues = [{'index': 1, 'text': 'a', 'img': '/t/1.bmp'},
+            {'index': 2, 'text': '', 'img': '/t/2.bmp', 'blank': False}]
+    assert drop_empty_cues(cues, blank_only=False) == 1
+    assert len(cues) == 1
 
 
 if __name__ == '__main__':

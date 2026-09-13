@@ -1172,12 +1172,17 @@ def filter_merge_duplicates(cues, max_gap_ms=200):
             group_end = cues[j]['end']
             j += 1
 
-        result.append({
-            'index': len(result) + 1,
-            'start': group_start,
-            'end': group_end,
-            'text': group_text,
-        })
+        # ⚠️ Build from the FIRST cue of the group, not from a bare dict. Cues
+        # can carry keys this filter knows nothing about — the OCR review pane
+        # attaches 'img', the bitmap the text was read from — and constructing
+        # a fresh dict silently drops them. This was the ONLY one of the 16
+        # filters that did, found by running them all against a cue with an
+        # extra key rather than by reading them.
+        result.append({**cues[i],
+                       'index': len(result) + 1,
+                       'start': group_start,
+                       'end': group_end,
+                       'text': group_text})
         i = j
 
     return result

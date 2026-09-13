@@ -387,8 +387,39 @@ def cue_passes_ocr_filter(cue, mode):
     return True          # FILTER_ALL and anything unrecognised: show it
 
 
-def drop_empty_cues(cues):
+def is_blank_frame(cue):
+    """True when this cue had NO INK on the frame — nothing was ever there.
+
+    ⭐⭐ THE DISTINCTION THE REVIEW PANE TURNS ON. "Empty" is two different
+    events wearing one face:
+
+      * the frame was blank (a hold/transition frame). Nothing lost. Common.
+      * a bitmap WAS rendered and Tesseract returned nothing anyway. That is a
+        line of dialogue which will silently not exist in the finished .srt —
+        no error, no warning, discoverable only by watching the episode.
+
+    subtitle_ocr separates them at the source: every blank exit returns
+    img_path=None, while the OCR-failed path has already written its bitmap to
+    disk. So `empty and no img` is safe to discard, and `empty and has img` is
+    the one that must never be swept away with it.
+
+    ⚠️ Falls back to "not blank" when 'blank' is absent (a cue from an older
+    run, or a non-review list). Erring toward KEEPING is the safe direction.
+    """
+    if (cue.get('text') or '').strip():
+        return False
+    if 'blank' in cue:
+        return bool(cue['blank'])
+    return not cue.get('img')
+
+
+def drop_empty_cues(cues, blank_only=True):
     """Remove textless cues IN PLACE and renumber. Returns how many went.
+
+    ⚠️⚠️ By default drops ONLY blank frames (see is_blank_frame), never an
+    empty cue whose bitmap had ink — that is a real missing line, and sweeping
+    it out restores exactly the invisibility this pane exists to remove.
+    Pass blank_only=False for the old indiscriminate behaviour.
 
     ⚠️ In place (`cues[:] = kept`) because the caller holds this exact list
     object — ocr_result[0] — and rebinding a local would leave every other
@@ -400,7 +431,10 @@ def drop_empty_cues(cues):
     cues that remain.
     """
     before = len(cues)
-    kept = [c for c in cues if (c.get('text') or '').strip()]
+    if blank_only:
+        kept = [c for c in cues if not is_blank_frame(c)]
+    else:
+        kept = [c for c in cues if (c.get('text') or '').strip()]
     cues[:] = kept
     for n, c in enumerate(cues, 1):
         c['index'] = n
@@ -427,9 +461,13 @@ def flag_ocr_cue(cue):
     """
     text = (cue.get('text') or '')
     if not text.strip():
-        # Highest-value check: a bitmap that produced no text at all. It is
-        # invisible in the output, so this is the only place it can be caught.
-        return 'flag_empty', 'no text from bitmap'
+        # ⭐ Highest-value check in the file — but only for the half of it that
+        # is actually a failure. A blank frame is normal and gets dropped; a
+        # frame that HAD ink and still produced no text is a line about to go
+        # missing from the .srt, invisible everywhere else. See is_blank_frame.
+        if is_blank_frame(cue):
+            return 'flag_empty', 'blank frame'
+        return 'flag_lost', 'BITMAP HAD TEXT — OCR read nothing'
     junk = {c for c in text if c in _OCR_JUNK_CHARS}
     if junk:
         return 'flag_junk', 'odd char ' + ''.join(sorted(junk))
@@ -1280,6 +1318,11 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # ⚠️ Colour only — flagged rows stay in the list and stay
                 # selectable. The flag is a hint about where to look first,
                 # never a filter (docs/OCR_REVIEW_PANE.md).
+                # flag_lost is the loudest on purpose: a bitmap that had text
+                # and OCR'd to nothing is the only failure here with no other
+                # symptom. Blank frames are normally dropped before display.
+                cue_tree.tag_configure('flag_lost',  background='#ff9d9d',
+                                       foreground='#000000')
                 cue_tree.tag_configure('flag_empty', background='#ffe0e0')
                 cue_tree.tag_configure('flag_junk',  background='#fff0d0')
                 cue_tree.tag_configure('flag_short', background='#fff8d0')
@@ -1300,8 +1343,11 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 filter_box.pack(side='left', padx=(4, 8))
                 filter_count = ttk.Label(tool_f, text="", foreground='gray')
                 filter_count.pack(side='left')
+                # Blank frames go automatically; whatever is left is a bitmap
+                # OCR couldn't read, so the label says "unreadable", not
+                # "empty" — the button discards real subtitles.
                 remove_empty_btn = ttk.Button(
-                    tool_f, text="Remove Empty Cues", state='disabled',
+                    tool_f, text="Discard Unreadable", state='disabled',
                     command=lambda: _remove_empty_cues())
                 remove_empty_btn.pack(side='right')
                 # Rebuild on change; the handler stores true cue indices, so
@@ -1555,18 +1601,20 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     return flagged
 
                 def _remove_empty_cues():
-                    """Drop cues that produced no text. Destructive, on request.
+                    """Drop the remaining empty cues. Destructive, on request.
 
-                    ⚠️ Only ever called from the button — the tool never does
-                    this by itself. An empty cue is the one failure that is
-                    invisible in the output, so it is removed when Tony has
-                    looked at it and decided, not before.
+                    ⚠️⚠️ Blank frames are ALREADY removed automatically when
+                    OCR finishes. So anything this button can still see is an
+                    empty cue whose bitmap HAD TEXT ON IT — a subtitle Tesseract
+                    failed to read, which will not exist in the saved .srt.
+                    That is why the confirmation says so in those words: the
+                    old wording ("already excluded from any saved .srt") was
+                    true and deeply misleading, because it made discarding a
+                    lost line sound like tidying up.
 
-                    Order is preserved (list order is not disturbed by removal)
-                    and 'index' is renumbered so the # column stays sensible.
-                    The bitmaps of removed cues stay on disk until the window
-                    closes, which costs nothing and keeps undo cheap if it is
-                    ever wanted.
+                    Order is preserved and 'index' is renumbered so the # column
+                    stays sensible. The bitmaps stay on disk until the window
+                    closes, which costs nothing.
                     """
                     _end_inline(True)
                     cues = ocr_result[0]
@@ -1575,20 +1623,25 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     empties = [c for c in cues
                                if not (c.get('text') or '').strip()]
                     if not empties:
-                        status_label.configure(text="No empty cues to remove")
+                        status_label.configure(
+                            text="No empty cues left — blanks are removed "
+                                 "automatically")
                         return
                     if not messagebox.askyesno(
-                            "Remove Empty Cues",
-                            f"Remove {len(empties)} cue(s) that produced no "
-                            f"text?\n\nThey are already excluded from any "
-                            f"saved .srt — this only clears them from the "
-                            f"list.",
-                            parent=mon):
+                            "Discard unreadable cues?",
+                            f"{len(empties)} cue(s) have a bitmap with text on "
+                            f"it that OCR could not read.\n\n"
+                            f"These are real subtitles that will be MISSING "
+                            f"from the saved file. Discarding them means "
+                            f"accepting the gap — you can also type the text "
+                            f"in by reading the bitmap.\n\n"
+                            f"Discard them anyway?",
+                            parent=mon, icon='warning', default='no'):
                         return
-                    gone = drop_empty_cues(cues)
+                    gone = drop_empty_cues(cues, blank_only=False)
                     _rebuild_cue_tree()
                     status_label.configure(
-                        text=f"Removed {gone} empty cue(s) — "
+                        text=f"Discarded {gone} unreadable cue(s) — "
                              f"{len(cues)} remain")
 
                 # ── Log window ──
@@ -2020,14 +2073,33 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                             # into a real .srt.
                             write_srt_file(ocr_cues, tmp_srt.name)
 
+                            # ── Automatic blank-frame removal ──
+                            # ⭐ Tony, 2026-09-13: "can we remove the empty cues
+                            # automatically? I can't see an instance where I
+                            # wouldn't want the empty cues removed for editing."
+                            # Done — but ONLY the frames that had no ink on
+                            # them. An empty cue whose bitmap DID have text is
+                            # a line that will silently not exist in the .srt,
+                            # and sweeping it out with the blanks would hide
+                            # the one failure this pane was built to surface.
+                            # See is_blank_frame for how the two are told apart.
+                            blanks = drop_empty_cues(ocr_cues)
+
                             # ── Hand over to the review pane ──
                             # Replace the running commentary with the
-                            # reviewable record: every cue including the
-                            # empties, each linked to its bitmap and its
-                            # position in the cue list, flags applied.
+                            # reviewable record: each cue linked to its bitmap
+                            # and its position in the cue list, flags applied.
                             flagged = _rebuild_cue_tree() or 0
-                            flag_txt = (f"  |  {flagged} to check"
-                                        if flagged else "")
+                            lost = sum(1 for c in ocr_cues
+                                       if not (c.get('text') or '').strip())
+                            bits = []
+                            if blanks:
+                                bits.append(f"{blanks} blank removed")
+                            if lost:
+                                bits.append(f"⚠ {lost} OCR MISS")
+                            if flagged:
+                                bits.append(f"{flagged} to check")
+                            flag_txt = ("  |  " + "  |  ".join(bits)) if bits else ""
                             status_label.configure(
                                 text=f"Done — {_real_cue_count(ocr_cues)} cues in "
                                      f"{elapsed_m}m {elapsed_s}s{flag_txt}")

@@ -500,7 +500,10 @@ def _ocr_overlay_approach(filepath, stream_index, language, tess_lang,
             # Crop to content bounding box
             bbox = img.getbbox()
             if not bbox:
-                return (start_s, end_s - start_s, '', frame_path)
+                # Nothing drawn on this frame. img_path=None marks it blank so
+                # the review pane can drop it without hiding a real OCR miss —
+                # see the matching note in _decode_and_ocr.
+                return (start_s, end_s - start_s, '', None)
             pad = 12
             x1 = max(0, bbox[0] - pad)
             y1 = max(0, bbox[1] - pad)
@@ -607,6 +610,11 @@ def _ocr_overlay_approach(filepath, stream_index, language, tess_lang,
         if for_review:
             cue['img'] = img_path
             cue['empty'] = not text
+            # ⭐ 'blank' means the frame had NO INK — safe to drop unseen.
+            # empty-but-not-blank means a bitmap was rendered and Tesseract
+            # still returned nothing: a subtitle that will silently not exist
+            # in the .srt. That one has to stay in front of the user.
+            cue['blank'] = not text and not img_path
         cues.append(cue)
     if for_review:
         cues.bitmap_dir = tmpdir
@@ -897,11 +905,16 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
             img_path = os.path.join(tmpdir, f'frame_{i+1:05d}.bmp')
             try:
                 # ── Sanity check ──
+                # ⚠️ A blank exit returns img_path=None, NOT the path. That is
+                # how the review pane tells "nothing was ever on this frame"
+                # apart from "there was text and OCR failed to read it" — the
+                # second is lost dialogue and must stay visible. Returning a
+                # path to a file that was never written would conflate them.
                 if w <= 0 or h <= 0 or w > 4096 or h > 4096:
-                    return (pts, dur, '', img_path)
+                    return (pts, dur, '', None)
                 expected = w * h
                 if expected > 4096 * 4096:
-                    return (pts, dur, '', img_path)
+                    return (pts, dur, '', None)
 
                 # ── Decode PGS RLE ──
                 pixels = bytearray(expected)
@@ -979,7 +992,7 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                 gray = (lum * a_arr).clip(0, 255).astype(np.uint8)
 
                 if gray.max() < 10:
-                    return (pts, dur, '', img_path)  # blank
+                    return (pts, dur, '', None)  # truly blank — no ink at all
 
                 img = Image.fromarray(gray.reshape(h, w), mode='L')
 
@@ -1084,6 +1097,10 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
             if for_review:
                 cue['img'] = img_path
                 cue['empty'] = not text
+                # See the matching note in _ocr_overlay_approach: 'blank' = no
+                # ink on the frame (droppable); empty-but-not-blank = OCR
+                # failed on real text and the line is about to go missing.
+                cue['blank'] = not text and not img_path
             cues.append(cue)
         if for_review:
             cues.bitmap_dir = tmpdir
