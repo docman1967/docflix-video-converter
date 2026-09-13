@@ -1821,6 +1821,23 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                              cue.get('start', ''),
                                              cue.get('end', ''))
                         _refresh_row(item, i)
+                    # ⭐ Back to the top. Tony, 2026-09-13: "When the OCR is
+                    # finished, can we move back to the top of the file?" The
+                    # live view scrolls to the BOTTOM as cues stream in, so the
+                    # finished list opened at the end of the episode — the
+                    # wrong place to start proofreading.
+                    # ⚠️ Every rebuild, not just completion: switching the Show
+                    # filter or applying post-processing replaces the list
+                    # wholesale, and leaving the scroll position from a list
+                    # that no longer exists lands you somewhere arbitrary.
+                    # Selecting row one also populates the bitmap panel, so the
+                    # pane opens ready to read rather than blank.
+                    kids = cue_tree.get_children()
+                    if kids:
+                        cue_tree.see(kids[0])
+                        cue_tree.selection_set(kids[0])
+                        cue_tree.focus(kids[0])
+
                     # ⚠️ Say plainly when rows are being hidden. A filtered list
                     # that looks like the whole list is how you conclude a cue
                     # does not exist when it is merely out of view.
