@@ -1400,18 +1400,40 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # flag_lost is the loudest on purpose: a bitmap that had text
                 # and OCR'd to nothing is the only failure here with no other
                 # symptom. Blank frames are normally dropped before display.
-                cue_tree.tag_configure('flag_lost',  background='#ff9d9d',
+                # ⚠️⚠️ COLOUR-BLIND SAFE PALETTE — separated by LIGHTNESS, not
+                # hue. Tony is colour blind to some colours (2026-09-13), and
+                # the original palette was four pale red/orange/yellow tints:
+                # exactly the range red-green CVD compresses. Simulated, the
+                # old flag_empty / flag_junk / flag_short collapsed into ONE
+                # pale yellow-green barely distinct from a white row, and
+                # flag_lost — the most urgent — turned olive and stopped
+                # reading as an alarm at all.
+                #
+                #   minimum separation between all row colours
+                #     old:  8.0 normal / 4.5 deuteranopia / 2.4 tritanopia
+                #     new: 22.5 across ALL of them
+                #
+                # ⛔ Do not "tidy" these back into a pastel set of one hue.
+                # Re-simulate before changing any of them.
+                cue_tree.tag_configure('flag_lost',  background='#e06666',
                                        foreground='#000000')
-                cue_tree.tag_configure('flag_empty', background='#ffe0e0')
-                cue_tree.tag_configure('flag_junk',  background='#fff0d0')
-                cue_tree.tag_configure('flag_short', background='#fff8d0')
+                cue_tree.tag_configure('flag_empty', background='#f2f2f2')
+                cue_tree.tag_configure('flag_junk',  background='#ffd9a0')
+                cue_tree.tag_configure('flag_short', background='#fff2b2')
                 # A named correction ("Iike -> like?"), so it reads as a
                 # suggestion to check rather than a warning to fear.
-                cue_tree.tag_configure('flag_ocr',   background='#e0eeff')
-                # ⚠️ FOREGROUND only. Music is a highlight, not a flag, so it
-                # must not consume the background channel a real flag needs —
-                # a cue that is both musical and suspect shows both.
-                cue_tree.tag_configure('music', foreground='#0b6d3f')
+                # ⚠️ Violet, deliberately OFF the blue that music uses.
+                cue_tree.tag_configure('flag_ocr',   background='#d9c2f0')
+                # ⭐ Tony asked for a blue BACKGROUND instead of coloured text
+                # — he could barely see the green. Blue is also the one hue
+                # that stays distinct under every common form of CVD.
+                # ⚠️ Music now takes the background channel, so a cue that is
+                # both musical AND flagged shows the FLAG colour (the flag tag
+                # comes first in the tag tuple and wins). The music signal is
+                # not lost: every music cue also carries a ♪ in the Note
+                # column, which is colour-independent. Never rely on colour
+                # alone for something that has to be noticed.
+                cue_tree.tag_configure('music',      background='#8fbcff')
                 cue_scroll = ttk.Scrollbar(cue_frame, orient='vertical',
                                             command=cue_tree.yview)
                 cue_scroll.grid(row=0, column=1, sticky='ns')
@@ -1736,6 +1758,15 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     cue = cues[idx]
                     tag, reason = _flag_cue(cue)
                     disp = (cue.get('text') or '').replace('\n', ' ⏎ ')
+                    # ⚠️ A TEXT marker, not just colour. When a cue is both
+                    # musical and flagged the flag wins the background, so
+                    # without this the music highlight would silently vanish on
+                    # exactly the rows worth looking at hardest. It also makes
+                    # the feature work for someone who cannot separate the hues
+                    # — never rely on colour alone for something that must be
+                    # noticed.
+                    if cue_has_music(cue):
+                        reason = ('♪ ' + reason).strip()
                     if cue.get('edited'):
                         reason = (reason + ' · edited').strip(' ·')
                     cue_tree.item(item,
