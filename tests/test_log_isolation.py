@@ -199,3 +199,29 @@ def test_the_sink_lets_a_dead_panel_fail_loudly():
         "the sink no longer checks the panel is alive")
     assert '_editor_log[0] = _editor_log_sink' in src, (
         "_log is being registered directly again — it cannot report failure")
+
+
+def test_trace_never_writes_to_the_main_encoder_log():
+    """⭐ Tony, 2026-09-14: "should there be output into the main Encoder log?"
+    No — and the fallback that put it there was not an edge case. He also said:
+    "The OCR window doesn't open until a media file is dropped into the
+    subtitle editor and it's scanned." So at drop time there IS no panel, by
+    construction, and every single drop was guaranteed to land in the encoder
+    log. A fallback that fires on the main path is not a fallback.
+
+    _trace now has exactly two destinations: stderr always (the durable record,
+    and the whole reason it exists) and the OCR monitor's own Log panel when
+    that window is open. A line with nowhere visible to go still reaches
+    logs/video_converter_*.log, which is where you look when diagnosing."""
+    src = _editor_source()
+    start = src.find('def _trace(msg')
+    assert start != -1
+    end = src.find('# ── Color tag names', start)
+    assert end != -1
+    body = src[start:end]
+    code = [ln for ln in body.splitlines()
+            if 'add_log' in ln and not ln.lstrip().startswith(('#', '⚠', '⭐'))
+            and '"""' not in ln]
+    # docstring lines mention add_log deliberately; only real calls matter
+    calls = [ln for ln in code if 'app.add_log(' in ln]
+    assert not calls, f"_trace writes to the main encoder log again: {calls}"

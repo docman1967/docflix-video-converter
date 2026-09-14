@@ -727,6 +727,27 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             which is the same failure it was built to catch.
             stderr is captured into logs/video_converter_*.log by
             run_converter.sh, and flushing makes it survive an abort.
+
+            ⭐ Tony, 2026-09-14: "should there be output into the main Encoder
+            log?" No. It went there because _trace also called app.add_log,
+            which writes to the MAIN window's panel — so the subtitle editor
+            narrated itself into the encoder's window.
+
+            ⚠️⚠️ AND IT WAS NOT AN EDGE CASE. Tony: "The OCR window doesn't open
+            until a media file is dropped into the subtitle editor and it's
+            scanned." So at drop time there is no panel yet, by construction —
+            every single drop was guaranteed to land in the encoder log. A
+            "fallback" that fires on the main path is not a fallback.
+
+            So there are exactly two destinations now, and no third:
+              - stderr, always, which is the durable record and the whole
+                reason this function exists;
+              - the OCR monitor's own Log panel, when that window is open.
+            A line with nowhere visible to go is not lost — it is in the log
+            file, which is where you look when diagnosing. That is better than
+            noise in a window belonging to another tool.
+
+            *level* is retained for call-site compatibility and is now unused.
             """
             try:
                 sys.stderr.write(f"[Docflix/SubEditor] {msg}\n")
@@ -748,13 +769,8 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             if sink is not None:
                 try:
                     sink(f"Subtitle Editor: {msg}")
-                    return
                 except Exception:
-                    pass          # window torn down mid-write — fall through
-            try:
-                app.add_log(f"Subtitle Editor: {msg}", level)
-            except Exception:
-                pass
+                    pass          # panel already gone — stderr above has it
 
         # ── Color tag names ──
         TAG_MODIFIED = 'modified'
