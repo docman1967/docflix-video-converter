@@ -161,8 +161,60 @@ def send_notification(title: str, message: str):
 # ── stream / logging redirectors ─────────────────────────────────────────────
 
 
+class _ThreadScopedStream(io.TextIOBase):
+    """Send ONE thread's writes to the GUI queue; everyone else's straight on.
+
+    ⚠️⚠️ WHY THIS EXISTS. sys.stdout / sys.stderr are PROCESS-GLOBAL, not
+    per-thread. QueueStream below says "attach inside the worker thread", which
+    was the intent — but a bare `sys.stderr = QueueStream(...)` redirects the
+    whole process. For the duration of a transcribe batch, every part of the
+    Suite that wrote to stderr landed in this window's Log panel, and nothing
+    reached logs/video_converter_*.log at all.
+
+    Tony saw the cosmetic half on 2026-09-14: "I'm running a whisper transcribe
+    batch and decided to launch the subtitle editor. I noticed the log output is
+    showing in the whisper app."
+
+    ⚠️ The SERIOUS half was invisible. subtitle_editor._trace() writes to stderr
+    precisely so crash diagnostics outlive the window dying — its own docstring
+    forbids the GUI logger for that reason. This redirect quietly turned it back
+    into a GUI-only logger, so an editor crash during a batch put its evidence
+    in a Tk widget that then died with the app. That instrumentation exists
+    because the vanishing-window bug cost two days for want of exactly that
+    trace.
+
+    ⚠️ Nesting is safe: with two workers running, the second wraps the first,
+    and a write from neither thread falls through both to the real stream.
+    """
+
+    def __init__(self, owner, queue_stream, passthrough):
+        super().__init__()
+        self._owner = owner
+        self._queue_stream = queue_stream
+        self._passthrough = passthrough
+
+    def write(self, text: str) -> int:
+        if threading.current_thread() is self._owner:
+            return self._queue_stream.write(text)
+        try:
+            return self._passthrough.write(text)
+        except Exception:
+            return 0                      # a dead stream must not kill a batch
+
+    def flush(self):
+        for s in (self._queue_stream, self._passthrough):
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+
 class QueueStream(io.TextIOBase):
     """A write-only stream that forwards lines to the GUI log queue.
+
+    ⚠️ Do NOT assign this to sys.stdout/sys.stderr directly — wrap it in
+    _ThreadScopedStream above. Assigning it bare redirects the entire process,
+    not the worker thread. See that class for what that cost.
 
     Attach as sys.stdout / sys.stderr inside the worker thread so that
     library output (tqdm progress bars, huggingface_hub downloads,
@@ -275,9 +327,13 @@ class BatchTranscribeWorker(threading.Thread):
         self._stop_event.set()
 
     def run(self):
+        # ⚠️ Thread-scoped, NOT a bare assignment — see _ThreadScopedStream.
         old_stdout, old_stderr = sys.stdout, sys.stderr
-        sys.stdout = QueueStream(self.q, prefix="   ")
-        sys.stderr = QueueStream(self.q, prefix="   ")
+        me = threading.current_thread()
+        sys.stdout = _ThreadScopedStream(me, QueueStream(self.q, prefix="   "),
+                                         old_stdout)
+        sys.stderr = _ThreadScopedStream(me, QueueStream(self.q, prefix="   "),
+                                         old_stderr)
 
         log_handler = QueueLogHandler(self.q)
         log_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))

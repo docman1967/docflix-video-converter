@@ -712,6 +712,8 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         # Last path delivered by a drag-and-drop, purely so the crash report at
         # the bottom of this function can name it. See _on_editor_destroy.
         _last_drop = [None]
+        # Filled in once the editor window exists; see _trace below.
+        _editor_log = [None]
 
         def _trace(msg, level='INFO'):
             """Diagnostic line that SURVIVES the window dying.
@@ -731,6 +733,24 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 sys.stderr.flush()
             except Exception:
                 pass
+            # ⭐ Tony, 2026-09-14: "Output from the OCR window is ... being
+            # written to the encoder log as well." app.add_log writes to the
+            # MAIN window's log panel, so every drop and close of the subtitle
+            # editor was narrated into the encoder's log — a different tool's
+            # window. This editor has its own Log panel; use it when it exists.
+            #
+            # ⚠️ A HOLDER, not a direct call. _trace runs from the drop handler
+            # long before the editor window is built, and `_log` is defined in a
+            # deeper scope that does not exist yet at that point. The list is
+            # mutated (never rebound) so the inner scope can fill it in without
+            # a `nonlocal`. Same pattern as _last_drop above.
+            sink = _editor_log[0]
+            if sink is not None:
+                try:
+                    sink(f"Subtitle Editor: {msg}")
+                    return
+                except Exception:
+                    pass          # window torn down mid-write — fall through
             try:
                 app.add_log(f"Subtitle Editor: {msg}", level)
             except Exception:
@@ -2492,6 +2512,8 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
 
                 def _log(msg):
                     """Append a message to the log window."""
+                    # (registered into _editor_log just below, so _trace can
+                    # reach this window's panel instead of the main one.)
                     if msg == _last_log_msg[0]:
                         return  # skip duplicate consecutive messages
                     _last_log_msg[0] = msg
@@ -2502,6 +2524,15 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         log_text.configure(state='disabled')
                     except tk.TclError:
                         pass
+
+                # ⭐ From here on, _trace() writes into THIS window's Log panel
+                # rather than the main encoder log. Registered after the def so
+                # the name exists; the list is mutated, never rebound, so the
+                # enclosing scope sees it without a `nonlocal`.
+                # ⚠️ Cleared in the close handler — a stale reference would send
+                # traces into a destroyed widget, and _trace is the one thing
+                # that has to keep working while the window is being torn down.
+                _editor_log[0] = _log
 
                 # ── Periodic UI poll: drain queues and update widgets ──
                 def _poll_ocr_updates():
@@ -6885,6 +6916,12 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
 
         def on_editor_close():                      # noqa: F811  (wraps above)
             _close_ran[0] = True
+            # ⚠️ Unregister the window's Log panel FIRST. Everything from here
+            # on is teardown, and teardown is exactly when _trace has to keep
+            # working — writing into a widget that is being destroyed is the
+            # failure its own docstring warns about. Clearing the holder drops
+            # _trace back to stderr, which reaches the log file and survives.
+            _editor_log[0] = None
             _trace("close handler invoked")
             return _orig_close()
 
