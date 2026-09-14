@@ -259,3 +259,75 @@ def test_ocr_wrapper_fails_open(monkeypatch):
     out, marks = subtitle_ocr._strip_music_notes(img)
     assert out is img and marks == []
     assert subtitle_ocr._reinsert_music_notes('text', [(0, 'L')]) is not None
+
+
+# ── Note RUNS: ♪♪, not just ♪ ───────────────────────────────────────────────
+# ⭐ Tony, 2026-09-14: "we're also going to need for the music notes part of the
+# OCR to pick up doubles." Lyric lines routinely carry ♪♪, and the conversion
+# regexes matched exactly one J — so `JJ Everyone can see you now JJ` reached
+# the .srt with the letters still in it, on Warehouse 13 AND Black Lightning.
+#
+# ⚠️⚠️ THE REAL LESSON OF THIS BUG, kept here because it will mislead the next
+# reader too: the ♪ in OCR output does NOT come from music_notes.strip_notes on
+# this material. Measured on Warehouse 13 S02E04 — strip_notes returned
+# marks=[] on EVERY cue, including ones that produced a correct ♪, and the note
+# glyphs were still present in the saved bitmaps. The leading and trailing
+# glyphs of cue 19 are geometrically IDENTICAL (82x56 px both); one became ♪ and
+# two did not. Nothing about the bitmap distinguished them — only the regex did.
+# So the geometric eraser is inert here and these text rules are load-bearing.
+#
+# ⭐ One ♪ PER NOTE on purpose. Tony collapses ♪♪ to ♪ with his own
+# search-and-replace: "better to leave both inline and let the s/r do its work."
+
+import pytest                                                    # noqa: E402
+from modules.subtitle_ocr import _fix_ocr_text                    # noqa: E402
+
+
+@pytest.mark.parametrize("src,want", [
+    # Real cues, both shows
+    ("J Skinny little bitch J",            "♪ Skinny little bitch ♪"),
+    ("J Everyone can see you now JJ",      "♪ Everyone can see you now ♪♪"),
+    ("JJ 'Bout 'bout 'bout now JJ",        "♪♪ 'Bout 'bout 'bout now ♪♪"),
+    ("JJ This is my intuition listen JJ",  "♪♪ This is my intuition listen ♪♪"),
+    # Tesseract reads the gap between two notes as ; or ,
+    ("JJ 'Bout 'bout 'bout now J;J",       "♪♪ 'Bout 'bout 'bout now ♪♪"),
+    # Music-only lines
+    ("J", "♪"), ("JJ", "♪♪"), ("JJJ", "♪♪♪"),
+])
+def test_note_runs_become_one_note_each(src, want):
+    assert _fix_ocr_text(src) == want
+
+
+@pytest.mark.parametrize("line", [
+    "His name is J.",          # ⚠️ an INITIAL. Allowing a trailing '.' in the
+                               # run would eat this; the single-J rule could not.
+    "Who am I",                # ⚠️ trailing standalone I is real dialogue. The
+                               # bitmaps DO misread some notes as I (cue 13, 18)
+                               # and it is deliberately left alone — the cure
+                               # would be worse than the disease.
+    "I don't know",
+    "He got a J in maths",
+    "- Jim, wait.",
+    "Just go",
+    "Previously on Warehouse 13:",
+])
+def test_real_dialogue_is_untouched(line):
+    """A rule that fires on good text is worse than no rule — it trains you to
+    stop reading the column, and then the real one goes past unnoticed."""
+    assert _fix_ocr_text(line) == line
+
+
+def test_clean_notes_are_not_treated_as_garble():
+    """⚠️ REGRESSION GUARD. ♪ is itself in _GARBLE_CHARS, so a line the rules
+    above had just correctly resolved to `♪♪` fell into the garble branch and
+    was flattened back to a single `♪` — silently undoing the fix a few lines
+    earlier. Every other case passed and hid it; only a music-ONLY line showed
+    it."""
+    assert _fix_ocr_text("JJ") == "♪♪"
+    assert _fix_ocr_text("♪♪") == "♪♪"
+
+
+@pytest.mark.parametrize("garble", ["}{", ">>", "d}"])
+def test_genuine_garble_still_collapses(garble):
+    """The exemption above must not switch off the garble rule itself."""
+    assert _fix_ocr_text(garble) == "♪"

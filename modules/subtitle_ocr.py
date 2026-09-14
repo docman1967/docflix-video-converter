@@ -1426,10 +1426,42 @@ def _fix_ocr_text(text):
 
     # Standalone J or j at start/end of line → ♪ (music note misread)
     # J/j is rarely a standalone word in subtitles; almost always a ♪
-    text = re.sub(r'^(-?\s*)[Jj]\s+', r'\1♪ ', text, flags=re.MULTILINE)  # J at start
-    text = re.sub(r'\s+[Jj]\s*$', ' ♪', text, flags=re.MULTILINE)         # j at end
-    # Standalone J or j as the entire line
-    text = re.sub(r'^(-?\s*)[Jj]\s*$', r'\1♪', text, flags=re.MULTILINE)
+    #
+    # ⭐ Tony, 2026-09-14: "we're also going to need for the music notes part of
+    # the OCR to pick up doubles." A lyric line often carries ♪♪ rather than ♪,
+    # and these patterns matched exactly ONE J — so `JJ Everyone can see you now
+    # JJ` came through with the letters still in it and had to be fixed by hand.
+    # Measured on Warehouse 13 S02E04 and Black Lightning S01E01: the leading and
+    # trailing glyphs are geometrically IDENTICAL (82x56 px both), so nothing
+    # about the bitmap distinguished them — only this regex did.
+    #
+    # ⭐ Emit one ♪ PER NOTE, deliberately. Tony already runs a search-and-replace
+    # that collapses ♪♪ to ♪ for library uniformity: "it's probably better to
+    # leave both inline and let the s/r do its work." Collapsing here would take
+    # a step he owns and silently do it differently.
+    #
+    # ⚠️ Capped at 3. An unbounded run would turn a genuine `JJJJJ...` artefact
+    # into a wall of notes, and no real subtitle carries four.
+    # ⚠️ `;` and `,` only — NEVER `.`. A trailing period would turn the initial in
+    # "His name is J." into a music note, which the single-J version could not do.
+    # `;` and `,` are allowed between notes because Tesseract reads the gap
+    # that way (`J;J` in Black Lightning), but the run must still be bounded by
+    # line edge and whitespace — that is what keeps it off real words.
+    _NOTE_RUN = r'[Jj](?:[;,]?[Jj]){0,2}'
+
+    def _notes_for(run):
+        return '♪' * len(re.findall(r'[Jj]', run))
+
+    text = re.sub(rf'^(-?\s*)({_NOTE_RUN})\s+',
+                  lambda m: f"{m.group(1)}{_notes_for(m.group(2))} ",
+                  text, flags=re.MULTILINE)                       # notes at start
+    text = re.sub(rf'\s+({_NOTE_RUN})[;,]?\s*$',
+                  lambda m: f" {_notes_for(m.group(1))}",
+                  text, flags=re.MULTILINE)                       # notes at end
+    # A line that is nothing but notes
+    text = re.sub(rf'^(-?\s*)({_NOTE_RUN})[;,]?\s*$',
+                  lambda m: f"{m.group(1)}{_notes_for(m.group(2))}",
+                  text, flags=re.MULTILINE)
 
     # 7» → ♪ (7 + right guillemet misread)
     text = text.replace('7»', '♪')
@@ -1466,6 +1498,14 @@ def _fix_ocr_text(text):
     _GARBLE_CHARS = set('Jjd}]){><%#@~^*_=2$&£©»♪.,;:\'"!?/\\|-+`´ ')
     stripped = text.strip()
     if stripped:
+        # ⚠️ ALREADY-CLEAN NOTES ARE NOT GARBLE. ♪ is itself in _GARBLE_CHARS, so
+        # a line the note rules above had just correctly resolved to `♪♪` fell
+        # into the branch below and was flattened back to a single `♪` — undoing
+        # the fix a few lines earlier, which is how "JJ" kept coming out as one
+        # note however the regex was written. Found 2026-09-14 by testing a
+        # music-only line; every other case passed and hid it.
+        if set(stripped) <= {'♪', ' '}:
+            return text
         if len(stripped) <= 3 and all(c in _GARBLE_CHARS for c in stripped):
             return '♪'
         # Longer garble: if the text has no word with 2+ consecutive letters,
