@@ -1787,6 +1787,15 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 def _on_mon_destroy(event):
                     if event.widget is mon:
                         _release_bitmaps()
+                        # ⚠️ The Log panel _trace writes into belongs to THIS
+                        # window, which is destroyed independently of the
+                        # editor — so the holder's lifetime is mon's, not the
+                        # editor's. Left stale, _log would hit a dead widget,
+                        # swallow the TclError itself, and _trace would return
+                        # as though it had logged: the message silently gone.
+                        # That is the swallowed-error shape this codebase has
+                        # been bitten by before.
+                        _editor_log[0] = None
 
                 mon.bind('<Destroy>', _on_mon_destroy)
 
@@ -2529,10 +2538,24 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # rather than the main encoder log. Registered after the def so
                 # the name exists; the list is mutated, never rebound, so the
                 # enclosing scope sees it without a `nonlocal`.
-                # ⚠️ Cleared in the close handler — a stale reference would send
-                # traces into a destroyed widget, and _trace is the one thing
-                # that has to keep working while the window is being torn down.
-                _editor_log[0] = _log
+                # ⚠️ Cleared in _on_mon_destroy AND on_editor_close — this panel
+                # belongs to `mon`, which dies independently of the editor.
+                def _editor_log_sink(msg):
+                    """_trace's route into this window's Log panel.
+
+                    ⚠️ Checks the widget is ALIVE and lets the failure escape.
+                    `_log` catches tk.TclError itself and returns quietly, so
+                    handing _trace `_log` directly would make a dead panel look
+                    like a successful write and the message would vanish with
+                    no fallback. _trace needs the exception to fall back to the
+                    main log — belt and braces for a destroy hook that gets
+                    missed, which has happened in this window before.
+                    """
+                    if not log_text.winfo_exists():
+                        raise RuntimeError("log panel destroyed")
+                    _log(msg)
+
+                _editor_log[0] = _editor_log_sink
 
                 # ── Periodic UI poll: drain queues and update widgets ──
                 def _poll_ocr_updates():

@@ -170,3 +170,32 @@ def test_the_holder_is_cleared_on_close():
     assert i_trace != -1
     assert i_clear < i_trace, (
         "the holder must be cleared BEFORE the close trace is written")
+
+
+def test_the_holder_dies_with_the_window_that_owns_the_panel():
+    """⚠️⚠️ THE DEFECT IN THE FIRST VERSION OF THIS FIX. The Log panel belongs
+    to `mon`, the OCR monitor Toplevel, which is destroyed independently of the
+    editor from five different call sites. Clearing the holder only on EDITOR
+    close left it pointing at a dead widget — and because `_log` catches
+    tk.TclError itself and returns quietly, _trace would treat that as a
+    successful write and the message would vanish with no fallback at all.
+    Worse than the bug being fixed."""
+    src = _editor_source()
+    assert src.count('_editor_log[0] = None') >= 2, (
+        "the holder must be cleared on BOTH mon destroy and editor close")
+    mon_hook = src.find('def _on_mon_destroy')
+    assert mon_hook != -1
+    tail = src[mon_hook:mon_hook + 900]
+    assert '_editor_log[0] = None' in tail, (
+        "mon's destroy hook does not clear the log holder")
+
+
+def test_the_sink_lets_a_dead_panel_fail_loudly():
+    """A sink that cannot fail cannot fall back. _log swallows tk.TclError, so
+    the registered sink must check the widget itself and raise."""
+    src = _editor_source()
+    assert 'def _editor_log_sink' in src
+    assert 'log_text.winfo_exists()' in src, (
+        "the sink no longer checks the panel is alive")
+    assert '_editor_log[0] = _editor_log_sink' in src, (
+        "_log is being registered directly again — it cannot report failure")
