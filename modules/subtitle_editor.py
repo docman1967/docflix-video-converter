@@ -485,6 +485,36 @@ def delete_cues(cues, indices):
     return len(doomed)
 
 
+def index_after_delete(n_cues, indices):
+    """Which cue index should be selected after deleting *indices*?
+
+    ⭐ Tony, 2026-09-14: "if I delete a cue, it throws me back to the top of
+    the file, cue 1. It should just go to the next cue in line." Deleting a
+    run of junk cues means deleting, scrolling back, deleting, scrolling
+    back — the tree rebuild lands on row one every time.
+
+    Returns the post-deletion index of the cue that FOLLOWED the last one
+    removed, so the list carries on where the reviewer was. Deleting the tail
+    lands on the new last cue; deleting everything returns None.
+
+    ⚠️ All deleted indices are below `follow` by construction (follow is
+    max+1), so the survivor's new position is simply `follow - len(deleted)` —
+    it shifts down by exactly the number removed before it. Working that out
+    by counting survivors in a loop is the same answer with more places to
+    make an off-by-one.
+    """
+    doomed = sorted({i for i in indices if 0 <= i < n_cues})
+    if not doomed:
+        return None
+    remaining = n_cues - len(doomed)
+    if remaining <= 0:
+        return None
+    follow = doomed[-1] + 1
+    if follow >= n_cues:          # the tail went; land on the new last cue
+        return remaining - 1
+    return follow - len(doomed)
+
+
 def is_blank_frame(cue):
     """True when this cue had NO INK on the frame — nothing was ever there.
 
@@ -1944,8 +1974,12 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
 
                 _cue_passes_filter = cue_passes_ocr_filter   # module-level, tested
 
-                def _rebuild_cue_tree():
+                def _rebuild_cue_tree(select_cue=None):
                     """Repopulate the list from the finished cue list.
+
+                    *select_cue* is a TRUE cue index to land on instead of the
+                    top — used by delete, so removing a run of junk does not
+                    bounce the reviewer back to cue 1 after every keypress.
 
                     Live rows are a running commentary; this is the reviewable
                     record. Rebuilding also brings in the empty-OCR cues, which
@@ -1997,10 +2031,26 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     # Selecting row one also populates the bitmap panel, so the
                     # pane opens ready to read rather than blank.
                     kids = cue_tree.get_children()
-                    if kids:
-                        cue_tree.see(kids[0])
-                        cue_tree.selection_set(kids[0])
-                        cue_tree.focus(kids[0])
+                    target = None
+                    if kids and select_cue is not None:
+                        # ⚠️ Find the first VISIBLE row at or after the target.
+                        # With a filter active the wanted cue may not be on
+                        # screen at all — landing on the next one that is
+                        # keeps the reviewer moving forward, which is the
+                        # whole point. Falls back to the last row when the
+                        # deletion took everything below.
+                        for item in kids:
+                            if _row_cue.get(item, -1) >= select_cue:
+                                target = item
+                                break
+                        if target is None:
+                            target = kids[-1]
+                    elif kids:
+                        target = kids[0]
+                    if target:
+                        cue_tree.see(target)
+                        cue_tree.selection_set(target)
+                        cue_tree.focus(target)
 
                     # ⚠️ Say plainly when rows are being hidden. A filtered list
                     # that looks like the whole list is how you conclude a cue
@@ -2146,8 +2196,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         return 'break'
                     import copy as _copy
                     filter_undo[0] = _copy.deepcopy(cues)
+                    # ⚠️ Worked out BEFORE the delete, from the pre-delete
+                    # length. Afterwards the indices have all shifted and the
+                    # cue that followed the selection is no longer findable
+                    # by the number it used to have.
+                    nxt = index_after_delete(len(cues), idxs)
                     gone = delete_cues(cues, idxs)
-                    _rebuild_cue_tree()
+                    _rebuild_cue_tree(select_cue=nxt)
                     undo_filters_btn.configure(state='normal')
                     status_label.configure(
                         text=f"Deleted {gone} cue(s) — {len(cues)} remain "

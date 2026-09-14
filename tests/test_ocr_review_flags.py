@@ -360,6 +360,55 @@ def test_deleting_everything_is_allowed():
     assert cues == []
 
 
+# ── Where the selection lands after a delete ────────────────────────────────
+# ⭐ Tony, 2026-09-14: "if I delete a cue, it throws me back to the top of the
+# file, cue 1. It should just go to the next cue in line." The jump-to-top is
+# a DELIBERATE behaviour of _rebuild_cue_tree (his own request the day before,
+# for when OCR finishes and when the filter changes) — delete merely inherited
+# it. So this is about delete being an exception, not about removing it.
+
+from modules.subtitle_editor import index_after_delete             # noqa: E402
+
+
+def test_lands_on_the_following_cue():
+    cases = [
+        (5, [2],    2),      # middle — the cue that was 3 now sits at 2
+        (5, [0],    0),      # head — the next cue slides into 0
+        (5, [4],    3),      # tail — nothing follows, so land on the new last
+        (5, [1, 2], 1),      # a contiguous run of junk, the common case
+        (5, [1, 3], 2),      # non-contiguous: survivors 0,2,4 — old 4 at 2
+        (5, [0, 4], 2),      # both ends gone
+    ]
+    for n, idxs, want in cases:
+        assert index_after_delete(n, idxs) == want, (n, idxs)
+
+
+def test_nothing_to_select_returns_none():
+    """None means "leave the tree alone" — an empty list has no row to focus,
+    and inventing one would make the pane lie about what it holds."""
+    for n, idxs in ((1, [0]), (5, list(range(5))), (5, []), (5, [99])):
+        assert index_after_delete(n, idxs) is None, (n, idxs)
+
+
+def test_agrees_with_the_real_delete():
+    """⚠️⚠️ THE TEST THAT MATTERS. The others check the formula against
+    arithmetic Arthur did in his head; this one tracks the actual cue OBJECT
+    through the real delete_cues and asks where it ended up. A formula that
+    only agrees with its author's reasoning is not verified.
+    """
+    for n, idxs in ((5, [2]), (5, [4]), (5, [0]), (5, [1, 3]),
+                    (6, [2, 3, 4]), (7, [0, 6]), (4, [1, 2])):
+        cues = [{'index': i + 1, 'text': f"cue{i}"} for i in range(n)]
+        follow = cues[max(idxs) + 1] if max(idxs) + 1 < n else None
+        predicted = index_after_delete(n, idxs)
+        delete_cues(cues, idxs)
+        if follow is not None:
+            actual = next(k for k, c in enumerate(cues) if c is follow)
+        else:
+            actual = len(cues) - 1 if cues else None
+        assert predicted == actual, (n, idxs, predicted, actual)
+
+
 # ── Colon marking ───────────────────────────────────────────────────────────
 # ⭐ Tony, 2026-09-13: "can we highlight : characters? When I'm scrolling
 # through, they can get lost in the sea of text." A LOOK-AT-THIS, not a flag —
