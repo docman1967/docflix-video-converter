@@ -1922,18 +1922,34 @@ def open_video_scaler(app):
                         return
                     with clock:
                         idx = counters['next']
-                        if idx >= total:
+                        # ⚠️ len(files) LIVE, never the `total` snapshot taken before
+                        # the run started. Tony, 2026-09-17: "If a user adds a file and
+                        # starts the process and then adds more while that first one is
+                        # running, when the first one finishes, it doesn't continue to
+                        # the ones just added." The files DID land in the list — Add
+                        # Files is not disabled during a run — but the worker stopped at
+                        # the old count and the new rows sat there untouched.
+                        #
+                        # ⚠️ Read the ITEM inside the lock too. `Clear` is also live
+                        # during a run, and `files[idx]` outside the lock on an emptied
+                        # list is an IndexError on a worker thread — which surfaces as a
+                        # silently dead lane, not a traceback the user ever sees.
+                        # Bounds-checking here makes Clear mean "stop after the current
+                        # file", which is the sane reading of it.
+                        if idx >= len(files):
                             return
+                        f_item = files[idx]
                         counters['next'] += 1
-                    ok = _process_one(idx, files[idx], gpu)
+                    ok = _process_one(idx, f_item, gpu)
                     with clock:
                         if ok:
                             counters['done'] += 1
                         else:
                             counters['failed'] += 1
                         completed = counters['done'] + counters['failed']
+                        live_total = len(files)
                     if parallel_mode[0]:
-                        _set_overall(completed, total)
+                        _set_overall(completed, live_total)
 
             threads = [threading.Thread(target=_worker, args=(g,), daemon=True) for g in lanes]
             for t in threads:
@@ -1943,10 +1959,14 @@ def open_video_scaler(app):
 
             done, failed = counters['done'], counters['failed']
             parallel_mode[0] = False
+            # ⚠️ Live count again, for the same reason. With `total` the summary read
+            # "Done: 1/1 files" after processing four, and the skipped figure could go
+            # NEGATIVE — a report that contradicts the work that was actually done.
+            final_total = len(files)
             _log(f"Complete: {done} done, {failed} failed, "
-                 f"{total - done - failed} skipped", 'INFO')
+                 f"{max(0, final_total - done - failed)} skipped", 'INFO')
             _update_progress(100.0 if done > 0 else 0.0,
-                            f"Done: {done}/{total} files")
+                            f"Done: {done}/{final_total} files")
             processing[0] = False
             win.after(0, lambda: process_btn.configure(state='normal'))
             win.after(0, lambda: stop_btn.configure(state='disabled'))
