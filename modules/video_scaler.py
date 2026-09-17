@@ -1913,49 +1913,95 @@ def open_video_scaler(app):
             if parallel_mode[0]:
                 _set_overall(0, total)
 
-            counters = {'done': 0, 'failed': 0, 'next': 0}
-            clock = threading.Lock()
+            counters = {'done': 0, 'failed': 0, 'next': 0, 'busy': 0}
+            # ⚠️ A Condition, not a bare Lock. An idle lane has to be able to WAIT for
+            # work that has not been added yet — see the comment on _worker below.
+            clock = threading.Condition()
 
             def _worker(gpu):
                 while True:
-                    if stop_flag[0]:
-                        return
                     with clock:
-                        idx = counters['next']
-                        # ⚠️ len(files) LIVE, never the `total` snapshot taken before
-                        # the run started. Tony, 2026-09-17: "If a user adds a file and
-                        # starts the process and then adds more while that first one is
-                        # running, when the first one finishes, it doesn't continue to
-                        # the ones just added." The files DID land in the list — Add
-                        # Files is not disabled during a run — but the worker stopped at
-                        # the old count and the new rows sat there untouched.
-                        #
-                        # ⚠️ Read the ITEM inside the lock too. `Clear` is also live
-                        # during a run, and `files[idx]` outside the lock on an emptied
-                        # list is an IndexError on a worker thread — which surfaces as a
-                        # silently dead lane, not a traceback the user ever sees.
-                        # Bounds-checking here makes Clear mean "stop after the current
-                        # file", which is the sane reading of it.
-                        if idx >= len(files):
-                            return
-                        f_item = files[idx]
-                        counters['next'] += 1
-                    ok = _process_one(idx, f_item, gpu)
-                    with clock:
-                        if ok:
-                            counters['done'] += 1
-                        else:
-                            counters['failed'] += 1
-                        completed = counters['done'] + counters['failed']
-                        live_total = len(files)
+                        while True:
+                            if stop_flag[0]:
+                                clock.notify_all()
+                                return
+                            # ⚠️ len(files) LIVE, never the `total` snapshot taken
+                            # before the run started. Tony, 2026-09-17: "If a user adds
+                            # a file and starts the process and then adds more while
+                            # that first one is running, when the first one finishes,
+                            # it doesn't continue to the ones just added." Add Files is
+                            # not disabled during a run, so the files really did land in
+                            # the list — the worker just stopped at the old count.
+                            #
+                            # ⚠️ Read the ITEM inside the lock too. `Clear` is live
+                            # during a run, and files[idx] outside the lock on a
+                            # just-emptied list is an IndexError on a worker thread —
+                            # a silently dead lane, not a traceback anyone sees.
+                            if counters['next'] < len(files):
+                                idx = counters['next']
+                                f_item = files[idx]
+                                counters['next'] += 1
+                                counters['busy'] += 1
+                                break
+                            # ⚠️⚠️ NOTHING TO DO RIGHT NOW IS NOT THE SAME AS FINISHED.
+                            # Tony, 2026-09-17, after the first fix: "If I add 1 title,
+                            # start the process and then add several more, it stays at
+                            # using one GPU only." Lanes are spawned ONCE, up front. With
+                            # one file queued and two GPU lanes, lane 0 took it and lane 1
+                            # found the queue empty and RETURNED — dead inside a
+                            # millisecond, and nothing can revive an exited thread. The
+                            # first fix kept the surviving lane going but could not bring
+                            # the other one back, so the whole run stayed on one card.
+                            #
+                            # An idle lane now waits while ANY lane is still busy, because
+                            # the user can still be adding files. The run ends only when
+                            # the queue is empty AND every lane is idle — at which point
+                            # there is genuinely no more work and no one left to make any.
+                            if counters['busy'] == 0:
+                                clock.notify_all()      # release the other idle lanes
+                                return
+                            clock.wait(0.25)            # timeout: also re-checks stop_flag
+                    # ⚠️ try/finally is LOAD-BEARING, and it is new risk this fix
+                    # introduced. The idle-wait above blocks while `busy` > 0, so if
+                    # _process_one ever raises, `busy` would never come back down and
+                    # every other lane would wait forever — the app would look frozen
+                    # with no error anywhere. The old exit-on-empty worker had no such
+                    # failure mode: an exception just killed that one thread.
+                    # A hang is worse than the bug being fixed.
+                    ok = False
+                    try:
+                        ok = _process_one(idx, f_item, gpu)
+                    except Exception as e:                       # noqa: BLE001
+                        _log(f"  Rescale worker error on {f_item.get('name', '?')}: "
+                             f"{e}", 'ERROR')
+                    finally:
+                        with clock:
+                            counters['busy'] -= 1
+                            if ok:
+                                counters['done'] += 1
+                            else:
+                                counters['failed'] += 1
+                            completed = counters['done'] + counters['failed']
+                            live_total = len(files)
+                            clock.notify_all()
                     if parallel_mode[0]:
                         _set_overall(completed, live_total)
 
-            threads = [threading.Thread(target=_worker, args=(g,), daemon=True) for g in lanes]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
+            # ⚠️ Respawn loop. The wait above closes the gap while a lane is working, but
+            # there is still a hair-thin window where every lane has gone idle and exited
+            # and the user adds a file in that instant. Re-checking after the join costs
+            # nothing and makes "added a file, nothing happened" impossible rather than
+            # merely unlikely.
+            while True:
+                threads = [threading.Thread(target=_worker, args=(g,), daemon=True)
+                           for g in lanes]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+                with clock:
+                    if stop_flag[0] or counters['next'] >= len(files):
+                        break
 
             done, failed = counters['done'], counters['failed']
             parallel_mode[0] = False
