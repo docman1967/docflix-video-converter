@@ -1018,6 +1018,19 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                 # Cut ♪ out before Tesseract (which cannot emit it at all) and
                 # put them back afterwards — both notes sharing a line with
                 # lyrics and cues that are nothing but notes.
+                # ⭐⭐ KEEP WHAT WAS ACTUALLY ON SCREEN, for the review pane.
+                # Tony, 2026-09-18: "the music notes aren't being put back on
+                # the bitmap like before... it was more of a comfort to be able
+                # to look at the bitmap and know immediately that the music
+                # notes belonged."
+                # The preview is his EVIDENCE that a ♪ in the text is real. Once
+                # the eraser started actually working, the saved preview became
+                # the post-erase frame and the notes vanished from it — so the
+                # text claimed a note the picture no longer showed. Tesseract
+                # gets the stripped image; the human gets the original.
+                # ⚠️ strip_notes does not mutate its input (it builds a new
+                # array), so holding this reference is safe and costs nothing.
+                img_on_screen = img
                 img, _notes = _strip_music_notes(img)
 
                 # ⚠️⚠️ NOTHING LEFT TO READ — DO NOT ASK TESSERACT.
@@ -1045,6 +1058,13 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                 # contrast and can rescue it, and dropping it would be lost
                 # dialogue, which is far worse than a stray `FE`.
                 if _notes and not (np.asarray(img) > 100).any():
+                    # ⚠️ STILL SAVE A PREVIEW. An earlier version of this guard
+                    # returned img_path without ever writing to it, so every
+                    # note-only cue came back with a broken thumbnail — and a
+                    # missing preview reads as "nothing was on this frame",
+                    # which is exactly the distinction img_path=None is supposed
+                    # to carry. Show the notes that WERE there.
+                    _save_ocr_preview(img_on_screen, img_path)
                     return (pts, dur, _reinsert_music_notes('', _notes), img_path)
 
                 # ── Upscale for Tesseract ──
@@ -1063,8 +1083,16 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                 # ── Add white border padding ──
                 img = ImageOps.expand(img, border=20, fill=255)
 
-                # Save for monitor preview
-                img.save(img_path)
+                # Save for monitor preview.
+                # ⭐ When notes were erased, show the ORIGINAL frame — see the
+                # note above `img_on_screen`. Otherwise the review pane would
+                # display a cue whose text says ♪ over a picture with no ♪ in
+                # it, and Tony's fastest sanity check would be reading a lie.
+                # ⚠️ Without notes this is the same image, so no extra work.
+                if _notes:
+                    _save_ocr_preview(img_on_screen, img_path)
+                else:
+                    img.save(img_path)
 
                 # ── Tesseract OCR ──
                 text = pytesseract.image_to_string(
@@ -1266,7 +1294,8 @@ def normalise_for_ocr(img):
 # alarm it was. A run that erases 0 notes in an episode full of songs means the
 # geometry bands are off this font; a run that erases some is working. One
 # number separates them and costs nothing. (Tony found it by eye, 2026-09-18.)
-_note_stats = {'cues_seen': 0, 'cues_with_notes': 0, 'notes_erased': 0}
+_note_stats = {'cues_seen': 0, 'cues_with_notes': 0, 'notes_erased': 0,
+               'preview_failures': 0}
 
 
 def reset_note_stats():
@@ -1283,7 +1312,44 @@ def note_stats_summary():
     return (f"music-note eraser: {s['notes_erased']} note(s) removed from "
             f"{s['cues_with_notes']}/{s['cues_seen']} cues"
             + ("   ⚠️ ZERO — check the geometry bands against this "
-               "font's glyphs" if s['cues_with_notes'] == 0 else ""))
+               "font's glyphs" if s['cues_with_notes'] == 0 else "")
+            + (f"   ⚠️ {s['preview_failures']} preview(s) failed to render"
+               if s['preview_failures'] else ""))
+
+
+def _save_ocr_preview(src, path):
+    """Render a cue bitmap for the review pane the same way OCR sees it.
+
+    ⭐ Used to show the frame as it was ON SCREEN — notes included — while
+    Tesseract is handed the stripped version. Tony, 2026-09-18: *"it was more of
+    a comfort to be able to look at the bitmap and know immediately that the
+    music notes belonged."* The preview is the evidence behind a ♪ in the text;
+    if the picture no longer shows the note, the check is worthless.
+
+    ⚠️ Mirrors the upscale / normalise / border the OCR path applies, so a
+    note-bearing cue does not look different from every other thumbnail.
+
+    ⚠️ Fails open — a preview is a convenience, and an exception here would cost
+    the whole cue in a run that goes unattended for an hour.
+    ⚠️⚠️ BUT IT COUNTS ITS FAILURES. The first version of this helper referenced
+    `Image` without importing it — `Image` is NOT at module scope in this file —
+    so every call raised NameError, the bare `except: pass` ate it, and every
+    note-bearing cue silently came back with no thumbnail at all. A guard that
+    hides its own breakage is the exact shape of bug this module has now
+    produced three times in one day. If `preview_failures` is non-zero in the
+    run summary, something here is throwing.
+    """
+    try:
+        from PIL import Image, ImageOps
+        p = src
+        if p.height < 100:
+            scale = max(2, 100 // p.height)
+            p = p.resize((p.width * scale, p.height * scale), Image.LANCZOS)
+        p = normalise_for_ocr(p)
+        p = ImageOps.expand(p, border=20, fill=255)
+        p.save(path)
+    except Exception:
+        _note_stats['preview_failures'] += 1
 
 
 def _strip_music_notes(img):

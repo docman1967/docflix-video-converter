@@ -246,6 +246,55 @@ def test_the_ocr_path_skips_tesseract_on_an_emptied_cue():
         "cue with no notes must still reach Tesseract, or that is lost dialogue")
 
 
+# ── The review preview must show what was ON SCREEN ─────────────────────────
+
+def test_the_preview_is_rendered_from_the_pre_strip_image():
+    """⭐⭐ Tony, 2026-09-18: "the music notes aren't being put back on the
+    bitmap like before... it was more of a comfort to be able to look at the
+    bitmap and know immediately that the music notes belonged."
+
+    The thumbnail is his EVIDENCE that a ♪ in the text is real. Once the eraser
+    started actually working, the saved preview became the post-erase frame and
+    the notes disappeared from it — so the text asserted a note the picture no
+    longer showed. Tesseract gets the stripped image; the human gets the
+    original."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = open(os.path.join(here, '..', 'modules', 'subtitle_ocr.py'),
+               encoding='utf-8').read()
+    assert 'img_on_screen = img' in src, (
+        "the pre-strip frame is no longer kept — the review pane will show "
+        "cues whose text claims a ♪ the bitmap does not contain")
+    i_keep = src.index('img_on_screen = img')
+    i_strip = src.index('_strip_music_notes(img)', i_keep)
+    assert i_keep < i_strip, "the frame must be captured BEFORE the notes are erased"
+    assert src.count('_save_ocr_preview(img_on_screen') >= 2, (
+        "both the blank-cue path and the normal path must save the original "
+        "frame; a note-only cue with no thumbnail reads as 'nothing was here'")
+
+
+def test_the_preview_helper_counts_its_own_failures():
+    """⚠️⚠️ The first version of this helper referenced `Image` without
+    importing it — `Image` is NOT at module scope in subtitle_ocr — so every
+    call raised NameError, a bare `except: pass` ate it, and every note-bearing
+    cue came back with no thumbnail. Silent.
+
+    ⛔ A guard that hides its own breakage is the exact failure this module
+    produced three times in one day. It must count."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = open(os.path.join(here, '..', 'modules', 'subtitle_ocr.py'),
+               encoding='utf-8').read()
+    i = src.index('def _save_ocr_preview')
+    body = src[i:src.index('def _strip_music_notes', i)]
+    assert 'from PIL import Image' in body, (
+        "Image is not imported inside the helper and is not at module scope — "
+        "every preview will raise NameError")
+    assert "_note_stats['preview_failures'] += 1" in body, (
+        "the helper swallows exceptions without counting them again")
+    assert 'preview_failures' in src[src.index('def note_stats_summary'):
+                                     src.index('def _save_ocr_preview')], (
+        "preview failures are counted but never surfaced in the run summary")
+
+
 # ── The bands themselves ────────────────────────────────────────────────────
 
 def test_the_widened_bands_cover_real_measurements():
