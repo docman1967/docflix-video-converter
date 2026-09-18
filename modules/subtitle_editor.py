@@ -1083,23 +1083,68 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             scan_dlg.grab_set()
             scan_dlg.protocol('WM_DELETE_WINDOW', lambda: None)
 
-            scan_result = [None]  # will hold (streams, cc_types)
+            # ⚠️⚠️ THE SCAN DIALOG USED TO WAIT ON CC DETECTION, AND THAT IS
+            # ~100% OF THE WAIT. Tony, 2026-09-18: "When I drop a file into the
+            # Subtitle Editor and it's running its scan, it takes a real long
+            # time to present the list." Measured on a 9.1 GB remux:
+            #
+            #     get_subtitle_streams           0.03 s   <- the list he wants
+            #     detect_cc_types               16.34 s
+            #       of which ccextractor direct 10.48 s — and it FAILS (rc=10)
+            #       before falling through to the TS-pipe tier anyway
+            #
+            # The list is ready in 30 milliseconds and then sits behind a probe
+            # whose answer is not needed to draw it.
+            #
+            # ⚠️ IT CANNOT SIMPLY BE DEFERRED. Downstream, `all_options` is
+            # text + bitmap + CC entries and `len(all_options) == 1` auto-opens
+            # WITHOUT a picker. Publish the list with CC unknown and a file with
+            # one text track plus one CC would silently auto-open the text track
+            # instead of asking.
+            # ⭐ So it is deferred ONLY when >= 2 real streams already exist: a
+            # picker is then guaranteed and no downstream decision can turn on
+            # the CC answer. CC rows are appended to that picker when they land.
+            # ⛔ Do NOT "optimise" further by skipping CC detection when text
+            # subtitles exist — that is the detector/doer divergence trap. The
+            # check would stop knowing what the extractor knows, and a file with
+            # both real subs and CCs would quietly lose the CC option.
+            scan_result = [None]      # (streams, cc_types) — the complete answer
+            streams_holder = [None]   # published as soon as ffprobe returns
+            cc_holder = [None]        # published when detection finishes
+            dismissed = [False]
 
             def _do_scan():
-                s = get_subtitle_streams(video_path)
+                streams_holder[0] = get_subtitle_streams(video_path)
                 cc = detect_cc_types(video_path)
-                scan_result[0] = (s, cc)
+                cc_holder[0] = cc
+                scan_result[0] = (streams_holder[0], cc)
 
             scan_thread = threading.Thread(target=_do_scan, daemon=True)
             scan_thread.start()
 
+            def _dismiss_scan_dialog():
+                if dismissed[0]:
+                    return
+                dismissed[0] = True
+                scan_bar.stop()
+                try:
+                    scan_dlg.grab_release()
+                    scan_dlg.destroy()
+                except tk.TclError:
+                    pass
+
             def _check_scan():
+                # ⭐ Fast path: list known, and a picker is guaranteed.
+                if (streams_holder[0] is not None and cc_holder[0] is None
+                        and len(streams_holder[0]) >= 2):
+                    _dismiss_scan_dialog()
+                    _finish_load_video(video_path, streams_holder[0], None,
+                                       cc_pending=cc_holder)
+                    return
                 if scan_thread.is_alive():
                     editor.after(50, _check_scan)
                     return
-                scan_bar.stop()
-                scan_dlg.grab_release()
-                scan_dlg.destroy()
+                _dismiss_scan_dialog()
                 _finish_load_video(video_path, *scan_result[0])
 
             editor.after(50, _check_scan)
@@ -1187,9 +1232,18 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
 
             editor.after(80, _wait)
 
-        def _finish_load_video(video_path, streams, cc_types, _converted=False):
-            """Continue loading after subtitle/CC scanning completes."""
+        def _finish_load_video(video_path, streams, cc_types, _converted=False,
+                               cc_pending=None):
+            """Continue loading after subtitle/CC scanning completes.
+
+            ⚠️ `cc_types` may be None when `cc_pending` is supplied — that is the
+            fast path where the stream list is shown before CC detection has
+            finished. See the long note at the call site. It is only ever used
+            with >= 2 real streams, which guarantees a picker and keeps every
+            decision below independent of the CC answer.
+            """
             nonlocal cues, original_cues
+            cc_types = cc_types or {}
 
             # ⚠️ Subtitle tracks ffmpeg cannot decode (WebVTT in Matroska) come
             # back as codec_name "unknown". They are NOT bitmap, so they fall
@@ -1348,10 +1402,58 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
 
                 stream_tree.selection_set('0')
 
+                # ⭐ CC detection is still running — show that honestly and fold
+                # the real rows in when they land. A placeholder row rather than
+                # silence, so a user who wants closed captions knows to wait
+                # rather than concluding the file has none.
+                # ⚠️ The placeholder is NOT selectable as a stream: `on_select`
+                # indexes `picker_streams`, and the placeholder has no entry
+                # there, so it is guarded below.
+                if cc_pending is not None:
+                    ph_iid = 'cc_pending'
+                    stream_tree.insert('', 'end', iid=ph_iid,
+                                       values=('…', '', '', 'Checking for '
+                                               'closed captions…', ''))
+
+                    def _poll_cc():
+                        if not stream_tree.winfo_exists():
+                            return
+                        cc = cc_pending[0]
+                        if cc is None:
+                            picker.after(150, _poll_cc)
+                            return
+                        try:
+                            stream_tree.delete(ph_iid)
+                        except tk.TclError:
+                            return
+                        for _t, _label in (('eia_608', 'Closed Captions (EIA-608)'),
+                                           ('eia_708', 'Closed Captions (CEA-708)')):
+                            if not cc.get(_t):
+                                continue
+                            entry = {
+                                'index': -1 if _t == 'eia_608' else -2,
+                                'codec_name': _t, 'language': 'eng',
+                                'title': _label, 'default': False,
+                                'forced': False, 'sdh': False,
+                                '_is_cc': True, '_cc_type': _t,
+                            }
+                            picker_streams.append(entry)
+                            stream_tree.insert(
+                                '', 'end', iid=str(len(picker_streams) - 1),
+                                values=('CC', 'eng', _t, _label, 'CC'))
+
+                    picker.after(150, _poll_cc)
+
                 def on_select():
                     sel = stream_tree.selection()
-                    if sel:
+                    # ⚠️ The "Checking for closed captions…" placeholder has a
+                    # non-numeric iid and no entry in picker_streams. Selecting
+                    # it and hitting OK would raise ValueError on a Tk callback
+                    # — which surfaces as a dead button, not a traceback.
+                    if sel and sel[0].isdigit():
                         chosen[0] = picker_streams[int(sel[0])]
+                    elif sel:
+                        return          # placeholder — ignore, keep the picker open
                     picker.destroy()
 
                 def on_double_click(event):
