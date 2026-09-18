@@ -64,16 +64,55 @@ import numpy as np
 # out of live dialogue. The reasoning was fine and the numbers were invented.
 # Widen these ONLY against the negative set; a band you cannot point at a
 # measurement for is a guess wearing a constant's clothes.
+#
+# ⚠️⚠️ AND THEY WERE MEASURED ON ONE SHOW (Glee S01E22), WHICH IS THE BUG BELOW.
+# Re-measured 2026-09-18 on Lucifer (3 episodes, 3,077 cues, 183 real notes and
+# 74,773 letters, ground truth from the release's own SDH text). On that font:
+#
+#     real notes:  onestem 0.846-0.92   hd_h 0.37-0.42   waist 5.0-7.5
+#     thresholds:  onestem >= 0.85      hd_h >= 0.44
+#
+# **0 of 183 real notes were caught** — the window sat entirely off the
+# population. Meanwhile a capital `J` cleared every test (fill 0.63 against a
+# 0.62 floor, by one hundredth) and was erased out of the word "Javier", with
+# `reinsert_notes` then putting a plausible ♪ where the letter had been. Tony
+# caught it by comparing against the video; nothing in the output looked wrong.
+# ⭐ That is why the two bounds below are WIDENED and `_WAIST_MIN` is NOT
+# touched: widening cannot newly reject a glyph that passes today, so it cannot
+# break the font these were originally measured on. Tightening the waist to 4.0
+# would also have killed the `J` — and would have been tuning on one show, which
+# is precisely the mistake being fixed here.
 _MIN_H          = 10      # px; below this there is not enough shape to judge
 _WAIST_MIN      = 2.2     # head width / median stem width through the middle
 _FILL_MIN       = 0.62    # ink fraction of the head's own bounding box
-_HEAD_H_MIN     = 0.44    # head width / glyph height   (kills `t` at 0.29)
-_HEAD_H_MAX     = 0.60    # measured 0.48-0.50
+_HEAD_H_MIN     = 0.35    # head width / glyph height. 0.44 rejected 183/183 real
+                          # Lucifer notes (0.37-0.42). `t` sits at 0.29.
+_HEAD_H_MAX     = 0.60    # measured 0.48-0.50 (Glee), 0.37-0.42 (Lucifer)
 _HEAD_W_MIN     = 0.45    # head width / glyph width
 _HEAD_W_MAX     = 0.78    # measured 0.52-0.67
 _ASPECT_MIN     = 1.00    # glyph height / glyph width — a note stands up
 _ASPECT_MAX     = 2.20
-_ONE_STEM_MIN   = 0.85    # fraction of middle-band rows that are a single run
+_ONE_STEM_MIN   = 0.82    # fraction of middle-band rows that are a single run.
+                          # Glee measured 0.94; Lucifer measures 0.846, and 0.85
+                          # rejected 47 real notes by four thousandths.
+
+# ⚠️ THE LETTER VETO — this is what actually stops `J`, and it is deliberately
+# NOT a proportion. Every band above is a shape ratio that drifts with the font;
+# this one is spacing, measured against the SAME LINE's own median glyph gap, so
+# it carries across fonts instead of encoding one.
+#
+# A music note stands alone: there is a word space between it and the lyric.
+# A `J` is the first letter of a word and its neighbour is 2-3px away.
+# Measured: real notes bottom out at 0.80 of their line's median gap; the Javier
+# `J` sat at 0.60. 0.70 splits them with margin either side.
+#
+# ⚠️ ♪♪ IS SAFE — Tony's first question about this idea. The veto only fires on a
+# NON-note neighbour, so a note beside another note is untouched.
+# ⚠️ Fails toward under-erasing: a note wrongly vetoed simply stays in the
+# bitmap and is picked up downstream by the regex repair, which is the status
+# quo. It cannot produce a worse result than doing nothing.
+_GAP_MIN        = 0.70    # nearest non-note neighbour, in units of the line's
+                          # own median inter-glyph gap
 
 
 def _label(mask):
@@ -197,6 +236,75 @@ def _line_bands(boxes, gap):
     return bands
 
 
+def _veto_letters(notes, glyphs):
+    """Demote note-shaped glyphs that are sitting inside a word.
+
+    Takes ``notes`` as ``[(box, label_id), ...]`` and ``glyphs`` as ``[box, ...]``;
+    returns the same pair with any vetoed note moved across to *glyphs*.
+
+    ⚠️⚠️ THIS IS THE `J` FIX. See `_GAP_MIN` above for the measurements. A capital
+    `J` clears every shape test on some fonts — it is tall, single-stemmed,
+    narrow-waisted and its hook is solid enough to pass the fill floor. What it
+    can never do is stand alone: it is the first letter of a word, so the next
+    glyph is a letter-width away. A real ♪ has a word space beside it.
+
+    ⚠️ Compared against the line's OWN median gap, never a pixel count — the
+    whole reason the shape bands failed is that they encoded one font's
+    proportions. Do not replace this with a constant.
+
+    ⚠️ ♪♪ survives: the veto only looks at NON-note neighbours.
+    ⚠️ Fails toward keeping the letter (under-erasing), which degrades to the
+    regex repair downstream rather than to a corrupted word.
+    """
+    if not notes:
+        return notes, glyphs
+
+    everything = [(b, True) for b, _ in notes] + [(b, False) for b in glyphs]
+    bands = _line_bands([b for b, _ in everything], gap=2)
+
+    kept, demoted = [], []
+    for box, ident in notes:
+        cy = (box[1] + box[3]) / 2
+        line = next((k for k, (a, b) in enumerate(bands) if a <= cy <= b), None)
+        if line is None:
+            kept.append((box, ident))
+            continue
+        lo, hi = bands[line]
+        row = sorted([e for e in everything if lo <= (e[0][1] + e[0][3]) / 2 <= hi],
+                     key=lambda e: e[0][0])
+        if len(row) < 2:
+            kept.append((box, ident))        # alone on its line — nothing to compare
+            continue
+
+        gaps = [row[i + 1][0][0] - row[i][0][2] for i in range(len(row) - 1)]
+        gaps = [g for g in gaps if g >= 0]
+        median = sorted(gaps)[len(gaps) // 2] if gaps else 0
+        if median <= 0:
+            kept.append((box, ident))
+            continue
+
+        try:
+            k = next(i for i, e in enumerate(row) if e[0] == box and e[1])
+        except StopIteration:
+            kept.append((box, ident))
+            continue
+
+        nearest = None
+        for j, side in ((k - 1, 'L'), (k + 1, 'R')):
+            if j < 0 or j >= len(row) or row[j][1]:
+                continue                     # off the end, or the neighbour is a note
+            g = (box[0] - row[j][0][2]) if side == 'L' else (row[j][0][0] - box[2])
+            if nearest is None or g < nearest:
+                nearest = g
+
+        if nearest is not None and nearest / median < _GAP_MIN:
+            demoted.append(box)              # a letter inside a word
+        else:
+            kept.append((box, ident))
+
+    return kept, glyphs + demoted
+
+
 def strip_notes(img, threshold=100):
     """Erase ♪ glyphs from a light-on-dark subtitle crop.
 
@@ -237,6 +345,10 @@ def strip_notes(img, threshold=100):
         else:
             glyphs.append(box)
 
+    if not notes:
+        return img, []
+
+    notes, glyphs = _veto_letters(notes, glyphs)
     if not notes:
         return img, []
 

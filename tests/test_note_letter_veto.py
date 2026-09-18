@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""The ♪ eraser must not eat a capital J — and must still catch real notes.
+
+⚠️⚠️ WHY THIS FILE EXISTS. Tony, 2026-09-18, on Lucifer:
+
+    "I noticed that capital J's were left off of a lot of cues... I went to the
+     original video, and the J is definitely there so it's being pulled at
+     extraction. My theory is that the script that does this thinks it's a music
+     note. There is always a mis-placed music note when the J is missing."
+
+He was right on all three counts. `_is_note` classified the `J` of "Javier" as a
+music note, `strip_notes` erased it from the bitmap before Tesseract ever saw it,
+and `reinsert_notes` then put a ♪ where the letter had been.
+
+⭐ THE FAILURE WAS INVISIBLE. The output was not garbled — it was a plausible
+lyric-looking cue with a note in it. Only comparing against the video caught it.
+
+⚠️ AND THE SAME MEASUREMENT SHOWED THE ERASER WAS CATCHING NOTHING. Across three
+Lucifer episodes (3,077 cues, 183 real notes, 74,773 letters):
+
+      real notes:  onestem 0.846-0.92   hd_h 0.37-0.42
+      thresholds:  onestem >= 0.85      hd_h >= 0.44     -> 0 of 183 caught
+
+Every band in `music_notes` was measured on ONE show (Glee S01E22). On a
+different subtitle font the window sat entirely off the population: it erased a
+letter and caught no notes at all. Arthur's own memory recorded the eraser as
+"never fires on real material" — which was true, and was the symptom, not a
+reassurance.
+
+⭐ The fix widens the two bounds that rejected real notes (widening cannot newly
+reject anything, so it cannot break Glee) and adds a veto that is SPACING, not
+proportion: a note-shaped glyph with a NON-note neighbour at intra-word distance
+is a letter. Measured against the line's own median gap, so it travels between
+fonts. Real notes bottom out at 0.80 of that median; the Javier `J` sat at 0.60.
+
+Fixtures are REAL PGS bitmaps decoded out of the remuxes, not synthetic glyphs —
+a fixture that cannot show the failure proves nothing.
+
+Run:  python3 tests/test_note_letter_veto.py
+"""
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+
+from PIL import Image                                          # noqa: E402
+from modules import music_notes as M                           # noqa: E402
+
+FIX = os.path.join(HERE, 'fixtures', 'notes')
+
+
+def _load(name):
+    return Image.open(os.path.join(FIX, name))
+
+
+# ── The bug ─────────────────────────────────────────────────────────────────
+
+def test_capital_J_inside_a_word_is_not_erased():
+    """⭐⭐ THE REPORTED BUG. "NAOMI: / You think I killed Javier?" — no music
+    anywhere in the cue. The J must survive."""
+    img = _load('letter_J_javier.png')
+    out, marks = M.strip_notes(img)
+    assert marks == [], (
+        f"the eraser removed {len(marks)} glyph(s) from a cue with no music in "
+        f"it — the J of 'Javier' is being eaten again: {marks}")
+
+
+def test_the_J_would_have_been_erased_without_the_veto():
+    """⚠️ A test that cannot demonstrate the failure proves nothing. With the
+    veto disabled the J must still be classified as a note — otherwise this
+    whole file is passing for the wrong reason."""
+    saved = M._GAP_MIN
+    try:
+        M._GAP_MIN = 0.0                      # veto can never fire
+        _, marks = M.strip_notes(_load('letter_J_javier.png'))
+        assert marks, ("with the veto disabled the J is no longer detected as a "
+                       "note — the shape bands changed and this test is now vacuous")
+    finally:
+        M._GAP_MIN = saved
+
+
+# ── The thing it must not break ─────────────────────────────────────────────
+
+def test_real_notes_are_still_erased():
+    """⚠️ The other direction. These are genuine lyric cues; every one must
+    still have its notes removed, or Tesseract gets a glyph it cannot encode."""
+    for n in (1, 2, 3):
+        name = f'note_lyric_{n}.png'
+        _, marks = M.strip_notes(_load(name))
+        assert marks, f"{name}: a real music cue had nothing erased"
+
+
+def test_a_note_beside_another_note_survives():
+    """⚠️⚠️ TONY'S FIRST QUESTION ABOUT THIS FIX: "a note can have a
+    neighbour....another note. How can we work it out so the second note doesn't
+    interfere?"
+
+    The veto only considers NON-note neighbours, so ♪♪ is untouched. Proven
+    directly against the helper rather than trusting the prose."""
+    # two note-shaped glyphs side by side, tight together, plus a distant word
+    notes = [((100, 10, 120, 50), 1), ((124, 10, 144, 50), 2)]
+    glyphs = [(200, 10, 260, 50)]
+    kept, demoted = M._veto_letters(notes, glyphs)
+    assert len(kept) == 2, (
+        f"a note adjacent to another note was vetoed — ♪♪ is broken ({kept})")
+
+
+def test_a_note_next_to_a_far_away_word_survives():
+    """`♪ Yeah` — a real note has a word space beside it, not letter spacing."""
+    notes = [((10, 10, 30, 50), 1)]
+    glyphs = [(90, 10, 110, 50), (114, 10, 134, 50), (138, 10, 158, 50)]
+    kept, _ = M._veto_letters(notes, glyphs)
+    assert len(kept) == 1, "a leading note before a lyric was wrongly vetoed"
+
+
+def test_the_veto_needs_gap_VARIANCE_not_just_a_close_neighbour():
+    """⚠️⚠️ THERE IS DELIBERATELY NO SYNTHETIC VERSION OF THE `J` CASE.
+
+    Arthur wrote one twice and it failed both times, for a reason worth keeping:
+    a hand-built line gives every letter an identical gap, so the line's MEDIAN
+    equals the letter spacing and the ratio comes out 1.0. Real text is not that
+    regular — the Javier line's median was 5px against a 3px J-gap, because
+    kerning and word spaces pull the median above the tightest pairs.
+
+    ⭐ So the veto's discriminating power comes from GAP VARIANCE on the line,
+    not merely from "has a close neighbour". A uniform synthetic cannot express
+    that, and contriving one until it passes would be fitting the fixture to the
+    answer. The proof lives in `test_capital_J_inside_a_word_is_not_erased`,
+    which runs on the real decoded bitmap.
+
+    This test pins the property that DOES hold synthetically: identical spacing
+    everywhere means no veto, which is the same statement as the limitation
+    below."""
+    notes = [((200, 10, 220, 50), 1)]
+    glyphs = [(10, 10, 30, 50), (33, 10, 53, 50), (56, 10, 76, 50),
+              (223, 10, 243, 50), (246, 10, 266, 50)]
+    kept, _ = M._veto_letters(notes, glyphs)
+    assert len(kept) == 1, (
+        "uniform letter spacing now triggers the veto — that is a behaviour "
+        "change; re-measure against the 183 real notes before trusting it")
+
+
+def test_known_limitation_a_single_word_line_cannot_be_judged():
+    """⚠️⚠️ WRITTEN DOWN BECAUSE IT IS REAL, NOT BECAUSE IT IS FIXED.
+
+    The veto compares a glyph's neighbour gap against its line's MEDIAN gap. On
+    a line that is one single word, the median IS the letter spacing, the ratio
+    is ~1.0, and the veto cannot fire. A note-shaped letter alone on such a line
+    would still be erased.
+
+    ⭐ Measured exposure is small: across 74,773 letters in three episodes only
+    THREE cleared the shape bands at all, and the veto caught the one that was
+    genuinely a letter. But if a `J`-eating report ever comes back, THIS is the
+    first thing to check — pull the cue and count the words on its line.
+
+    ⛔ Do not "fix" this by reaching for a pixel constant. That is what put the
+    font's proportions into the shape bands and caused the original bug."""
+    notes = [((100, 10, 120, 50), 1)]
+    glyphs = [(123, 10, 143, 50), (146, 10, 166, 50)]     # one word, even spacing
+    kept, _ = M._veto_letters(notes, glyphs)
+    assert len(kept) == 1, (
+        "the single-word limitation has changed behaviour — if this now vetoes, "
+        "re-measure against real notes before celebrating: it may be over-firing")
+
+
+# ── The bands themselves ────────────────────────────────────────────────────
+
+def test_the_widened_bands_cover_real_measurements():
+    """⚠️ These are not round numbers — they are below the measured minimum of
+    183 real notes. If someone raises them back, 183/183 stop being caught."""
+    assert M._ONE_STEM_MIN <= 0.84, (
+        "one-stem floor is back above Lucifer's measured 0.846 — that rejected "
+        "47 of 183 real notes by four thousandths")
+    assert M._HEAD_H_MIN <= 0.36, (
+        "head-height floor is back above Lucifer's measured 0.37 — that rejected "
+        "all 183 real notes")
+
+
+def test_waist_was_deliberately_not_tightened():
+    """⛔ Raising _WAIST_MIN to ~4.0 also kills the J and is tempting. It is
+    tuning on ONE show, which is the exact mistake that caused this bug. The
+    veto is font-relative; the waist is not."""
+    assert M._WAIST_MIN <= 2.2, (
+        "_WAIST_MIN was tightened — that encodes Lucifer's font the way the old "
+        "bands encoded Glee's. Use the spacing veto instead.")
+
+
+if __name__ == '__main__':
+    fails = []
+    for name, fn in sorted(globals().items()):
+        if name.startswith('test_') and callable(fn):
+            try:
+                fn()
+                print(f"  PASS  {name}")
+            except AssertionError as e:
+                fails.append(name)
+                print(f"  FAIL  {name}: {e}")
+    print(f"\n{'ALL PASS' if not fails else str(len(fails)) + ' FAILED'}")
+    sys.exit(1 if fails else 0)

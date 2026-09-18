@@ -713,6 +713,7 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
         import time as _time
 
         phase1_start = _time.monotonic()
+        reset_note_stats()          # per-run, so the summary below means this file
 
         # ── Step 1: Extract raw PGS stream to .sup file ──
         if progress_callback:
@@ -1117,6 +1118,10 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
             progress_callback(f"  Total OCR'd: {len(raw_results)}")
             progress_callback(f"  With text: {with_text}")
             progress_callback(f"  Empty/blank: {empty}")
+            # ⚠️ Say out loud how often the ♪ eraser fired. A songful episode
+            # reporting 0 means the geometry bands do not fit this font — which
+            # went unnoticed for weeks precisely because nothing printed it.
+            progress_callback(f"  {note_stats_summary()}")
 
         return cues
 
@@ -1217,6 +1222,33 @@ def normalise_for_ocr(img):
     return img
 
 
+# ⚠️⚠️ COUNTERS, NOT A DEBUG FLAG. The geometric eraser caught ZERO notes across
+# three entire episodes of Lucifer while quietly erasing the capital `J` out of
+# "Javier" — and nothing anywhere reported either fact. Arthur's own memory had
+# filed "the eraser never fires on real material" as a curiosity rather than the
+# alarm it was. A run that erases 0 notes in an episode full of songs means the
+# geometry bands are off this font; a run that erases some is working. One
+# number separates them and costs nothing. (Tony found it by eye, 2026-09-18.)
+_note_stats = {'cues_seen': 0, 'cues_with_notes': 0, 'notes_erased': 0}
+
+
+def reset_note_stats():
+    """Zero the eraser counters at the start of a run."""
+    for k in _note_stats:
+        _note_stats[k] = 0
+
+
+def note_stats_summary():
+    """One line for the log: how often the ♪ eraser actually fired."""
+    s = _note_stats
+    if not s['cues_seen']:
+        return "music-note eraser: no cues processed"
+    return (f"music-note eraser: {s['notes_erased']} note(s) removed from "
+            f"{s['cues_with_notes']}/{s['cues_seen']} cues"
+            + ("   ⚠️ ZERO — check the geometry bands against this "
+               "font's glyphs" if s['cues_with_notes'] == 0 else ""))
+
+
 def _strip_music_notes(img):
     """Erase ♪ glyphs before OCR. Returns ``(image, marks)``.
 
@@ -1231,9 +1263,17 @@ def _strip_music_notes(img):
     """
     try:
         from .music_notes import strip_notes
-        return strip_notes(img)
+        img_out, marks = strip_notes(img)
     except Exception:
+        _note_stats['cues_seen'] += 1
         return img, []
+    # ⚠️ Counted AFTER the call and outside the try, so a counter bug can never
+    # cost a cue — the fail-open promise above stays intact.
+    _note_stats['cues_seen'] += 1
+    if marks:
+        _note_stats['cues_with_notes'] += 1
+        _note_stats['notes_erased'] += len(marks)
+    return img_out, marks
 
 
 def _reinsert_music_notes(text, marks):
