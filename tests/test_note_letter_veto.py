@@ -201,6 +201,51 @@ def test_no_space_between_stacked_notes():
     assert ' ' not in M.reinsert_notes('', [(0, 'L'), (0, 'L')])
 
 
+# ── The blank page ──────────────────────────────────────────────────────────
+
+def test_an_all_notes_cue_leaves_no_glyph_pixels():
+    """⚠️⚠️ Tesseract does NOT return '' for a blank frame — it invents text.
+
+    Tony, 2026-09-18: "I'm getting the 2 music notes plus the FE." After both
+    notes were erased from a ♪♪ cue the frame was empty, and Tesseract at
+    --psm 6 returned `FE` — deterministically, every time, on 38 surviving
+    anti-aliased pixels at value <=15.
+
+    ⚠️ The first guard tested `max() < 10` and did NOT fire, because the fringe
+    peaks at 15. The gate has to be the SAME threshold strip_notes uses to call
+    something a glyph (>100), not "near zero".
+
+    ⚠️ It is also frame-size dependent: the identical blank content at 216x166
+    read as '' while 216x188 read as 'FE'. An isolated reproduction of the cue
+    looked fine while the real pipeline was broken — twice.
+    """
+    import numpy as np
+    out, marks = M.strip_notes(_load('two_notes.png'))
+    assert len(marks) == 2
+    arr = np.asarray(out.convert('L'))
+    assert not (arr > 100).any(), (
+        f"glyph-level ink survives an all-notes cue (max={arr.max()}) — Tesseract "
+        f"would be handed a near-blank frame and will hallucinate on it")
+
+
+def test_the_ocr_path_skips_tesseract_on_an_emptied_cue():
+    """Structural: both OCR routes must bail before the Tesseract call when
+    notes were erased and no glyph ink remains.
+
+    ⚠️ TWO call sites on purpose — the PGS route and the DVB/VobSub route. The
+    second is the one that historically gets fixed later and stays broken."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = open(os.path.join(here, '..', 'modules', 'subtitle_ocr.py'),
+               encoding='utf-8').read()
+    n = src.count("> 100).any()")
+    assert n >= 2, (
+        f"only {n} blank-frame guard(s) found; both OCR paths need one or a "
+        f"note-only cue will be handed to Tesseract again")
+    assert "_notes and not (" in src, (
+        "the guard no longer requires that notes were actually erased — a dim "
+        "cue with no notes must still reach Tesseract, or that is lost dialogue")
+
+
 # ── The bands themselves ────────────────────────────────────────────────────
 
 def test_the_widened_bands_cover_real_measurements():

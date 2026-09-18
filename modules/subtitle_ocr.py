@@ -516,6 +516,16 @@ def _ocr_overlay_approach(filepath, stream_index, language, tess_lang,
             # cues that are nothing but notes.
             img, _notes = _strip_music_notes(img)
 
+            # ⚠️⚠️ Same guard as the PGS path — see the long note there. A cue
+            # that was nothing but ♪ is now a blank frame, and Tesseract does
+            # not answer "" to a blank frame; it invents text (`FE`, on Lucifer).
+            # ⚠️ Keep BOTH copies. This is the DVB/VobSub route and it is the
+            # one that historically gets fixed second and stays broken longest.
+            import numpy as _np
+            if _notes and not (_np.asarray(img) > 100).any():
+                return (start_s, end_s - start_s,
+                        _reinsert_music_notes('', _notes), frame_path)
+
             # Invert: subtitle text is light on black bg → make dark on white
             img = normalise_for_ocr(img)
 
@@ -1009,6 +1019,33 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                 # put them back afterwards — both notes sharing a line with
                 # lyrics and cues that are nothing but notes.
                 img, _notes = _strip_music_notes(img)
+
+                # ⚠️⚠️ NOTHING LEFT TO READ — DO NOT ASK TESSERACT.
+                # Tony, 2026-09-18: "I'm getting the 2 music notes plus the FE."
+                # A note-only cue (♪♪) has every glyph erased above, leaving a
+                # blank frame. Handed that, Tesseract at --psm 6 does not return
+                # empty — it HALLUCINATES, deterministically, and on this show it
+                # invents `FE` every time. Caught by intercepting the call: the
+                # image measured 0 dark pixels and still produced 'FE'.
+                # ⚠️ It is also frame-size dependent: the same blank content at
+                # 216x166 returned '' while 216x188 returned 'FE', which is why
+                # an isolated reproduction of the cue looked fine and the real
+                # pipeline did not. Do not trust a blank page to read as blank.
+                # ⭐ Skipping the call is also free speed on every note-only cue.
+                #
+                # ⚠️ Gate on `> 100`, the SAME threshold strip_notes uses to
+                # decide what counts as a glyph — not on max() being ~0. Erasing
+                # a note leaves an anti-aliased fringe just outside the 2px halo
+                # dilation: measured 38 surviving pixels at value <=15 on this
+                # show. A `max() < 10` test let those through and Tesseract
+                # hallucinated off 38 specks of dust. Anything at or below the
+                # glyph threshold is not text by this module's own definition.
+                # ⚠️ Only when notes were ACTUALLY erased. A dim cue that had no
+                # notes must still go to Tesseract — normalise_for_ocr stretches
+                # contrast and can rescue it, and dropping it would be lost
+                # dialogue, which is far worse than a stray `FE`.
+                if _notes and not (np.asarray(img) > 100).any():
+                    return (pts, dur, _reinsert_music_notes('', _notes), img_path)
 
                 # ── Upscale for Tesseract ──
                 if img.height < 100:
