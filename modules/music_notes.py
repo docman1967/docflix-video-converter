@@ -402,19 +402,35 @@ def reinsert_notes(text, marks, note='♪'):
         return text
     lines = [ln for ln in (text or '').splitlines() if ln.strip()]
     if not lines:
-        return note
+        # ⚠️⚠️ ONE NOTE PER MARK. This used to `return note` flat, so a cue that
+        # is nothing but ♪♪ came back as a single ♪ no matter how many glyphs
+        # were erased — Tony, 2026-09-18: "it's adding ♪ FE where there should
+        # be two music notes... there should be ♪♪ instead."
+        # ⭐ Doubles are a FEATURE he asked for on 2026-09-14 ("we're also going
+        # to need for the music notes part of the ocr to pick up doubles") and
+        # the regex path has emitted `'♪' * count` since. The geometric path
+        # silently collapsed them, so the two halves of the same feature
+        # disagreed depending on which one fired.
+        # ⚠️ No space between them — matches `_notes_for` in subtitle_ocr, and
+        # his search-and-replace expects the inline pair.
+        return note * len(marks)
 
     n_lines = max(m[0] for m in marks) + 1
     if len(lines) == n_lines:
         for i, ln in enumerate(lines):
             lead = sum(1 for m in marks if m[0] == i and m[1] == 'L')
             trail = sum(1 for m in marks if m[0] == i and m[1] == 'R')
-            lines[i] = f"{note + ' ' if lead else ''}{ln}{' ' + note if trail else ''}"
+            # ⚠️ Same bug lived here: `lead`/`trail` were COUNTED and then one
+            # note emitted regardless, so `♪♪ lyric ♪♪` lost half its notes.
+            lines[i] = (f"{note * lead + ' ' if lead else ''}{ln}"
+                        f"{' ' + note * trail if trail else ''}")
         return '\n'.join(lines)
 
     # Counts disagree — bracket the cue instead of guessing.
-    if any(m[1] == 'L' for m in marks):
-        lines[0] = f"{note} {lines[0]}"
-    if any(m[1] == 'R' for m in marks):
-        lines[-1] = f"{lines[-1]} {note}"
+    n_lead = sum(1 for m in marks if m[1] == 'L')
+    n_trail = sum(1 for m in marks if m[1] == 'R')
+    if n_lead:
+        lines[0] = f"{note * n_lead} {lines[0]}"
+    if n_trail:
+        lines[-1] = f"{lines[-1]} {note * n_trail}"
     return '\n'.join(lines)

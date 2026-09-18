@@ -229,9 +229,29 @@ def test_reinsert_handles_empty_ocr():
     assert reinsert_notes('', [(0, 'L')]) == '♪'
 
 
-def test_reinsert_does_not_double_up_repeated_notes():
-    """`♪♪ [ Continues ]` — two leading notes, one marker."""
-    assert reinsert_notes('[ Continues ]', [(0, 'L'), (0, 'L')]) == '♪ [ Continues ]'
+def test_repeated_notes_come_back_as_a_PAIR():
+    """`♪♪ [ Continues ]` — two leading notes, TWO markers.
+
+    ⚠️⚠️ THIS ASSERTION WAS INVERTED ON 2026-09-18, DELIBERATELY. It used to
+    require the opposite — two erased notes collapsing into a single ♪ — and
+    that was the right answer when written (e51a364, 2026-08-27, the commit that
+    introduced the geometric eraser).
+
+    ⭐ It was superseded by a06ddb2, 2026-09-14: *"OCR: music notes now come
+    through in pairs, not as JJ"* — Tony asked for doubles explicitly, and the
+    REGEX repair path has emitted `'♪' * count` ever since. The geometric path
+    kept collapsing, so the two halves of one feature disagreed depending on
+    which fired. Nobody noticed because the geometric path was not firing at all
+    on real material until its bands were re-measured on 2026-09-18.
+
+    ⭐ Confirmed again by Tony that day, on a note-only cue: *"it's adding ♪ FE
+    where there should be two music notes... there should be ♪♪ instead."*
+
+    ⛔ Do not restore the collapsing behaviour. He drops one of a pair himself
+    with a search-and-replace when he wants uniformity — the tool's job is to
+    report what was actually on screen, not to pre-decide his house style.
+    """
+    assert reinsert_notes('[ Continues ]', [(0, 'L'), (0, 'L')]) == '♪♪ [ Continues ]'
 
 
 # ── failing open ──────────────────────────────────────────────────────────────

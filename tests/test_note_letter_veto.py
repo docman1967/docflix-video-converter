@@ -164,6 +164,43 @@ def test_known_limitation_a_single_word_line_cannot_be_judged():
         "re-measure against real notes before celebrating: it may be over-firing")
 
 
+# ── Doubles: one note back per note erased ──────────────────────────────────
+
+def test_a_note_only_cue_returns_one_note_per_mark():
+    """⚠️⚠️ Tony, 2026-09-18: "it's adding ♪ FE where there should be two music
+    notes... there should be ♪♪ instead."
+
+    `reinsert_notes` had a flat `return note` for the no-text case, so a cue that
+    is nothing but ♪♪ came back as a single ♪ regardless of how many glyphs were
+    erased. ⭐ Doubles are a feature he asked for on 2026-09-14 and the REGEX
+    path has emitted one note per J since — so the two halves of the same
+    feature disagreed depending on which one fired."""
+    assert M.reinsert_notes('', [(0, 'L'), (0, 'L')]) == '♪♪'
+    assert M.reinsert_notes('', [(0, 'L')]) == '♪'
+    assert M.reinsert_notes('', [(0, 'L')] * 3) == '♪♪♪'
+
+
+def test_the_real_two_note_bitmap_yields_two_notes():
+    """End to end on the actual cue from Tony's screenshot (Pops, 00:06:25)."""
+    img = _load('two_notes.png')
+    out, marks = M.strip_notes(img)
+    assert len(marks) == 2, f"expected two notes erased, got {marks}"
+    assert M.reinsert_notes('', marks) == '♪♪'
+
+
+def test_doubles_around_a_lyric_are_not_collapsed():
+    """⚠️ The same flaw lived in the aligned branch: lead/trail were counted and
+    then ONE note emitted regardless."""
+    got = M.reinsert_notes('I was walking', [(0, 'L'), (0, 'L'), (0, 'R'), (0, 'R')])
+    assert got == '♪♪ I was walking ♪♪', got
+
+
+def test_no_space_between_stacked_notes():
+    """⚠️ Matches `_notes_for` in subtitle_ocr, which emits `'♪' * count`. Tony's
+    search-and-replace for dropping one of a pair expects the inline form."""
+    assert ' ' not in M.reinsert_notes('', [(0, 'L'), (0, 'L')])
+
+
 # ── The bands themselves ────────────────────────────────────────────────────
 
 def test_the_widened_bands_cover_real_measurements():
