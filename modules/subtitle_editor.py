@@ -429,6 +429,54 @@ def drop_recurring_words(cues, errors_by_cue, min_hits=3):
     return set(kept_details), kept_details
 
 
+# ⚠️ The word must START lowercase — that is what makes this specific. A
+# capital appearing INSIDE a word is not English; it is a character the OCR
+# read in the wrong case. "McDonald" and "O'Brien" begin with a capital and so
+# can never match, which is why there is no exception list for them.
+_MIDCAP_RE = re.compile(r"\b([a-z]+[A-Z][a-zA-Z']*)\b")
+
+# ⚠️ Genuine mid-word capitals, all of them brand names. Short list on purpose:
+# every entry here is a hole in the detector, so it earns its place only when
+# the word actually turns up in dialogue.
+_MIDCAP_OK = frozenset({
+    'iPhone', 'iPhones', 'iPad', 'iPads', 'iTunes', 'iPod', 'iPods', 'iMac',
+    'eBay', 'YouTube', 'iCloud', 'iMessage', 'eSports', 'iOS', 'LaCroix',
+})
+
+
+def cue_midword_capital(cue):
+    """The word carrying a capital letter inside it, or None.
+
+    ⭐⭐ THE HIGHEST-PRECISION OCR SIGNAL IN THE PANE. Measured 2026-09-19
+    across 40 Lucifer episodes (39,684 cues): 16 hits, 15 of them real —
+
+        lI  x7  -> I     "lI can't hide you"   (a spurious l on a capital I)
+        sO  x5  -> So    "sO many questions"
+        hO      -> no    iS -> is    eX -> ex
+
+    ⚠️ It catches what BOTH other detectors miss, which is why it is worth
+    having separately. "hO" is not all-caps, so the ALL-CAPS rule skips it;
+    "ho" is in the dictionary, so the speller passes it. It sat in
+    "SO hO more games" — two errors in one cue — invisible to everything.
+
+    ⭐ It also needs no dictionary at all, so unlike the spelling highlight it
+    still works when pyspellchecker is missing.
+
+    ⚠️ Rarer than anything else here (0.4 per episode, against ~10 colons),
+    so by the pane's rarity precedence it outranks them — see the tags tuple
+    in _refresh_row. It shares the SPELLING colour rather than taking a new
+    one: both mean "a word in this cue is wrong", and the Note column already
+    says which is which (`cap: lI` vs `sp: beheves`). A new background for a
+    signal that is not semantically new is how a palette fills up with
+    distinctions nobody asked for.
+    """
+    text = _CAPS_TAG_RE.sub('', cue.get('text') or '')
+    for m in _MIDCAP_RE.finditer(text):
+        if m.group(1) not in _MIDCAP_OK:
+            return m.group(1)
+    return None
+
+
 def has_srt_tag(raw, tag):
     """True if `raw` is wrapped in <tag>…</tag> exactly (ignoring outer space)."""
     core = (raw or '').strip()
@@ -1893,6 +1941,11 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # (both above the palette's real 4.5 floor — see above)
                 cue_tree.tag_configure('spelling',   background='#f7b8c8')
                 cue_tree.tag_configure('allcaps',    background='#e8d0a8')
+                # ⚠️ Deliberately the SAME pink as 'spelling' — a mid-word
+                # capital IS a wrong word, so a second colour would be a
+                # distinction without a difference. The Note column separates
+                # them (`cap: lI` vs `sp: beheves`). See cue_midword_capital.
+                cue_tree.tag_configure('midcap',     background='#f7b8c8')
                 cue_scroll = ttk.Scrollbar(cue_frame, orient='vertical',
                                             command=cue_tree.yview)
                 cue_scroll.grid(row=0, column=1, sticky='ns')
@@ -2308,6 +2361,9 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     # these in the Note column instead of on the row. "break: of"
                     # sends him to the exact spot; a coloured row could only say
                     # "something is odd here". Same for "sp:".
+                    _midcap = cue_midword_capital(cue)
+                    if _midcap:
+                        reason = (f'cap: {_midcap} · ' + reason).strip(' ·')
                     if idx in review_spell[0]:
                         _bad = review_spell[1].get(idx) or []
                         reason = (('sp: ' + _bad[0] if _bad else 'sp')
@@ -2324,21 +2380,29 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                           f"{cue.get('start','')} → "
                                           f"{cue.get('end','')}",
                                           disp, reason),
-                                  # ⚠️ PRECEDENCE: flag > colon > spelling >
-                                  # allcaps > music. The first tag carrying
-                                  # `background` wins, so order is by RARITY —
-                                  # a flag is a problem (rare, urgent), a colon
-                                  # is 1 cue in 102 and actively hunted,
-                                  # spelling ~30/episode, ALL-CAPS ~41/episode,
-                                  # music is 28% and ambient. Whichever loses
-                                  # the background still keeps its Note-column
+                                  # ⚠️ PRECEDENCE: flag > midcap > colon >
+                                  # spelling > allcaps > music. The first tag
+                                  # carrying `background` wins, so order is by
+                                  # RARITY — a flag is a problem (rare,
+                                  # urgent), a mid-word capital is 0.4/episode
+                                  # and nearly always real, a colon is 1 cue in
+                                  # 102 and actively hunted, spelling
+                                  # ~30/episode, ALL-CAPS ~41/episode, music is
+                                  # 28% and ambient. Whichever loses the
+                                  # background still keeps its Note-column
                                   # marker, so nothing is lost.
+                                  # ⚠️ 'midcap' and 'spelling' share ONE colour
+                                  # on purpose (see cue_midword_capital), so
+                                  # their relative order is invisible — but it
+                                  # is still correct, and it matters if they
+                                  # are ever split apart.
                                   # ⚠️ A stranded line break has NO tag here on
                                   # purpose — at 1 in 33 it is the commonest of
                                   # the lot and Tony chose Note-column only
                                   # (2026-09-19: "The note color can stay the
                                   # color it is"). Do not give it a background.
                                   tags=(((tag,) if tag else ())
+                                        + (('midcap',) if _midcap else ())
                                         + (('colon',) if cue_has_colon(cue)
                                            else ())
                                         + (('spelling',) if idx in review_spell[0]

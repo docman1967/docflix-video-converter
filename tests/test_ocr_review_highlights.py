@@ -21,6 +21,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from modules.subtitle_editor import (cue_stranded_break,        # noqa: E402
+                                     cue_midword_capital,
                                      drop_recurring_words)
 
 
@@ -114,6 +115,72 @@ def test_returns_the_word_not_just_true():
     got = cue_stranded_break(_cue("He was late for\nhis own wedding."))
     assert got == 'for'
     assert isinstance(got, str)
+
+
+# ───────────────────────── mid-word capitals ─────────────────────────
+
+def test_real_midword_capitals_from_the_lucifer_sweep():
+    """Every one of these is a real line from the library (2026-09-19)."""
+    assert cue_midword_capital(_cue('But the rock cried out,\n"lI can\'t hide you"')) == 'lI'
+    assert cue_midword_capital(_cue('SO hO more games...\nwhat\'s in it?')) == 'hO'
+    assert cue_midword_capital(_cue('sO... handsome.')) == 'sO'
+    assert cue_midword_capital(_cue('This line of questioning\niS now over.')) == 'iS'
+    assert cue_midword_capital(_cue("Ash's eX.")) == 'eX'
+
+
+def test_ordinary_text_is_never_flagged():
+    """⚠️ At 0.4 hits per episode this is the RAREST signal in the pane.
+    If ordinary dialogue starts matching, that claim dies and so does the
+    precedence it was given."""
+    for text in ("I found the body at nine.",
+                 "CHLOE: Get down!",
+                 "DETECTIVE DECKER is here.",
+                 "He said I should go.",
+                 "It's a long way to Tipperary.",
+                 "Well, THAT went well.",
+                 "A B C D E F G",
+                 "♪ We are the champions ♪"):
+        assert cue_midword_capital(_cue(text)) is None, text
+
+
+def test_a_word_starting_with_a_capital_can_never_match():
+    """McDonald / O'Brien / MacArthur are capital-INITIAL, not capital-inside.
+    That is why the detector needs no exception list for them — if this ever
+    goes red somebody has loosened the leading [a-z]+ anchor."""
+    for text in ("We ate at McDonald's.",
+                 "O'Brien called twice.",
+                 "General MacArthur returned.",
+                 "She works for DeSoto Motors."):
+        assert cue_midword_capital(_cue(text)) is None, text
+
+
+def test_real_brand_names_are_excused():
+    """The short allow-list. Each entry is a hole, so it stays short."""
+    for text in ("Check my iPhone.", "He bought an iPad.",
+                 "It's on eBay.", "Watch it on YouTube.",
+                 "Sync it to iTunes."):
+        assert cue_midword_capital(_cue(text)) is None, text
+
+
+def test_an_unlisted_brand_is_still_flagged_and_that_is_correct():
+    """⚠️ ACCEPTED COST, recorded so it is not a surprise: a CamelCase brand
+    that is not on the list reads as an OCR error. One glance to dismiss, and
+    the alternative — a long allow-list — is a long list of blind spots."""
+    assert cue_midword_capital(_cue('Posted it on myFace.')) == 'myFace'
+
+
+def test_returns_the_word_so_the_note_can_name_it():
+    got = cue_midword_capital(_cue('sO many questions,'))
+    assert got == 'sO'
+
+
+def test_formatting_tags_do_not_hide_it():
+    assert cue_midword_capital(_cue('<i>sO many questions</i>')) == 'sO'
+
+
+def test_empty_and_missing_text_are_safe():
+    assert cue_midword_capital(_cue('')) is None
+    assert cue_midword_capital({}) is None
 
 
 # ───────────────────────── recurring-word filter ─────────────────────────
