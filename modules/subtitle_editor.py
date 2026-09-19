@@ -433,6 +433,47 @@ def cue_midword_capital(cue):
     return None
 
 
+def add_user_word(app, word, as_name=False):
+    """Teach the user dictionary a word. Returns True if anything changed.
+
+    ⚠️⚠️ THE ONE PLACE THESE RULES LIVE. There are now two doors into the
+    dictionary — the Spell Check dialog's "Add to Dict" / "Add as Name"
+    buttons, and the OCR review pane's right-click menu. They were written
+    separately first, which is how the same word ends up known in one pane and
+    unknown in the other, and how a user concludes the dictionary is broken.
+    Both call this. ⛔ Do not reimplement it a third time.
+
+        custom_spell_words   case-INSENSITIVE  — "stop flagging this"
+        custom_cap_words     CASE-SENSITIVE    — the record of how the proper
+                                                 noun is really written, which
+                                                 is the whole point of storing
+                                                 a corrected form rather than
+                                                 the OCR's. It also shields the
+                                                 word from the Fix ALL CAPS
+                                                 filter.
+
+    ⚠️ A name goes into BOTH lists. custom_cap_words alone would keep it
+    correctly-cased and still flagged as a misspelling.
+
+    ⚠️ Saves only when something actually changed — save_preferences writes two
+    prefs stores (the 3.19.3 split), so a no-op re-add should not cost two file
+    writes on every right-click.
+
+    ⚠️ Does NOT touch any cue. The caller may have a correction to apply; this
+    function only records that a word is legitimate.
+    """
+    changed = False
+    if as_name and word not in app.custom_cap_words:
+        app.custom_cap_words.append(word)
+        changed = True
+    if word.lower() not in [x.lower() for x in app.custom_spell_words]:
+        app.custom_spell_words.append(word)
+        changed = True
+    if changed:
+        app.save_preferences()
+    return changed
+
+
 def has_srt_tag(raw, tag):
     """True if `raw` is wrapped in <tag>…</tag> exactly (ignoring outer space)."""
     core = (raw or '').strip()
@@ -1686,6 +1727,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # ocr_result is a list.
                 review_spell = [set(), {}]     # (indices, {idx: [word, ...]})
                 review_caps = [set(), {}]      # (indices, {idx: {WORD, ...}})
+                # Words dismissed for THIS review only, via the right-click
+                # menu's "Ignore in this episode". Deliberately NOT persisted —
+                # the two dictionary entries are permanent and this one is not,
+                # which is the whole difference between them. A throwaway
+                # judgement that quietly became permanent would be worse than
+                # no ignore at all.
+                review_ignore = set()
 
                 # ── Monitor window ──
                 mon = tk.Toplevel(editor)
@@ -2286,6 +2334,95 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 cue_tree.bind('<Delete>', lambda e: _delete_selected_cues(e))
                 cue_tree.bind('<BackSpace>', lambda e: _delete_selected_cues(e))
 
+                def _teach_word(word, as_name, cue_idx):
+                    """Add *word* to the user dictionary and redraw.
+
+                    ⚠️⚠️ MIRRORS the Spell Check dialog's two buttons exactly
+                    (_do_add_dict / _do_add_name above). One set of rules, two
+                    doors into it — if these ever disagree, the same word is
+                    known in one pane and unknown in the other, which reads as
+                    the dictionary being broken.
+
+                        Add to dictionary : custom_spell_words, case-INSENSITIVE
+                        Add as name       : custom_cap_words CASE-SENSITIVE
+                                            (it is the record of how the proper
+                                            noun is really written) PLUS
+                                            custom_spell_words
+
+                    ⚠️ Unlike the dialog this NEVER rewrites a cue. The dialog
+                    can apply a correction because the user typed one; here he
+                    only said "this word is fine", which is not a licence to
+                    touch his text. Propose, never apply.
+                    """
+                    try:
+                        add_user_word(app, word, as_name)
+                    except Exception:
+                        pass        # advisory feature; never lose the review
+                    _rebuild_cue_tree(select_cue=cue_idx)
+
+                def _ignore_word(word, cue_idx):
+                    review_ignore.add(word.lower())
+                    _rebuild_cue_tree(select_cue=cue_idx)
+
+                def _popup_dict_menu(event):
+                    """Right-click a row: teach the dictionary its unknown words.
+
+                    ⭐ Tony, 2026-09-19: the pane is where he actually reads, and
+                    the only way to add a word was to load the cue into the main
+                    editor and walk the Spell Check dialog to it. A dead end with
+                    no visible way out (feedback_size-by-users-not-frequency).
+
+                    ⚠️ A cue can hold more than one unknown word and the Note
+                    column only shows the FIRST. A flat menu would therefore act
+                    on a word he cannot see, so every word gets its own submenu
+                    naming itself. One unknown word still gets a submenu — an
+                    interface that changes shape between one and two items is
+                    harder to learn than one that does not.
+                    """
+                    item = cue_tree.identify_row(event.y)
+                    if not item:
+                        return
+                    cue_tree.selection_set(item)
+                    idx = _row_cue.get(item)
+                    if idx is None:
+                        return
+                    words = list(review_spell[1].get(idx) or [])
+                    menu = tk.Menu(cue_tree, tearoff=0)
+                    if not words:
+                        # ⚠️ Shown, not hidden. A menu that silently refuses to
+                        # appear reads as a broken right-click; this says why.
+                        # Rows flagged only for ALL-CAPS or a mid-word capital
+                        # land here, and correctly — "lI" is an OCR error, not a
+                        # word to teach.
+                        menu.add_command(
+                            label="No unknown words in this cue",
+                            state='disabled')
+                    for w in words:
+                        sub = tk.Menu(menu, tearoff=0)
+                        sub.add_command(
+                            label=f'Add "{w}" to dictionary',
+                            command=lambda w=w: _teach_word(w, False, idx))
+                        sub.add_command(
+                            label=f'Add "{w}" as a name',
+                            command=lambda w=w: _teach_word(w, True, idx))
+                        sub.add_separator()
+                        sub.add_command(
+                            label=f'Ignore "{w}" in this episode',
+                            command=lambda w=w: _ignore_word(w, idx))
+                        menu.add_cascade(label=w, menu=sub)
+                    try:
+                        menu.tk_popup(event.x_root, event.y_root)
+                    finally:
+                        # ⚠️ grab_release or the menu can leave the pointer
+                        # grabbed on some window managers and the pane stops
+                        # responding to clicks entirely.
+                        menu.grab_release()
+
+                # ⚠️ Bound here beside the other cue_tree bindings, though
+                # _rebuild_cue_tree is defined further down — the name resolves
+                # when the handler RUNS, by which point everything exists.
+                cue_tree.bind('<Button-3>', _popup_dict_menu)
+
                 _flag_cue = flag_ocr_cue     # module-level, unit-tested
 
                 def _refresh_row(item, idx):
@@ -2402,6 +2539,15 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     try:
                         from .spell_checker import run_spell_highlight_scan
                         raw = run_spell_highlight_scan(app, mon, cues, set())
+                        if raw and review_ignore:
+                            # ⚠️ Applied BEFORE drop_recurring_words, so a cue
+                            # whose only remaining word was ignored disappears
+                            # from the flags entirely instead of surviving as
+                            # an empty entry.
+                            raw = {i: [w for w in ws
+                                       if w.lower() not in review_ignore]
+                                   for i, ws in raw.items()}
+                            raw = {i: ws for i, ws in raw.items() if ws}
                         if raw:
                             # ⚠️ The recurring-word filter is what makes this
                             # usable — without it every character name in the
@@ -4985,10 +5131,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     push_undo()
                     _apply_correction_everywhere(scanned, w)
                     refresh_tree(cues)
-                if w.lower() not in [x.lower()
-                                     for x in app.custom_spell_words]:
-                    app.custom_spell_words.append(w)
-                    app.save_preferences()
+                add_user_word(app, w)          # see add_user_word — one rule
                 spell.word_frequency.load_words([w.lower()])
                 ignored.add(scanned.lower())
                 _show_next()
@@ -5004,14 +5147,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     push_undo()
                     _apply_correction_everywhere(scanned, w)
                     refresh_tree(cues)
-                # custom_cap_words is CASE-SENSITIVE on purpose — it is the
-                # record of how the proper noun is really written, which is the
-                # whole point of adding a corrected form rather than the OCR's.
-                if w not in app.custom_cap_words:
-                    app.custom_cap_words.append(w)
-                if w.lower() not in [x.lower()
-                                     for x in app.custom_spell_words]:
-                    app.custom_spell_words.append(w)
+                add_user_word(app, w, as_name=True)   # see add_user_word
                 spell.word_frequency.load_words([w.lower()])
                 # Teach the wrong-case check the name too, or the cues still
                 # ahead of the cursor keep their broken capitalisation AND stop

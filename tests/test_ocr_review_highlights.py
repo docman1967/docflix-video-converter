@@ -23,12 +23,89 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from modules.subtitle_editor import (cue_midword_capital,       # noqa: E402
-                                     drop_recurring_words)
+                                     drop_recurring_words,
+                                     add_user_word)
+
+
+class _App:
+    """Stand-in for the app object — only what add_user_word touches."""
+    def __init__(self, spell=None, cap=None):
+        self.custom_spell_words = list(spell or [])
+        self.custom_cap_words = list(cap or [])
+        self.saves = 0
+
+    def save_preferences(self):
+        self.saves += 1
 
 
 def _cue(text):
     return {'index': 1, 'start': '00:00:01,000', 'end': '00:00:02,000',
             'text': text}
+
+
+# ─────────────────────────── user dictionary ───────────────────────────
+#
+# ⚠️ These pin the rules shared by the Spell Check dialog's two buttons AND
+# the OCR pane's right-click menu. The two were written separately first —
+# if they ever drift, the same word is known in one pane and unknown in the
+# other, and the dictionary looks broken.
+
+def test_add_to_dictionary_is_case_insensitive():
+    app = _App(spell=['Amenadiel'])
+    assert add_user_word(app, 'amenadiel') is False
+    assert app.custom_spell_words == ['Amenadiel'], "must not double-add"
+    assert app.saves == 0, "a no-op must not write two prefs stores"
+
+
+def test_add_as_name_goes_into_BOTH_lists():
+    """⚠️ cap_words alone would keep it correctly-cased AND still flagged."""
+    app = _App()
+    assert add_user_word(app, 'Amenadiel', as_name=True) is True
+    assert app.custom_cap_words == ['Amenadiel']
+    assert app.custom_spell_words == ['Amenadiel']
+
+
+def test_plain_add_does_NOT_touch_cap_words():
+    """"Add to dictionary" means stop flagging it, not "this is a name"."""
+    app = _App()
+    add_user_word(app, 'bababooey')
+    assert app.custom_spell_words == ['bababooey']
+    assert app.custom_cap_words == []
+
+
+def test_cap_words_are_CASE_SENSITIVE():
+    """It records how the proper noun is really written — 'chloe' and 'Chloe'
+    are not the same entry, which is the entire point of the list."""
+    app = _App(cap=['Chloe'])
+    assert add_user_word(app, 'chloe', as_name=True) is True
+    assert app.custom_cap_words == ['Chloe', 'chloe']
+
+
+def test_a_name_already_known_as_a_word_still_reaches_cap_words():
+    """The half-added case: spelled-ok but never recorded as a name."""
+    app = _App(spell=['Decker'])
+    assert add_user_word(app, 'Decker', as_name=True) is True
+    assert app.custom_cap_words == ['Decker']
+    assert app.custom_spell_words == ['Decker'], "no duplicate"
+    assert app.saves == 1
+
+
+def test_saves_once_per_real_change():
+    app = _App()
+    add_user_word(app, 'Maze')
+    add_user_word(app, 'Maze')
+    add_user_word(app, 'MAZE')
+    assert app.saves == 1, "only the first add changed anything"
+
+
+def test_never_mutates_a_cue():
+    """add_user_word records a judgement; applying a correction is the
+    caller's job. Propose, never apply."""
+    app = _App()
+    cue = _cue('He beheves it.')
+    before = dict(cue)
+    add_user_word(app, 'beheves')
+    assert cue == before
 
 
 # ───────────────────────── mid-word capitals ─────────────────────────
