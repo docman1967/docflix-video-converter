@@ -289,98 +289,6 @@ def scan_allcaps_words(cues):
     return indices, details
 
 
-# ⚠️⚠️ These are words that bind RIGHTWARD — the word AFTER them completes the
-# phrase, so ending a subtitle line here always jars the reader. The distinction
-# matters and it is the whole reason this list is short:
-#
-#   "You weren't part of  /  the Seer's prophecy"   <- bad, "of" is stranded
-#   "I might have joined you  /  if I'd been 20"    <- GOOD, "if" opens a clause
-#
-# A conjunction (if/and/but/or/because) at end of line is correct practice — it
-# is where the phrase naturally bends. Measured on 109,812 two-line cues from
-# 400 library .srt files (2026-09-19):
-#
-#     any function word at end of line 1 : 1 in 7   (13.2%)  <- WALLPAPER, and
-#                                                               mostly GOOD breaks
-#     rightward-binding words only       : 1 in 33  (3.0%)   <- every sample a
-#                                                               real defect
-#
-# ⛔ Do NOT add conjunctions, pronouns or auxiliaries to this set without
-# re-measuring on real subtitles. The 1-in-7 version was the first attempt and
-# it would have painted a seventh of the pane. Same failure shape as the music
-# note geometry bands — a widened band with no negative set.
-_STRANDED_WORDS = frozenset({
-    'a', 'an', 'the',
-    'of', 'to', 'in', 'on', 'at', 'for', 'with', 'from', 'by',
-    'into', 'onto', 'upon',
-})
-
-_LAST_WORD_RE = re.compile(r"([A-Za-z']+)[^A-Za-z']*$")
-_FIRST_WORD_RE = re.compile(r"^[^A-Za-z']*([A-Za-z']+)")
-
-# ⚠️⚠️ THE SECOND HALF OF THE RULE, and it is not optional. A preposition can
-# do two different jobs, and only one of them is a defect:
-#
-#   "You weren't part of  /  the Seer's prophecy"     <- binds RIGHTWARD, bad
-#   "Where's that wisdom come from  /  if not..."     <- ENDS A CLAUSE, fine
-#
-# Same word, opposite verdicts. What tells them apart is the word AFTER the
-# break: when line 2 opens with a conjunction or subordinator, the break sits
-# on a clause boundary, which is exactly where a line is supposed to bend.
-# ⭐ Caught by test_conjunction_at_end_of_line_is_NOT_a_defect, on a line the
-# first draft of this rule had confidently reported as a real catch.
-_CLAUSE_OPENERS = frozenset({
-    'if', 'and', 'but', 'or', 'nor', 'so', 'yet', 'because', 'since',
-    'when', 'while', 'where', 'whereas', 'though', 'although', 'unless',
-    'until', 'before', 'after', 'whether', 'than', 'as',
-})
-
-
-def cue_stranded_break(cue):
-    """The word left dangling at the end of line 1, or None.
-
-    ⭐ Tony, 2026-09-19: *"people that do subtitles get caught up in the grammar
-    that they forget it has to be legible by the folks viewing the program."*
-    A subtitle is read in about two seconds while the viewer is also watching a
-    face; a line that breaks mid-phrase costs part of that budget. Same
-    principle as the Transcriber's cue segmentation — but that generates cues
-    from Whisper, so it controls its own breaks. Here the breaks arrived with
-    whoever made the release, and until now nothing looked at them at all.
-
-    ⚠️ NOTE COLUMN ONLY — no row background. Tony, 2026-09-19: *"The note color
-    can stay the color it is."* At 1 in 33 this is the most COMMON of the three
-    review signals, so under the rarity precedence it would lose the background
-    to a rarer flag most of the time anyway; and naming the stranded word
-    (`break: of`) is strictly more useful than colouring the row, which can only
-    say "something is odd here".
-
-    ⚠️ Only two-line cues. A single line has no break to judge, and a 3+ line
-    cue has a different problem (too long) that flag_ocr_cue is not trying to
-    solve here.
-
-    ⚠️ Terminal punctuation on line 1 means the break is deliberate — "Wait for
-    it. / Now." is two sentences, not a stranded preposition.
-    """
-    text = (cue.get('text') or '')
-    lines = [l for l in text.split('\n') if l.strip()]
-    if len(lines) != 2:
-        return None
-    first = _CAPS_TAG_RE.sub('', lines[0]).strip()
-    if first.endswith(('.', '!', '?', '—', '–', ':')):
-        return None
-    m = _LAST_WORD_RE.search(first)
-    if not m:
-        return None
-    word = m.group(1)
-    if word.lower() not in _STRANDED_WORDS:
-        return None
-    # ⚠️ Look at line 2 before calling it a defect — see _CLAUSE_OPENERS.
-    nxt = _FIRST_WORD_RE.search(_CAPS_TAG_RE.sub('', lines[1]).strip())
-    if nxt and nxt.group(1).lower() in _CLAUSE_OPENERS:
-        return None
-    return word
-
-
 def drop_recurring_words(cues, errors_by_cue, min_hits=3):
     """Drop 'misspellings' that recur often enough to be proper nouns.
 
@@ -427,6 +335,54 @@ def drop_recurring_words(cues, errors_by_cue, min_hits=3):
         if survivors:
             kept_details[idx] = survivors
     return set(kept_details), kept_details
+
+
+# ⚠️ The word must START lowercase — that is what makes this specific. A
+# capital appearing INSIDE a word is not English; it is a character the OCR
+# read in the wrong case. "McDonald" and "O'Brien" begin with a capital and so
+# can never match, which is why there is no exception list for them.
+_MIDCAP_RE = re.compile(r"\b([a-z]+[A-Z][a-zA-Z']*)\b")
+
+# ⚠️ Genuine mid-word capitals, all of them brand names. Short list on purpose:
+# every entry here is a hole in the detector, so it earns its place only when
+# the word actually turns up in dialogue.
+_MIDCAP_OK = frozenset({
+    'iPhone', 'iPhones', 'iPad', 'iPads', 'iTunes', 'iPod', 'iPods', 'iMac',
+    'eBay', 'YouTube', 'iCloud', 'iMessage', 'eSports', 'iOS', 'LaCroix',
+})
+
+
+def cue_midword_capital(cue):
+    """The word carrying a capital letter inside it, or None.
+
+    ⭐⭐ THE HIGHEST-PRECISION OCR SIGNAL IN THE PANE. Measured 2026-09-19
+    across 40 Lucifer episodes (39,684 cues): 16 hits, 15 of them real —
+
+        lI  x7  -> I     "lI can't hide you"   (a spurious l on a capital I)
+        sO  x5  -> So    "sO many questions"
+        hO      -> no    iS -> is    eX -> ex
+
+    ⚠️ It catches what BOTH other detectors miss, which is why it is worth
+    having separately. "hO" is not all-caps, so the ALL-CAPS rule skips it;
+    "ho" is in the dictionary, so the speller passes it. It sat in
+    "SO hO more games" — two errors in one cue — invisible to everything.
+
+    ⭐ It also needs no dictionary at all, so unlike the spelling highlight it
+    still works when pyspellchecker is missing.
+
+    ⚠️ Rarer than anything else here (0.4 per episode, against ~10 colons),
+    so by the pane's rarity precedence it outranks them — see the tags tuple
+    in _refresh_row. It shares the SPELLING colour rather than taking a new
+    one: both mean "a word in this cue is wrong", and the Note column already
+    says which is which (`cap: lI` vs `sp: beheves`). A new background for a
+    signal that is not semantically new is how a palette fills up with
+    distinctions nobody asked for.
+    """
+    text = _CAPS_TAG_RE.sub('', cue.get('text') or '')
+    for m in _MIDCAP_RE.finditer(text):
+        if m.group(1) not in _MIDCAP_OK:
+            return m.group(1)
+    return None
 
 
 # ⚠️ The word must START lowercase — that is what makes this specific. A
@@ -2370,9 +2326,6 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                   + ' · ' + reason).strip(' ·')
                     if idx in review_caps[0]:
                         reason = ('CAPS · ' + reason).strip(' ·')
-                    _stranded = cue_stranded_break(cue)
-                    if _stranded:
-                        reason = (f'break: {_stranded} · ' + reason).strip(' ·')
                     if cue.get('edited'):
                         reason = (reason + ' · edited').strip(' ·')
                     cue_tree.item(item,
@@ -2396,11 +2349,17 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                   # their relative order is invisible — but it
                                   # is still correct, and it matters if they
                                   # are ever split apart.
-                                  # ⚠️ A stranded line break has NO tag here on
-                                  # purpose — at 1 in 33 it is the commonest of
-                                  # the lot and Tony chose Note-column only
-                                  # (2026-09-19: "The note color can stay the
-                                  # color it is"). Do not give it a background.
+                                  # ⛔ A "stranded line break" marker (line 1
+                                  # ending on an article or preposition) was
+                                  # built and REMOVED the same day. It was
+                                  # measured, correct, and still wrong — Tony,
+                                  # 2026-09-19, after using the real pane:
+                                  # "I think we need to remove the break
+                                  # flag....it's cluttering." At ~8 rows an
+                                  # episode, "you could have wrapped that
+                                  # better" is nagging, not helping. A signal
+                                  # being ACCURATE does not make it WELCOME.
+                                  # ⛔ Do not rebuild it.
                                   tags=(((tag,) if tag else ())
                                         + (('midcap',) if _midcap else ())
                                         + (('colon',) if cue_has_colon(cue)

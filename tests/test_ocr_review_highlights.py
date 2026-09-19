@@ -11,110 +11,24 @@ the letter `u`; `_is_music_note_frame`, which never once returned True).
 So every test below is really a test about FREQUENCY and FALSE POSITIVES, not
 just about correctness. The negative cases are the point.
 
-⭐ The measurement these encode, from 109,812 real two-line cues:
-       any function word ends line 1  : 1 in 7   (13.2%)  <- rejected, wallpaper
-       rightward-binding words only   : 1 in 33  (3.0%)   <- shipped
+⛔ A "stranded line break" rule lived here for one morning: line 1 ending on
+an article or preposition, narrowed from 1-in-7 to 1-in-34 and measured on
+109,812 real two-line cues. Tony removed it after using it — "it's cluttering."
+Recorded because it is the lesson this file is really about: ACCURATE is not
+the same as WELCOME, and only the real pane can tell you which one you built.
 """
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from modules.subtitle_editor import (cue_stranded_break,        # noqa: E402
-                                     cue_midword_capital,
+from modules.subtitle_editor import (cue_midword_capital,       # noqa: E402
                                      drop_recurring_words)
 
 
 def _cue(text):
     return {'index': 1, 'start': '00:00:01,000', 'end': '00:00:02,000',
             'text': text}
-
-
-# ─────────────────────────── stranded line breaks ───────────────────────────
-
-def test_stranded_preposition_is_caught():
-    """The real defect: line 1 ends on a word that belongs to line 2."""
-    assert cue_stranded_break(
-        _cue("You weren't part of\nthe Seer's prophecy, Mr. Fitz.")) == 'of'
-    assert cue_stranded_break(
-        _cue("I'm late for\nmy morning check-in.")) == 'for'
-    assert cue_stranded_break(
-        _cue("Anyway, he's at\nthe end of the bar.")) == 'at'
-    assert cue_stranded_break(
-        _cue("and stay in touch with\nthe people we fight for.")) == 'with'
-
-
-def test_stranded_article_is_caught():
-    assert cue_stranded_break(
-        _cue("I just have kind of a\ncomplicated relationship.")) == 'a'
-    assert cue_stranded_break(
-        _cue("He walked straight into the\nroom without knocking.")) == 'the'
-
-
-def test_conjunction_at_end_of_line_is_NOT_a_defect():
-    """⚠️⚠️ THE TEST THAT DEFINES THE BAND.
-
-    Breaking before a conjunction is correct subtitling — the conjunction
-    opens the next clause, which is exactly where the phrase wants to bend.
-    The first version of this rule flagged these and fired on 1 cue in 7.
-    If this test ever goes red, somebody has widened _STRANDED_WORDS without
-    re-measuring, and the pane is about to become wallpaper.
-    """
-    for text in (
-        "I might have joined you\nif I'd been 20 years young.",
-        "Where's that wisdom come from\nif not from the Lord?",
-        "He said he'd be here and\nhe never showed up.",
-        "I'd tell you the truth but\nyou wouldn't believe me.",
-        "We can go now or\nwe can wait until morning.",
-        "She left him because\nhe never listened.",
-    ):
-        assert cue_stranded_break(_cue(text)) is None, text
-
-
-def test_pronoun_and_auxiliary_are_NOT_flagged():
-    """Also deliberately out of the band — same wallpaper risk."""
-    for text in ("Nobody ever told me that I\nwould have to do this alone.",
-                 "The only thing he was\nafraid of was the dark.",
-                 "I don't think they\nknew what they were doing."):
-        assert cue_stranded_break(_cue(text)) is None, text
-
-
-def test_terminal_punctuation_means_the_break_was_deliberate():
-    """"Wait for it. / Now." is two sentences, not a stranded preposition."""
-    for text in ("Get in.\nThe car's running.",
-                 "Are you in?\nThe others already said yes.",
-                 "Stop it!\nThe neighbours will hear.",
-                 "I wanted to tell you —\nthe truth is complicated."):
-        assert cue_stranded_break(_cue(text)) is None, text
-
-
-def test_speaker_label_colon_is_not_a_stranded_break():
-    """A trailing colon is a speaker label; the colon highlight owns that."""
-    assert cue_stranded_break(_cue("CHLOE:\nthe body was moved.")) is None
-
-
-def test_single_line_and_three_line_cues_are_ignored():
-    """A one-line cue has no break to judge; 3+ lines is a different problem."""
-    assert cue_stranded_break(_cue("You weren't part of the prophecy.")) is None
-    assert cue_stranded_break(
-        _cue("You weren't part of\nthe Seer's\nprophecy.")) is None
-    assert cue_stranded_break(_cue("")) is None
-    assert cue_stranded_break(_cue("   \n   ")) is None
-
-
-def test_case_and_formatting_tags_do_not_defeat_the_rule():
-    """OCR output carries <i> tags; the band must see through them."""
-    assert cue_stranded_break(
-        _cue("<i>You weren't part of</i>\nthe prophecy.")) == 'of'
-    assert cue_stranded_break(
-        _cue("You weren't part OF\nthe prophecy.")) == 'OF'
-
-
-def test_returns_the_word_not_just_true():
-    """The Note column says `break: of` — naming the word IS the feature."""
-    got = cue_stranded_break(_cue("He was late for\nhis own wedding."))
-    assert got == 'for'
-    assert isinstance(got, str)
 
 
 # ───────────────────────── mid-word capitals ─────────────────────────
