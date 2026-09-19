@@ -289,6 +289,146 @@ def scan_allcaps_words(cues):
     return indices, details
 
 
+# ⚠️⚠️ These are words that bind RIGHTWARD — the word AFTER them completes the
+# phrase, so ending a subtitle line here always jars the reader. The distinction
+# matters and it is the whole reason this list is short:
+#
+#   "You weren't part of  /  the Seer's prophecy"   <- bad, "of" is stranded
+#   "I might have joined you  /  if I'd been 20"    <- GOOD, "if" opens a clause
+#
+# A conjunction (if/and/but/or/because) at end of line is correct practice — it
+# is where the phrase naturally bends. Measured on 109,812 two-line cues from
+# 400 library .srt files (2026-09-19):
+#
+#     any function word at end of line 1 : 1 in 7   (13.2%)  <- WALLPAPER, and
+#                                                               mostly GOOD breaks
+#     rightward-binding words only       : 1 in 33  (3.0%)   <- every sample a
+#                                                               real defect
+#
+# ⛔ Do NOT add conjunctions, pronouns or auxiliaries to this set without
+# re-measuring on real subtitles. The 1-in-7 version was the first attempt and
+# it would have painted a seventh of the pane. Same failure shape as the music
+# note geometry bands — a widened band with no negative set.
+_STRANDED_WORDS = frozenset({
+    'a', 'an', 'the',
+    'of', 'to', 'in', 'on', 'at', 'for', 'with', 'from', 'by',
+    'into', 'onto', 'upon',
+})
+
+_LAST_WORD_RE = re.compile(r"([A-Za-z']+)[^A-Za-z']*$")
+_FIRST_WORD_RE = re.compile(r"^[^A-Za-z']*([A-Za-z']+)")
+
+# ⚠️⚠️ THE SECOND HALF OF THE RULE, and it is not optional. A preposition can
+# do two different jobs, and only one of them is a defect:
+#
+#   "You weren't part of  /  the Seer's prophecy"     <- binds RIGHTWARD, bad
+#   "Where's that wisdom come from  /  if not..."     <- ENDS A CLAUSE, fine
+#
+# Same word, opposite verdicts. What tells them apart is the word AFTER the
+# break: when line 2 opens with a conjunction or subordinator, the break sits
+# on a clause boundary, which is exactly where a line is supposed to bend.
+# ⭐ Caught by test_conjunction_at_end_of_line_is_NOT_a_defect, on a line the
+# first draft of this rule had confidently reported as a real catch.
+_CLAUSE_OPENERS = frozenset({
+    'if', 'and', 'but', 'or', 'nor', 'so', 'yet', 'because', 'since',
+    'when', 'while', 'where', 'whereas', 'though', 'although', 'unless',
+    'until', 'before', 'after', 'whether', 'than', 'as',
+})
+
+
+def cue_stranded_break(cue):
+    """The word left dangling at the end of line 1, or None.
+
+    ⭐ Tony, 2026-09-19: *"people that do subtitles get caught up in the grammar
+    that they forget it has to be legible by the folks viewing the program."*
+    A subtitle is read in about two seconds while the viewer is also watching a
+    face; a line that breaks mid-phrase costs part of that budget. Same
+    principle as the Transcriber's cue segmentation — but that generates cues
+    from Whisper, so it controls its own breaks. Here the breaks arrived with
+    whoever made the release, and until now nothing looked at them at all.
+
+    ⚠️ NOTE COLUMN ONLY — no row background. Tony, 2026-09-19: *"The note color
+    can stay the color it is."* At 1 in 33 this is the most COMMON of the three
+    review signals, so under the rarity precedence it would lose the background
+    to a rarer flag most of the time anyway; and naming the stranded word
+    (`break: of`) is strictly more useful than colouring the row, which can only
+    say "something is odd here".
+
+    ⚠️ Only two-line cues. A single line has no break to judge, and a 3+ line
+    cue has a different problem (too long) that flag_ocr_cue is not trying to
+    solve here.
+
+    ⚠️ Terminal punctuation on line 1 means the break is deliberate — "Wait for
+    it. / Now." is two sentences, not a stranded preposition.
+    """
+    text = (cue.get('text') or '')
+    lines = [l for l in text.split('\n') if l.strip()]
+    if len(lines) != 2:
+        return None
+    first = _CAPS_TAG_RE.sub('', lines[0]).strip()
+    if first.endswith(('.', '!', '?', '—', '–', ':')):
+        return None
+    m = _LAST_WORD_RE.search(first)
+    if not m:
+        return None
+    word = m.group(1)
+    if word.lower() not in _STRANDED_WORDS:
+        return None
+    # ⚠️ Look at line 2 before calling it a defect — see _CLAUSE_OPENERS.
+    nxt = _FIRST_WORD_RE.search(_CAPS_TAG_RE.sub('', lines[1]).strip())
+    if nxt and nxt.group(1).lower() in _CLAUSE_OPENERS:
+        return None
+    return word
+
+
+def drop_recurring_words(cues, errors_by_cue, min_hits=3):
+    """Drop 'misspellings' that recur often enough to be proper nouns.
+
+    A real typo is a one-off — OCR misreads `believes` as `beheves` once. A
+    character name the dictionary has never heard of appears all episode. So
+    the count IS the signal, and it needs no name list to work on a show
+    nobody has ever catalogued.
+
+    ⭐ Measured 2026-09-18 on Lucifer S01E01: 53 flagged cues -> 30 (-43%).
+    Re-measured 2026-09-19 on Daredevil S01E09: 76 -> 35 (-54%). Survivors are
+    the genuine catches (`cohapsed`, `beheves`, `decken`, `overthelast`);
+    what goes is Amenadiel, Mazikeen, Urich, Healy.
+
+    ⚠️ Counts occurrences across the WHOLE cue list, not per cue — three
+    mentions anywhere in the episode is the test. Case-insensitive, because
+    a name is still a name at the start of a sentence.
+
+    ⚠️ Returns NEW structures; never mutates the caller's. The spell scan's
+    own `spell_error_indices` set is owned by the editor and is still used by
+    the main tree, which does not want this filter applied.
+
+    Pure and module level so it is testable without pyspellchecker — the
+    expensive half (run_spell_highlight_scan) needs the dictionary, this half
+    does not, and this is the half with the judgement in it.
+    """
+    if not errors_by_cue:
+        return set(), {}
+    counts = {}
+    for cue in cues:
+        clean = re.sub(r'<[^>]+>|\{\\[^}]+\}|♪', '', cue.get('text') or '')
+        for w in re.findall(r"[A-Za-z]+", clean):
+            lw = w.lower()
+            counts[lw] = counts.get(lw, 0) + 1
+    def _root(w):
+        # ⚠️ Strip the possessive BEFORE the non-letters, or "Owlsley's"
+        # normalises to "owlsleys" and never matches the "owlsley" counted in
+        # the text — so every name survives the filter in its possessive form,
+        # which is the form names most often appear in.
+        return re.sub(r"[^A-Za-z]", '', re.sub(r"'s$", '', w, flags=re.I)).lower()
+
+    kept_details = {}
+    for idx, words in errors_by_cue.items():
+        survivors = [w for w in words if counts.get(_root(w), 0) < min_hits]
+        if survivors:
+            kept_details[idx] = survivors
+    return set(kept_details), kept_details
+
+
 def has_srt_tag(raw, tag):
     """True if `raw` is wrapped in <tag>…</tag> exactly (ignoring outer space)."""
     core = (raw or '').strip()
@@ -1530,6 +1670,18 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
 
                 cancel_event = threading.Event()
                 ocr_result = [None]
+                # Whole-LIST review scans, unlike flag_ocr_cue / cue_has_colon
+                # which judge one cue in isolation. Spelling needs the rest of
+                # the episode to tell a typo from a character name, and the
+                # ALL-CAPS scan is cheapest done once. Recomputed by
+                # _run_review_scans() whenever the cue list changes; _refresh_row
+                # only ever reads them.
+                # ⚠️ Mutable containers, not bare names — _refresh_row and
+                # _rebuild_cue_tree are closures and rebinding a local in one
+                # would leave the other pointing at the old object. Same reason
+                # ocr_result is a list.
+                review_spell = [set(), {}]     # (indices, {idx: [word, ...]})
+                review_caps = [set(), {}]      # (indices, {idx: {WORD, ...}})
 
                 # ── Monitor window ──
                 mon = tk.Toplevel(editor)
@@ -1642,21 +1794,57 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # flag_lost is the loudest on purpose: a bitmap that had text
                 # and OCR'd to nothing is the only failure here with no other
                 # symptom. Blank frames are normally dropped before display.
-                # ⚠️⚠️ COLOUR-BLIND SAFE PALETTE — separated by LIGHTNESS, not
-                # hue. Tony is colour blind to some colours (2026-09-13), and
-                # the original palette was four pale red/orange/yellow tints:
-                # exactly the range red-green CVD compresses. Simulated, the
-                # old flag_empty / flag_junk / flag_short collapsed into ONE
-                # pale yellow-green barely distinct from a white row, and
-                # flag_lost — the most urgent — turned olive and stopped
-                # reading as an alarm at all.
+                # ⚠️⚠️ COLOUR-BLIND SAFE PALETTE. Tony is colour blind
+                # (2026-09-13). The original palette was four pale
+                # red/orange/yellow tints — exactly the range red-green CVD
+                # compresses — and simulated, flag_empty / flag_junk /
+                # flag_short collapsed into ONE pale yellow-green barely
+                # distinct from a white row.
                 #
-                #   minimum separation between all row colours
-                #     old:  8.0 normal / 4.5 deuteranopia / 2.4 tritanopia
-                #     new: 22.5 across ALL of them
+                # ⭐⭐ THE RULE THAT ACTUALLY DECIDES — Tony, 2026-09-19:
+                #   "it's not so much the color as it is the text underneath.
+                #    If we have a line highlighted in red, I can't read the
+                #    text underneath. Other darkish colors do the same, browns,
+                #    navy blue, etc... So we could use tans, grays, yellow,
+                #    pink."
+                # The constraint is READABILITY, i.e. LUMINANCE: a row
+                # background must be light enough that BLACK TEXT on it stays
+                # readable. It is NOT primarily about hue. Note his safe list
+                # is not a hue list — every colour on it is light. Separation
+                # between rows still matters (can he tell two rows apart) but
+                # it is the SECOND test, not the first.
+                #
+                # ⛔⛔ THE "22.5 MINIMUM SEPARATION" THIS COMMENT USED TO CLAIM
+                # WAS NEVER TRUE. It was a design target written down mid-work
+                # and then quoted back as a result. Measured 2026-09-19 with
+                # the same simulation that chose these colours, the live
+                # palette's real internal minimum is 4.5, and 9 of 28 pairs
+                # fall below 22.5:
+                #     flag_empty/white_row 4.5   flag_junk/flag_short  6.3
+                #     flag_empty/flag_ocr  8.0   music/colon           8.0
+                # Believing it cost a day: a search returned a best pair at
+                # 20.6, the palette was declared "full", and a whole feature
+                # was tabled on a bar nine shipped pairs already fail.
+                # ⛔ Do not reinstate a numeric bar here without MEASURING the
+                # live palette in the same breath.
                 #
                 # ⛔ Do not "tidy" these back into a pastel set of one hue.
-                # Re-simulate before changing any of them.
+                #
+                # ⚠️⚠️ flag_lost IS DELIBERATELY RED AND IS EXEMPT FROM THE
+                # READABILITY RULE ABOVE. Red is the one colour Tony cannot
+                # read black text on (4.94:1 simulated protanopia, vs 10.5-18.8
+                # for every other row here), so this looks like a bug and has
+                # been "found" as one. It is not. Tony, 2026-09-19:
+                #   "leave the red....those are lines that need to be addressed
+                #    so keeping them red is fine. They are typically empty until
+                #    I add the text that belongs in them."
+                # flag_lost fires when a bitmap HAD ink and OCR returned
+                # nothing — so the row's text cell is EMPTY. There is no black
+                # text under the red to be unreadable, and once he types the
+                # missing line in, the cue is no longer flagged. The red is
+                # pure alarm, which is exactly what this row needs to be.
+                # ⭐ General lesson: contrast only matters where there IS text.
+                # ⛔ Do not "fix" this colour.
                 cue_tree.tag_configure('flag_lost',  background='#e06666',
                                        foreground='#000000')
                 cue_tree.tag_configure('flag_empty', background='#f2f2f2')
@@ -1688,6 +1876,23 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # blue is the safe one. Grey scored well and was rejected for
                 # meaning "disabled" rather than "look here".
                 cue_tree.tag_configure('colon',      background='#7fd8c8')
+                # ⭐ Tony, 2026-09-18/19 — bring the main editor's spelling and
+                # ALL-CAPS detectors into the OCR pane, where the text is next
+                # to the frame it was read from.
+                # ⚠️ NOT the main tree's colours. TAG_SPELL is #f5c6cb and
+                # TAG_CAPS is #d7c4f2 (lavender), and #d7c4f2 sits right on top
+                # of this pane's flag_ocr #d9c2f0 — copying them across would
+                # have made two different meanings the same colour.
+                # ⭐ Both chosen under the readability rule above (light enough
+                # for black text) and then checked for separation, in that
+                # order. Tony approved them by eye, which is the real test:
+                #   "I like the colors you chose... all of those colors will
+                #    work and I can read what is underneath them."
+                #     pink #f7b8c8  contrast 13.1:1  nearest existing 6.0
+                #     tan  #e8d0a8  contrast 15.0:1  nearest existing 8.1
+                # (both above the palette's real 4.5 floor — see above)
+                cue_tree.tag_configure('spelling',   background='#f7b8c8')
+                cue_tree.tag_configure('allcaps',    background='#e8d0a8')
                 cue_scroll = ttk.Scrollbar(cue_frame, orient='vertical',
                                             command=cue_tree.yview)
                 cue_scroll.grid(row=0, column=1, sticky='ns')
@@ -2099,6 +2304,19 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     # Colour-independent too, which matters here.
                     if cue_has_colon(cue):
                         reason = (': ' + reason).strip()
+                    # ⭐ NAMES THE WORD, which is the whole point of putting
+                    # these in the Note column instead of on the row. "break: of"
+                    # sends him to the exact spot; a coloured row could only say
+                    # "something is odd here". Same for "sp:".
+                    if idx in review_spell[0]:
+                        _bad = review_spell[1].get(idx) or []
+                        reason = (('sp: ' + _bad[0] if _bad else 'sp')
+                                  + ' · ' + reason).strip(' ·')
+                    if idx in review_caps[0]:
+                        reason = ('CAPS · ' + reason).strip(' ·')
+                    _stranded = cue_stranded_break(cue)
+                    if _stranded:
+                        reason = (f'break: {_stranded} · ' + reason).strip(' ·')
                     if cue.get('edited'):
                         reason = (reason + ' · edited').strip(' ·')
                     cue_tree.item(item,
@@ -2106,20 +2324,69 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                           f"{cue.get('start','')} → "
                                           f"{cue.get('end','')}",
                                           disp, reason),
-                                  # ⚠️ PRECEDENCE: flag > colon > music. The
-                                  # first tag carrying `background` wins, so
-                                  # order is by RARITY — a flag is a problem
-                                  # (rare, urgent), a colon is 1 cue in 102 and
-                                  # actively hunted, music is 28% and ambient.
-                                  # Whichever loses the background still keeps
-                                  # its Note-column marker, so nothing is lost.
+                                  # ⚠️ PRECEDENCE: flag > colon > spelling >
+                                  # allcaps > music. The first tag carrying
+                                  # `background` wins, so order is by RARITY —
+                                  # a flag is a problem (rare, urgent), a colon
+                                  # is 1 cue in 102 and actively hunted,
+                                  # spelling ~30/episode, ALL-CAPS ~41/episode,
+                                  # music is 28% and ambient. Whichever loses
+                                  # the background still keeps its Note-column
+                                  # marker, so nothing is lost.
+                                  # ⚠️ A stranded line break has NO tag here on
+                                  # purpose — at 1 in 33 it is the commonest of
+                                  # the lot and Tony chose Note-column only
+                                  # (2026-09-19: "The note color can stay the
+                                  # color it is"). Do not give it a background.
                                   tags=(((tag,) if tag else ())
                                         + (('colon',) if cue_has_colon(cue)
+                                           else ())
+                                        + (('spelling',) if idx in review_spell[0]
+                                           else ())
+                                        + (('allcaps',) if idx in review_caps[0]
                                            else ())
                                         + (('music',) if cue_has_music(cue)
                                            else ())))
 
                 _cue_passes_filter = cue_passes_ocr_filter   # module-level, tested
+
+                def _run_review_scans():
+                    """Recompute the whole-list review scans into the holders.
+
+                    Cheap enough to run on every rebuild — measured 2026-09-19
+                    on a 738-cue episode: 0.13s to construct the dictionary
+                    (one-off, the import caches it) and 0.01s for the scan
+                    itself. ⚠️ That mattered: the Subtitle Editor already has a
+                    slow-open problem (detect_cc_types' 180s CC probe), and a
+                    second expensive thing on the same path would have been
+                    blamed on this feature forever.
+
+                    ⚠️ Fails SOFT and stays silent. pyspellchecker is optional
+                    — run_spell_highlight_scan offers to pip-install it, which
+                    is right when Tony clicked Spell Check and wrong when he
+                    merely opened a finished OCR run. A missing dictionary
+                    costs the pink highlight; it must never cost the pane.
+                    """
+                    cues = ocr_result[0] or []
+                    review_caps[0], review_caps[1] = scan_allcaps_words(cues)
+                    review_spell[0], review_spell[1] = set(), {}
+                    if not cues:
+                        return
+                    try:
+                        from spellchecker import SpellChecker  # noqa: F401
+                    except ImportError:
+                        return          # no dictionary, no pink. Quietly.
+                    try:
+                        from .spell_checker import run_spell_highlight_scan
+                        raw = run_spell_highlight_scan(app, mon, cues, set())
+                        if raw:
+                            # ⚠️ The recurring-word filter is what makes this
+                            # usable — without it every character name in the
+                            # episode is a "misspelling". See drop_recurring_words.
+                            review_spell[0], review_spell[1] = \
+                                drop_recurring_words(cues, raw)
+                    except Exception:
+                        pass            # advisory only; never break the review
 
                 def _rebuild_cue_tree(select_cue=None):
                     """Repopulate the list from the finished cue list.
@@ -2146,6 +2413,12 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     cues = ocr_result[0]
                     if not cues:
                         return 0
+                    # ⚠️ BEFORE the row loop. _refresh_row reads these holders,
+                    # so scanning after the loop would paint the FIRST rebuild
+                    # with the PREVIOUS scan's results — the classic
+                    # off-by-one-rebuild that looks like a caching bug and only
+                    # shows up after an edit.
+                    _run_review_scans()
                     mode = filter_var.get()
                     for item in cue_tree.get_children():
                         cue_tree.delete(item)
