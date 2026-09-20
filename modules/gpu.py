@@ -35,10 +35,74 @@ from .utils import get_video_duration, format_size, format_time
 GPU_TEST_MODE = False
 
 
+# Where to sample for A53 side data when a cheap yes/no is wanted. Five points
+# through the file rather than only the opening — see any_a53_side_data().
+CC_SAMPLE_INTERVALS = '%+#30,10%+#30,25%+#30,50%+#30,75%+#30'
+
+
+def any_a53_side_data(filepath, intervals=CC_SAMPLE_INTERVALS):
+    """Cheap look for ATSC A53 side data at several points in the file.
+
+    ⭐ Tony, 2026-09-20: dropping a 12.5 GB REMUX into the Subtitle Editor took
+    21-28 s, and he noticed the MAIN window flags CC on the same file instantly.
+    It does — `_probe_one` uses detect_closed_captions(), a 30-frame look, while
+    the editor ran the full three-tier detect_cc_types(). Same question, two
+    detectors, 100x apart in cost.
+
+    ⚠️ THIS IS A GATE, NOT A REPLACEMENT. It answers "is there any sign of CC
+    anywhere in this file", and nothing else. It cannot tell EIA-608 from
+    CEA-708, which the editor's picker genuinely needs — so a hit still hands
+    off to the full probe. It only lets the NEGATIVE case stop early.
+
+    ⚠️ Deliberately more thorough than detect_closed_captions(), which reads 30
+    frames at the very start. A cold open, a network ident or a title sequence
+    can all run before the first caption, and 2026-08-23 recorded a real .mp4
+    where the 30-frame look found nothing and a real extraction found 827 cues.
+    Five points across the file is a much weaker thing to be wrong about.
+
+    Measured 2026-09-20:
+        30 frames   0.13-0.29 s      5 points   1.0-2.9 s      full probe 21-28 s
+        agreed with the full probe on all 8 files tested (6 with CC, 2 without)
+
+    ⚠️⚠️ FAILS OPEN. If ffprobe errors, times out or is missing, this returns
+    True so the caller runs the full probe. A gate that fails CLOSED would
+    silently report "no captions" on every file the moment ffprobe broke — the
+    worst possible failure for a detector, because it looks like an answer.
+    ⛔ Do not "simplify" the except branch to return False.
+
+    ⚠️ It is NOT a guarantee. Captions present only between sample points are
+    missed. That is the accepted cost of the gate; it is why a hit escalates
+    rather than this function deciding anything on its own.
+    """
+    cmd = [
+        'ffprobe', '-v', 'quiet',
+        '-read_intervals', intervals,
+        '-show_entries', 'frame=side_data_list:side_data=side_data_type',
+        '-print_format', 'json',
+        '-select_streams', 'v:0',
+        filepath,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except Exception:
+        return True          # fail OPEN — let the full probe decide
+    if result.returncode != 0:
+        return True          # same: an error is not a "no"
+    return 'ATSC A53' in result.stdout or 'Closed Captions' in result.stdout
+
+
 def detect_closed_captions(filepath):
     """Detect ATSC A53 closed captions (EIA-608/CEA-708) embedded in video frame side data.
     Returns True if CC data is found, False otherwise.
-    These are common in MPEG-2 transport stream (.ts) HDTV recordings."""
+    These are common in MPEG-2 transport stream (.ts) HDTV recordings.
+
+    ⚠️ Reads only the FIRST 30 FRAMES. Kept that way on purpose: the main
+    window probes files in bulk as they are added, where any_a53_side_data()'s
+    5-point sample would cost ~75 s on a 50-file drop against ~7 s here. The
+    editor opens one file at a time and can afford the better look.
+    ⛔ That difference is deliberate — do not "unify" them without pricing the
+    bulk-add path first.
+    """
     try:
         cmd = [
             'ffprobe', '-v', 'quiet',
@@ -64,7 +128,29 @@ def detect_cc_types(filepath):
     ccextractor is not available.
 
     Returns a dict: {'eia_608': bool, 'eia_708': bool}
+
+    ⚠️⚠️ GATED ON A CHEAP LOOK FIRST (2026-09-20). The three tiers below cost
+    21-28 s on a 12 GB REMUX and the overwhelmingly common answer is "no
+    captions" — 0 of 300 library files sampled carry any. Tony: dropping such a
+    file into the Subtitle Editor "takes quite a while to scan". So a 5-point
+    A53 sample runs first and, when it finds nothing anywhere, this returns the
+    no-CC answer in ~3 s instead of ~25.
+
+        Luther S01E02, 12.5 GB      21.6 s  ->  2.9 s
+        files that DO have CC       unchanged — the gate passes and all tiers
+                                    run, because only they can tell 608 from
+                                    708, which the editor's picker needs.
+
+    ⚠️ The gate FAILS OPEN (see any_a53_side_data) — any ffprobe error means
+    the full probe runs. The only thing that can stop it early is a clean
+    "nothing at five points in the file".
+    ⚠️ Accepted cost: captions present ONLY between sample points are missed.
+    That is a real regression against the old behaviour and it is the price of
+    the 8x speedup. ⛔ Do not widen the gate to a single 30-frame look — that
+    is detect_closed_captions(), and 2026-08-23 has a file it got wrong.
     """
+    if not any_a53_side_data(filepath):
+        return {'eia_608': False, 'eia_708': False}
     result = {'eia_608': False, 'eia_708': False}
     ccx_ok = False
     if shutil.which('ccextractor'):
