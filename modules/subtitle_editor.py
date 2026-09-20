@@ -1011,9 +1011,19 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         TAG_SEARCH = 'search_match'
         TAG_SPELL = 'has_spelling'
         TAG_CAPS = 'has_allcaps'
+        TAG_MIDCAP = 'has_midcap'      # a capital INSIDE a word — lI, sO, hO
+        TAG_COLON = 'has_colon'        # speaker label, or a : worth re-reading
 
         # ── Spell check state ──
         spell_error_indices = set()
+        # {cue index: [misspelled word, ...]} — populated by _highlight_spelling,
+        # which already receives this from run_spell_highlight_scan and used to
+        # discard it. Feeds the Note column so it can say `sp: beheves` instead
+        # of a bare `sp`; naming the word is the whole reason the Note beats a
+        # colour. ⚠️ The INTERACTIVE dialog fills spell_error_indices one cue at
+        # a time without words, so this may be empty for rows that set are in —
+        # _row_note falls back to a bare marker rather than assuming.
+        spell_error_words = {}
         # Has a spelling scan been run for the current file? Drives the status-bar
         # count that replaced the old results popup, and distinguishes "scanned,
         # found nothing" from "never scanned" — without it, a clean file and an
@@ -5336,6 +5346,8 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 app, editor, cues, spell_error_indices)
             if errors_by_cue is None:
                 return          # checker unavailable — it already said so
+            spell_error_words.clear()
+            spell_error_words.update(errors_by_cue)
             spell_scanned[0] = True
             refresh_tree(cues)      # paints the rows AND updates the status bar
             # NO RESULTS POPUP. Tony, 2026-08-07: "yes please remove that popup.
@@ -6876,7 +6888,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         tree_scroll_y = ttk.Scrollbar(tree_frame, orient='vertical')
         tree_scroll_y.pack(side='right', fill='y')
 
-        tree = ttk.Treeview(tree_frame, columns=('num', 'time', 'text'),
+        tree = ttk.Treeview(tree_frame, columns=('num', 'time', 'text', 'note'),
                             show='headings', yscrollcommand=tree_scroll_y.set,
                             selectmode='extended')
         tree_scroll_y.config(command=tree.yview)
@@ -6884,10 +6896,23 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         tree.heading('num', text='#')
         tree.heading('time', text='Timestamp')
         tree.heading('text', text='Text')
+        # ⚠️⚠️ THE NOTE COLUMN IS NOT DECORATION — it is what makes more than one
+        # signal survivable. This tree paints ONE background and the priority
+        # chain below picks a single winner, so before this column existed every
+        # losing tag vanished silently. That was a live defect, not a
+        # hypothetical: a cue you had EDITED that also held a spelling error
+        # showed pink, the MODIFIED yellow disappeared, and you lost track of
+        # what you had touched with nothing to tell you.
+        # ⭐ Same design as the OCR review pane (2026-09-19): whatever loses the
+        # background keeps a Note marker, so nothing is ever lost — and the Note
+        # can NAME the thing (`cap: lI`) where a colour can only say "something
+        # here is odd".
+        tree.heading('note', text='Note')
         install_cue_sort(tree, lambda: cues)
         tree.column('num', width=40, minwidth=30, stretch=False)
         tree.column('time', width=260, minwidth=220, stretch=False)
         tree.column('text', width=500, minwidth=200, stretch=True)
+        tree.column('note', width=150, minwidth=90, stretch=False)
         tree.pack(fill='both', expand=True)
 
         # Color coding
@@ -6898,6 +6923,24 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         tree.tag_configure(TAG_SEARCH, background='#c8e6c9')
         tree.tag_configure(TAG_SPELL, background='#f5c6cb')
         tree.tag_configure(TAG_CAPS, background='#d7c4f2')    # lavender — ALL CAPS words
+        # ⭐ Ported from the OCR review pane 2026-09-20, Tony's ask: "These
+        # highlights/Flags would be just as beneficial in the subtitle editor
+        # editing a standard .srt as they are in the OCR window."
+        # ⚠️ NOT the OCR pane's colours. That pane uses teal #7fd8c8 for colon
+        # and pink #f7b8c8 for a mid-word capital, but this tree already carries
+        # TAG_HI #cce5ff (blue) and TAG_SPELL #f5c6cb (pink) — reusing them here
+        # would put two different meanings on one colour. Chosen against THIS
+        # tree's seven existing tags, light enough for black text (the readability
+        # rule, see the OCR pane's palette note).
+        tree.tag_configure(TAG_MIDCAP, background='#f7b8c8')   # a capital inside a word
+        tree.tag_configure(TAG_COLON, background='#7fd8c8')    # speaker label / mid-line colon
+        # ⛔ MUSIC IS DELIBERATELY ABSENT. Tony, 2026-09-20: "I want to keep the
+        # music notes highlight just like it is. No changes to it." In this tree
+        # a ♪ cue is caught by _classify_cue's HI rule and painted TAG_HI, the
+        # same blue as [SIGHS] and (laughing). Arthur proposed splitting music
+        # out into its own tag — he declined; he has built a working procedure
+        # around the current behaviour. ⛔ Do not add a music tag here and do not
+        # touch _classify_cue's ♪ handling.
 
         # Mousewheel scrolling
         def on_tree_mousewheel(event):
@@ -6963,11 +7006,24 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     # SEARCH is deliberately absent: the edit path has no access to
                     # the live search set, and a stale green row would be worse
                     # than none.
-                    if idx in spell_error_indices:
+                    # ⚠️ 2026-09-20: midcap and colon added in BOTH places in the
+                    # same commit, and the Note column written here too. This is
+                    # the exact divergence the paragraph above records happening
+                    # once already — two copies of one chain is the defect, and
+                    # until they are merged the only defence is changing them
+                    # together.
+                    _caps_idx, _caps_det = (
+                        scan_allcaps_words(cues, _known_caps())
+                        if caps_highlight_on[0] else (set(), {}))
+                    _midcap = cue_midword_capital(cues[idx])
+                    if _midcap:
+                        row_tag = TAG_MIDCAP
+                    elif idx in spell_error_indices:
                         row_tag = TAG_SPELL
-                    elif (caps_highlight_on[0]
-                          and idx in scan_allcaps_words(cues, _known_caps())[0]):
+                    elif idx in _caps_idx:
                         row_tag = TAG_CAPS
+                    elif cue_has_colon(cues[idx]):
+                        row_tag = TAG_COLON
                     elif TAG_MODIFIED in ctags:
                         row_tag = TAG_MODIFIED
                     elif TAG_HI in ctags:
@@ -6978,6 +7034,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         row_tag = TAG_LONG
                     else:
                         row_tag = ''
+                    # ⚠️ The Note must be rewritten too. Leaving it stale would
+                    # be worse than not having it — an edit that fixes `beheves`
+                    # would clear the pink row but leave "sp: beheves" sitting
+                    # in the column, and a marker that contradicts the text is a
+                    # bug that looks like the detector being wrong.
+                    tree.set(item, 'note',
+                             _row_note(idx, cues[idx], ctags, _caps_det, _midcap))
                     tree.item(item, tags=(row_tag,) if row_tag else ())
                 else:
                     del cues[idx]
@@ -7253,10 +7316,62 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         ctx_menu.add_separator()
         ctx_menu.add_command(label="🗑 Delete selected", command=delete_selected)
 
+        # How many dictionary entries were prepended to ctx_menu last time it
+        # opened. ⚠️ ctx_menu is built ONCE and reused, so a per-row block has
+        # to be removed before the next one goes in — otherwise the menu grows
+        # by a few items on every right-click until it runs off the screen.
+        _ctx_dynamic = [0]
+
+        def _teach_from_tree(word, as_name):
+            """Teach the dictionary from the editor tree, then repaint.
+
+            ⚠️ Same add_user_word() the Spell Check dialog and the OCR review
+            pane use — three doors, one rule. See add_user_word().
+            """
+            try:
+                add_user_word(app, word, as_name)
+            except Exception:
+                pass            # advisory feature; never lose the edit session
+            refresh_tree(cues)
+
         def show_context_menu(event):
             item = tree.identify_row(event.y)
             if item and item not in tree.selection():
                 tree.selection_set(item)
+
+            for _ in range(_ctx_dynamic[0]):
+                ctx_menu.delete(0)
+            _ctx_dynamic[0] = 0
+
+            # ⭐ Tony, 2026-09-20: the dictionary was reachable only from the
+            # Spell Check dialog, so while EDITING a .srt there was no way to
+            # say "that word is fine" — the same dead end the OCR pane had.
+            try:
+                idx = int(item) if item else None
+            except (TypeError, ValueError):
+                idx = None
+            if idx is not None and 0 <= idx < len(cues):
+                cue = cues[idx]
+                entries = []
+                for w in (spell_error_words.get(idx) or [])[:4]:
+                    entries.append((f'Add "{w}" to dictionary', w, False))
+                    entries.append((f'Add "{w}" as a name', w, True))
+                caps_now = scan_allcaps_words([cue], _known_caps())[1].get(0) or ()
+                for w in sorted(caps_now):
+                    entries.append((f'"{w}" is correct — stop flagging it',
+                                    w, True))
+                if entries:
+                    # ⚠️ Inserted in REVERSE at index 0, so the visible order
+                    # matches `entries`. insert_command(0, ...) puts each new
+                    # item above the last one.
+                    ctx_menu.insert_separator(0)
+                    _ctx_dynamic[0] = 1
+                    for label, w, as_name in reversed(entries):
+                        ctx_menu.insert_command(
+                            0, label=label,
+                            command=lambda w=w, n=as_name: _teach_from_tree(w, n))
+                        _ctx_dynamic[0] += 1
+
             ctx_menu.tk_popup(event.x_root, event.y_root)
 
         tree.bind('<Button-3>', show_context_menu)
@@ -7473,6 +7588,38 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         ttk.Button(status_frame, text="🗑 Delete", command=delete_selected).pack(side='right', padx=4)
 
         # ── Refresh tree function ──
+        def _row_note(i, cue, ctags, caps_detail, midcap_word):
+            """Build the Note column text for one row.
+
+            ⚠️⚠️ EVERY SIGNAL THAT CAN LOSE THE BACKGROUND MUST APPEAR HERE.
+            That is the contract the Note column exists to keep — the tree
+            paints one colour and the priority chain picks one winner, so a
+            signal missing from this function is a signal that silently
+            disappears whenever a rarer one shares its row. If you add a tag to
+            the chain, add it here in the same commit.
+
+            Ordered rarest-first so the most informative marker reads first.
+
+            ⛔ MUSIC IS NOT LISTED, deliberately. In this tree a ♪ cue is caught
+            by _classify_cue's HI rule and shows as TAG_HI; Tony asked for that
+            to stay exactly as it is (2026-09-20). It never loses its colour to
+            anything above it that it does not also deserve, so it needs no
+            fallback marker here.
+            """
+            parts = []
+            if midcap_word:
+                parts.append(f'cap: {midcap_word}')
+            if i in spell_error_indices:
+                words = spell_error_words.get(i) or []
+                parts.append(f'sp: {words[0]}' if words else 'sp')
+            if caps_detail.get(i):
+                parts.append('CAPS')
+            if cue_has_colon(cue):
+                parts.append(':')
+            if TAG_MODIFIED in ctags:
+                parts.append('edited')
+            return ' · '.join(parts)
+
         def refresh_tree(new_cues, search_indices=None):
             nonlocal cues
             cues = new_cues
@@ -7480,10 +7627,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             search_set = set(search_indices or [])
             # Re-scan for ALL CAPS on every rebuild while the mode is on, so the
             # highlighting survives deletes, edits, undo and filtering.
-            caps_set = scan_allcaps_words(cues, _known_caps())[0] if caps_highlight_on[0] else set()
+            caps_scan = (scan_allcaps_words(cues, _known_caps())
+                         if caps_highlight_on[0] else (set(), {}))
+            caps_set, caps_detail = caps_scan
             for i, cue in enumerate(cues):
                 display = cue['text'].replace('\n', ' \\n ')
                 ts = f"{cue['start']} → {cue['end']}"
+                midcap_word = cue_midword_capital(cue)
                 if cue['text'] in _orig_texts:
                     orig_text = cue['text']
                 else:
@@ -7491,8 +7641,22 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 ctags = _classify_cue(cue, orig_text)
                 if i in search_set:
                     ctags.add(TAG_SEARCH)
+                # ⚠️⚠️ THE TWO NEW TAGS ARE INSERTED, NOT REORDERED. Every
+                # existing relationship in this chain is preserved exactly —
+                # SEARCH > SPELL > CAPS > MODIFIED > HI > TAGS > LONG — because
+                # each was chosen for a reason (see the CAPS note below) and
+                # this is the tool Tony uses most. midcap goes directly under
+                # SEARCH because it is by far the rarest and most certain signal
+                # here (1 cue in 12,741 measured across 242,084 library cues,
+                # and nearly every hit is a real error). colon goes directly
+                # above MODIFIED: rarer than an edit, less urgent than a
+                # misspelling.
+                # ⭐ Losing the background no longer means being invisible —
+                # every one of these also writes its Note marker below.
                 if TAG_SEARCH in ctags:
                     row_tag = TAG_SEARCH
+                elif midcap_word:
+                    row_tag = TAG_MIDCAP
                 elif i in spell_error_indices:
                     row_tag = TAG_SPELL
                 elif i in caps_set:
@@ -7500,6 +7664,8 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     # row stops matching and drops to yellow, which is a useful
                     # "done" signal while working through them.
                     row_tag = TAG_CAPS
+                elif cue_has_colon(cue):
+                    row_tag = TAG_COLON
                 elif TAG_MODIFIED in ctags:
                     row_tag = TAG_MODIFIED
                 elif TAG_HI in ctags:
@@ -7511,7 +7677,9 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 else:
                     row_tag = ''
                 tree.insert('', 'end', iid=str(i),
-                            values=(i + 1, ts, display),
+                            values=(i + 1, ts, display,
+                                    _row_note(i, cue, ctags, caps_detail,
+                                              midcap_word)),
                             tags=(row_tag,) if row_tag else ())
             _rebuild_stats()
             # Refresh waveform timeline cue blocks and live subtitles
