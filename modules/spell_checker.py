@@ -30,6 +30,31 @@ from tkinter import ttk, messagebox
 # form the name most often appears in.
 _CONTRACTION_SUFFIXES = {'s', 're', 've', 'll', 'd', 'm', 't'}
 
+# ⚠️⚠️ THE APOSTROPHE CLASS MUST INCLUDE THE CURLY ONE, and this regex is the
+# reason a fix lives here rather than in three copies. Found 2026-09-20 by the
+# Note column making it visible: the tokeniser only knew `'`, so on a file
+# using typographic quotes `isn’t` was torn into `isn` + `t` BEFORE
+# is_ok_contraction() — which does normalise `’` — ever saw the word. The doer
+# was curly-aware; the splitter was not, so the word never reached it.
+# (Same shape as [[reference_detector-doer-divergence]].)
+#
+# ⭐ WHY IT HID FOR SO LONG: most contractions degrade into real words.
+# `that’s` -> `that` + `s`, both known, nothing flagged. It only surfaces on
+# stems that are not words — isn, hasn, doesn, wasn, couldn, wouldn, didn,
+# aren, weren, shouldn, hadn.
+#
+# ⚠️ Measured across 250 library files (151,618 cues): only 4% of files use
+# curly apostrophes and the fix removes 167 false positives — about 1% of all
+# flags. Small. It is worth fixing anyway because a false positive the user can
+# ACT ON is worse than one he can only ignore: `sp: isn` invites a right-click
+# "add to dictionary", which permanently poisons custom_spell_words — the same
+# list that feeds the Fix ALL CAPS filter.
+#
+# ⛔ Do not re-narrow this to a bare `'`. Use WORD_RE everywhere a subtitle is
+# split into words for spelling; there were three separate copies of the old
+# pattern and all three had the bug.
+WORD_RE = re.compile(r"[a-zA-Z]+(?:['’][a-zA-Z]+)?")
+
 # No letter-root to recover — these do not decompose.
 _IRREGULAR_CONTRACTIONS = {
     "won't": ["will"], "shan't": ["shall"], "ain't": ["be", "is", "am"],
@@ -214,7 +239,7 @@ def run_spell_check_scan(app, parent_window, cues, spell_error_indices):
     errors_by_cue = {}
     for i, cue in enumerate(cues):
         clean = re.sub(r'<[^>]+>|\{\\[^}]+\}|♪', '', cue['text'])
-        words = re.findall(r"[a-zA-Z]+(?:'[a-zA-Z]+)?", clean)
+        words = WORD_RE.findall(clean)
         if not words:
             continue
         unknown = spell.unknown(words)
@@ -295,7 +320,7 @@ def run_spell_highlight_scan(app, parent_window, cues, spell_error_indices):
     errors_by_cue = {}
     for i, cue in enumerate(cues):
         clean = re.sub(r'<[^>]+>|\{\\[^}]+\}|♪', '', cue['text'])
-        words = re.findall(r"[a-zA-Z]+(?:'[a-zA-Z]+)?", clean)
+        words = WORD_RE.findall(clean)
         if not words:
             continue
         unknown = spell.unknown(words)

@@ -463,6 +463,20 @@ def cue_midword_capital(cue):
     return None
 
 
+def _spell_word_re():
+    """The one word-splitting regex used for spelling, from spell_checker.
+
+    ⚠️ Imported lazily by function rather than at module top: spell_checker
+    pulls in tkinter.messagebox and this module is imported by headless code
+    paths and by the test suite. A top-level import would drag a GUI dependency
+    into places that have no display.
+    ⛔ Do not paste a local copy of the pattern back in — three copies is how
+    the curly-apostrophe bug survived. See WORD_RE in spell_checker.py.
+    """
+    from .spell_checker import WORD_RE
+    return WORD_RE
+
+
 def add_user_word(app, word, as_name=False):
     """Teach the user dictionary a word. Returns True if anything changed.
 
@@ -4977,8 +4991,10 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     cues_checked[0] = ci + 1
                     clean = re.sub(r'<[^>]+>|\{\\[^}]+\}|♪', '',
                                    cues[ci]['text'])
-                    words = re.findall(r"[a-zA-Z]+(?:'[a-zA-Z]+)?",
-                                       clean)
+                    # ⚠️ Shared with spell_checker's two scans — see WORD_RE.
+                    # This was the third copy of the pattern and it carried the
+                    # same curly-apostrophe bug.
+                    words = _spell_word_re().findall(clean)
                     if words:
                         unknown = spell.unknown(words)
                         for j in range(wi, len(words)):

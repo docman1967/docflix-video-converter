@@ -924,14 +924,33 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
         for phrase in custom_phrases:
             pattern = re.compile(re.escape(phrase), re.IGNORECASE)
             text = pattern.sub(phrase.title(), text)
-        custom_single = {n.lower(): n for n in custom_names
+        # ⚠️ Keys are NORMALISED (curly -> straight) so a name stored as
+        # "O'Brien" still matches text written "O’Brien", and vice versa. The
+        # VALUE keeps whatever he typed; only the lookup is normalised.
+        custom_single = {n.lower().replace('’', "'"): n for n in custom_names
                          if ' ' not in n}
         if custom_single:
+            def _same_apostrophes(canon, src):
+                """`canon` re-spelled with `src`'s apostrophe characters.
+
+                ⚠️ The stored name is the authority on CAPITALISATION, not on
+                typography. If the subtitle uses a curly apostrophe the output
+                must keep it — silently swapping "O’Brien" to "O'Brien" edits
+                his text to suit our dictionary, and would leave one straight
+                apostrophe in a line where every other one is curly.
+                Lengths match because normalising is 1:1.
+                """
+                if len(canon) != len(src):
+                    return canon
+                return ''.join(s if (c in "'’" and s in "'’") else c
+                               for c, s in zip(canon, src))
+
             def _cap_custom(m):
                 word = m.group(0)
-                original = custom_single.get(word.lower())
+                norm = word.replace('’', "'")
+                original = custom_single.get(norm.lower())
                 if original:
-                    return original
+                    return _same_apostrophes(original, word)
                 # ⚠️ THEN THE POSSESSIVE ROOT — "sho's" -> "Sho's".
                 # The whole-token lookup above cannot match a possessive,
                 # because the list holds "Sho" and the token is "sho's". Before
@@ -942,11 +961,25 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
                 # found the same afternoon by the spell checker — which catches
                 # them because miscased_name() does exactly this. Two lookups,
                 # not one, or the two features disagree about the same word.
-                root, sep, suffix = word.rpartition("'")
+                # ⚠️ NORMALISE THE CURLY APOSTROPHE BEFORE SPLITTING, but slice
+                # the ORIGINAL to build the answer — so "HIRST’S" comes back as
+                # "Hirst’s" with its typographic quote intact rather than
+                # silently rewritten to a straight one.
+                # ⚠️ This line and the pattern below MUST change together. Until
+                # 2026-09-20 "HIRST’S" worked by ACCIDENT: the pattern stopped
+                # at the curly, so "HIRST" matched the whole-token lookup above
+                # and never reached here. Widening the pattern without widening
+                # this split would have broken a case that already worked.
+                root, sep, suffix = norm.rpartition("'")
                 if sep and root and suffix.lower() in ('s', ''):
                     original = custom_single.get(root.lower())
                     if original:
-                        return original + word[len(root):]
+                        # ⚠️ Slice the ORIGINAL word for the tail so the
+                        # possessive keeps its own apostrophe character, and
+                        # re-spell the root so a name that itself contains one
+                        # ("O’Brien’s") does not come back half-straight.
+                        return (_same_apostrophes(original, word[:len(root)])
+                                + word[len(root):])
                 return word
             # ⚠️ APOSTROPHES ARE PART OF THE WORD. This was r'\b[a-zA-Z]+\b',
             # which split "o'brien" into "o" and "brien" — so NO custom name
@@ -955,9 +988,24 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
             # just stayed lowercase, with no sign anything had been skipped.
             # Safe for ordinary contractions: "don't" now matches as one token,
             # is not in custom_single, its root "don" is not either, and it is
-            # returned unchanged.
-            # Same word pattern the spell checker uses. (Found 2026-08-07.)
-            text = re.sub(r"\b[a-zA-Z]+(?:'[a-zA-Z]+)*", _cap_custom, text)
+            # returned unchanged. (Found 2026-08-07.)
+            #
+            # ⚠️⚠️ THE CURLY APOSTROPHE WAS THE SAME BUG AGAIN (2026-09-20).
+            # With only a straight `'` in the class, "O’BRIEN" matched as "O"
+            # then "BRIEN", the name lookup missed both halves, and the output
+            # came back **"O’brien"** — a visibly WRONG result, not merely a
+            # skipped one:
+            #     O'BRIEN IS HERE.  ->  O'Brien is here.   correct
+            #     O’BRIEN IS HERE.  ->  O’brien is here.   the bug
+            # 4% of library files use typographic quotes.
+            # ⛔ Do not drop `’` from this character class.
+            #
+            # ⚠️ Related to spell_checker.WORD_RE but NOT identical — that one
+            # allows a single suffix (`?`), this allows several (`*`) and anchors
+            # on \b. Keep the APOSTROPHE CLASS in step; the rest legitimately
+            # differs. The comment here used to claim they were "the same word
+            # pattern", which stopped being true the moment one was fixed alone.
+            text = re.sub(r"\b[a-zA-Z]+(?:['’][a-zA-Z]+)*", _cap_custom, text)
         return text
 
     result = []
