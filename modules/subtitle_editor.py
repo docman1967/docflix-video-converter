@@ -249,10 +249,39 @@ def replace_word(text, word, repl, count=0, exact=False):
     return pat.sub(lambda m: _match_case(m.group(0), repl), text, count=count)
 
 
-def scan_allcaps_words(cues):
+def scan_allcaps_words(cues, known_caps=()):
     """Pure scan: return (indices, details) for cues containing ALL CAPS words.
 
-    Skips only the common-short-word list (_CAPS_EXCLUDE).
+    Skips the common-short-word list (_CAPS_EXCLUDE) plus anything in
+    *known_caps* — normally `app.custom_cap_words`, the words Tony has
+    confirmed the casing of.
+
+    ⭐ Tony, 2026-09-20: *"being able to add acronyms to the dictionary. Right
+    now they show up as all caps which they should but if they were in the
+    dictionary, could we exclude them somehow?"* Measured on his 93-episode
+    Lucifer REMUX run: **79% of ALL-CAPS hits are acronyms or names**, and
+    `LAPD` alone (136 hits) is 27% of every ALL-CAPS row in the show. Ten
+    entries kill 54% of them.
+
+    ⚠️⚠️ THE MATCH IS CASE-SENSITIVE AND THAT IS THE WHOLE POINT. `_CAPS_RE`
+    only ever yields `[A-Z]{2,}`, so a word only matches *known_caps* if Tony
+    stored it in CAPS. That is exactly right:
+
+        stored "LAPD"   -> "LAPD" in a cue is correct     -> skip it
+        stored "Jimmy"  -> "JIMMY" in a cue is SHOUTING   -> still flag it
+
+    A case-insensitive test would silence the second one, and lowercasing
+    `JIMMY` back to `Jimmy` is precisely the job this pane exists to feed.
+    ⭐ Real numbers, measured across 300 of Tony's mixed-case subtitle files —
+    Jimmy Neutron alone carries `JIMMY` 60x shouted against `Jimmy` 359x in
+    Title case, `SHEEN` 35 vs 117, `CARL` 27 vs 151. A `.lower()` comparison
+    would have silenced 122 genuine shouts in one show to save teaching three
+    names. ⛔ Do not "fix" this into a case-insensitive comparison.
+
+    ⚠️ `known_caps` is OPTIONAL so the five existing callers keep working
+    unchanged; each passes the user list explicitly. A default of `app`-lookup
+    would have made this function impure and untestable — see the note below
+    about it having no side effects, which is load-bearing.
 
     ⚠️ THE PERIOD-ADJACENCY CHECK WAS REMOVED 2026-08-06, and it matters.
     The old code skipped any match with a '.' immediately before or after it, to
@@ -276,13 +305,14 @@ def scan_allcaps_words(cues):
     its findings in a local, which is why the highlighting vanished the moment
     anything rebuilt the tree. See refresh_tree(). (2026-08-06)
     """
+    skip = _CAPS_EXCLUDE | set(known_caps or ())
     indices = set()
     details = {}
     for i, cue in enumerate(cues):
         text = _CAPS_TAG_RE.sub('', cue['text'])
         for m in _CAPS_RE.finditer(text):
             word = m.group(1)
-            if word in _CAPS_EXCLUDE:
+            if word in skip:
                 continue
             indices.add(i)
             details.setdefault(i, set()).add(word)
@@ -861,6 +891,22 @@ def _real_cue_count(cues):
 def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto_external=None):
         import tempfile
 
+        def _known_caps():
+            """The words Tony has confirmed the casing of, for the caps scan.
+
+            ⚠️ READ FRESH ON EVERY CALL, never cached. He adds an acronym from
+            the OCR pane's right-click menu and expects the highlight to go on
+            the next redraw — a list snapshotted when the editor opened would
+            keep flagging LAPD until he closed and reopened the window, which
+            reads as the feature not working.
+
+            ⚠️ Same list the Fix ALL CAPS filter uses to protect a word from
+            being lowercased (batch_filter.py). That is deliberate: if LAPD is
+            correct in caps, it is correct in BOTH places, and one list cannot
+            disagree with itself. See add_user_word().
+            """
+            return getattr(app, 'custom_cap_words', ()) or ()
+
         editor = tk.Toplevel(app.root)
         editor.withdraw()
         editor.title("Docflix Subtitle Editor")
@@ -1026,7 +1072,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             if long_count:
                 parts.append(f"{long_count} long lines")
             if caps_highlight_on[0]:
-                parts.append(f"{len(scan_allcaps_words(cues)[0])} ALL CAPS")
+                parts.append(f"{len(scan_allcaps_words(cues, _known_caps())[0])} ALL CAPS")
             # Shown only once a scan has run, so "0 misspelled" means
             # checked-and-clean rather than never-checked.
             if spell_scanned[0]:
@@ -1734,6 +1780,11 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # judgement that quietly became permanent would be worse than
                 # no ignore at all.
                 review_ignore = set()
+                # ⚠️ Separate from review_ignore and CASE-SENSITIVE, matching
+                # how the caps scan compares. Sharing one set would mean
+                # ignoring the word "shield" also silenced "SHIELD", which are
+                # two different judgements about two different things.
+                review_caps_ignore = set()
 
                 # ── Monitor window ──
                 mon = tk.Toplevel(editor)
@@ -2364,6 +2415,29 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     review_ignore.add(word.lower())
                     _rebuild_cue_tree(select_cue=cue_idx)
 
+                def _teach_caps(word, cue_idx):
+                    """Record an ALL-CAPS word as correctly cased, permanently.
+
+                    ⚠️ Goes through add_user_word(as_name=True) — the SAME door
+                    the Spell Check dialog and the spelling menu use. An acronym
+                    is not a different kind of fact from a name: both are "this
+                    is how the word is really written". One rule, one list.
+
+                    ⭐ Side effect worth knowing and wanted: custom_cap_words
+                    also protects a word from the Fix ALL CAPS filter, so
+                    teaching LAPD here also stops it ever being lowercased to
+                    "Lapd" in a batch run.
+                    """
+                    try:
+                        add_user_word(app, word, as_name=True)
+                    except Exception:
+                        pass        # advisory feature; never lose the review
+                    _rebuild_cue_tree(select_cue=cue_idx)
+
+                def _ignore_caps(word, cue_idx):
+                    review_caps_ignore.add(word)
+                    _rebuild_cue_tree(select_cue=cue_idx)
+
                 def _popup_dict_menu(event):
                     """Right-click a row: teach the dictionary its unknown words.
 
@@ -2387,8 +2461,34 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     if idx is None:
                         return
                     words = list(review_spell[1].get(idx) or [])
+                    # ⭐ Tony, 2026-09-20. ALL-CAPS words are NOT spelling
+                    # errors, so they never appeared in `words` and a caps-only
+                    # row dead-ended on "No unknown words in this cue" — the
+                    # exact rows carrying LAPD, which is 27% of every ALL-CAPS
+                    # row in his Lucifer run.
+                    # ⚠️ Filtered against the live list: a word he has already
+                    # taught would still be in review_caps until the next
+                    # rebuild, and offering to add it twice looks broken.
+                    caps_words = sorted(w for w in (review_caps[1].get(idx) or ())
+                                        if w not in _known_caps())
                     menu = tk.Menu(cue_tree, tearoff=0)
-                    if not words:
+                    for w in caps_words:
+                        sub = tk.Menu(menu, tearoff=0)
+                        # ⚠️ Stored EXACTLY as it appears — custom_cap_words is
+                        # case-sensitive and this word is the record of how the
+                        # acronym is really written. It also shields it from the
+                        # Fix ALL CAPS filter, which is wanted: LAPD must never
+                        # be lowercased.
+                        sub.add_command(
+                            label=f'"{w}" is correct — stop flagging it',
+                            command=lambda w=w: _teach_caps(w, idx))
+                        sub.add_command(
+                            label=f'Ignore "{w}" in this episode',
+                            command=lambda w=w: _ignore_caps(w, idx))
+                        menu.add_cascade(label=f'{w}   (ALL CAPS)', menu=sub)
+                    if caps_words and words:
+                        menu.add_separator()
+                    if not words and not caps_words:
                         # ⚠️ Shown, not hidden. A menu that silently refuses to
                         # appear reads as a broken right-click; this says why.
                         # Rows flagged only for ALL-CAPS or a mid-word capital
@@ -2474,13 +2574,28 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                   # spelling > allcaps > music. The first tag
                                   # carrying `background` wins, so order is by
                                   # RARITY — a flag is a problem (rare,
-                                  # urgent), a mid-word capital is 0.4/episode
-                                  # and nearly always real, a colon is 1 cue in
-                                  # 102 and actively hunted, spelling
-                                  # ~30/episode, ALL-CAPS ~41/episode, music is
-                                  # 28% and ambient. Whichever loses the
-                                  # background still keeps its Note-column
-                                  # marker, so nothing is lost.
+                                  # urgent); the rest measured on Tony's
+                                  # 93-episode Lucifer REMUX run (89,858 cues,
+                                  # 2026-09-20), which is a real finished job
+                                  # rather than a sample:
+                                  #
+                                  #     mid-word capital   0.03 / episode
+                                  #     colon              0.6  / episode
+                                  #     ALL-CAPS           5.4  / episode
+                                  #     spelling          ~26   / episode
+                                  #     music              28%  of cues, ambient
+                                  #
+                                  # ⚠️ An earlier version of this comment said
+                                  # ALL-CAPS was "~41/episode". That came from
+                                  # ONE episode of an older WEB-DL rip and was
+                                  # generalised from n=1 — the REMUX source is
+                                  # far cleaner. ⛔ Do not quote a per-episode
+                                  # rate here without saying which corpus it
+                                  # came from; the same show measures 8x apart
+                                  # between two sources.
+                                  #
+                                  # Whichever loses the background still keeps
+                                  # its Note-column marker, so nothing is lost.
                                   # ⚠️ 'midcap' and 'spelling' share ONE colour
                                   # on purpose (see cue_midword_capital), so
                                   # their relative order is invisible — but it
@@ -2528,7 +2643,8 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     costs the pink highlight; it must never cost the pane.
                     """
                     cues = ocr_result[0] or []
-                    review_caps[0], review_caps[1] = scan_allcaps_words(cues)
+                    review_caps[0], review_caps[1] = scan_allcaps_words(
+                        cues, list(_known_caps()) + list(review_caps_ignore))
                     review_spell[0], review_spell[1] = set(), {}
                     if not cues:
                         return
@@ -4541,7 +4657,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 messagebox.showinfo("Find ALL CAPS", "No subtitle loaded.",
                                     parent=editor)
                 return
-            indices = scan_allcaps_words(cues)[0]
+            indices = scan_allcaps_words(cues, _known_caps())[0]
             # No modal on success — the highlighted rows ARE the result, and a
             # dialog you have to dismiss before you can look at them is pure
             # friction. The count goes to the status bar instead, so turning the
@@ -6850,7 +6966,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     if idx in spell_error_indices:
                         row_tag = TAG_SPELL
                     elif (caps_highlight_on[0]
-                          and idx in scan_allcaps_words(cues)[0]):
+                          and idx in scan_allcaps_words(cues, _known_caps())[0]):
                         row_tag = TAG_CAPS
                     elif TAG_MODIFIED in ctags:
                         row_tag = TAG_MODIFIED
@@ -7364,7 +7480,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             search_set = set(search_indices or [])
             # Re-scan for ALL CAPS on every rebuild while the mode is on, so the
             # highlighting survives deletes, edits, undo and filtering.
-            caps_set = scan_allcaps_words(cues)[0] if caps_highlight_on[0] else set()
+            caps_set = scan_allcaps_words(cues, _known_caps())[0] if caps_highlight_on[0] else set()
             for i, cue in enumerate(cues):
                 display = cue['text'].replace('\n', ' \\n ')
                 ts = f"{cue['start']} → {cue['end']}"

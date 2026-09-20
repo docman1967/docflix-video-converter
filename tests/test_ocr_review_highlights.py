@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from modules.subtitle_editor import (cue_midword_capital,       # noqa: E402
                                      drop_recurring_words,
+                                     scan_allcaps_words,
                                      add_user_word)
 
 
@@ -41,6 +42,88 @@ class _App:
 def _cue(text):
     return {'index': 1, 'start': '00:00:01,000', 'end': '00:00:02,000',
             'text': text}
+
+
+# ────────────────────── known acronyms (ALL-CAPS scan) ──────────────────────
+#
+# ⭐ Tony, 2026-09-20: acronyms "show up as all caps which they should", but he
+# does not want to keep looking at them. Measured on his 93-episode Lucifer
+# REMUX run: 79% of ALL-CAPS hits are acronyms or names, and LAPD alone (136
+# hits) is 27% of every ALL-CAPS row in the show.
+
+def test_a_known_acronym_stops_being_flagged():
+    cues = [_cue('Call the LAPD now.'), _cue('Get me DNA on this.')]
+    assert scan_allcaps_words(cues)[0] == {0, 1}
+    assert scan_allcaps_words(cues, ['LAPD'])[0] == {1}
+    assert scan_allcaps_words(cues, ['LAPD', 'DNA'])[0] == set()
+
+
+def test_the_match_is_CASE_SENSITIVE_and_that_is_the_point():
+    """⚠️⚠️ THE TEST THAT DEFENDS THE DESIGN.
+
+    custom_cap_words records how a word is REALLY written. Confirming "Jimmy"
+    says nothing about "JIMMY" — the second one is shouting, and lowercasing
+    it back is exactly the job this pane feeds. A `.lower()` comparison would
+    silence it and quietly destroy that.
+
+    ⭐ REAL NUMBERS, from Tony's own library (measured 2026-09-20 across 300
+    mixed-case subtitle files). Jimmy Neutron alone:
+
+        JIMMY   60 shouted   vs   Jimmy   359 in Title case
+        SHEEN   35           vs   Sheen   117
+        CARL    27           vs   Carl    151
+
+    So a case-insensitive match would have silenced 122 genuine shouts in one
+    show, to save him teaching three names.
+    ⚠️ This fixture was originally "VERSACE", which Arthur invented because
+    Versace sits in Tony's custom_cap_words. Tony asked *"What episode did you
+    find VERSACE"* — it appears in ZERO subtitles in the entire library. A test
+    that documents a behaviour with a situation that has never happened is the
+    weak kind. Use real strings.
+    """
+    cues = [_cue('JIMMY! Get down here right now!')]
+    assert scan_allcaps_words(cues, ['Jimmy'])[0] == {0}, \
+        "Title-case entry must NOT excuse the shouted form"
+    assert scan_allcaps_words(cues, ['JIMMY'])[0] == set(), \
+        "...but the caps form, confirmed, must"
+
+
+def test_the_hardcoded_floor_still_applies():
+    """_CAPS_EXCLUDE is structural, not a preference — it survives an empty
+    user list and is not something the user has to re-teach."""
+    cues = [_cue('OK, see you at 3 PM.'), _cue('Watch it on TV.')]
+    assert scan_allcaps_words(cues, [])[0] == set()
+    assert scan_allcaps_words(cues)[0] == set()
+
+
+def test_an_unknown_acronym_in_the_same_cue_still_flags():
+    """Teaching one word must not silence the whole row."""
+    cues = [_cue('The LAPD wants a BOLO out now.')]
+    idx, det = scan_allcaps_words(cues, ['LAPD'])
+    assert idx == {0}
+    assert det[0] == {'BOLO'}
+
+
+def test_details_name_only_the_words_still_unknown():
+    """The right-click menu is built from `details`, so a taught word must
+    disappear from it or the menu offers to add it twice."""
+    cues = [_cue('LAPD and FBI and SWAT.')]
+    _, det = scan_allcaps_words(cues, ['LAPD', 'SWAT'])
+    assert det[0] == {'FBI'}
+
+
+def test_empty_and_None_known_caps_are_safe():
+    cues = [_cue('Call the LAPD.')]
+    assert scan_allcaps_words(cues, None)[0] == {0}
+    assert scan_allcaps_words(cues, ())[0] == {0}
+    assert scan_allcaps_words(cues, [])[0] == {0}
+
+
+def test_known_caps_does_not_mutate_the_caller_list():
+    """The live list is app.custom_cap_words — scanning must not touch it."""
+    known = ['LAPD']
+    scan_allcaps_words([_cue('LAPD and FBI.')], known)
+    assert known == ['LAPD']
 
 
 # ─────────────────────────── user dictionary ───────────────────────────
