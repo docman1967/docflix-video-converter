@@ -43,6 +43,59 @@ _DICT_PATHS = (
     '/usr/share/dict/british-english',
 )
 
+_common_words_cache = None
+
+
+def _common_words():
+    """Lowercase English words from the system dictionary, cached.
+
+    Shared by load_names_db() (which drops names that collide with them) and
+    _split_custom_names() (which routes them through the contextual path
+    instead of dropping them). One source, so the two can never disagree about
+    what counts as an ordinary word.
+    """
+    global _common_words_cache
+    if _common_words_cache is not None:
+        return _common_words_cache
+    words = set(_NAMES_AMBIGUOUS)
+    for path in _DICT_PATHS:
+        if os.path.isfile(path):
+            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    w = line.strip()
+                    # Only lowercase entries are common words; proper nouns in
+                    # the dictionary start uppercase and are not the point.
+                    if w and w[0].islower() and w.isalpha():
+                        words.add(w.lower())
+            break
+    _common_words_cache = words
+    return words
+
+
+def _split_custom_names(custom_names):
+    """(applied everywhere, applied only next to an anchor).
+
+    ⚠️ Multi-word entries ("Mary Sibley") always go in the GLOBAL bucket — the
+    phrase itself is the disambiguation, so there is nothing to be careful
+    about.
+    """
+    glob_, ctx = [], []
+    for n in (custom_names or ()):
+        if ' ' in n or n.lower() not in _common_words():
+            glob_.append(n)
+        else:
+            ctx.append(n)
+    return glob_, ctx
+
+
+# Titles that make the following word a name regardless of anything else.
+_NAME_TITLES = (
+    'miss', 'mistress', 'mr', 'mrs', 'ms', 'doctor', 'dr', 'reverend',
+    'captain', 'lady', 'lord', 'sir', 'brother', 'sister', 'father',
+    'mother', 'aunt', 'uncle', 'magistrate', 'sheriff', 'judge', 'general',
+    'colonel', 'major', 'sergeant', 'officer', 'professor', 'saint',
+)
+
 # Fallback exclusion list when no system dictionary is available.
 # These are common English words that are also names — they must NOT
 # be auto-capitalized to avoid errors like "she has the Will to fight".
@@ -840,9 +893,25 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
     - Capitalizes custom names if provided
     - Optionally capitalizes names from the downloaded names database
     """
+    # ⚠️⚠️ A CUSTOM NAME THAT IS ALSO AN ORDINARY WORD IS APPLIED BY CONTEXT,
+    # NOT EVERYWHERE. Salem (2026-09-20) is the case this exists for: its main
+    # characters are Mercy, Increase, Cotton, John and Hale. Putting those in
+    # all_proper turns "have mercy on me" into "have Mercy on me" and "a cotton
+    # shirt" into "a Cotton shirt" — worse than leaving them lowercase.
+    # ⭐ So the split is automatic and Tony never has to think about it: a
+    # custom name the system dictionary knows as a common word is capitalised
+    # ONLY next to an anchor (a known surname, or a title). One that is not —
+    # Tituba, Samhain, Kenaima — is capitalised everywhere, as before.
+    # ⭐ This is what makes the OCR pane's right-click safe: adding "Mercy" to
+    # the list used to be a footgun, and now it does the right thing.
+    # ⛔ Do NOT build the candidate set from the names the DB discards. Measured
+    # 2026-09-20: 12,033 names are dropped for being dictionary words, and 32 of
+    # 33 obviously-dangerous words are in there — The, And, But, You, Will, God,
+    # Sir, Let. "the Alden house" would become "The Alden house". Only a list
+    # Tony curated himself is safe here.
+    custom_global, custom_contextual = _split_custom_names(custom_names)
     all_proper = set(PROPER_NOUNS)
-    if custom_names:
-        all_proper.update(w.lower() for w in custom_names)
+    all_proper.update(w.lower() for w in custom_global)
     use_names = use_names_db and _names_db_loaded
 
     sorted_nouns = sorted(all_proper, key=len, reverse=True)
@@ -918,16 +987,21 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
         return text
 
     def apply_custom_names(text):
-        if not custom_names:
+        # ⚠️ custom_GLOBAL, not custom_names. The contextual ones are handled
+        # by apply_contextual_names() and must not be capitalised here — this
+        # was the second of two places that had to change, and missing it left
+        # "have Mercy on me" working exactly as before while all_proper looked
+        # correct. Two application paths for one list; change them together.
+        if not custom_global:
             return text
-        custom_phrases = [n for n in custom_names if ' ' in n]
+        custom_phrases = [n for n in custom_global if ' ' in n]
         for phrase in custom_phrases:
             pattern = re.compile(re.escape(phrase), re.IGNORECASE)
             text = pattern.sub(phrase.title(), text)
         # ⚠️ Keys are NORMALISED (curly -> straight) so a name stored as
         # "O'Brien" still matches text written "O’Brien", and vice versa. The
         # VALUE keeps whatever he typed; only the lookup is normalised.
-        custom_single = {n.lower().replace('’', "'"): n for n in custom_names
+        custom_single = {n.lower().replace("’", "'"): n for n in custom_global
                          if ' ' not in n}
         if custom_single:
             def _same_apostrophes(canon, src):
@@ -1008,6 +1082,69 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
             text = re.sub(r"\b[a-zA-Z]+(?:['’][a-zA-Z]+)*", _cap_custom, text)
         return text
 
+    def apply_contextual_names(text):
+        """Capitalise an ambiguous custom name only when an anchor proves it.
+
+        Two anchors, both of which do the disambiguating so we never have to
+        guess:
+
+            <name> <Known-Surname>     mercy lewis   -> Mercy Lewis
+            <title> <name>             miss mercy    -> Miss Mercy
+
+        ⚠️ RUNS AFTER apply_custom_names AND fix_case, which is what makes the
+        first anchor work at all: by now "lewis" has already become "Lewis" via
+        the names DB, so the test is simply "is the next word capitalised and
+        known". Move this earlier and it silently stops finding anything.
+
+        ⚠️ The possessive is stripped before the lookup — the names DB holds
+        "Alden", not "Alden's", and the first pass at the Salem files missed 12
+        occurrences of "john Alden's" for exactly that reason. Both apostrophes.
+
+        ⚠️ Anything with NO anchor is left alone on purpose: "have mercy on me",
+        "where are you, john". Measured on 26 Salem episodes — 231 occurrences
+        had an anchor, 337 did not, and the 337 are overwhelmingly correct as
+        lowercase. A rule that capitalised those too would be wrong more often
+        than right.
+        """
+        if not custom_contextual:
+            return text
+        names = '|'.join(re.escape(n.lower()) for n in custom_contextual)
+        canon = {n.lower(): n for n in custom_contextual}
+
+        def _anchored(m):
+            word, gap, nxt = m.group(1), m.group(2), m.group(3)
+            root = re.sub(r"['’]s$", '', nxt)
+            known = (root in _names_db
+                     or root.lower() in all_proper
+                     or root.lower() in {c.lower() for c in custom_global})
+            return (canon[word.lower()] if known else word) + gap + nxt
+
+        text = re.sub(r'\b(' + names + r")([ \t]+)([A-Z][a-z'’]+)",
+                      _anchored, text)
+
+        # ⚠️ THE OTHER DIRECTION — the ambiguous name as the SURNAME. "Anne
+        # hale" needs its anchor on the LEFT. Measured on 26 Salem episodes:
+        # 33 occurrences of <known name> <ambiguous name>, 32 of them "anne
+        # hale" and correct; the one miss is a word fragment.
+        # ⚠️ Applied SECOND so anything the forward rule already fixed is not
+        # reconsidered, and deliberately narrower — the left word must itself
+        # be a name we know, not merely capitalised, or every sentence-initial
+        # word would anchor the one after it.
+        def _anchored_left(m):
+            prev, gap, word = m.group(1), m.group(2), m.group(3)
+            if prev in _names_db or prev.lower() in all_proper:
+                return prev + gap + canon[word.lower()]
+            return m.group(0)
+
+        text = re.sub(r"\b([A-Z][a-z'’]+)([ \t]+)(" + names + r')\b',
+                      _anchored_left, text)
+        titles = '|'.join(_NAME_TITLES)
+        text = re.sub(r'\b(' + titles + r')([ \t]+)(' + names + r')\b',
+                      lambda m: (m.group(1)[0].upper() + m.group(1)[1:]
+                                 + m.group(2) + canon[m.group(3).lower()]),
+                      text, flags=re.IGNORECASE)
+        return text
+
     result = []
     prev_text = ''
     for cue in cues:
@@ -1022,6 +1159,10 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
                 r'^(-\s*)?([a-z])',
                 lambda m: (m.group(1) or '') + m.group(2).upper(), text)
         text = apply_custom_names(text)
+        # ⚠️ LAST, and it matters — see apply_contextual_names. The anchor test
+        # asks whether the NEXT word is already a known capitalised name, which
+        # is only true once fix_case and apply_custom_names have run.
+        text = apply_contextual_names(text)
         prev_text = text
         result.append({**cue, 'text': text})
     return result
