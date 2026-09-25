@@ -543,11 +543,7 @@ def _ocr_overlay_approach(filepath, stream_index, language, tess_lang,
                 tmpdir, f'ocr_{idx + 1:05d}.png')
             img.save(processed_path)
 
-            text = pytesseract.image_to_string(
-                img, lang=tess_lang,
-                config='--psm 6 --oem 3'
-            ).strip()
-            text = _reinsert_music_notes(_fix_ocr_text(text), _notes)
+            text = _ocr_cue(img, tess_lang, _notes)
             return (start_s, end_s - start_s, text, processed_path)
         except Exception:
             return (start_s, end_s - start_s, '', frame_path)
@@ -1095,11 +1091,7 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                     img.save(img_path)
 
                 # ── Tesseract OCR ──
-                text = pytesseract.image_to_string(
-                    img, lang=tess_lang,
-                    config='--psm 6 --oem 3'
-                ).strip()
-                text = _reinsert_music_notes(_fix_ocr_text(text), _notes)
+                text = _ocr_cue(img, tess_lang, _notes)
                 return (pts, dur, text, img_path)
             except Exception:
                 return (pts, dur, '', img_path)
@@ -1238,6 +1230,160 @@ def write_srt_file(cues, output_path):
             f.write(f"{n}\n")
             f.write(f"{cue['start']} --> {cue['end']}\n")
             f.write(f"{cue['text']}\n\n")
+
+
+# ⭐ Measured on 24 real frames from Sons of Anarchy S01E01 (tests/fixtures/italics):
+#     upright speech     0° .. -1°
+#     italic            -17° .. -20°
+# ~16° of clean separation, so the cut sits in open water rather than on a boundary.
+# ⚠️ Unlike the wake-word voiceprint bands or the memory-relevance scores, these two
+# populations genuinely DO separate — which is the only reason a threshold is honest
+# here. Do not copy this pattern to a problem where the distributions overlap.
+ITALIC_SLANT_DEG = -8.0
+_SLANT_SEARCH = (-30, 12)
+
+
+def detect_slant_deg(img):
+    """Dominant slant of the glyphs, in degrees. ~0 for upright, ~-18 for italic.
+
+    Shears the ink mask by a range of angles and keeps the one whose vertical
+    projection is most peaked: upright strokes stack into tall narrow columns, a slant
+    smears them across many. Returns None when there is too little ink to judge.
+
+    ⚠️⚠️ THREE WRONG ANSWERS PRECEDED THIS ONE, and every one was degenerate — pinned
+    to an end of the search range, which is the signature of a metric that rises with
+    the angle instead of peaking at the right one:
+      1. The accumulator was sized per angle, so bigger shears gained trailing zero
+         columns and scored higher on that alone. **The score must be comparable ACROSS
+         angles** — hence one fixed length for the whole sweep.
+      2. A negative shear produced a negative index, and `acc[-5:-5+w] += row` is a
+         SILENT empty slice, not an error. Hence the `pad` bias.
+      3. The ink mask assumed light-on-dark and was handed a post-invert frame, so it
+         measured the BACKGROUND. Hence: never assume polarity — take whichever class
+         is the MINORITY, because glyphs are always the smaller share of a subtitle crop.
+    ⚠️ A result sitting exactly on `_SLANT_SEARCH`'s edge is a broken measurement, not
+    a steep italic.
+    """
+    try:
+        import numpy as _np
+        a = _np.asarray(img.convert("L"), dtype=float)
+    except Exception:
+        return None
+    dark, light = (a < 100), (a > 155)
+    ink = (dark if dark.sum() <= light.sum() else light).astype(float)
+    if ink.sum() < 50:
+        return None
+    rows = _np.where(ink.sum(1) > 0)[0]
+    if rows.size < 4:
+        return None
+    ink = ink[rows.min():rows.max() + 1]
+    h, w = ink.shape
+    lo, hi = _SLANT_SEARCH
+    pad = int(_np.tan(_np.deg2rad(max(abs(lo), abs(hi)))) * h) + 2
+    length = w + 2 * pad
+    best, best_score = None, -1.0
+    for deg in range(lo, hi + 1):
+        sh = _np.tan(_np.deg2rad(deg))
+        acc = _np.zeros(length)
+        for y in range(h):
+            off = pad + int(sh * (h - 1 - y))
+            acc[off:off + w] += ink[y]
+        score = float((acc ** 2).sum())
+        if score > best_score:
+            best_score, best = score, float(deg)
+    return best
+
+
+def looks_italic(img):
+    """True if this subtitle bitmap is italic. Conservative — see ITALIC_SLANT_DEG."""
+    deg = detect_slant_deg(img)
+    return deg is not None and deg <= ITALIC_SLANT_DEG
+
+
+def apply_italic_tag(text, is_italic):
+    """Wrap a finished cue in <i></i>, once, without disturbing its line breaks.
+
+    ⚠️ Wraps the WHOLE cue, including any ♪ — that is what the release subs do, and the
+    editor's own italic button does the same, so a cue tagged here and a cue tagged by
+    hand look identical. ⚠️ Never double-wraps: OCR text can already contain a tag when
+    a custom rule put one there.
+    """
+    if not is_italic or not text or not text.strip():
+        return text
+    stripped = text.strip()
+    if "<i>" in stripped.lower():
+        return text
+    return f"<i>{stripped}</i>"
+
+
+def _repair_sdh_brackets(text):
+    """Put back the `]` that Tesseract reads as `I`.
+
+    Tony, 2026-09-25: *"it's still having problems picking up the brackets.....mainly
+    the right side one it appears."*
+
+        [ Men Chattering In Spanish I      ->  [ Men Chattering In Spanish ]
+        [ Gunshots I                       ->  [ Gunshots ]
+        ♪♪ [Rock I                         ->  ♪♪ [Rock]
+        [I Cawing I                        ->  [ Cawing ]
+
+    ⚠️ NOT an image problem — the `]` is crisp and well formed in the bitmap. It is
+    Tesseract's classic `] / I / l / |` confusion, so the repair belongs here in
+    post-processing and NOT in preprocessing. (`|` has already become `I` further up,
+    so every variant of the misread arrives here as `I`.)
+
+    ⛔ A blunt `I` -> `]` would wreck every line ending in the pronoun — "Neither did
+    I", "That's what I said, I". So the rule is BRACKET-BALANCED and per line: only a
+    line with an unclosed `[` can gain a `]`, which no ordinary sentence has.
+
+    ⚠️ The leading form is tighter still. `[I ` is only collapsed when the next word is
+    Capitalised AND the line already closes — the shape of an SDH descriptor — so
+    "[I want to go]" is left alone. ⭐ The negative set in test_italic_detection.py is
+    the load-bearing half of this; extend it before ever widening these patterns.
+    """
+    if not text or '[' not in text:
+        return text
+    out = []
+    for line in text.split('\n'):
+        # Trailing: an unclosed '[' and the line ends on a lone I -> that I is a ']'.
+        if line.count('[') > line.count(']'):
+            line = re.sub(r'(?<=\S)(\s*)I\s*$', r'\1]', line)
+        # Leading: '[I Word' where the line closes -> the I is the bracket's own stroke.
+        if ']' in line:
+            line = re.sub(r'^(\W*)\[\s*I\s+(?=[A-Z])', r'\1[ ', line)
+        out.append(line)
+    return '\n'.join(out)
+
+
+def _ocr_cue(img, tess_lang, notes):
+    """Tesseract + the whole post-processing chain for one cue. ONE copy, two callers.
+
+    ⚠️ The PGS path and the DVB/VobSub path are separate functions with byte-identical
+    OCR tails, and the file's own warning says the DVB one "historically gets fixed
+    second and stays broken longest". A rule pasted into both drifts; a rule called by
+    both cannot.
+
+    ⭐ Italic is judged on the SAME image handed to Tesseract, so the detector and the
+    reader can never disagree about what they looked at.
+
+    ⚠️⚠️ LOCAL IMPORT BELOW, DELIBERATELY. `pytesseract` is imported INSIDE
+    `_ocr_overlay_approach()` and `ocr_bitmap_subtitle()` — after
+    `_ensure_tesseract_deps()` has had its chance to install it — and NOT at module
+    level. This helper lives outside both, so the first version raised NameError on
+    every single cue. Both call sites wrap this in `except Exception`, so the failure
+    was SILENT: every cue came back empty and the run reported success.
+    ⛔ Do not "tidy" it to a module-level import; that would run before the installer.
+    ⭐ Note what caught it — not the syntax check, not the unit tests (which only
+    asserted that both paths CALL this function), but running the real OCR on a real
+    file. **Structure is not behaviour.**
+    """
+    import pytesseract
+
+    italic = looks_italic(img)
+    text = pytesseract.image_to_string(
+        img, lang=tess_lang, config='--psm 6 --oem 3').strip()
+    text = _reinsert_music_notes(_fix_ocr_text(text), notes)
+    return apply_italic_tag(text, italic)
 
 
 def normalise_for_ocr(img):
@@ -1659,6 +1805,8 @@ def _fix_ocr_text(text):
     # Clean up common OCR artifacts
     text = re.sub(r'\s{2,}', ' ', text)          # collapse multiple spaces
     text = re.sub(r'^\s+|\s+$', '', text, flags=re.MULTILINE)  # trim lines
+
+    text = _repair_sdh_brackets(text)
 
     # Apply user's custom OCR rules (loaded from prefs)
     for find, replace in _get_custom_ocr_rules():

@@ -19,3 +19,8 @@ logo_transparent.png
 # OS
 .DS_Store
 Thumbs.db
+
+# Real subtitle frames off Tony own discs — test data, not code.
+# ⛔ Never commit these: this repo is PUBLIC and they are stills from a commercial
+# release. The tests that need them SKIP (loudly) when absent; see the README there.
+tests/fixtures/italics/
