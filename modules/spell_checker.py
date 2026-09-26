@@ -115,6 +115,65 @@ def is_ok_contraction(word, spell, extra_known=()):
     return False
 
 
+def iter_words(text):
+    """Yield (word, followed_by_apostrophe) for every token in `text`.
+
+    ⚠️⚠️ WHY THIS EXISTS RATHER THAN A WIDER WORD_RE. The dropped-g rule below
+    needs to know whether a token was written `trailin'` or `trailin`, and
+    WORD_RE throws the trailing apostrophe away. The obvious fix — append
+    `['’]?` to the pattern — would change EVERY token in the suite: UK-style
+    single-quoted dialogue (`'Run'`) would start yielding `Run'`, and
+    pyspellchecker would flag a word that is spelled perfectly. That is the
+    widened-band mistake the music-note work already paid for once.
+
+    So the pattern stays exactly as it is and the apostrophe is read from the
+    text AFTER the match. ⭐ And it lives here, called by all THREE scanners
+    (both in this file and _find_next in the editor), because a rule the
+    highlighter honours and the F7 dialog does not is the detector/doer split
+    that keeps catching us.
+    """
+    for m in WORD_RE.finditer(text):
+        yield m.group(0), text[m.end():m.end() + 1] in ("'", "’")
+
+
+def is_dropped_g(word, had_apostrophe, spell):
+    """True if `word` is the dialect `-in'` spelling of a known `-ing` word.
+
+    Tony, 2026-09-26: *"I'm noticing words that I know I put into the
+    dictionary, coming back in the next files I'm working on... most of them
+    are contractions like trailin', dyin', ridin'."*
+
+    ⭐ HIS DICTIONARY WAS NEVER THE PROBLEM — it is global and it persists, and
+    `trailin'` really was in it. What he was fighting is a TREADMILL: measured
+    across 40 of his subtitle files there are 114 distinct dropped-g forms, he
+    had added 44 of them one at a time, and every new file arrives carrying
+    ones he has not met yet (runnin, makin, killin, sayin, walkin, mornin...).
+    Adding them one by one can never finish. So this suppresses the CLASS,
+    exactly as is_ok_contraction does for possessives.
+
+    ⛔ THE APOSTROPHE IS REQUIRED, and the measurement is why. Of 278
+    candidates in those 40 files, 272 (97.8%) were written with one. The six
+    that were not include **westin** (the hotel) and **lavin** (a surname) —
+    so the lax version of this rule would have quietly accepted proper nouns
+    as dialect, while gaining 2% coverage. Requiring the apostrophe is both
+    safer AND catches nearly everything.
+
+    ⚠️ Like is_ok_contraction this can only ever SUPPRESS a flag, never create
+    one — so the worst case is a missed correction, not a wrong one.
+    """
+    if not had_apostrophe:
+        return False
+    wl = word.lower().replace("’", "'").rstrip("'")
+    # len>3 so the ordinary word "in" can never reach the dictionary lookup.
+    if len(wl) < 4 or not wl.endswith("in"):
+        return False
+    try:
+        # ⭐ The whole test: is this word, with its dropped g put back, a word?
+        return not spell.unknown([wl + "g"])
+    except Exception:
+        return False
+
+
 # ── Wrong-case proper nouns ──────────────────────────────────────────────────
 # Tony, 2026-08-07: *"I just found a name that is in the list but it didn't
 # repair it. Name is hirst and it's line #250."*
@@ -390,17 +449,21 @@ def run_spell_highlight_scan(app, parent_window, cues, spell_error_indices,
     errors_by_cue = {}
     for i, cue in enumerate(cues):
         clean = re.sub(r'<[^>]+>|\{\\[^}]+\}|♪', '', cue['text'])
-        words = WORD_RE.findall(clean)
-        if not words:
+        pairs = list(iter_words(clean))
+        if not pairs:
             continue
+        words = [w for w, _ in pairs]
         unknown = spell.unknown(words)
         cue_words, cue_names = [], []
-        for w in words:
+        for w, apos in pairs:
             if ((w.lower() in unknown or w in unknown)
                     # Skip valid contractions/possessives — see the note on
                     # is_ok_contraction. Without this, every "Whatever's" and
                     # every possessive of a known name is a false positive.
-                    and not is_ok_contraction(w, spell, known)):
+                    and not is_ok_contraction(w, spell, known)
+                    # ...and dialect dropped-g forms, which are a class, not a
+                    # list. See is_dropped_g — 114 distinct forms in 40 files.
+                    and not is_dropped_g(w, apos, spell)):
                 cue_words.append(w)
                 continue
             # ⭐ WRONG-CASE NAMES, added 2026-09-26 at Tony's request: *"Yes I

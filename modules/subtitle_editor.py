@@ -4941,8 +4941,9 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 else:
                     return
 
-            from modules.spell_checker import (is_ok_contraction,
-                                               miscased_name, name_case_lut)
+            from modules.spell_checker import (is_dropped_g, is_ok_contraction,
+                                               iter_words, miscased_name,
+                                               name_case_lut)
 
             spell = SpellChecker()
             all_names = app.custom_cap_words + temp_cap_words
@@ -5066,11 +5067,18 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     # ⚠️ Shared with spell_checker's two scans — see WORD_RE.
                     # This was the third copy of the pattern and it carried the
                     # same curly-apostrophe bug.
-                    words = _spell_word_re().findall(clean)
-                    if words:
+                    # ⚠️ iter_words, not findall: the dropped-g rule needs to
+                    # know whether the token was written `trailin'` or
+                    # `trailin`, and WORD_RE drops the trailing apostrophe.
+                    # Both scans in spell_checker.py use the same helper, so
+                    # this dialog and the highlighter cannot disagree about
+                    # what counts as an error.
+                    pairs = list(iter_words(clean))
+                    if pairs:
+                        words = [w for w, _ in pairs]
                         unknown = spell.unknown(words)
                         for j in range(wi, len(words)):
-                            w = words[j]
+                            w, _apos = pairs[j]
                             # Ignore is per-word and covers BOTH kinds — the
                             # user said "stop showing me this word".
                             if w.lower() in ignored:
@@ -5085,7 +5093,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                             # rather than skipping the word entirely.
                             if ((w.lower() in unknown or w in unknown)
                                     and not is_ok_contraction(w, spell,
-                                                              known)):
+                                                              known)
+                                    # ...and not a dialect dropped-g form.
+                                    # Same rule the highlighter applies — see
+                                    # is_dropped_g. Without it here, F7 would
+                                    # still stop on every "runnin'" that the
+                                    # tree had already stopped colouring.
+                                    and not is_dropped_g(w, _apos, spell)):
                                 cands = spell.candidates(w)
                                 spell_error_indices.add(ci)
                                 scan_cue[0] = ci
