@@ -49,6 +49,35 @@ MAX_ZOOM_PX_PER_SEC = 500   # zoomed all the way in (0.5s per 250px)
 RULER_HEIGHT = 24           # pixels for the time ruler
 EDGE_GRAB_PX = 6            # pixels from edge to trigger resize drag
 CURSOR_POLL_MS = 80         # playback cursor poll interval
+# ⭐ How far INSIDE a cue the preview seeks, so the picture shows the cue you
+# picked rather than the last frame of the one before it. See the long note in
+# seek_to_cue — subtitle files are usually gapless, so a cue's first
+# millisecond is also the previous cue's last. Comfortably more than one frame
+# at 24 fps (41.7 ms); measured to fix 4/13 misses with 0 regressions.
+PREVIEW_NUDGE_MS = 50
+
+
+def preview_seek_ms(start_ms, end_ms, duration_ms):
+    """Where the video preview should seek to show the cue [start, end).
+
+    ⭐ NOT `start_ms`. Subtitle files are usually gapless — a cue's first
+    millisecond is also the previous cue's last — and a seek lands on the
+    nearest decodable frame at or before the target. At 23.976 fps that frame
+    is 41.7 ms wide, so a third of the time it is still inside the OUTGOING
+    cue and mpv renders that text instead. Tony hit it on 2026-09-26; see the
+    measurements in seek_to_cue.
+
+    ⚠️ Clamped to a third of the cue's own length so a very short cue cannot be
+    overshot, and to the media duration so the last cue cannot seek past the
+    end. Separate from the playback position on purpose: only the PREVIEW moves
+    forward, so the waveform cursor stays on the true boundary and Play still
+    starts at the first word.
+    """
+    if end_ms <= start_ms:
+        nudge = 0                       # zero-length or reversed — do not guess
+    else:
+        nudge = min(PREVIEW_NUDGE_MS, max(0, (end_ms - start_ms) // 3))
+    return max(0, min(duration_ms, start_ms + nudge))
 
 
 def _format_time(ms):
@@ -1498,6 +1527,7 @@ class WaveformTimeline(tk.Frame):
 
         try:
             start_ms = srt_ts_to_ms(cues[idx]['start'])
+            end_ms = srt_ts_to_ms(cues[idx]['end'])
         except (KeyError, ValueError):
             return
         start_ms = max(0, min(self._duration_ms, start_ms))
@@ -1506,7 +1536,35 @@ class WaveformTimeline(tk.Frame):
 
         self._playback_pos_ms = start_ms
         if self._mpv_proc and self._mpv_proc.poll() is None:
-            self._mpv_cmd(["seek", str(start_ms / 1000), "absolute+exact"])
+            # ⭐⭐ SEEK A HAIR *INSIDE* THE CUE, NOT TO ITS FIRST MILLISECOND.
+            # Tony, 2026-09-26: *"the inline subs aren't matching... text it
+            # shows on the screen doesn't match the selected cue."* He was on
+            # 00:26:43,394 and the picture read "So get one." — the cue ENDING
+            # at 00:26:43,394.
+            #
+            # ⚠️ NOT an mpv bug and NOT an off-by-one in our indices. Subtitle
+            # files are usually GAPLESS — on the episode he was editing, 493 of
+            # 550 cues (90%) start on the exact millisecond the previous one
+            # ends. A seek to that millisecond lands on the nearest decodable
+            # frame at or before it, and at 23.976 fps frames are 41.7 ms apart,
+            # so roughly a third of the time that frame is still inside the
+            # OUTGOING cue and mpv renders its text.
+            #
+            # ⭐ MEASURED against the real episode via mpv IPC, 13 gapless cues:
+            #       seek to start          4/13 showed the previous cue
+            #       seek to start + 20 ms  0/13
+            #       seek to start + 50 ms  0/13
+            # (Control: seeking mid-cue was right 14/14. The first three
+            # attempts at that measurement were instrument failures — mpv with
+            # --vo=null and --pause decodes no frame after a seek, so sub-text
+            # stayed empty and every cue read as "wrong". Never trust this kind
+            # of probe without the mid-cue control.)
+            #
+            # ⚠️ Only the PREVIEW moves — _playback_pos_ms keeps the true start
+            # above, so the waveform cursor stays on the boundary and Play still
+            # begins at the first word rather than 50 ms into it.
+            preview_ms = preview_seek_ms(start_ms, end_ms, self._duration_ms)
+            self._mpv_cmd(["seek", str(preview_ms / 1000), "absolute+exact"])
         cw = self._canvas.winfo_width()
         ch = self._canvas.winfo_height()
         if cw > 0 and ch > 0:
