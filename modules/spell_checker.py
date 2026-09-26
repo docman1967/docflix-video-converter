@@ -176,6 +176,52 @@ def miscased_name(word, lut):
     return good + word[len(root):]
 
 
+# ── One SpellChecker, reused ─────────────────────────────────────────────────
+# ⭐ MEASURED 2026-09-26, and it is the whole reason live highlighting is
+# possible at all:
+#
+#     SpellChecker()  construction : ~145 ms   every single call
+#     the scan loop, 814 cues      :  ~17 ms
+#     the scan loop, 535 cues      :   ~7 ms
+#
+# The scan was only ever run from a menu item, so 145 ms nobody could feel. The
+# moment it moved into refresh_tree — which fires on every delete, edit, undo
+# and filter — that constructor became the cost of the feature. Cached, a
+# rescan is ~15 ms and sits in the same league as scan_allcaps_words.
+#
+# ⭐⭐ KEYED ON THE WORD LIST, WHICH IS THE POINT. Tony, 2026-09-26: *"Once a
+# word or name has been added to the dictionary or name list, it doesn't clear
+# the remaining errors."* There are NINE separate doors that add a word (two
+# dialog buttons, two right-click menus, the OCR pane, three preferences
+# controls, the temp-names menu) and asking each of them to remember to call an
+# invalidate function is how this bug happens again. Instead the cache key IS
+# the known-word list: add a word anywhere and the key changes, so the next
+# scan rebuilds and the error clears everywhere. Nothing to remember.
+#
+# ⛔ The INTERACTIVE dialog deliberately does NOT use this. It calls
+# `spell.word_frequency.load_words([w])` directly on its own instance (see
+# _do_add_dict) — a mutation the key knows nothing about, which would leave a
+# cached checker claiming to hold a word list it no longer matches.
+_CHECKER = {"key": None, "spell": None}
+
+
+def checker_for(known):
+    """A SpellChecker loaded with `known`, reused until `known` changes.
+
+    ⚠️ The key is the SORTED, LOWERCASED, DEDUPED set — so re-ordering the
+    preferences list, or adding a word that differs only in case, does not throw
+    away a perfectly good checker and pay 145 ms for nothing.
+    """
+    from spellchecker import SpellChecker
+    key = tuple(sorted({str(w).lower() for w in known if w}))
+    if _CHECKER["spell"] is None or _CHECKER["key"] != key:
+        spell = SpellChecker()
+        if key:
+            spell.word_frequency.load_words(list(key))
+        _CHECKER["key"], _CHECKER["spell"] = key, spell
+    return _CHECKER["spell"]
+
+
 def run_spell_check_scan(app, parent_window, cues, spell_error_indices):
     """Scan all cues for spelling errors.
 
@@ -254,26 +300,47 @@ def run_spell_check_scan(app, parent_window, cues, spell_error_indices):
     return errors_by_cue
 
 
-def run_spell_highlight_scan(app, parent_window, cues, spell_error_indices):
+def run_spell_highlight_scan(app, parent_window, cues, spell_error_indices,
+                             name_fixes=None, quiet=False, extra_known=()):
     """Scan all cues for spelling errors (highlight-only, no candidates).
 
     Faster than run_spell_check_scan() because it skips candidate
     generation — only identifies which cues contain misspelled words.
+
+    ⭐ THIS IS NOW CALLED FROM refresh_tree, not just from the menu. Tony,
+    2026-09-26: *"if I delete a line, the remaining spelling errors don't move
+    with the new line numbers."* They could not — the result is keyed by
+    POSITION and ~16 operations renumber the cues under it (delete, split,
+    join, insert, undo, redo, Reset to Original, filters, Replace All). The
+    ALL CAPS highlighter two lines above in refresh_tree has always re-scanned
+    on every rebuild for exactly this reason; the spell highlighter was the one
+    that cached. So it stops caching, and the drift stops being possible rather
+    than being fixed one caller at a time.
 
     Args:
         app: Application context with custom_cap_words, custom_spell_words.
         parent_window: Tk window for dialogs.
         cues: List of subtitle cue dicts.
         spell_error_indices: Set to populate with cue indices that have
-                             errors.
+                             errors. CLEARED first.
+        name_fixes: Optional dict to fill with {cue_index: [(bad, good), ...]}
+                    for wrong-case names. See the miscased block below.
+        quiet: True to return None instead of offering to pip-install the
+               spell checker. ⚠️ LOAD-BEARING for the refresh_tree caller: a
+               modal that is fine once from a menu is unusable when it fires on
+               every repaint of the tree.
+        extra_known: Additional known words/names — the per-file "This File
+                     Only" temp names.
 
     Returns:
         Dict of {cue_index: [word, ...]} listing misspelled words per cue,
         or None if spell checker is not available.
     """
     try:
-        from spellchecker import SpellChecker
+        from spellchecker import SpellChecker            # noqa: F401
     except ImportError:
+        if quiet:
+            return None
         if messagebox.askyesno(
                 "Missing Package",
                 "pyspellchecker is not installed.\n\n"
@@ -309,12 +376,15 @@ def run_spell_highlight_scan(app, parent_window, cues, spell_error_indices):
         else:
             return None
 
-    spell = SpellChecker()
-    cap_words = getattr(app, 'custom_cap_words', [])
-    spell_words = getattr(app, 'custom_spell_words', [])
-    known = [w.lower() for w in cap_words + spell_words]
-    if known:
-        spell.word_frequency.load_words(known)
+    cap_words = list(getattr(app, 'custom_cap_words', []))
+    spell_words = list(getattr(app, 'custom_spell_words', []))
+    extra = [w for w in extra_known if w]
+    known = [w.lower() for w in cap_words + spell_words + extra]
+    spell = checker_for(known)
+    # ⚠️ Names only — NOT custom_spell_words. A word in the plain dictionary is
+    # an ordinary word ("beheves" -> "behaves"); only the name list carries the
+    # claim that there is one correct capitalisation.
+    lut = name_case_lut(cap_words + extra)
 
     spell_error_indices.clear()
     errors_by_cue = {}
@@ -324,19 +394,40 @@ def run_spell_highlight_scan(app, parent_window, cues, spell_error_indices):
         if not words:
             continue
         unknown = spell.unknown(words)
-        if unknown:
-            cue_words = []
-            for w in words:
-                if w.lower() in unknown or w in unknown:
+        cue_words, cue_names = [], []
+        for w in words:
+            if ((w.lower() in unknown or w in unknown)
                     # Skip valid contractions/possessives — see the note on
                     # is_ok_contraction. Without this, every "Whatever's" and
                     # every possessive of a known name is a false positive.
-                    if is_ok_contraction(w, spell, known):
-                        continue
-                    cue_words.append(w)
+                    and not is_ok_contraction(w, spell, known)):
+                cue_words.append(w)
+                continue
+            # ⭐ WRONG-CASE NAMES, added 2026-09-26 at Tony's request: *"Yes I
+            # want names to be lit as well."*
+            # ⚠️⚠️ THIS MUST RUN ON *KNOWN* WORDS, which is why it sits after
+            # the `continue` and not inside `if unknown`. Adding "Hirst" to the
+            # name list is precisely what makes "hirst" a correctly-spelled
+            # word — see the long note above name_case_lut. A caps error is
+            # invisible to a spell checker by construction, so a scan that only
+            # looked at unknown words could never find one.
+            # ⚠️ The `continue` above stops a word being reported as BOTH a
+            # misspelling and a caps error. It is defensive, not load-bearing:
+            # a mutation test on 2026-09-26 removed it and every check still
+            # passed, because a name in the lut is also loaded into the
+            # dictionary, so it can never appear in `unknown`. Recorded so the
+            # next reader neither deletes it as dead code nor trusts it as a
+            # guarantee — it starts earning its keep the moment names stop
+            # being loaded into the checker.
+            good = miscased_name(w, lut)
+            if good:
+                cue_names.append((w, good))
+        if cue_words or cue_names:
+            spell_error_indices.add(i)
             if cue_words:
-                spell_error_indices.add(i)
                 errors_by_cue[i] = cue_words
+            if cue_names and name_fixes is not None:
+                name_fixes[i] = cue_names
     return errors_by_cue
 
 

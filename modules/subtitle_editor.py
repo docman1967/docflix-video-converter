@@ -477,6 +477,40 @@ def _spell_word_re():
     return WORD_RE
 
 
+def rescan_spell_state(app, parent, cues, indices, words, name_fixes,
+                       extra_known=()):
+    """Re-derive the spelling highlight from the CURRENT cues, in place.
+
+    ⭐⭐ THE FIX FOR BOTH OF TONY'S 2026-09-26 SYMPTOMS, and it is deliberately
+    a plain module-level function rather than a closure inside refresh_tree —
+    so it can be DRIVEN BY A TEST. The closure version could only ever be
+    inspected through the AST, and an AST check is exactly what went green over
+    an OCR helper that raised NameError on every cue the day before.
+
+    `indices`, `words` and `name_fixes` are the editor's live containers and are
+    updated IN PLACE, because the tree-painting code closes over them.
+
+    ⚠️ RETURNS FALSE AND CHANGES NOTHING when the spell checker is unavailable.
+    Wiping the row colours because a package is missing would read as "your file
+    is clean now" — a lie in the one direction that costs the user work. This
+    holds because run_spell_highlight_scan's `quiet` path returns BEFORE it
+    clears `indices`; that ordering is load-bearing here and is asserted in
+    tests/test_spell_highlight_live.py rather than trusted.
+    """
+    from .spell_checker import run_spell_highlight_scan
+    fresh_names = {}
+    fresh = run_spell_highlight_scan(app, parent, cues, indices,
+                                     name_fixes=fresh_names, quiet=True,
+                                     extra_known=list(extra_known))
+    if fresh is None:
+        return False
+    words.clear()
+    words.update(fresh)
+    name_fixes.clear()
+    name_fixes.update(fresh_names)
+    return True
+
+
 def add_user_word(app, word, as_name=False):
     """Teach the user dictionary a word. Returns True if anything changed.
 
@@ -1038,6 +1072,14 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         # a time without words, so this may be empty for rows that set are in —
         # _row_note falls back to a bare marker rather than assuming.
         spell_error_words = {}
+        # {cue index: [(wrong, correct), ...]} — wrong-case NAMES, which are a
+        # different animal from a misspelling: there is exactly one right answer
+        # and it is already stored, so the Note can name the fix rather than a
+        # guess. Tony asked for these to light up too on 2026-09-26.
+        # ⚠️ A caps error is INVISIBLE to a spell checker — adding "Hirst" to
+        # the name list is what makes "hirst" correctly spelled. See the note
+        # above name_case_lut in spell_checker.py.
+        spell_name_fixes = {}
         # Has a spelling scan been run for the current file? Drives the status-bar
         # count that replaced the old results popup, and distinguishes "scanned,
         # found nothing" from "never scanned" — without it, a clean file and an
@@ -1285,6 +1327,12 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             # (Tony, 2026-08-06.)
             caps_highlight_on[0] = False
             spell_error_indices.clear()
+            # ⚠️ The two detail maps go with the index set. They were NOT being
+            # cleared here before — a leftover {index: words} from the previous
+            # file would have fed the Note column the old file's words for as
+            # long as the new file went unscanned.
+            spell_error_words.clear()
+            spell_name_fixes.clear()
             # Clear the SCANNED flag too, not just the results. Leaving it set
             # would show "0 misspelled" on a brand-new file that was never
             # checked — a clean bill of health nobody asked for and nobody
@@ -5358,14 +5406,20 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                     parent=editor)
                 return
             from modules.spell_checker import run_spell_highlight_scan
-            errors_by_cue = run_spell_highlight_scan(
-                app, editor, cues, spell_error_indices)
-            if errors_by_cue is None:
+            # ⚠️ This one probe runs NOT quiet, because it is the only place the
+            # "pyspellchecker is not installed — install it?" offer can still be
+            # made. refresh_tree's rescan has to be quiet (a modal on every
+            # repaint is unusable), so without this the menu item would fail
+            # silently on a machine that has never had the package.
+            if run_spell_highlight_scan(app, editor, cues, spell_error_indices,
+                                        quiet=False,
+                                        extra_known=temp_cap_words) is None:
                 return          # checker unavailable — it already said so
-            spell_error_words.clear()
-            spell_error_words.update(errors_by_cue)
             spell_scanned[0] = True
-            refresh_tree(cues)      # paints the rows AND updates the status bar
+            # ⭐ refresh_tree now OWNS the scan — it re-runs it, fills
+            # spell_error_words / spell_name_fixes, paints the rows and updates
+            # the status bar. This function's whole job is to turn the mode on.
+            refresh_tree(cues)
             # NO RESULTS POPUP. Tony, 2026-08-07: "yes please remove that popup.
             # It's not needed." Same call he made on the ALL CAPS highlighter the
             # day before — this tool's whole job is to colour rows, and a modal
@@ -5375,8 +5429,12 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             # The "no errors found" popup went too: the status bar says
             # "0 misspelled" instead, so a clean file still gives feedback
             # without stealing focus.
-            if errors_by_cue:
-                first = min(errors_by_cue.keys())
+            # ⚠️ Jump using spell_error_indices, not the scan's return value:
+            # a cue whose ONLY fault is a wrong-case name is in the index set
+            # but not in errors_by_cue, and skipping past it would make the
+            # highlight and the jump disagree about what an error is.
+            if spell_error_indices:
+                first = min(spell_error_indices)
                 items = tree.get_children()
                 if first < len(items):
                     tree.see(items[first])
@@ -7627,7 +7685,21 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 parts.append(f'cap: {midcap_word}')
             if i in spell_error_indices:
                 words = spell_error_words.get(i) or []
-                parts.append(f'sp: {words[0]}' if words else 'sp')
+                # ⭐ A wrong-case name gets its OWN marker, and it names the
+                # correction rather than the fault: `name: Hirst`, not
+                # `sp: hirst`. Unlike a misspelling there is exactly one right
+                # answer and it is already in the name list, so the Note can
+                # just say it. Calling it `sp:` would be actively misleading —
+                # the word is spelled perfectly.
+                fixes = spell_name_fixes.get(i) or []
+                if words:
+                    parts.append(f'sp: {words[0]}')
+                if fixes:
+                    parts.append(f'name: {fixes[0][1]}')
+                if not words and not fixes:
+                    # The INTERACTIVE dialog marks rows without recording the
+                    # word — fall back to a bare marker rather than assuming.
+                    parts.append('sp')
             if caps_detail.get(i):
                 parts.append('CAPS')
             if cue_has_colon(cue):
@@ -7646,6 +7718,30 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             caps_scan = (scan_allcaps_words(cues, _known_caps())
                          if caps_highlight_on[0] else (set(), {}))
             caps_set, caps_detail = caps_scan
+            # ⭐⭐ AND THE SAME FOR SPELLING — added 2026-09-26. The line above
+            # has been doing this since ALL CAPS shipped; spelling scanned once
+            # from the menu and cached the answer BY CUE INDEX, so every
+            # operation that renumbers cues left the marks pointing at the wrong
+            # rows. Tony found it the obvious way: *"if I delete a line, the
+            # remaining spelling errors don't move with the new line numbers."*
+            #
+            # ⛔ Do NOT "fix" this by remapping indices at the delete site. That
+            # is the road this bug came down — there are ~16 places that
+            # renumber cues (delete, split, join, insert, undo, redo, Reset to
+            # Original, apply_filter, fix-caps, Replace All, inline-delete,
+            # smart sync) and all but a couple funnel through HERE. One rescan
+            # at the chokepoint cannot be forgotten by a site added next year.
+            #
+            # ⚠️ quiet=True is load-bearing: the scan offers to pip-install
+            # pyspellchecker when it is missing, which is fine from a menu and
+            # intolerable on every repaint.
+            # ⭐ Affordable only because checker_for() caches the SpellChecker —
+            # the constructor is ~145 ms, the scan itself ~15 ms. See the
+            # measurements above checker_for in spell_checker.py.
+            if spell_scanned[0]:
+                rescan_spell_state(app, editor, cues, spell_error_indices,
+                                   spell_error_words, spell_name_fixes,
+                                   temp_cap_words)
             for i, cue in enumerate(cues):
                 display = cue['text'].replace('\n', ' \\n ')
                 ts = f"{cue['start']} → {cue['end']}"
