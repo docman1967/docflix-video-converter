@@ -4723,6 +4723,30 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                 command=lambda: _show_spell_check())
         filter_menu.add_command(label="Highlight Spelling Errors",
                                 command=lambda: _highlight_spelling())
+
+        def _edit_dictionary():
+            """Open the Dictionary & Names editor.
+
+            ⭐ Both lists were write-only until 2026-09-26 — every "Add to
+            Dict" / "Add as Name" in the suite appends and nothing took one
+            back out. Tony: *"I have US set as a name on accident. It would be
+            nice to be able to delete these accidents on my own."*
+
+            ⚠️ on_change repaints the tree rather than re-running the scan by
+            hand: refresh_tree re-derives the spell state itself now, and
+            checker_for() is keyed on the word list, so removing a word here
+            clears (or restores) its highlights on the very next paint.
+            """
+            from modules.dictionary_editor import show_dictionary_editor
+            show_dictionary_editor(app, editor,
+                                   on_change=lambda: refresh_tree(cues))
+
+        # ⚠️ ONE ampersand. Tk menu labels are literal — mnemonics come from
+        # `underline=`, not from `&`. "Dictionary && Names..." would render the
+        # double ampersand verbatim; that escaping is a Qt habit.
+        filter_menu.add_command(label="Dictionary & Names...",
+                                command=_edit_dictionary)
+
         def _find_allcaps():
             """Toggle ALL CAPS highlighting: on if any are found, off if none."""
             if not cues:
