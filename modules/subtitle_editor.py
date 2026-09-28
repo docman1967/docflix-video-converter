@@ -1259,7 +1259,21 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 return
             if ext in ('.srt',):
                 try:
-                    with open(sub_path, 'r', encoding='utf-8', errors='replace') as f:
+                    # ⚠️⚠️ utf-8-sig, NOT utf-8. A UTF-8 BOM glues itself to the
+                    # first cue's index — the line becomes "\ufeff1" instead of
+                    # "1" — so block 1 fails to parse and the editor silently
+                    # opens at cue 2. Tony, 2026-09-28: "when I load it into
+                    # Docflix Subtitle Editor, that first line is missing
+                    # completely." Measured on his Stargate SG-1 S02E01:
+                    #       utf-8      -> 664 cues, starts at "It's over, Jack."
+                    #       utf-8-sig  -> 665 cues, starts at "Previously on..."
+                    # ⭐ VLC and Gnome Subtitles both strip it, which is why the
+                    # file looks fine everywhere else and the editor looks broken.
+                    # ⛔ The .vtt branch nine lines below ALREADY used utf-8-sig
+                    # and even carried the comment "utf-8-sig drops the BOM" —
+                    # the lesson was learned once and never carried across. Two
+                    # read paths, one fixed. utf-8-sig is safe on BOM-less files.
+                    with open(sub_path, 'r', encoding='utf-8-sig', errors='replace') as f:
                         srt_text = f.read()
                 except Exception as e:
                     messagebox.showerror("Error", f"Failed to read file:\n{e}",
