@@ -2776,13 +2776,47 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                             label=f'Ignore "{w}" in this episode',
                             command=lambda w=w: _ignore_word(w, idx))
                         menu.add_cascade(label=w, menu=sub)
+                    # ⚠️⚠️ DO NOT PUT grab_release() IN A `finally` HERE. That is
+                    # the documented Tkinter idiom and it is wrong for a menu
+                    # you want to dismiss by clicking away, which cost Tony
+                    # real time on 2026-09-29: *"getting rid of the edit popup
+                    # isn't easy. I should be able to just click outside of it
+                    # and have it go away but it doesn't always work that way."*
+                    #
+                    # tk_popup() POSTS THE MENU AND RETURNS IMMEDIATELY — it
+                    # does not block until the menu closes. So `finally` runs a
+                    # moment later and tears down the grab the menu needs in
+                    # order to see a click outside itself. Left ungrabbed, a
+                    # posted menu only closes if the window manager happens to
+                    # deliver the click somewhere useful, which is exactly why
+                    # it was intermittent rather than broken.
+                    #
+                    # ⚠️ The grab still MUST be released — the original note was
+                    # right, an abandoned grab locks the pointer out of the pane
+                    # on some window managers. So release it when the menu is
+                    # actually gone, not before.
+                    def _release_when_gone():
+                        try:
+                            if menu.winfo_exists() and menu.winfo_ismapped():
+                                cue_tree.after(150, _release_when_gone)
+                                return
+                        except tk.TclError:
+                            pass        # window died under us; fall through
+                        for _step in (menu.grab_release, menu.destroy):
+                            try:
+                                _step()
+                            except tk.TclError:
+                                pass
                     try:
                         menu.tk_popup(event.x_root, event.y_root)
-                    finally:
-                        # ⚠️ grab_release or the menu can leave the pointer
-                        # grabbed on some window managers and the pane stops
-                        # responding to clicks entirely.
-                        menu.grab_release()
+                    except tk.TclError:
+                        # Posting failed — release immediately or the grab leaks.
+                        try:
+                            menu.grab_release()
+                        except tk.TclError:
+                            pass
+                    else:
+                        cue_tree.after(150, _release_when_gone)
 
                 # ⚠️ Bound here beside the other cue_tree bindings, though
                 # _rebuild_cue_tree is defined further down — the name resolves
