@@ -2395,6 +2395,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         return False
                     cues[idx]['text'] = new_text
                     cues[idx]['edited'] = True
+                    # ⚠️ Editing after a Save makes the file stale again. Without
+                    # this the close guard would see saved=True and wave the
+                    # window shut on work done since — a warning that is right
+                    # once and then silently wrong for the rest of the session.
+                    # ⚠️ Resolves at call time; _ocr_kept is defined further
+                    # down in the same closure, like _rebuild_cue_tree.
+                    _ocr_kept['saved'] = False
                     # A cue that was empty and now has text is no longer empty,
                     # so its flag must be recomputed rather than left stale.
                     cues[idx]['empty'] = not new_text.strip()
@@ -3207,6 +3214,10 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     # by the number it used to have.
                     nxt = index_after_delete(len(cues), idxs)
                     gone = delete_cues(cues, idxs)
+                    # ⚠️ A deletion is unsaved work too. It leaves no 'edited'
+                    # marker anywhere — the cue is simply gone — so without this
+                    # the close guard could not see it at all.
+                    _ocr_kept['saved'] = False
                     _rebuild_cue_tree(select_cue=nxt)
                     undo_filters_btn.configure(state='normal')
                     status_label.configure(
@@ -3324,6 +3335,51 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     """Cancel OCR: set event, kill processes, keep window open."""
                     cancel_event.set()
                     _kill_ocr_processes()
+
+                # Has this OCR run been disposed of somewhere it survives?
+                # ⚠️ Saving and loading are the ONLY two ways out that keep the
+                # work: everything else ends at mon.destroy() and the cues live
+                # in a TEMP file, so the whole run goes with the window.
+                _ocr_kept = {'saved': False, 'loaded': False}
+
+                def _close_monitor():
+                    """Close the OCR window, warning first if work would be lost.
+
+                    ⭐ Tony, 2026-09-29: *"in the OCR preview, if you hit close,
+                    it just....closes. It should remind the user that the
+                    subtitles haven't been saved."*
+
+                    ⚠️⚠️ WHAT IS ACTUALLY AT RISK IS THE WHOLE OCR RUN, not just
+                    the hand edits. The cues live in tmp_srt, which Save COPIES
+                    out and Load hands to the editor. Close it without doing one
+                    of those and minutes of OCR go with it, silently.
+
+                    ⚠️ Gated on the SAME thing the save path acts on — the cue
+                    list and the two disposal flags — not on a separate "dirty"
+                    notion that could drift out of step with it.
+
+                    ⚠️ default='no': the safe answer must be the one you get by
+                    hitting Return on a dialog you did not expect.
+                    """
+                    cues = ocr_result[0] or []
+                    n = _real_cue_count(cues)
+                    if n and not (_ocr_kept['saved'] or _ocr_kept['loaded']):
+                        edited = sum(1 for c in cues if c.get('edited'))
+                        what = f"{n} cue{'s' if n != 1 else ''}"
+                        if edited:
+                            what += (f", {edited} of them edited by hand"
+                                     if edited != 1 else ", 1 edited by hand")
+                        if not messagebox.askyesno(
+                                "Close without saving?",
+                                f"These subtitles have not been saved.\n\n"
+                                f"{what} will be discarded, including the OCR "
+                                f"run itself.\n\n"
+                                f"Use \"Save\" to write an .srt, or \"Load into "
+                                f"Editor\" to keep working on them.\n\n"
+                                f"Close anyway?",
+                                parent=mon, default='no'):
+                            return
+                    mon.destroy()
 
                 def _do_retry():
                     """Re-run OCR with same file/stream (e.g. after adding rules)."""
@@ -3651,7 +3707,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                             cue_n = _real_cue_count(ocr_cues)
                             status_label.configure(
                                 text=f"OCR cancelled — {cue_n} cues completed")
-                            cancel_btn.configure(text="Close", command=mon.destroy)
+                            cancel_btn.configure(text="Close", command=_close_monitor)
                             ttk.Button(btn_f, text="Retry",
                                        command=_do_retry).pack(
                                            side='right', padx=(0, 8))
@@ -3678,6 +3734,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                         try:
                                             import shutil
                                             shutil.copy2(tmp_srt.name, save_path)
+                                            # ⚠️ The CANCELLED branch has its own
+                                            # save/load pair. Marking only the
+                                            # completed-run pair would nag him
+                                            # after he had already saved a
+                                            # partial run — the fifth call site
+                                            # the bitmap-leak note warned about.
+                                            _ocr_kept['saved'] = True
                                             status_label.configure(
                                                 text=f"Saved {cue_n} cues: "
                                                      f"{os.path.basename(save_path)}")
@@ -3687,6 +3750,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
 
                                 def _load_partial():
                                     _flush_cues_to_tmp()
+                                    _ocr_kept['loaded'] = True
                                     mon.destroy()
                                     with open(tmp_srt.name, 'r', encoding='utf-8',
                                               errors='replace') as f:
@@ -3763,7 +3827,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                 text=f"Done — {_real_cue_count(ocr_cues)} cues in "
                                      f"{elapsed_m}m {elapsed_s}s{flag_txt}")
                             progress_var.set(100)
-                            cancel_btn.configure(text="Close", command=mon.destroy)
+                            cancel_btn.configure(text="Close", command=_close_monitor)
                             # Editing happens inline in the cue list now, so
                             # the side box stays a read-only view of the
                             # selected cue beside its bitmap.
@@ -3780,6 +3844,14 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
 
                             def _load_into_editor():
                                 _flush_cues_to_tmp()
+                                # ⚠️ Set BEFORE destroy. This path calls
+                                # mon.destroy() directly rather than
+                                # _close_monitor(), so it cannot raise the
+                                # warning today — but the flag is what stops it
+                                # doing so if anyone ever routes it through the
+                                # guard, which is exactly the kind of quiet
+                                # regression the five-call-sites note warns of.
+                                _ocr_kept['loaded'] = True
                                 mon.destroy()
                                 with open(tmp_srt.name, 'r', encoding='utf-8',
                                           errors='replace') as f:
@@ -3834,6 +3906,12 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                     try:
                                         import shutil
                                         shutil.copy2(tmp_srt.name, save_path)
+                                        # ⚠️ INSIDE the try and AFTER the copy —
+                                        # a failed write must still count as
+                                        # unsaved, or the close guard would wave
+                                        # through the one case where the work
+                                        # really is about to be lost.
+                                        _ocr_kept['saved'] = True
                                         status_label.configure(
                                             text=f"Saved: {os.path.basename(save_path)}")
                                         app.add_log(
@@ -3852,7 +3930,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                            side='right', padx=(0, 8))
                         else:
                             status_label.configure(text="OCR produced no output")
-                            cancel_btn.configure(text="Close", command=mon.destroy)
+                            cancel_btn.configure(text="Close", command=_close_monitor)
                             os.unlink(tmp_srt.name)
 
                     editor.after(100, _finish)
