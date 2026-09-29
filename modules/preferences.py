@@ -137,6 +137,25 @@ def load_preferences(app):
                 app.add_log(f"Names database loaded ({count:,} names)",
                             'INFO')
 
+        # ⚠️⚠️ REPLAY the hand-taught names into the names DB, every launch.
+        # custom_cap_words persists in prefs; the names DB is rebuilt in memory
+        # from the bulk file and knows nothing about it. Without this, "Lorne is
+        # a name" holds until the app is closed and then silently un-teaches
+        # itself — the worst kind of fix, because it appears to work.
+        # ⚠️ AFTER the load above: load_names_db() rebinds the set, so seeding
+        # first would be discarded. (It reapplies _user_names as well, so the
+        # order is belt-and-braces rather than load-bearing — but the next
+        # person to reorder these lines should not have to know that.)
+        # ⚠️ Unconditional, NOT gated on use_names_db: with no bulk DB the
+        # suspect check is noisier, and Tony's own names are exactly the part
+        # worth keeping.
+        try:
+            from .subtitle_filters import add_user_name
+            for _n in (getattr(app, 'custom_cap_words', None) or []):
+                add_user_name(_n)
+        except Exception:
+            pass        # never let a name replay stop preferences loading
+
         app.add_log("Preferences loaded.", 'INFO')
     except Exception as e:
         app.add_log(f"Failed to load preferences: {e}", 'WARNING')

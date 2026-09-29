@@ -19,6 +19,9 @@ from pathlib import Path
 
 _names_db = set()           # loaded names (capitalized form, e.g. "Johnson")
 _names_db_loaded = False
+# Names TONY taught by hand, kept separately so they survive a reload of the
+# bulk DB. See add_user_name().
+_user_names = set()
 
 NAMES_DB_DIR = Path.home() / '.local' / 'share' / 'docflix' / 'names'
 NAMES_DB_FILES = ('FirstNames.txt', 'Surnames.txt')
@@ -280,14 +283,67 @@ def load_names_db():
                             and name.isalpha()):
                         names.add(name.capitalize())
     _names_db = names
+    # ⚠️ REAPPLIED after every load. A name Tony taught by hand must outlive a
+    # reload of the bulk DB — otherwise "Lorne" is a name until the next time
+    # the 1.1M list is rebuilt, and then quietly starts being flagged again.
+    _names_db |= _user_names
     _names_db_loaded = bool(names)
     return len(names)
 
 
+def add_user_name(word):
+    """Teach the names DB one name, permanently for this process. True if new.
+
+    ⭐ WHY THIS EXISTS (Tony, 2026-09-29): *"Lorne is a name and I should be
+    able to add it to the names list."* The OCR suspect check skips any word
+    that `_is_name()` recognises, and `_is_name` reads THIS set — not
+    `custom_cap_words`. So teaching a name anywhere else leaves
+    `check_confusions` still proposing `Lorne -> Lome?` with no way to stop it.
+
+    ⚠️ Stored in BOTH the bare and capitalised forms because `_is_name` tries
+    `bare.capitalize() in names or bare in names` — matching that lookup here
+    is what stops this becoming another detector/doer split.
+
+    ⚠️ Apostrophes are stripped to match `_is_name`, which does the same before
+    looking up: teaching "Lorne's" must teach "Lorne".
+
+    ⚠️ SUPPRESSION IS GLOBAL — a name taught here is never OCR-flagged again,
+    in any episode. That is the intent, and Tony agreed to it knowingly on
+    2026-09-29. It is also the knife the caps-filter work was cut on: the names
+    DB silences checks as well as informing them.
+    """
+    bare = (word or '').strip("'’").strip()
+    if not bare:
+        return False
+    # ⚠️ Teach the ROOT of a possessive, not the possessive. strip() only takes
+    # apostrophes off the ENDS, so "Sheppard's" survives it intact and then
+    # fails .isalpha() — the name would be silently rejected and the flag would
+    # never clear. Caught 2026-09-29 by a test with an EMPTY names DB; the same
+    # assertion passed by accident against the real 1.1M list, which already
+    # contains "Sheppard".
+    root = bare.replace('’', "'").rpartition("'")[0] or bare
+    if not root.isalpha():
+        return False
+    before = len(_user_names)
+    for form in (root, root.capitalize()):
+        _user_names.add(form)
+        _names_db.add(form)
+    return len(_user_names) != before
+
+
+def get_user_names():
+    """The hand-taught names, for callers that need to persist them."""
+    return set(_user_names)
+
+
 def unload_names_db():
-    """Clear the names database from memory."""
+    """Clear the names database from memory.
+
+    ⚠️ Does NOT clear _user_names — those are Tony's, not the bulk DB's, and
+    unloading the big list must not silently un-teach them.
+    """
     global _names_db, _names_db_loaded
-    _names_db = set()
+    _names_db = set(_user_names)
     _names_db_loaded = False
 
 

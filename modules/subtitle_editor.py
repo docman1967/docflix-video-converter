@@ -541,6 +541,17 @@ def add_user_word(app, word, as_name=False):
     function only records that a word is legitimate.
     """
     changed = False
+    if as_name:
+        # ⚠️⚠️ THE NAMES DB IS A SEPARATE LOOKUP and the OCR suspect check reads
+        # ONLY it — not custom_cap_words. Without this line, "Add as a name"
+        # silences the spell flag and leaves check_confusions still proposing
+        # "Lorne -> Lome?" forever, which is precisely the dead end Tony hit on
+        # 2026-09-29. Teaching a name must teach every checker that asks.
+        try:
+            from .subtitle_filters import add_user_name
+            add_user_name(word)
+        except Exception:
+            pass        # advisory; never lose the dictionary add itself
     if as_name and word not in app.custom_cap_words:
         app.custom_cap_words.append(word)
         changed = True
@@ -832,7 +843,59 @@ def drop_empty_cues(cues, blank_only=True):
     return before - len(cues)
 
 
-def flag_ocr_cue(cue):
+def ocr_suspect_words(text, ocr_ignore=()):
+    """[(word, suggestion), ...] the OCR suspect checks would flag in *text*.
+
+    ⚠️⚠️ THE ONE PLACE THIS QUESTION IS ASKED. flag_ocr_cue() takes the first
+    hit for the Note column; the review pane's right-click menu takes the whole
+    list to build its "this is a name" actions. Before this existed the menu had
+    no way to know which word the note was about, and the only alternative was
+    parsing "Lorne -> Lome?" back apart — i.e. a second implementation that can
+    disagree with the first about what is suspect. ⛔ Do not reimplement it.
+
+    Order is PRIORITY order and is load-bearing: flag_ocr_cue reports hits[0],
+    so the one-substitution check must stay first. It is the highest-precision
+    of the three (measured ~1 in 209 cues, nearly all genuine).
+
+    *ocr_ignore* is the per-episode dismiss list — words Tony has said are fine
+    for this file without teaching them globally. Compared case-insensitively,
+    matching how review_ignore works for the spell checker.
+    """
+    from .ocr_suspect import (check_confusions, splits_into_words, words_of,
+                              wrongly_lowercased, lowercase_tokens)
+    from .subtitle_filters import get_names_db
+    skip = {w.lower() for w in (ocr_ignore or ())}
+    out = []
+    # 1. One OCR substitution from a real word (Iike -> like).
+    # ⚠️ The names DB is what keeps this precise — without it the check
+    # "corrects" real surnames into other words via rn->m (Arnie -> Amie).
+    for w, fix in check_confusions(text, get_names_db()):
+        if w.lower() not in skip:
+            out.append((w, fix))
+    # 2. Two words run together where the bitmap lost the space.
+    for w in words_of(text):
+        if w.lower() in skip:
+            continue
+        run = splits_into_words(w)
+        if run:
+            out.append((w, run))
+    # 3. ⭐ A lowercased acronym. Tony, 2026-09-13: "I'd rather have them
+    # flagged and be right than not flagged and be wrong." Fix ALL CAPS
+    # lowercases what it does not recognise, and on a shouted line an
+    # acronym is exactly that: "NASA and NORAD." -> "NASA and norad."
+    # ⚠️ An exact wordlist lookup (416 entries), not a heuristic — 0 false
+    # positives against ordinary words, including the near-misses that
+    # broke the first cut (english, monday, paris, china, march).
+    for w in lowercase_tokens(text):
+        if w.lower() in skip:
+            continue
+        caps = wrongly_lowercased(w)
+        if caps:
+            out.append((w, caps))
+    return out
+
+
+def flag_ocr_cue(cue, ocr_ignore=()):
     """Advisory review flag for one OCR cue. Returns (tag, reason) or (None,'').
 
     ⚠️⚠️ PROPOSES, NEVER FILTERS. Every cue stays in the list; a flag only
@@ -889,29 +952,10 @@ def flag_ocr_cue(cue):
     # show's own vocabulary (Aquaman, Hotchner, bollocks, nowt). Do not
     # reintroduce it; see docs/OCR_REVIEW_PANE.md for the numbers.
     try:
-        from .ocr_suspect import check_confusions, splits_into_words, words_of
-        from .subtitle_filters import get_names_db
-        names = get_names_db()
-        hits = check_confusions(text, names)
+        hits = ocr_suspect_words(text, ocr_ignore)
         if hits:
             w, fix = hits[0]
             return 'flag_ocr', f'{w} -> {fix}?'
-        for w in words_of(text):
-            run = splits_into_words(w)
-            if run:
-                return 'flag_ocr', f'{w} -> {run}?'
-        # ⭐ A lowercased acronym. Tony, 2026-09-13: "I'd rather have them
-        # flagged and be right than not flagged and be wrong." Fix ALL CAPS
-        # lowercases what it does not recognise, and on a shouted line an
-        # acronym is exactly that: "NASA and NORAD." -> "NASA and norad."
-        # ⚠️ An exact wordlist lookup (416 entries), not a heuristic — 0 false
-        # positives against ordinary words, including the near-misses that
-        # broke the first cut (english, monday, paris, china, march).
-        from .ocr_suspect import wrongly_lowercased, lowercase_tokens
-        for w in lowercase_tokens(text):
-            caps = wrongly_lowercased(w)
-            if caps:
-                return 'flag_ocr', f'{w} -> {caps}?'
     except Exception:
         pass        # a flag is advisory; never let it break the review pane
 
@@ -1871,6 +1915,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # ignoring the word "shield" also silenced "SHIELD", which are
                 # two different judgements about two different things.
                 review_caps_ignore = set()
+                # ⚠️ A THIRD ignore list, for the OCR suspect flags. It cannot
+                # share review_ignore: that one is consulted by the SPELL scan,
+                # and an OCR-suspect word is very often a perfectly-spelled word
+                # ("Lorne") that the spell checker never objected to. Silencing
+                # it in the spell list would therefore do nothing at all.
+                # Case-insensitive, matching ocr_suspect_words().
+                review_ocr_ignore = set()
 
                 # ── Monitor window ──
                 mon = tk.Toplevel(editor)
@@ -2572,6 +2623,36 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     review_caps_ignore.add(word)
                     _rebuild_cue_tree(select_cue=cue_idx)
 
+                def _teach_ocr_name(word, cue_idx):
+                    """"Lorne is a name" — teach it and stop the OCR flag.
+
+                    ⭐ Tony, 2026-09-29: *"Lorne is a name and I should be able
+                    to add it to the names list."* The row showed
+                    "Lorne -> Lome?" and the right-click menu said "No unknown
+                    words in this cue", because `Lorne` is neither a
+                    misspelling nor ALL CAPS — so both existing menu groups were
+                    empty and there was nothing to click. Third detector, third
+                    door; the first two were built on 09-19 and 09-20.
+
+                    ⚠️ Goes through add_user_word(as_name=True), the SAME door
+                    the Spell Check dialog and the spelling menu use — which now
+                    also reaches the names DB, the only list check_confusions
+                    consults. One rule, one list.
+
+                    ⚠️ GLOBAL: a name taught here is never OCR-flagged again in
+                    any episode. Tony agreed to that knowingly. Use "Ignore in
+                    this episode" for a one-off he does not want to commit to.
+                    """
+                    try:
+                        add_user_word(app, word, as_name=True)
+                    except Exception:
+                        pass        # advisory feature; never lose the review
+                    _rebuild_cue_tree(select_cue=cue_idx)
+
+                def _ignore_ocr(word, cue_idx):
+                    review_ocr_ignore.add(word.lower())
+                    _rebuild_cue_tree(select_cue=cue_idx)
+
                 def _popup_dict_menu(event):
                     """Right-click a row: teach the dictionary its unknown words.
 
@@ -2605,6 +2686,25 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     # rebuild, and offering to add it twice looks broken.
                     caps_words = sorted(w for w in (review_caps[1].get(idx) or ())
                                         if w not in _known_caps())
+                    # ⭐ THE THIRD DETECTOR. flag_ocr rows are computed live by
+                    # _flag_cue and have no holder to read, so ask the shared
+                    # helper the same question the Note column asked. Tony,
+                    # 2026-09-29: the row said "Lorne -> Lome?" and the menu
+                    # said "No unknown words in this cue" — true, useless, and a
+                    # dead end with no visible way out.
+                    # ⚠️ Same helper, not a reimplementation: parsing the word
+                    # back out of the note string would be a second opinion that
+                    # can disagree with the first.
+                    try:
+                        _cue = (ocr_result[0] or [])[idx]
+                        ocr_words = [w for w, _fix in ocr_suspect_words(
+                            _cue.get('text') or '', review_ocr_ignore)]
+                    except Exception:
+                        ocr_words = []
+                    # Don't offer a word twice when two detectors both caught it.
+                    _seen = {w.lower() for w in words} | {w.lower() for w in caps_words}
+                    ocr_words = [w for w in dict.fromkeys(ocr_words)
+                                 if w.lower() not in _seen]
                     menu = tk.Menu(cue_tree, tearoff=0)
                     for w in caps_words:
                         sub = tk.Menu(menu, tearoff=0)
@@ -2620,9 +2720,25 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                             label=f'Ignore "{w}" in this episode',
                             command=lambda w=w: _ignore_caps(w, idx))
                         menu.add_cascade(label=f'{w}   (ALL CAPS)', menu=sub)
+                    for w in ocr_words:
+                        sub = tk.Menu(menu, tearoff=0)
+                        # ⚠️ "is a name", not "is correct" — this is the wording
+                        # Tony used, and it is the accurate one: the action adds
+                        # the word to the NAMES DB, which is what
+                        # check_confusions consults. Calling it "correct" would
+                        # imply a dictionary add, which is a different list.
+                        sub.add_command(
+                            label=f'"{w}" is a name — add it to the names list',
+                            command=lambda w=w: _teach_ocr_name(w, idx))
+                        sub.add_command(
+                            label=f'Ignore "{w}" in this episode',
+                            command=lambda w=w: _ignore_ocr(w, idx))
+                        menu.add_cascade(label=f'{w}   (OCR suspect)', menu=sub)
+                    if ocr_words and (caps_words or words):
+                        menu.add_separator()
                     if caps_words and words:
                         menu.add_separator()
-                    if not words and not caps_words:
+                    if not words and not caps_words and not ocr_words:
                         # ⚠️ Shown, not hidden. A menu that silently refuses to
                         # appear reads as a broken right-click; this says why.
                         # Rows flagged only for ALL-CAPS or a mid-word capital
@@ -2665,7 +2781,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     if not cues or idx >= len(cues):
                         return
                     cue = cues[idx]
-                    tag, reason = _flag_cue(cue)
+                    tag, reason = _flag_cue(cue, review_ocr_ignore)
                     disp = (cue.get('text') or '').replace('\n', ' ⏎ ')
                     # ⚠️ A TEXT marker, not just colour. When a cue is both
                     # musical and flagged the flag wins the background, so
@@ -2846,7 +2962,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     flagged = 0
                     shown = 0
                     for i, cue in enumerate(cues):
-                        if _flag_cue(cue)[0]:
+                        if _flag_cue(cue, review_ocr_ignore)[0]:
                             flagged += 1
                         if not _cue_passes_filter(cue, mode):
                             continue
