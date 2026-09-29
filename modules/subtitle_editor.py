@@ -2378,6 +2378,43 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     if save and text is not None and item is not None:
                         _write_cue_text(_row_cue.get(item), item, text)
 
+                def _click_outside(event):
+                    """Commit the inline editor when the click lands anywhere else.
+
+                    ⚠️ <FocusOut> alone does NOT dismiss this editor, and that is
+                    the whole bug. Tk only generates <FocusOut> when the click
+                    actually MOVES the focus — and most of this pane is
+                    takefocus=0 (labels, frames, the dead space around the tree).
+                    Click one of those and focus stays in the Text, no <FocusOut>
+                    fires, and the editor just sits there. That is why it was
+                    intermittent rather than broken: clicking another CUE worked,
+                    because _begin_inline commits first (see below); clicking
+                    nothing did nothing at all.
+                    Tony, 2026-09-29: "I should be able to just click outside of
+                    it and have it go away but it doesn't always work that way."
+
+                    ⚠️ Deliberately does NOT return 'break' — this is an extra
+                    (add='+') handler and must let the click reach its real
+                    target, or selecting a different cue would stop working.
+
+                    ⚠️ No unbind on close; the handler no-ops when no editor is
+                    open. Tkinter's unbind(seq, funcid) drops EVERY binding for
+                    that sequence on the widget, not just the one named, so
+                    removing this one would silently take other handlers with it.
+                    """
+                    w = _inline['w']
+                    if w is None:
+                        return          # nothing open — stay out of the way
+                    # A click inside the editor (or any child of it) is not
+                    # "outside". Walk up the master chain rather than comparing
+                    # one widget, so a scrollbar or child never dismisses it.
+                    probe = getattr(event, 'widget', None)
+                    while probe is not None:
+                        if probe is w:
+                            return
+                        probe = getattr(probe, 'master', None)
+                    _end_inline(True)
+
                 def _begin_inline(event):
                     # Any editor already open commits first — that is what
                     # makes "click another cue" work as the commit gesture.
@@ -2464,6 +2501,17 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     _inline['item'] = item
 
                 cue_tree.bind('<Double-1>', _begin_inline)
+                # Click-anywhere-else commits the open inline editor. Bound on the
+                # TOPLEVEL because the point is to catch clicks the tree never sees
+                # — the takefocus=0 widgets that leave focus (and therefore the
+                # editor) stuck. See _click_outside for why <FocusOut> is not
+                # enough on its own.
+                # ⚠️ add='+' and no 'break': this must not displace or swallow any
+                # existing <Button-1> handling on the window.
+                # ⚠️ Safe alongside the <Delete> caution below — that warning is
+                # about window-level KEY bindings stealing keystrokes mid-edit. A
+                # Button-1 handler that no-ops unless an editor is open cannot.
+                cue_tree.winfo_toplevel().bind('<Button-1>', _click_outside, add='+')
                 # ⚠️ Bound on the TREE, not the window: the inline editor is a
                 # Text widget living inside the tree, and a window-level
                 # binding would delete the selected CUE while he is pressing
