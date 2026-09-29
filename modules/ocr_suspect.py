@@ -421,6 +421,60 @@ def check_confusions(text, names=None):
     return hits
 
 
+# ── 1b. A letter I/l standing in for the digit 1 inside a number ────────────
+# ⭐ Tony, 2026-09-29: *"OCR tends to make 1's I's so a number with one in it
+# could have I instead. It also happens the other way around but the spell
+# checker catches it."* His example, from a live review:
+#
+#     Your grapple's only got 1,000 feet of cable.        <- correct
+#     ...should be able to dive at least I,000,           <- the same number
+#
+# ⚠️⚠️ INVISIBLE TO EVERY OTHER CHECK, which is why this is a separate rule and
+# not a widened band. words_of() keeps only ALPHABETIC tokens of 4+ characters,
+# so a number never reaches check_confusions at all; and "I,000" is not a word,
+# so the spell checker has no opinion either. Tony's "the other way around"
+# (a 1 inside a word, "1ike") IS caught — that token is alphabetic-ish and the
+# substitution check owns it. Only the numeric direction was unowned.
+#
+# ⚠️⚠️ HYPHENS ARE DELIBERATELY EXCLUDED FROM THE TOKEN, and this is the whole
+# reason the check is usable. Measured 2026-09-29 over 216,455 cues from 400
+# library .srt files: WITH the hyphen it fired 6 times and every single hit was
+# a US interstate — I-84, I-90 — i.e. 0% precision. Dropping '-' makes "I-84"
+# tokenise as "I" + "84", neither of which qualifies. Same run with the hyphen
+# removed: ZERO false positives in 216,455 cues.
+#
+# ⛔ Do NOT add 'O'/'o' for the digit 0 without repeating that measurement.
+# "1,0O0" is a real OCR failure, but 'O' pulls in far more ordinary text than
+# 'I' does, and an unmeasured widening is how the music-note band ate the
+# letter "u" (project_music-note-ocr).
+_DIGIT_CONFUSION_RE = re.compile(r'[0-9Il][0-9Il.,:/]*')
+
+
+def check_digit_letter_confusion(text):
+    """[(token, suggestion), ...] for numbers holding an I or l instead of 1.
+
+    Fires only on a token that is ALREADY numeric — at least one real digit —
+    and contains at least one I or l. That pairing is what keeps it precise:
+    "I" and "I'll" carry no digit, "1,000" carries no letter, and "I-84" is
+    split by the excluded hyphen before it can be judged.
+
+    ⚠️ Lowercase 'i' is NOT a confusion character. It has a dot and OCR does
+    not produce it for "1"; including it would flag "1080i", which is a real
+    word in a video library.
+    """
+    hits = []
+    for m in _DIGIT_CONFUSION_RE.finditer(text or ''):
+        tok = m.group(0).strip('.,:/')
+        if len(tok) < 2:
+            continue
+        if not any(c.isdigit() for c in tok):
+            continue            # "Il", "III" — not a number, not ours
+        if not any(c in 'Il' for c in tok):
+            continue            # "1,000" — already correct
+        hits.append((tok, tok.replace('I', '1').replace('l', '1')))
+    return hits
+
+
 # ── 2. Non-dictionary words (broader, noisier) ──────────────────────────────
 
 def check_nondictionary(text, names=None):

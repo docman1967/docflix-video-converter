@@ -862,7 +862,8 @@ def ocr_suspect_words(text, ocr_ignore=()):
     matching how review_ignore works for the spell checker.
     """
     from .ocr_suspect import (check_confusions, splits_into_words, words_of,
-                              wrongly_lowercased, lowercase_tokens)
+                              wrongly_lowercased, lowercase_tokens,
+                              check_digit_letter_confusion)
     from .subtitle_filters import get_names_db
     skip = {w.lower() for w in (ocr_ignore or ())}
     out = []
@@ -870,6 +871,14 @@ def ocr_suspect_words(text, ocr_ignore=()):
     # ⚠️ The names DB is what keeps this precise — without it the check
     # "corrects" real surnames into other words via rn->m (Arnie -> Amie).
     for w, fix in check_confusions(text, get_names_db()):
+        if w.lower() not in skip:
+            out.append((w, fix))
+    # 1b. A letter standing in for the digit 1 inside a number (I,000 -> 1,000).
+    # ⚠️ Sits HIGH in the order on purpose: measured at ZERO false positives
+    # over 216,455 library cues, which makes it the most trustworthy check
+    # here, and flag_ocr_cue() reports hits[0]. ⚠️ It must stay BELOW
+    # check_confusions, whose hit is the more informative one when both fire.
+    for w, fix in check_digit_letter_confusion(text):
         if w.lower() not in skip:
             out.append((w, fix))
     # 2. Two words run together where the bitmap lost the space.
@@ -2722,14 +2731,21 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         menu.add_cascade(label=f'{w}   (ALL CAPS)', menu=sub)
                     for w in ocr_words:
                         sub = tk.Menu(menu, tearoff=0)
-                        # ⚠️ "is a name", not "is correct" — this is the wording
-                        # Tony used, and it is the accurate one: the action adds
-                        # the word to the NAMES DB, which is what
-                        # check_confusions consults. Calling it "correct" would
-                        # imply a dictionary add, which is a different list.
-                        sub.add_command(
-                            label=f'"{w}" is a name — add it to the names list',
-                            command=lambda w=w: _teach_ocr_name(w, idx))
+                        # ⚠️ "Add to the names list" is offered ONLY for a word
+                        # that could BE a name. The digit check flags tokens
+                        # like "I,000", and add_user_name() correctly refuses a
+                        # non-alphabetic token — so offering it there would be a
+                        # menu item that silently does nothing, which is worse
+                        # than no menu item at all.
+                        # ⚠️ "is a name", not "is correct": the action writes to
+                        # the NAMES DB, which is the list check_confusions
+                        # consults. "Correct" would imply a dictionary add, a
+                        # different list with different effects.
+                        if w.replace("'", '').replace('’', '').isalpha():
+                            sub.add_command(
+                                label=f'"{w}" is a name — '
+                                      f'add it to the names list',
+                                command=lambda w=w: _teach_ocr_name(w, idx))
                         sub.add_command(
                             label=f'Ignore "{w}" in this episode',
                             command=lambda w=w: _ignore_ocr(w, idx))
