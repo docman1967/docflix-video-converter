@@ -1616,7 +1616,20 @@ def filter_reduce_lines(cues, max_lines=2, max_chars=42):
       3. Before conjunctions (and, but, or, so, because, when, ...)
       4. Before prepositions (in, on, at, to, for, with, from, ...)
       5. Nearest midpoint space (last resort)
+
+    ⚠️ Tiers 2-4 will NOT produce a line shorter than MIN_SHORT_LINE; if none
+    of their candidates clear it, the midpoint split wins instead, which is
+    balanced by construction. Tier 1 is exempt — see _best_in_tier.
     """
+    # ⚠️ ~2-3 words. Tuned against the failures Tony reported and the library
+    # cases below, NOT against a large corpus — raw multi-line OCR output never
+    # reaches disk, it only exists inside the review pane, so there is nothing
+    # to measure at scale. Observed: 'Yeah,' (5), 'So,' (3), 'Well,' (5) are all
+    # wrong; 'He walked in' (12) is a complete clause and acceptable.
+    # ⛔ Do not raise this without a real before/after on OCR output — a bigger
+    # floor starts rejecting legitimate short clauses, and the only corpus that
+    # can show that is Tony's screen.
+    MIN_SHORT_LINE = 12
     if not cues:
         return cues
 
@@ -1637,12 +1650,29 @@ def filter_reduce_lines(cues, max_lines=2, max_chars=42):
         'beyond', 'under', 'over', 'above', 'below', 'across',
     }
 
-    def _best_in_tier(positions, flat):
+    def _best_in_tier(positions, flat, min_short=0):
         """From a list of split positions, return the one that produces
-        the most balanced two lines, or None if no valid split exists."""
+        the most balanced two lines, or None if no valid split exists.
+
+        *min_short* rejects any split leaving a line shorter than that.
+
+        ⚠️⚠️ WHY min_short EXISTS (Tony, 2026-09-30): *"The 'Reduce to two
+        lines' filter is cutting at the first comma and in many cases, that's
+        after the first word of the sentence."* This function balances WITHIN a
+        tier, but the tiers are absolute — so a single comma after word one was
+        the ONLY tier-2 candidate and won by default:
+
+            'Yeah,'                                                      (5)
+            'we know the Jumper should be able to dive at least 1,000,'  (57)
+
+        ⚠️ It is NOT applied to tier 1. A sentence boundary is semantically
+        load-bearing and deserves its own line even when short — 'Holy shit.'
+        (10) followed by a 51-char sentence is correct, and forcing balance
+        there would break the second sentence mid-phrase. A comma after "Yeah"
+        carries no such meaning.
+        """
         if not positions:
             return None
-        mid = len(flat) / 2
         best_pos = None
         best_diff = len(flat)
         for pos in positions:
@@ -1651,6 +1681,8 @@ def filter_reduce_lines(cues, max_lines=2, max_chars=42):
             # Skip splits that leave either line empty
             if not line1 or not line2:
                 continue
+            if min_short and min(len(line1), len(line2)) < min_short:
+                continue        # orphan — let a later tier (or the midpoint) try
             diff = abs(len(line1) - len(line2))
             # Prefer the split closest to midpoint for balance
             if diff < best_diff:
@@ -1689,6 +1721,7 @@ def filter_reduce_lines(cues, max_lines=2, max_chars=42):
             pos = m.end()
             if 0 < pos < len(flat):
                 tier1.append(pos)
+        # ⚠️ NO floor here — a sentence boundary earns its own line.
         best = _best_in_tier(tier1, flat)
         if best is not None:
             return _split_at(flat, best)
@@ -1699,7 +1732,7 @@ def filter_reduce_lines(cues, max_lines=2, max_chars=42):
             pos = m.end()
             if 0 < pos < len(flat):
                 tier2.append(pos)
-        best = _best_in_tier(tier2, flat)
+        best = _best_in_tier(tier2, flat, MIN_SHORT_LINE)
         if best is not None:
             return _split_at(flat, best)
 
@@ -1711,7 +1744,7 @@ def filter_reduce_lines(cues, max_lines=2, max_chars=42):
                 pos = m.start() + 1  # split at the space before
                 if 0 < pos < len(flat):
                     tier3.append(pos)
-        best = _best_in_tier(tier3, flat)
+        best = _best_in_tier(tier3, flat, MIN_SHORT_LINE)
         if best is not None:
             return _split_at(flat, best)
 
@@ -1723,7 +1756,7 @@ def filter_reduce_lines(cues, max_lines=2, max_chars=42):
                 pos = m.start() + 1
                 if 0 < pos < len(flat):
                     tier4.append(pos)
-        best = _best_in_tier(tier4, flat)
+        best = _best_in_tier(tier4, flat, MIN_SHORT_LINE)
         if best is not None:
             return _split_at(flat, best)
 
