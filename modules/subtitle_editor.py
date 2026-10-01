@@ -7224,36 +7224,84 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         replace_var = tk.StringVar()
         use_regex = tk.BooleanVar(value=False)
         wrap_around = tk.BooleanVar(value=False)
+        # ⭐ Tony, 2026-10-01: *"we need to have a checkbox for case sensitive
+        # finds."* Every match in this toolbar was hardcoded case-INSENSITIVE —
+        # re.IGNORECASE in the regex paths, .lower() in the literal ones.
+        case_sensitive = tk.BooleanVar(value=False)
+
+        def _find_flags():
+            return 0 if case_sensitive.get() else re.IGNORECASE
+
+        def _cue_matches(text, term):
+            """Does *text* contain *term* under the current options?
+
+            ⚠️⚠️ THE ONE PLACE THIS QUESTION IS ASKED. Find, Replace and Replace
+            All each used to decide it inline — six copies of the same two
+            branches — which is how "case sensitive" could have ended up honoured
+            by one button and ignored by another. Same lesson as add_user_word.
+            """
+            try:
+                if use_regex.get():
+                    return re.search(term, text, _find_flags()) is not None
+                if case_sensitive.get():
+                    return term in text
+                return term.lower() in text.lower()
+            except re.error:
+                return False
 
         def do_find():
+            """Select the NEXT match after the current row, not always the first.
+
+            ⚠️⚠️ WAS: it recomputed every match and then always jumped to
+            `matches[0]`. Tony, 2026-10-01: *"if you search for a word and the
+            first one you find doesn't need to be changed, hitting find again
+            won't continue the search."* ⭐ His diagnosis was the tell —
+            *"if you click replace, it will move to the next instance"* —
+            because do_replace_one starts from `tree.selection()` and Find did
+            not. Find now uses the same anchor.
+            """
             term = find_var.get()
             if not term:
                 refresh_tree(cues)
                 return
-            matches = []
-            for i, cue in enumerate(cues):
-                try:
-                    if use_regex.get():
-                        if re.search(term, cue['text'], re.IGNORECASE):
-                            matches.append(i)
-                    else:
-                        if term.lower() in cue['text'].lower():
-                            matches.append(i)
-                except re.error:
-                    pass
+            # ⚠️ Read the selection BEFORE refresh_tree — repainting the tree
+            # drops it, and then "next after here" has nothing to work from.
+            sel = tree.selection()
+            try:
+                cur = int(sel[0]) if sel else -1
+            except (TypeError, ValueError):
+                cur = -1
+            matches = [i for i, cue in enumerate(cues)
+                       if _cue_matches(cue['text'], term)]
             refresh_tree(cues, search_indices=matches)
-            if matches:
-                first_idx = matches[0]
-                first = str(first_idx)
-                def _scroll_to_match():
-                    tree.selection_set(first)
-                    # Scroll so the match is near the middle of the view, not at the edge
-                    # Aim a few rows past the match so it's comfortably visible
-                    ahead = min(first_idx + 5, len(cues) - 1)
-                    tree.see(str(ahead))
-                    tree.after(50, lambda: (tree.see(first), tree.selection_set(first)))
-                tree.after_idle(_scroll_to_match)
-            app.add_log(f"Search: {len(matches)} matches for '{term}'", 'INFO')
+            if not matches:
+                app.add_log(f"Search: no matches for '{term}'", 'INFO')
+                return
+            later = [i for i in matches if i > cur]
+            if later:
+                target = later[0]
+            elif wrap_around.get():
+                target = matches[0]
+                app.add_log(f"Wrapped to the first of {len(matches)} matches",
+                            'INFO')
+            else:
+                # Already on the last one. Stay put and say so rather than
+                # silently bouncing back to the top.
+                target = matches[-1]
+                app.add_log(f"Last of {len(matches)} matches for '{term}' "
+                            f"— tick Wrap to start again", 'INFO')
+            pos = matches.index(target) + 1
+            first = str(target)
+            def _scroll_to_match():
+                tree.selection_set(first)
+                # Scroll so the match is near the middle of the view, not at the edge
+                # Aim a few rows past the match so it's comfortably visible
+                ahead = min(target + 5, len(cues) - 1)
+                tree.see(str(ahead))
+                tree.after(50, lambda: (tree.see(first), tree.selection_set(first)))
+            tree.after_idle(_scroll_to_match)
+            app.add_log(f"Search: match {pos} of {len(matches)} for '{term}'",
+                        'INFO')
 
         def do_replace_one():
             """Replace the first occurrence of search term from current selection."""
@@ -7273,10 +7321,14 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 try:
                     if use_regex.get():
                         new_text = re.sub(term, lambda m: repl, old_text, count=1,
-                                          flags=re.IGNORECASE)
+                                          flags=_find_flags())
                     else:
-                        # Case-insensitive literal find + replace (preserves rest of line)
-                        pos = old_text.lower().find(term.lower())
+                        # Literal find + replace, preserving the rest of the line.
+                        # ⚠️ Honours the Case checkbox like everything else here.
+                        if case_sensitive.get():
+                            pos = old_text.find(term)
+                        else:
+                            pos = old_text.lower().find(term.lower())
                         if pos >= 0:
                             new_text = old_text[:pos] + repl + old_text[pos + len(term):]
                         else:
@@ -7296,16 +7348,10 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         next_order = list(range(i + 1, len(cues)))
                     for j in next_order:
                         try:
-                            if use_regex.get():
-                                if re.search(term, cues[j]['text'], re.IGNORECASE):
-                                    tree.see(str(j))
-                                    tree.selection_set(str(j))
-                                    break
-                            else:
-                                if term.lower() in cues[j]['text'].lower():
-                                    tree.see(str(j))
-                                    tree.selection_set(str(j))
-                                    break
+                            if _cue_matches(cues[j]['text'], term):
+                                tree.see(str(j))
+                                tree.selection_set(str(j))
+                                break
                         except (re.error, IndexError):
                             pass
                     app.add_log(f"Replaced 1 occurrence of '{term}' → '{repl}'", 'INFO')
@@ -7324,12 +7370,15 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 old_text = cue['text']
                 try:
                     if use_regex.get():
-                        new_text = re.sub(term, lambda m: repl, old_text, flags=re.IGNORECASE)
+                        new_text = re.sub(term, lambda m: repl, old_text,
+                                          flags=_find_flags())
                     else:
-                        # Case-insensitive literal replace all
+                        # Literal replace-all, honouring the Case checkbox.
                         new_text = old_text
-                        lower_text = new_text.lower()
-                        lower_term = term.lower()
+                        lower_text = (new_text if case_sensitive.get()
+                                      else new_text.lower())
+                        lower_term = (term if case_sensitive.get()
+                                      else term.lower())
                         result = []
                         pos = 0
                         while True:
@@ -7388,6 +7437,11 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                    command=do_replace_all).pack(side='left', padx=2)
         ttk.Checkbutton(search_frame, text="Wrap",
                         variable=wrap_around).pack(side='left', padx=(6, 2))
+        # ⚠️ Applies to Find, Replace AND Replace All — they all go through
+        # _cue_matches()/_find_flags(), so the box cannot be honoured by one
+        # button and ignored by another.
+        ttk.Checkbutton(search_frame, text="Case",
+                        variable=case_sensitive).pack(side='left', padx=(2, 2))
 
         editor.bind('<Control-f>', lambda e: find_entry.focus_set())
         editor.bind('<Control-F>', lambda e: find_entry.focus_set())
