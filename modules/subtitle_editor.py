@@ -319,6 +319,38 @@ def scan_allcaps_words(cues, known_caps=()):
     return indices, details
 
 
+def apply_word_fix(text, bad, good):
+    """Replace whole-word *bad* with *good* in *text*. (new_text, reason).
+
+    `reason` is None on success, otherwise a short string saying why nothing
+    was changed — the caller shows it in its status bar.
+
+    ⚠️⚠️ THE ONE PLACE THIS SUBSTITUTION LIVES. Both the OCR review pane and the
+    Subtitle Editor offer "Change X → Y", and `add_user_word` three hundred
+    lines up carries the scar from exactly this shape: *"They were written
+    separately first, which is how the same word ends up known in one pane and
+    unknown in the other."* ⛔ Do not inline a second regex.
+
+    ⚠️ WHOLE WORDS, CASE-SENSITIVELY. 'hirst' must not match inside
+    'Hirstwood'; and a case-insensitive replace would rewrite the occurrences
+    that are ALREADY correct, which is the thing a caps fix exists to protect.
+
+    ⛔⛔ REFUSES any substitution that changes the word count. `balance_lines`
+    in the Whisper cue path silently DELETED WORDS and was caught only by
+    asserting words_in == words_out. A rewrite that quietly loses a word is
+    worse than no feature at all.
+    """
+    if not text or not bad or good is None or bad == good:
+        return text, "nothing to change"
+    new = re.sub(r'(?<!\w)' + re.escape(bad) + r'(?!\w)',
+                 good.replace('\\', '\\\\'), text)
+    if new == text:
+        return text, f'"{bad}" not found in that cue'
+    if len(new.split()) != len(text.split()):
+        return text, "refused — that change would alter the word count"
+    return new, None
+
+
 def drop_recurring_words(cues, errors_by_cue, min_hits=3):
     """Drop 'misspellings' that recur often enough to be proper nouns.
 
@@ -2655,18 +2687,11 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     if not cues or cue_idx is None or cue_idx >= len(cues):
                         return
                     old = cues[cue_idx].get('text') or ''
-                    new = re.sub(r'(?<!\w)' + re.escape(bad) + r'(?!\w)',
-                                 good.replace('\\', '\\\\'), old)
-                    if new == old:
-                        status_label.configure(
-                            text=f'"{bad}" not found in that cue — nothing changed')
-                        return
-                    # ⛔⛔ NON-NEGOTIABLE. `balance_lines` in the Whisper cue
-                    # path silently DELETED WORDS and was caught only by this
-                    # assertion. A substitution must never change the count.
-                    if len(new.split()) != len(old.split()):
-                        status_label.configure(
-                            text="Refused: that change would alter the word count")
+                    # ⚠️ Module-level and shared with the Subtitle Editor's
+                    # version of this action. Do not inline a second regex.
+                    new, why = apply_word_fix(old, bad, good)
+                    if why:
+                        status_label.configure(text=why)
                         return
                     import copy as _copy
                     filter_undo[0] = _copy.deepcopy(cues)   # one shared undo
@@ -7814,6 +7839,36 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 pass            # advisory feature; never lose the edit session
             refresh_tree(cues)
 
+        def _apply_fix_from_tree(idx, bad, good):
+            """Change one word in one cue, from the editor's right-click menu.
+
+            ⭐ Tony, 2026-10-01: *"We should have #2 in the subtitle editor as
+            well as the OCR preview."* The editor already COMPUTED the
+            correction — `spell_name_fixes` holds the (bad, good) pairs and the
+            Note column has been printing `name: Hirst` all along — but there
+            was no way to act on it without retyping the word by hand.
+
+            ⚠️ Substitution goes through the SHARED module-level
+            apply_word_fix(), the same one the OCR review pane uses. Two panes,
+            one rule — the mistake add_user_word() documents is writing them
+            separately and letting them drift.
+
+            ⚠️ refresh_tree() re-runs rescan_spell_state when a scan is live, so
+            the flag clears itself; no second repaint path needed.
+            """
+            if not (0 <= idx < len(cues)):
+                return
+            new, why = apply_word_fix(cues[idx].get('text') or '', bad, good)
+            if why:
+                try:
+                    app.add_log(f"Change skipped — {why}", 'WARNING')
+                except Exception:
+                    pass
+                return
+            push_undo()                      # the editor's own undo stack
+            cues[idx]['text'] = new
+            refresh_tree(cues)
+
         def show_context_menu(event):
             item = tree.identify_row(event.y)
             if item and item not in tree.selection():
@@ -7833,6 +7888,17 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             if idx is not None and 0 <= idx < len(cues):
                 cue = cues[idx]
                 entries = []
+                # ⭐ The correction FIRST — it is the thing he most often wants,
+                # and the label names both words, which is what makes applying
+                # it consent rather than the pane editing his text unasked.
+                # ⚠️ Only wrong-case names have a KNOWN single right answer
+                # here. A misspelling needs candidate generation, which the
+                # highlight scan deliberately skips — that is the Spell Check
+                # dialog's job and it already applies corrections.
+                _fix_entries = []
+                for _b, _g in (spell_name_fixes.get(idx) or [])[:4]:
+                    if _b != _g:
+                        _fix_entries.append((f'Change  "{_b}"  →  "{_g}"', _b, _g))
                 for w in (spell_error_words.get(idx) or [])[:4]:
                     entries.append((f'Add "{w}" to dictionary', w, False))
                     entries.append((f'Add "{w}" as a name', w, True))
@@ -7840,7 +7906,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 for w in sorted(caps_now):
                     entries.append((f'"{w}" is correct — stop flagging it',
                                     w, True))
-                if entries:
+                if entries or _fix_entries:
                     # ⚠️ Inserted in REVERSE at index 0, so the visible order
                     # matches `entries`. insert_command(0, ...) puts each new
                     # item above the last one.
@@ -7850,6 +7916,14 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         ctx_menu.insert_command(
                             0, label=label,
                             command=lambda w=w, n=as_name: _teach_from_tree(w, n))
+                        _ctx_dynamic[0] += 1
+                    # ⚠️ Added LAST so they end up ABOVE the teach entries —
+                    # same reverse-insert trick, one level out.
+                    for label, _b, _g in reversed(_fix_entries):
+                        ctx_menu.insert_command(
+                            0, label=label,
+                            command=lambda i=idx, b=_b, g=_g:
+                                _apply_fix_from_tree(i, b, g))
                         _ctx_dynamic[0] += 1
 
             ctx_menu.tk_popup(event.x_root, event.y_root)

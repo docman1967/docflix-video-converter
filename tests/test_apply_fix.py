@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from modules.spell_checker import run_spell_highlight_scan
+from modules.subtitle_editor import apply_word_fix
 import types
 
 SRC = (Path(__file__).resolve().parent.parent
@@ -66,9 +67,15 @@ def test_name_fixes_are_absent_when_not_asked_for():
 # ── The substitution rules ──────────────────────────────────────────────────
 
 def _apply(bad, good, old):
-    """Mirrors _apply_fix's substitution — it lives in a Tk closure."""
-    return re.sub(r'(?<!\w)' + re.escape(bad) + r'(?!\w)',
-                  good.replace('\\', '\\\\'), old)
+    """Calls the REAL shared helper.
+
+    ⚠️ This used to MIRROR the regex, which made the test a second
+    implementation that could pass while the shipped one drifted — the exact
+    failure add_user_word() documents. Fixed 2026-10-01 when the substitution
+    was extracted to module level for the Subtitle Editor to share.
+    """
+    new, _why = apply_word_fix(old, bad, good)
+    return new
 
 
 @pytest.mark.parametrize('bad,good,before,after', [
@@ -121,8 +128,15 @@ def test_apply_is_undoable_and_marks_the_cue():
 
 
 def test_apply_refuses_to_change_the_word_count():
-    body = CODE.split('def _apply_fix(', 1)[1].split('\n                def ', 1)[0]
-    assert 'len(new.split()) != len(old.split())' in body
+    """⚠️ The guard lives in the SHARED helper, not in either pane's handler —
+    moved there 2026-10-01 so the editor inherits it rather than needing its
+    own copy. Behaviour is covered by test_refuses_a_count_changing_substitution;
+    this pins the location, so it cannot be quietly dropped from one caller."""
+    body = CODE.split('def apply_word_fix(', 1)[1].split('\ndef ', 1)[0]
+    assert 'len(new.split()) != len(text.split())' in body
+    # and neither pane may bypass it
+    ocr = CODE.split('def _apply_fix(', 1)[1].split('\n                def ', 1)[0]
+    assert 'apply_word_fix(' in ocr, 'the OCR pane must delegate, not reimplement'
 
 
 def test_the_menu_names_both_words():
@@ -135,3 +149,32 @@ def test_no_apply_all_sweep_exists():
     looked at is the thing 'propose, never apply' exists to prevent."""
     for banned in ('apply_all_fixes', 'fix_all_cues', 'Apply All Fixes'):
         assert banned not in SRC, f'{banned} — not asked for, do not add'
+
+
+# ── Both panes share ONE substitution ───────────────────────────────────────
+
+def test_the_substitution_is_module_level_and_shared():
+    """⚠️⚠️ Tony, 2026-10-01: *"We should have #2 in the subtitle editor as well
+    as the OCR preview."* Two call sites, one rule. add_user_word() carries the
+    scar from the alternative: *"They were written separately first, which is
+    how the same word ends up known in one pane and unknown in the other."*"""
+    assert 'def apply_word_fix(' in SRC, 'the shared helper is gone'
+    assert CODE.count('apply_word_fix(') >= 3, (
+        'expected the definition plus BOTH callers (OCR pane + editor)')
+    # ⛔ Neither pane may carry its own copy of the regex.
+    assert CODE.count("re.sub(r'(?<!\\w)'") <= 1, (
+        'a second inline substitution has appeared — use apply_word_fix')
+
+
+def test_the_editor_applies_through_the_shared_helper():
+    body = CODE.split('def _apply_fix_from_tree(', 1)[1].split('\n        def ', 1)[0]
+    assert 'apply_word_fix(' in body
+    assert 'push_undo()' in body, 'must be undoable in the editor too'
+    assert 'refresh_tree(cues)' in body, (
+        're-paint, which also re-runs rescan_spell_state so the flag clears')
+
+
+def test_refuses_a_count_changing_substitution():
+    """⛔⛔ The guard that balance_lines needed."""
+    out, why = apply_word_fix('say hello there', 'hello', 'hello there')
+    assert out == 'say hello there' and 'word count' in why
