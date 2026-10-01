@@ -114,6 +114,9 @@ def load_preferences(app):
         app.custom_cap_words = prefs.get('custom_cap_words', [])
         app.use_names_db = prefs.get('use_names_db', False)
         app.custom_spell_words = prefs.get('custom_spell_words', [])
+        # Subtitle Editor highlight modes — see save_preferences.
+        app.sub_caps_highlight = prefs.get('sub_caps_highlight', False)
+        app.sub_spell_highlight = prefs.get('sub_spell_highlight', False)
         app.custom_replacements = prefs.get('custom_replacements', [])
         app._tv_rename_provider = prefs.get('tv_rename_provider', 'TVDB')
         app._tv_rename_template = prefs.get('tv_rename_template',
@@ -137,24 +140,12 @@ def load_preferences(app):
                 app.add_log(f"Names database loaded ({count:,} names)",
                             'INFO')
 
-        # ⚠️⚠️ REPLAY the hand-taught names into the names DB, every launch.
-        # custom_cap_words persists in prefs; the names DB is rebuilt in memory
-        # from the bulk file and knows nothing about it. Without this, "Lorne is
-        # a name" holds until the app is closed and then silently un-teaches
-        # itself — the worst kind of fix, because it appears to work.
-        # ⚠️ AFTER the load above: load_names_db() rebinds the set, so seeding
-        # first would be discarded. (It reapplies _user_names as well, so the
-        # order is belt-and-braces rather than load-bearing — but the next
-        # person to reorder these lines should not have to know that.)
-        # ⚠️ Unconditional, NOT gated on use_names_db: with no bulk DB the
-        # suspect check is noisier, and Tony's own names are exactly the part
-        # worth keeping.
-        try:
-            from .subtitle_filters import add_user_name
-            for _n in (getattr(app, 'custom_cap_words', None) or []):
-                add_user_name(_n)
-        except Exception:
-            pass        # never let a name replay stop preferences loading
+        # ⛔⛔ DO NOT PUT STARTUP WORK IN THIS MODULE. It is imported by
+        # NOTHING — see the header — so anything added here never executes. A
+        # names-replay was added on 2026-09-29 and sat dead until 2026-10-01
+        # while its unit test passed, because the test called the function
+        # directly and never asked whether the app did. The live path is
+        # VideoConverterApp.load_preferences in video_converter.py.
 
         app.add_log("Preferences loaded.", 'INFO')
     except Exception as e:

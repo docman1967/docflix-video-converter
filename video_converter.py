@@ -7802,6 +7802,13 @@ class VideoConverterApp:
             'custom_cap_words':      self.custom_cap_words,
             'custom_replacements':   self.custom_replacements,
             'custom_spell_words':    self.custom_spell_words,
+            # ⭐ Subtitle Editor highlight MODES, remembered between files.
+            # Tony, 2026-10-01: *"when I load a new subtitle, I don't have
+            # to select those two every time."* ⚠️ Only the MODE persists —
+            # the RESULTS are still cleared on every load, because stale row
+            # indices point into the previous file (his own note, 2026-08-06).
+            'sub_caps_highlight':    getattr(self, 'sub_caps_highlight', False),
+            'sub_spell_highlight':   getattr(self, 'sub_spell_highlight', False),
             'tv_rename_provider':    getattr(self, '_tv_rename_provider', 'TVDB'),
             'tv_rename_template':    getattr(self, '_tv_rename_template', '{show} S{season}E{episode} {title}'),
             'movie_rename_template': getattr(self, '_movie_rename_template', '{show} ({year})'),
@@ -7962,6 +7969,38 @@ class VideoConverterApp:
                                 cur_list.append(item)
             except Exception:
                 pass
+
+            # ⚠️⚠️ REPLAY the hand-taught names into the in-memory names DB.
+            # custom_cap_words persists in prefs; the names DB is rebuilt from
+            # the bulk file and knows nothing about it, so without this a name
+            # Tony taught is forgotten the moment the app restarts and
+            # check_confusions starts proposing "Lorne -> Lome?" all over again.
+            #
+            # ⛔⛔ THIS LIVED IN modules/preferences.py FROM 2026-09-29 TO
+            # 2026-10-01 AND NEVER RAN ONCE. That module is imported by nothing
+            # — its own docstring says so — so the feature was dead on arrival
+            # while its unit test passed, because the test called
+            # add_user_name() directly and never checked that the APP did.
+            # ⚠️ Anything that must happen at startup belongs HERE, in
+            # VideoConverterApp.load_preferences.
+            #
+            # ⚠️ AFTER the standalone merge above, so names that arrived via the
+            # "Open with" prefs file get replayed too.
+            try:
+                from modules.subtitle_filters import add_user_name
+                for _n in (self.custom_cap_words or []):
+                    add_user_name(_n)
+            except Exception:
+                pass        # never let a name replay stop preferences loading
+
+            # ⭐ Subtitle Editor highlight MODES, remembered between files.
+            # Tony, 2026-10-01: *"when I load a new subtitle, I don't have to
+            # select those two every time."* ⚠️ Only the MODE persists — the
+            # RESULTS are cleared on every load, because stale row indices point
+            # into the file just closed (his own note, 2026-08-06).
+            self.sub_caps_highlight = bool(prefs.get('sub_caps_highlight', False))
+            self.sub_spell_highlight = bool(prefs.get('sub_spell_highlight', False))
+
             self._tv_rename_provider = prefs.get('tv_rename_provider', 'TVDB')
             self._tv_rename_template = prefs.get('tv_rename_template',
                                                   '{show} S{season}E{episode} {title}')

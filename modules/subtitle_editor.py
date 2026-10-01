@@ -1169,7 +1169,9 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         # count that replaced the old results popup, and distinguishes "scanned,
         # found nothing" from "never scanned" — without it, a clean file and an
         # unscanned file look identical.
-        spell_scanned = [False]
+        # ⭐ Seeded from the SAVED preference (Tony, 2026-10-01: *"when I load
+        # a new subtitle, I don't have to select those two every time"*).
+        spell_scanned = [bool(getattr(app, 'sub_spell_highlight', False))]
 
         # ── Per-file character names ─────────────────────────────────────────
         # Tony, 2026-08-07: *"a 'add temp name' that would be cleared once the
@@ -1235,7 +1237,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         # is deleted — every index after it shifts by one. So keep only a flag and
         # let refresh_tree() re-scan; the scan is a regex pass over the cue list
         # and costs nothing next to rebuilding the Treeview itself.
-        caps_highlight_on = [False]
+        caps_highlight_on = [bool(getattr(app, 'sub_caps_highlight', False))]
 
         # ── Undo / Redo ──
         def push_undo():
@@ -1424,7 +1426,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             # scan re-runs) but you never asked for them, and for spelling they'd
             # be plain wrong: stale row indices pointing into a different file.
             # (Tony, 2026-08-06.)
-            caps_highlight_on[0] = False
+            # ⚠️ MODE vs RESULTS. The mode is Tony's standing preference and
+            # SURVIVES the load; the results below do NOT, because stale row
+            # indices point into the file just closed (his note, 2026-08-06 —
+            # that half of the original reasoning is still exactly right).
+            # refresh_tree() re-runs both scans against the NEW cues, so the
+            # highlights that appear are freshly earned, not inherited.
+            caps_highlight_on[0] = bool(getattr(app, 'sub_caps_highlight', False))
             spell_error_indices.clear()
             # ⚠️ The two detail maps go with the index set. They were NOT being
             # cleared here before — a leftover {index: words} from the previous
@@ -1436,7 +1444,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             # would show "0 misspelled" on a brand-new file that was never
             # checked — a clean bill of health nobody asked for and nobody
             # earned. Same class of lie as a stale highlight.
-            spell_scanned[0] = False
+            spell_scanned[0] = bool(getattr(app, 'sub_spell_highlight', False))
             # Per-file character names die with the file they belonged to.
             # "Grace" is a character here and a noun in the next episode.
             temp_cap_words.clear()
@@ -5142,8 +5150,54 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         filter_menu.add_command(label="Spell Check...",
                                 accelerator="F7",
                                 command=lambda: _show_spell_check())
-        filter_menu.add_command(label="Highlight Spelling Errors",
-                                command=lambda: _highlight_spelling())
+
+        # ── The two highlight MODES, remembered between files ───────────────
+        # ⭐ Tony, 2026-10-01: *"I'd like to make the Find all caps words and
+        # highlight spelling errors to be on or off. That way when I load a new
+        # subtitle, I don't have to select those two every time."*
+        # ⚠️ They were add_command — one-shot actions with no way to turn them
+        # OFF except loading another file. As checkbuttons they gain an explicit
+        # off AND they persist.
+        caps_mode_var = tk.BooleanVar(value=caps_highlight_on[0])
+        spell_mode_var = tk.BooleanVar(value=spell_scanned[0])
+
+        def _remember_modes():
+            app.sub_caps_highlight = bool(caps_mode_var.get())
+            app.sub_spell_highlight = bool(spell_mode_var.get())
+            try:
+                app.save_preferences()
+            except Exception:
+                pass        # standalone launch may have no prefs store
+
+        def _toggle_caps_mode():
+            if caps_mode_var.get():
+                _find_allcaps()
+                # ⚠️ Reflect REALITY, not the request: _find_allcaps switches
+                # itself off when the file contains no ALL CAPS at all, and a
+                # tick next to a mode that is not running would be a small lie.
+                caps_mode_var.set(caps_highlight_on[0])
+            else:
+                caps_highlight_on[0] = False
+                refresh_tree(cues)
+            _remember_modes()
+
+        def _toggle_spell_mode():
+            if spell_mode_var.get():
+                _highlight_spelling()
+                spell_mode_var.set(spell_scanned[0])
+            else:
+                spell_scanned[0] = False
+                # ⚠️ Clear the detail maps with the flag. A stale {index: words}
+                # would feed the Note column words from a scan no longer on.
+                spell_error_indices.clear()
+                spell_error_words.clear()
+                spell_name_fixes.clear()
+                refresh_tree(cues)
+            _remember_modes()
+
+        filter_menu.add_checkbutton(label="Highlight Spelling Errors",
+                                    variable=spell_mode_var,
+                                    command=_toggle_spell_mode)
 
         def _edit_dictionary():
             """Open the Dictionary & Names editor.
@@ -5192,8 +5246,9 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 tree.see(items[first])
                 tree.selection_set(items[first])
 
-        filter_menu.add_command(label="Find ALL CAPS Words...",
-                                command=_find_allcaps)
+        filter_menu.add_checkbutton(label="Find ALL CAPS Words",
+                                    variable=caps_mode_var,
+                                    command=_toggle_caps_mode)
         filter_menu.add_separator()
         filter_menu.add_command(label="Search/Replace List...",
                                 command=lambda: _show_saved_replacements())
