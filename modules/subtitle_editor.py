@@ -4834,7 +4834,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                       "You can scroll the subtitle list to find names.",
                       justify='center', padding=(10, 10)).pack()
 
-            lf = ttk.LabelFrame(cd, text="Custom Names (saved across sessions)",
+            # ⚠️ The title NAMES THE OTHER DOOR. This listbox and the "Names"
+            # pane in Tools ▸ Dictionary & Names are the SAME
+            # app.custom_cap_words list under two different names, and nothing
+            # said so. Tony spent an afternoon on 2026-09-30 watching a word he
+            # had deleted reappear; removing it in one place and re-adding it
+            # from the other is indistinguishable from a broken delete.
+            lf = ttk.LabelFrame(cd, text="Custom Names — same list as Tools ▸ Dictionary & Names",
                                 padding=8)
             lf.pack(fill='both', expand=True, padx=10, pady=5)
 
@@ -4870,16 +4876,38 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 new_word_var.set('')
 
             def remove_word():
+                """Remove the SELECTED WORD, not whatever is at that index.
+
+                ⚠️⚠️ WAS `app.custom_cap_words.pop(sel[0])` — deleting by LISTBOX
+                POSITION. The listbox is filled ONCE when the dialog opens, and
+                this dialog is deliberately non-modal and topmost ("allows
+                scrolling the subtitle list"), so `app.custom_cap_words` can be
+                mutated underneath it the whole time it is open — by Tools ▸
+                Dictionary & Names, by "Add as a name" in the editor tree, by
+                the OCR review pane. Any of those shifts every later index by
+                one, and Remove then silently deleted a DIFFERENT word than the
+                one highlighted. Found 2026-10-01 while chasing a name that kept
+                coming back; Tony had no way to see it happen.
+
+                ⚠️ remove() takes the first exact match; add_word() dedupes
+                case-insensitively, so there is never more than one.
+                """
                 sel = word_list.curselection()
-                if sel:
-                    app.custom_cap_words.pop(sel[0])
-                    word_list.delete(sel[0])
-                    app.save_preferences()
+                if not sel:
+                    return
+                word = word_list.get(sel[0])     # ask the WIDGET what is selected
+                try:
+                    app.custom_cap_words.remove(word)
+                except ValueError:
+                    pass        # already gone — the list moved under us; the
+                                # row still goes, which is what he asked for
+                word_list.delete(sel[0])
+                app.save_preferences()
 
             ttk.Button(add_frame, text="Add", command=add_word).pack(side='right')
             word_entry.bind('<Return>', lambda e: add_word())
 
-            ttk.Label(lf, text="Names are saved automatically and persist between sessions.",
+            ttk.Label(lf, text="Saved automatically. This is the same list as \nTools ▸ Dictionary & Names — editing either changes both.",
                       font=('Helvetica', 8), foreground='gray').pack(anchor='w')
 
             # ── This-file-only names ────────────────────────────────────────
