@@ -1912,6 +1912,15 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # ocr_result is a list.
                 review_spell = [set(), {}]     # (indices, {idx: [word, ...]})
                 review_caps = [set(), {}]      # (indices, {idx: {WORD, ...}})
+                # ⭐ WRONG-CASE NAMES: {idx: [(bad, good), ...]}.
+                # ⚠️⚠️ These were COMPUTED AND THROWN AWAY until 2026-10-01.
+                # run_spell_highlight_scan builds them whenever `name_fixes` is
+                # a dict, and this pane called it with the default None — so a
+                # cue whose ONLY fault was a miscased name produced no entry at
+                # all and never went pink. Tony asked for exactly this on
+                # 2026-09-26 (*"Yes I want names to be lit as well"*); it has
+                # worked in the Subtitle Editor and been silently dead here.
+                review_names = {}
                 # Words dismissed for THIS review only, via the right-click
                 # menu's "Ignore in this episode". Deliberately NOT persisted —
                 # the two dictionary entries are permanent and this one is not,
@@ -2621,6 +2630,51 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     review_ocr_ignore.add(word.lower())
                     _rebuild_cue_tree(select_cue=cue_idx)
 
+                def _apply_fix(bad, good, cue_idx, item):
+                    """Replace *bad* with *good* in one cue. Undoable.
+
+                    ⭐ Tony, 2026-09-30: *"When a word comes up that the app
+                    thinks is misspelled or not capitalized, it would be nice to
+                    have an option to change it automatically."*
+
+                    ⚠️⚠️ THIS CROSSES A DELIBERATE RULE, AND NARROWLY. The pane
+                    PROPOSES, NEVER APPLIES — `_teach_word` says so explicitly:
+                    *"he only said 'this word is fine', which is not a licence
+                    to touch his text."* The carve-out that already exists is
+                    the Spell Check dialog, which MAY rewrite because the user
+                    CHOSE the correction. A menu item naming the exact change
+                    ("Change 'hirst' to 'Hirst'") is that same consent, so this
+                    stays inside the rule. ⛔ An apply-to-all sweep is NOT, and
+                    Tony has not asked for one. Do not add it.
+
+                    ⚠️ Whole words only, case-sensitively. 'hirst' must not
+                    match inside 'Hirstwood', and a case-insensitive replace
+                    would rewrite the correctly-cased occurrences too.
+                    """
+                    cues = ocr_result[0]
+                    if not cues or cue_idx is None or cue_idx >= len(cues):
+                        return
+                    old = cues[cue_idx].get('text') or ''
+                    new = re.sub(r'(?<!\w)' + re.escape(bad) + r'(?!\w)',
+                                 good.replace('\\', '\\\\'), old)
+                    if new == old:
+                        status_label.configure(
+                            text=f'"{bad}" not found in that cue — nothing changed')
+                        return
+                    # ⛔⛔ NON-NEGOTIABLE. `balance_lines` in the Whisper cue
+                    # path silently DELETED WORDS and was caught only by this
+                    # assertion. A substitution must never change the count.
+                    if len(new.split()) != len(old.split()):
+                        status_label.configure(
+                            text="Refused: that change would alter the word count")
+                        return
+                    import copy as _copy
+                    filter_undo[0] = _copy.deepcopy(cues)   # one shared undo
+                    undo_filters_btn.configure(state='normal')
+                    _write_cue_text(cue_idx, item, new)     # marks edited, dirties save
+                    _rebuild_cue_tree(select_cue=cue_idx)   # re-scan, or the flag persists
+                    status_label.configure(text=f'Changed "{bad}" to "{good}" · Undo to restore')
+
                 def _popup_dict_menu(event):
                     """Right-click a row: teach the dictionary its unknown words.
 
@@ -2673,7 +2727,34 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     _seen = {w.lower() for w in words} | {w.lower() for w in caps_words}
                     ocr_words = [w for w in dict.fromkeys(ocr_words)
                                  if w.lower() not in _seen]
+                    # ⭐ Wrong-case names, with the correction already worked out
+                    # by miscased_name(). These were computed and discarded
+                    # before 2026-10-01 — see review_names.
+                    name_fixes = list(review_names.get(idx) or [])
+                    # Pairs the OCR checks propose, e.g. ('I,000','1,000').
+                    try:
+                        _cue2 = (ocr_result[0] or [])[idx]
+                        ocr_pairs = [(b, g) for b, g in ocr_suspect_words(
+                            _cue2.get('text') or '', review_ocr_ignore)
+                            if b.lower() not in _seen]
+                    except Exception:
+                        ocr_pairs = []
                     menu = tk.Menu(cue_tree, tearoff=0)
+                    # ── Apply a correction ─────────────────────────────────
+                    # ⚠️ FIRST in the menu and it NAMES BOTH WORDS. That naming
+                    # is the consent that keeps this inside "propose, never
+                    # apply" — he is choosing a specific change, not licensing
+                    # the pane to edit his text.
+                    _fixes, _fseen = [], set()
+                    for b, g in name_fixes + ocr_pairs:
+                        if b != g and (b, g) not in _fseen:
+                            _fseen.add((b, g)); _fixes.append((b, g))
+                    for b, g in _fixes:
+                        menu.add_command(
+                            label=f'Change  "{b}"  →  "{g}"',
+                            command=lambda b=b, g=g: _apply_fix(b, g, idx, item))
+                    if _fixes:
+                        menu.add_separator()
                     for w in caps_words:
                         sub = tk.Menu(menu, tearoff=0)
                         # ⚠️ Stored EXACTLY as it appears — custom_cap_words is
@@ -2713,7 +2794,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         menu.add_separator()
                     if caps_words and words:
                         menu.add_separator()
-                    if not words and not caps_words and not ocr_words:
+                    if not words and not caps_words and not ocr_words and not _fixes:
                         # ⚠️ Shown, not hidden. A menu that silently refuses to
                         # appear reads as a broken right-click; this says why.
                         # Rows flagged only for ALL-CAPS or a mid-word capital
@@ -2822,6 +2903,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                   + ' · ' + reason).strip(' ·')
                     if idx in review_caps[0]:
                         reason = ('CAPS · ' + reason).strip(' ·')
+                    # ⭐ NAMES THE CORRECTION, like the OCR flags do — "name:
+                    # hirst -> Hirst" is checkable at a glance against the
+                    # bitmap, where a bare "name" would send him hunting.
+                    _nf = review_names.get(idx) or []
+                    if _nf:
+                        reason = (f'name: {_nf[0][0]} -> {_nf[0][1]}'
+                                  + ' · ' + reason).strip(' ·')
                     if cue.get('edited'):
                         reason = (reason + ' · edited').strip(' ·')
                     cue_tree.item(item,
@@ -2875,7 +2963,15 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                         + (('midcap',) if _midcap else ())
                                         + (('colon',) if cue_has_colon(cue)
                                            else ())
-                                        + (('spelling',) if idx in review_spell[0]
+                                        # ⚠️ A wrong-case name shares the
+                                        # 'spelling' pink deliberately — same
+                                        # reasoning as 'midcap' above. Tony is
+                                        # colour blind; reusing a colour he
+                                        # already reads beats inventing one,
+                                        # and the Note column carries the
+                                        # meaning in WORDS either way.
+                                        + (('spelling',)
+                                           if (idx in review_spell[0] or _nf)
                                            else ())
                                         + (('allcaps',) if idx in review_caps[0]
                                            else ())
@@ -2913,7 +3009,21 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         return          # no dictionary, no pink. Quietly.
                     try:
                         from .spell_checker import run_spell_highlight_scan
-                        raw = run_spell_highlight_scan(app, mon, cues, set())
+                        # ⚠️ name_fixes MUST be a dict. Passing the default None
+                        # makes the scan compute the wrong-case pairs and drop
+                        # them, which is how this feature stayed invisible here
+                        # for five days after it shipped in the editor.
+                        review_names.clear()
+                        raw = run_spell_highlight_scan(app, mon, cues, set(),
+                                                       name_fixes=review_names)
+                        if review_names and review_ignore:
+                            for _i in list(review_names):
+                                keep = [(b, g) for b, g in review_names[_i]
+                                        if b.lower() not in review_ignore]
+                                if keep:
+                                    review_names[_i] = keep
+                                else:
+                                    del review_names[_i]
                         if raw and review_ignore:
                             # ⚠️ Applied BEFORE drop_recurring_words, so a cue
                             # whose only remaining word was ignored disappears
