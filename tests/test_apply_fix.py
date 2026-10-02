@@ -144,11 +144,65 @@ def test_the_menu_names_both_words():
     assert 'Change  "{b}"  →  "{g}"' in SRC
 
 
-def test_no_apply_all_sweep_exists():
-    """⛔ Tony asked for a per-word option. A bulk sweep over cues he has not
-    looked at is the thing 'propose, never apply' exists to prevent."""
-    for banned in ('apply_all_fixes', 'fix_all_cues', 'Apply All Fixes'):
-        assert banned not in SRC, f'{banned} — not asked for, do not add'
+def test_change_all_exists_and_names_the_count():
+    """⭐ Tony, 2026-10-02: *"Being able to change all instances would really be
+    helpful."* So yesterday's per-word-only rule is lifted — but only for a
+    substitution HE names.
+
+    ⚠️⚠️ THE LINE STILL HOLDS, it has just moved. Forbidden: the app deciding
+    what is wrong and rewriting cues he has never seen. Allowed: ONE change he
+    chose, applied everywhere, with the COUNT shown before he commits and a
+    single undo. **One choice applied many times is not many choices made on
+    his behalf.**
+    """
+    assert 'def _apply_fix_all(' in SRC, 'OCR pane change-all missing'
+    assert 'def _apply_fix_all_from_tree(' in SRC, 'editor change-all missing'
+    assert 'in all {_n} cues' in SRC, (
+        'the label must carry the COUNT — a bare "Change all" is a leap of faith')
+    assert 'count_cues_with_word' in SRC
+
+
+def test_no_blind_fix_everything_sweep():
+    """⛔ STILL FORBIDDEN, and this is now checked by BEHAVIOUR not by name.
+
+    ⚠️ The previous version of this test listed banned identifiers
+    ('apply_all_fixes', ...). It passed straight through the change-all work
+    simply because I happened to choose different names — a guard that only
+    catches the spelling it anticipated is no guard at all. What actually
+    matters is that nothing iterates the FLAG LISTS applying fixes without Tony
+    naming each one.
+    """
+    for src_fn in ('_apply_fix_all(', '_apply_fix_all_from_tree('):
+        body = SRC.split(f'def {src_fn}', 1)[1].split('"""', 2)[-1][:1200]
+        for forbidden in ('review_names', 'spell_name_fixes',
+                          'ocr_suspect_words', 'review_spell'):
+            assert forbidden not in body, (
+                f'{src_fn} reads {forbidden} — it must apply ONE named change, '
+                f'not walk the detector output deciding for him')
+
+
+def test_change_all_is_undoable_as_one_unit():
+    """⚠️ Undoing 40 cues one press at a time is not undo, it is penance."""
+    # ⚠️⚠️ COMMENT-STRIPPED, and this is the FOURTH time that has mattered this
+    # week. The first version searched raw source and found `push_undo()` at
+    # offset 91 — inside the comment EXPLAINING that push_undo() must come
+    # first. My own explanation broke the test of the thing it explains.
+    # (Previously: `head -3` matching my command, `pgrep` matching my wrapper,
+    # a grep matching my comment.) **If a check searches text, ask what else
+    # that text appears in.**
+    ocr = CODE.split('def _apply_fix_all(', 1)[1].split('"""', 2)[-1]
+    ocr = ocr.split('\n                def ', 1)[0]
+    assert 'filter_undo[0] = snapshot' in ocr and 'deepcopy' in ocr
+    ed = CODE.split('def _apply_fix_all_from_tree(', 1)[1].split('"""', 2)[-1]
+    ed = ed.split('\n        def ', 1)[0]
+    assert 'push_undo()' in ed, 'the editor batch must be undoable'
+    # ⚠️⚠️ ORDER MATTERS. push_undo() copies the CURRENT cues — after the loop
+    # it would snapshot the already-changed text and undo would restore
+    # nothing. And counting first stops a no-match pushing a useless entry.
+    assert ed.index('push_undo()') < ed.index('apply_word_fix'), (
+        'snapshot BEFORE mutating')
+    assert ed.index('count_cues_with_word') < ed.index('push_undo()'), (
+        'count first, so a no-match does not push a useless undo entry')
 
 
 # ── Both panes share ONE substitution ───────────────────────────────────────

@@ -319,6 +319,24 @@ def scan_allcaps_words(cues, known_caps=()):
     return indices, details
 
 
+def count_cues_with_word(cues, bad):
+    """How many cues contain whole-word *bad*.
+
+    ⭐ Used to put the NUMBER in the menu label — "Change all 7" rather than a
+    bare "Change all". Tony, 2026-10-02, asked for a change-everywhere option;
+    showing the count up front is what keeps it a choice rather than a leap.
+    ⚠️ Same matching rule as apply_word_fix, by construction — it calls it.
+    """
+    if not bad:
+        return 0
+    n = 0
+    for c in cues or ():
+        new, why = apply_word_fix(c.get('text') or '', bad, bad + '\x00')
+        if why is None:
+            n += 1
+    return n
+
+
 def apply_word_fix(text, bad, good):
     """Replace whole-word *bad* with *good* in *text*. (new_text, reason).
 
@@ -2708,6 +2726,51 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     _rebuild_cue_tree(select_cue=cue_idx)   # re-scan, or the flag persists
                     status_label.configure(text=f'Changed "{bad}" to "{good}" · Undo to restore')
 
+                def _apply_fix_all(bad, good, cue_idx):
+                    """Apply one named change to EVERY cue. Undoable as a unit.
+
+                    ⭐ Tony, 2026-10-02: *"we added the ability to change the
+                    misspelled word or name but it works line by line. Being
+                    able to change all instances would really be helpful."*
+
+                    ⚠️⚠️ THIS IS NOT THE SWEEP THE PANE FORBIDS, and the line
+                    between them is worth keeping sharp. "PROPOSES, NEVER
+                    FILTERS" guards against the app deciding what is wrong and
+                    rewriting text Tony has never looked at. Here HE names the
+                    exact substitution and the menu shows the COUNT before he
+                    commits — it is one choice applied many times, not many
+                    choices made on his behalf. ⛔ A "fix every flagged word in
+                    this file" button would still be the forbidden thing.
+
+                    ⚠️ ONE undo snapshot for the whole batch. Undoing 40 cues
+                    one press at a time is not undo, it is penance.
+                    """
+                    cues = ocr_result[0]
+                    if not cues:
+                        return
+                    import copy as _copy
+                    snapshot = _copy.deepcopy(cues)
+                    changed = 0
+                    for i, c in enumerate(cues):
+                        new_text, why = apply_word_fix(c.get('text') or '', bad, good)
+                        if why:
+                            continue        # no match here, or refused — skip it
+                        c['text'] = new_text
+                        c['edited'] = True
+                        changed += 1
+                    if not changed:
+                        status_label.configure(text=f'"{bad}" not found')
+                        return
+                    # ⚠️ Only arm Undo once we KNOW something moved, and only
+                    # dirty the save guard then too.
+                    filter_undo[0] = snapshot
+                    undo_filters_btn.configure(state='normal')
+                    _ocr_kept['saved'] = False
+                    _rebuild_cue_tree(select_cue=cue_idx)
+                    status_label.configure(
+                        text=f'Changed "{bad}" to "{good}" in {changed} cue'
+                             f'{"s" if changed != 1 else ""} · Undo to restore')
+
                 def _popup_dict_menu(event):
                     """Right-click a row: teach the dictionary its unknown words.
 
@@ -2782,10 +2845,22 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     for b, g in name_fixes + ocr_pairs:
                         if b != g and (b, g) not in _fseen:
                             _fseen.add((b, g)); _fixes.append((b, g))
+                    _all_cues = ocr_result[0] or []
                     for b, g in _fixes:
                         menu.add_command(
                             label=f'Change  "{b}"  →  "{g}"',
                             command=lambda b=b, g=g: _apply_fix(b, g, idx, item))
+                        # ⭐ Directly beneath, exactly as Tony described it, and
+                        # NAMING THE COUNT — "Change all 7" is a decision he can
+                        # make; a bare "Change all" is a leap of faith.
+                        # ⚠️ Only offered when it would do MORE than the line
+                        # above; a second entry that does the same thing is
+                        # noise.
+                        _n = count_cues_with_word(_all_cues, b)
+                        if _n > 1:
+                            menu.add_command(
+                                label=f'      …in all {_n} cues',
+                                command=lambda b=b, g=g: _apply_fix_all(b, g, idx))
                     if _fixes:
                         menu.add_separator()
                     for w in caps_words:
@@ -8040,6 +8115,38 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             cues[idx]['text'] = new
             refresh_tree(cues)
 
+        def _apply_fix_all_from_tree(bad, good):
+            """Apply one named change to every cue in the editor. One undo.
+
+            ⭐ Tony, 2026-10-02 — same ask as the OCR pane, same reasoning:
+            he names the substitution, the menu shows the count, and the whole
+            batch undoes as a unit.
+            """
+            # ⚠️⚠️ COUNT FIRST, THEN SNAPSHOT, THEN MUTATE — in that order.
+            # push_undo() copies the CURRENT cues, so calling it after the loop
+            # would snapshot the already-changed text and undo would restore
+            # nothing. And calling it before knowing whether anything matches
+            # would push a useless entry onto his undo stack.
+            if not count_cues_with_word(cues, bad):
+                try:
+                    app.add_log(f'"{bad}" not found', 'WARNING')
+                except Exception:
+                    pass
+                return
+            push_undo()                       # one entry for the whole batch
+            changed = 0
+            for c in cues:
+                new_text, why = apply_word_fix(c.get('text') or '', bad, good)
+                if why:
+                    continue
+                c['text'] = new_text
+                changed += 1
+            refresh_tree(cues)
+            try:
+                app.add_log(f'Changed "{bad}" to "{good}" in {changed} cues', 'INFO')
+            except Exception:
+                pass
+
         def show_context_menu(event):
             item = tree.identify_row(event.y)
             if item and item not in tree.selection():
@@ -8069,7 +8176,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 _fix_entries = []
                 for _b, _g in (spell_name_fixes.get(idx) or [])[:4]:
                     if _b != _g:
-                        _fix_entries.append((f'Change  "{_b}"  →  "{_g}"', _b, _g))
+                        _fix_entries.append((f'Change  "{_b}"  →  "{_g}"', _b, _g, False))
+                        # ⭐ "…in all N cues" directly beneath, with the COUNT —
+                        # only when it would do more than the single-cue entry.
+                        _n = count_cues_with_word(cues, _b)
+                        if _n > 1:
+                            _fix_entries.append(
+                                (f'      …in all {_n} cues', _b, _g, True))
                 for w in (spell_error_words.get(idx) or [])[:4]:
                     entries.append((f'Add "{w}" to dictionary', w, False))
                     entries.append((f'Add "{w}" as a name', w, True))
@@ -8090,11 +8203,12 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         _ctx_dynamic[0] += 1
                     # ⚠️ Added LAST so they end up ABOVE the teach entries —
                     # same reverse-insert trick, one level out.
-                    for label, _b, _g in reversed(_fix_entries):
+                    for label, _b, _g, _all in reversed(_fix_entries):
                         ctx_menu.insert_command(
                             0, label=label,
-                            command=lambda i=idx, b=_b, g=_g:
-                                _apply_fix_from_tree(i, b, g))
+                            command=(lambda b=_b, g=_g: _apply_fix_all_from_tree(b, g))
+                            if _all else
+                            (lambda i=idx, b=_b, g=_g: _apply_fix_from_tree(i, b, g)))
                         _ctx_dynamic[0] += 1
 
             ctx_menu.tk_popup(event.x_root, event.y_root)

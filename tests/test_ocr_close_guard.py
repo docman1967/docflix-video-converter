@@ -111,8 +111,21 @@ def test_mutations_clear_the_saved_flag():
     """⚠️ Otherwise the warning is right once and then silently wrong for the
     rest of the session. A deletion leaves no 'edited' marker anywhere, so it
     has to clear the flag itself."""
-    assert SRC.count("_ocr_kept['saved'] = False") == 2, (
-        'both the inline edit and the delete path must mark the run dirty')
+    # ⚠️ Was `== 2` until 2026-10-02, when a third mutation path arrived
+    # (_apply_fix_all, the change-everywhere action). A bare count is a proxy
+    # for "every path that changes text dirties the flag" — so assert the
+    # PATHS, not the number, and let new ones be added without a false alarm.
+    assert SRC.count("_ocr_kept['saved'] = False") >= 2, (
+        'the mutation paths must mark the run dirty')
+    # ⚠️ Anchor PAST the docstring. A fixed character window does not work
+    # here: these functions carry long explanations, and stripping `#` lines
+    # does not remove a docstring. Third time this week a text window measured
+    # how much was written ABOUT the code instead of the code.
+    batch = SRC.split('def _apply_fix_all(', 1)[1]
+    batch = batch.split('"""', 2)[-1].split('\n                def ', 1)[0]
+    assert "_ocr_kept['saved'] = False" in batch, (
+        'the change-all batch must dirty the save guard too, or closing after '
+        'it would not warn')
     edit_block = CODE.split("cues[idx]['edited'] = True", 1)[1][:200]
     assert "_ocr_kept['saved'] = False" in edit_block, 'inline edit must dirty it'
     del_block = CODE.split('gone = delete_cues(cues, idxs)', 1)[1][:200]
