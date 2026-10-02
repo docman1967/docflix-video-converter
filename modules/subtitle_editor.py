@@ -2849,6 +2849,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                             label=f'Ignore "{w}" in this episode',
                             command=lambda w=w: _ignore_word(w, idx))
                         menu.add_cascade(label=w, menu=sub)
+                    # ⭐ Always available, even when the cue has nothing to
+                    # teach — Tony needs the full list reachable from here, not
+                    # only the words this particular row happens to flag.
+                    menu.add_separator()
+                    menu.add_command(label="Dictionary & Names…",
+                                     command=_show_dict_editor)
+
                     # ⚠️⚠️ DO NOT PUT grab_release() IN A `finally` HERE. That is
                     # the documented Tkinter idiom and it is wrong for a menu
                     # you want to dismiss by clicking away, which cost Tony
@@ -3625,9 +3632,36 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                command=rules_win.destroy).pack(
                                    side='right', padx=(0, 4))
 
+                def _show_dict_editor():
+                    """Dictionary & Names, from the OCR pane.
+
+                    ⭐ Tony, 2026-10-02: *"I was using the OCR and needed to add
+                    a name but couldn't through the OCR, so I opened a different
+                    subtitle so I could have access to the Dictionary and Names
+                    widget... made me realize that I need to have access to that
+                    widget in the OCR menu."* He had to open an unrelated
+                    subtitle in another window to reach it — the same dead-end
+                    shape as the right-click menu on 2026-09-19 and 09-20.
+
+                    ⚠️ on_change rebuilds the cue tree, which re-runs the review
+                    scans — so removing a name here un-greys the rows that were
+                    relying on it, immediately. Without that the pane would keep
+                    showing a judgement the dictionary no longer supports.
+                    """
+                    try:
+                        from modules.dictionary_editor import show_dictionary_editor
+                        show_dictionary_editor(app, mon,
+                                               on_change=_rebuild_cue_tree)
+                    except Exception as e:
+                        messagebox.showerror("Dictionary & Names",
+                                             f"Could not open:\n{e}", parent=mon)
+
                 ttk.Button(btn_f, text="OCR Rules",
                            command=_show_ocr_rules).pack(
                                side='left')
+                ttk.Button(btn_f, text="Dictionary & Names",
+                           command=_show_dict_editor).pack(
+                               side='left', padx=(6, 0))
 
                 start_time = [_time.monotonic()]
                 cue_count = [0]
