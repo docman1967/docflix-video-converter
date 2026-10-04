@@ -2472,6 +2472,21 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     # A cue that was empty and now has text is no longer empty,
                     # so its flag must be recomputed rather than left stale.
                     cues[idx]['empty'] = not new_text.strip()
+                    # ⭐ RESCAN THE WHOLE LIST, then repaint every row IN PLACE.
+                    # Tony, 2026-10-04: after a manual name fix he had to toggle
+                    # Highlight Spelling off and on to see the rest flagged. The
+                    # scans are whole-list: drop_recurring_words hides a word
+                    # seen 3+ times as a probable name, so fixing two of five
+                    # "Teal'k" drops the count and the other three SHOULD light
+                    # up — but only this row was ever redrawn.
+                    # ⚠️ In place, NOT _rebuild_cue_tree: that calls
+                    # _end_inline, which is how we got here (recursion), and it
+                    # re-creates every item, losing his place in the list.
+                    # Resolves at call time, like _ocr_kept above.
+                    _run_review_scans()
+                    for _it, _ci in list(_row_cue.items()):
+                        if _it != item:
+                            _refresh_row(_it, _ci)
                     _refresh_row(item, idx)
                     _row_bitmap[item] = (cues[idx].get('img'), new_text,
                                          cues[idx].get('start', ''),
@@ -7798,6 +7813,22 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     refresh_tree(cues)
                 edit_entry.destroy()
                 edit_entry = None
+                # ⭐ Tony, 2026-10-04: after a manual name fix the highlight stayed
+                # on the OLD scan until he toggled Highlight Spelling off and on.
+                # The row patch above tests `idx in spell_error_indices` — a set
+                # nothing on this path ever rescans — so a cue he just fixed
+                # stayed pink and a typo he just typed never lit. (Unlike the OCR
+                # pane, this scan is per-cue; the stale SET is the whole bug.)
+                # So when spelling is on, do the full rebuild — it rescans at the
+                # chokepoint — and put him back exactly where he was: same
+                # scroll, same cue selected.
+                if new_text and spell_scanned[0]:
+                    _yv = tree.yview()[0]
+                    refresh_tree(cues)
+                    tree.yview_moveto(_yv)
+                    if tree.exists(item):
+                        tree.selection_set(item)
+                        tree.focus(item)
                 _rebuild_stats()
 
             def cancel_edit(e=None):
