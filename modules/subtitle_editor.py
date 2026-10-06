@@ -781,6 +781,66 @@ def cue_has_colon(cue):
     return bool(_COLON_RE.search(cue.get('text') or ''))
 
 
+# Pref key in the 'subtitle_editor' section. True = skip the bitmap OCR prompt.
+OCR_NO_CONFIRM = 'ocr_no_confirm'
+
+
+def confirm_bitmap_ocr(parent, codec_label, stream_index, lang):
+    """Ask before OCR'ing a bitmap stream. Returns (proceed, dont_ask_again).
+
+    Purely informational — nothing is lost by skipping it — so it can be
+    silenced. Undo lives in View → "Ask Before OCR", so the dismissal is never
+    a dead end. Saying No never sets the dismissal, same rule as the strip-subs
+    warning in media_processor: you don't silence a prompt by backing out of it.
+    """
+    dlg = tk.Toplevel(parent)
+    dlg.title("Bitmap Subtitle — OCR Required")
+    dlg.transient(parent)
+    dlg.resizable(False, False)
+    body = ttk.Frame(dlg, padding=14)
+    body.pack(fill='both', expand=True)
+    ttk.Label(body, wraplength=360, justify='left', text=(
+        f"This subtitle stream is in {codec_label} format "
+        f"(bitmap/image-based).\n\n"
+        f"Stream #{stream_index} — {lang}\n\n"
+        f"Bitmap subtitles cannot be edited directly. They must be converted "
+        f"to text using OCR (Optical Character Recognition), which may take a "
+        f"few minutes and may not be 100% accurate.\n\n"
+        f"Continue with OCR?")).pack(anchor='w')
+
+    answer = {'ok': False}
+    dont_ask = tk.BooleanVar(value=False)
+
+    def _yes(_e=None):
+        answer['ok'] = True
+        dlg.destroy()
+
+    row = ttk.Frame(body)
+    row.pack(fill='x', pady=(12, 0))
+    ttk.Checkbutton(row, text="Don't ask again",
+                    variable=dont_ask).pack(side='left')
+    ttk.Button(row, text="No", command=dlg.destroy).pack(side='right')
+    yes_btn = ttk.Button(row, text="Yes", command=_yes)
+    yes_btn.pack(side='right', padx=(0, 6))
+    dlg.bind('<Return>', _yes)
+    dlg.bind('<Escape>', lambda e: dlg.destroy())
+
+    dlg.update_idletasks()
+    try:
+        x = parent.winfo_rootx() + (parent.winfo_width() - dlg.winfo_width()) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - dlg.winfo_height()) // 3
+        dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+    except Exception:
+        pass
+    yes_btn.focus_set()
+    try:
+        dlg.grab_set()      # can fail if the window isn't mapped yet
+    except tk.TclError:
+        pass
+    parent.wait_window(dlg)
+    return answer['ok'], (dont_ask.get() and answer['ok'])
+
+
 def delete_cues(cues, indices):
     """Remove cues at *indices* IN PLACE and renumber. Returns how many went.
 
@@ -1065,6 +1125,10 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         editor.geometry(geom_str)
         editor.minsize(*scaled_minsize(editor, 700, 500))
         editor.resizable(True, True)
+        # View → "Ask Before OCR". Read here so the prompt and the menu tick
+        # agree from the first frame.
+        ask_ocr_var = tk.BooleanVar(value=not (
+            load_module_prefs('subtitle_editor') or {}).get(OCR_NO_CONFIRM, False))
         editor.update_idletasks()
         try:
             import re as _re
@@ -1914,19 +1978,21 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 codec_label = {'hdmv_pgs_subtitle': 'PGS',
                                'dvd_subtitle': 'VobSub',
                                'dvb_subtitle': 'DVB'}.get(codec, codec)
-                proceed = messagebox.askyesno(
-                    "Bitmap Subtitle — OCR Required",
-                    f"This subtitle stream is in {codec_label} format "
-                    f"(bitmap/image-based).\n\n"
-                    f"Stream #{stream_index} — {lang}\n\n"
-                    f"Bitmap subtitles cannot be edited directly. "
-                    f"They must be converted to text using OCR "
-                    f"(Optical Character Recognition), which may "
-                    f"take a few minutes and may not be 100% accurate.\n\n"
-                    f"Continue with OCR?",
-                    parent=editor)
-                if not proceed:
-                    return
+                _se = load_module_prefs('subtitle_editor') or {}
+                if not _se.get(OCR_NO_CONFIRM, False):
+                    proceed, never = confirm_bitmap_ocr(
+                        editor, codec_label, stream_index, lang)
+                    if not proceed:
+                        return
+                    if never:
+                        # ⚠️ save_module_prefs writes BOTH stores — one alone
+                        # leaves the other stale (the 3.19.3 split).
+                        _se[OCR_NO_CONFIRM] = True
+                        try:
+                            save_module_prefs('subtitle_editor', _se)
+                        except Exception:
+                            pass
+                        ask_ocr_var.set(False)
 
             tmp_srt = tempfile.NamedTemporaryFile(suffix='.srt', delete=False,
                                                    mode='w', encoding='utf-8')
@@ -6807,6 +6873,19 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         # ── View menu ──
         view_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="View", menu=view_menu)
+
+        def _ask_ocr_toggle():
+            """The undo for the OCR prompt's "Don't ask again"."""
+            try:
+                prefs = load_module_prefs('subtitle_editor') or {}
+                prefs[OCR_NO_CONFIRM] = not ask_ocr_var.get()
+                save_module_prefs('subtitle_editor', prefs)
+            except Exception:
+                pass
+
+        view_menu.add_checkbutton(label="Ask Before OCR", variable=ask_ocr_var,
+                                  command=_ask_ocr_toggle)
+        view_menu.add_separator()
 
         def _toggle_timeline_menu():
             _toggle_timeline()
