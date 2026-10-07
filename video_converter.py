@@ -3930,6 +3930,8 @@ class VideoConverterApp:
                                command=self.open_sub_ripper)
         tools_menu.add_command(label="Docflix Track Extractor...",
                                command=self.open_track_extractor)
+        tools_menu.add_command(label="Docflix Remux...",
+                               command=self.open_remux)
         tools_menu.add_command(label="Docflix Trailer Grabber...",
                                command=self.open_trailer_downloader)
         # Help menu
@@ -6287,6 +6289,15 @@ class VideoConverterApp:
         except Exception as exc:
             messagebox.showerror("Track Extractor",
                                  f"Could not open the Track Extractor:\n{exc}")
+
+    def open_remux(self):
+        """Open the Remux tool: keep/drop/add tracks and see the result first."""
+        try:
+            from modules.remux import open_remux
+            open_remux(self)
+        except Exception as exc:
+            messagebox.showerror("Remux",
+                                 f"Could not open Remux:\n{exc}")
 
     def open_whisper_transcriber(self):
         """Open the Whisper Subtitle Transcriber tool."""
