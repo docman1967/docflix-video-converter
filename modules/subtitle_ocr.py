@@ -892,9 +892,6 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
         except Exception:
             max_workers = 4
 
-        completed_count = [0]
-        completed_lock = threading.Lock()
-
         if progress_callback:
             elapsed = _time.monotonic() - phase1_start
             progress_callback(
@@ -902,199 +899,7 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                 f"starting OCR ({max_workers} workers)...")
 
         def _decode_and_ocr(args):
-            """Decode PGS RLE bitmap + OCR in one step."""
-            i, pts, palette, rle_data, w, h, dur = args
-            img_path = os.path.join(tmpdir, f'frame_{i+1:05d}.bmp')
-            try:
-                # ── Sanity check ──
-                # ⚠️ A blank exit returns img_path=None, NOT the path. That is
-                # how the review pane tells "nothing was ever on this frame"
-                # apart from "there was text and OCR failed to read it" — the
-                # second is lost dialogue and must stay visible. Returning a
-                # path to a file that was never written would conflate them.
-                if w <= 0 or h <= 0 or w > 4096 or h > 4096:
-                    return (pts, dur, '', None)
-                expected = w * h
-                if expected > 4096 * 4096:
-                    return (pts, dur, '', None)
-
-                # ── Decode PGS RLE ──
-                pixels = bytearray(expected)
-                pp = 0
-                dp = 0
-                rle_len = len(rle_data)
-                max_iters = rle_len * 2 + expected
-                iters = 0
-                while dp < rle_len and pp < expected:
-                    iters += 1
-                    if iters > max_iters:
-                        break
-                    byte1 = rle_data[dp]; dp += 1
-                    if byte1 != 0:
-                        pixels[pp] = byte1; pp += 1
-                    else:
-                        if dp >= rle_len: break
-                        byte2 = rle_data[dp]; dp += 1
-                        if byte2 == 0:
-                            mod = pp % w
-                            if mod != 0: pp += w - mod
-                        elif byte2 < 0x40:
-                            pp += min(byte2, expected - pp)
-                        elif byte2 < 0x80:
-                            if dp >= rle_len: break
-                            byte3 = rle_data[dp]; dp += 1
-                            pp += min(((byte2 & 0x3F) << 8) | byte3, expected - pp)
-                        elif byte2 < 0xC0:
-                            run_len = byte2 & 0x3F
-                            if dp >= rle_len: break
-                            color = rle_data[dp]; dp += 1
-                            run_len = min(run_len, expected - pp)
-                            pixels[pp:pp+run_len] = bytes([color]) * run_len
-                            pp += run_len
-                        else:
-                            if dp + 1 >= rle_len: break
-                            byte3 = rle_data[dp]; dp += 1
-                            color = rle_data[dp]; dp += 1
-                            run_len = min(((byte2 & 0x3F) << 8) | byte3, expected - pp)
-                            pixels[pp:pp+run_len] = bytes([color]) * run_len
-                            pp += run_len
-
-                # ── Palette → grayscale image ──
-                # Use luminance AND alpha to separate text from shadow.
-                # PGS subtitles have bright text (white, lum~220) with
-                # dark shadow/outline (lum~30) behind it. Both have
-                # high alpha. Using alpha alone makes shadows appear as
-                # thick dark borders that merge characters together.
-                # Instead: composite on white bg, then invert. Bright
-                # text stays bright on white → inverts to dark. Dark
-                # shadow stays dark on white → inverts to light/white.
-                idx_arr = np.frombuffer(pixels, dtype=np.uint8)
-                pal_r = np.zeros(256, dtype=np.uint8)
-                pal_g = np.zeros(256, dtype=np.uint8)
-                pal_b = np.zeros(256, dtype=np.uint8)
-                pal_a = np.zeros(256, dtype=np.uint8)
-                for idx, (r, g, b, a) in palette.items():
-                    if idx < 256:
-                        pal_r[idx] = r; pal_g[idx] = g
-                        pal_b[idx] = b; pal_a[idx] = a
-
-                r_arr = pal_r[idx_arr].astype(np.float32)
-                g_arr = pal_g[idx_arr].astype(np.float32)
-                b_arr = pal_b[idx_arr].astype(np.float32)
-                a_arr = pal_a[idx_arr].astype(np.float32) / 255.0
-
-                # Grayscale luminance
-                lum = 0.299 * r_arr + 0.587 * g_arr + 0.114 * b_arr
-
-                # Composite on BLACK background: 0*(1-a) + lum*a = lum*a
-                # Result: bright text stays bright, dark shadow stays dark,
-                # transparent background = black (0).
-                # ⚠️ This comment used to say "_ocr_one will then see dark
-                # corners and invert" — _ocr_one is a DIFFERENT path and does
-                # not run on these cues. Nothing inverted them, and it cost
-                # 10% of the dialogue. The inversion now happens below, in
-                # this function, just before the white border is added.
-                gray = (lum * a_arr).clip(0, 255).astype(np.uint8)
-
-                if gray.max() < 10:
-                    return (pts, dur, '', None)  # truly blank — no ink at all
-
-                img = Image.fromarray(gray.reshape(h, w), mode='L')
-
-                # ── Crop to bounding box + padding ──
-                bbox = img.getbbox()
-                if bbox:
-                    pad = 12
-                    x1 = max(0, bbox[0] - pad)
-                    y1 = max(0, bbox[1] - pad)
-                    x2 = min(img.width, bbox[2] + pad)
-                    y2 = min(img.height, bbox[3] + pad)
-                    img = img.crop((x1, y1, x2, y2))
-
-                # Cut ♪ out before Tesseract (which cannot emit it at all) and
-                # put them back afterwards — both notes sharing a line with
-                # lyrics and cues that are nothing but notes.
-                # ⭐⭐ KEEP WHAT WAS ACTUALLY ON SCREEN, for the review pane.
-                # Tony, 2026-09-18: "the music notes aren't being put back on
-                # the bitmap like before... it was more of a comfort to be able
-                # to look at the bitmap and know immediately that the music
-                # notes belonged."
-                # The preview is his EVIDENCE that a ♪ in the text is real. Once
-                # the eraser started actually working, the saved preview became
-                # the post-erase frame and the notes vanished from it — so the
-                # text claimed a note the picture no longer showed. Tesseract
-                # gets the stripped image; the human gets the original.
-                # ⚠️ strip_notes does not mutate its input (it builds a new
-                # array), so holding this reference is safe and costs nothing.
-                img_on_screen = img
-                img, _notes = _strip_music_notes(img)
-
-                # ⚠️⚠️ NOTHING LEFT TO READ — DO NOT ASK TESSERACT.
-                # Tony, 2026-09-18: "I'm getting the 2 music notes plus the FE."
-                # A note-only cue (♪♪) has every glyph erased above, leaving a
-                # blank frame. Handed that, Tesseract at --psm 6 does not return
-                # empty — it HALLUCINATES, deterministically, and on this show it
-                # invents `FE` every time. Caught by intercepting the call: the
-                # image measured 0 dark pixels and still produced 'FE'.
-                # ⚠️ It is also frame-size dependent: the same blank content at
-                # 216x166 returned '' while 216x188 returned 'FE', which is why
-                # an isolated reproduction of the cue looked fine and the real
-                # pipeline did not. Do not trust a blank page to read as blank.
-                # ⭐ Skipping the call is also free speed on every note-only cue.
-                #
-                # ⚠️ Gate on `> 100`, the SAME threshold strip_notes uses to
-                # decide what counts as a glyph — not on max() being ~0. Erasing
-                # a note leaves an anti-aliased fringe just outside the 2px halo
-                # dilation: measured 38 surviving pixels at value <=15 on this
-                # show. A `max() < 10` test let those through and Tesseract
-                # hallucinated off 38 specks of dust. Anything at or below the
-                # glyph threshold is not text by this module's own definition.
-                # ⚠️ Only when notes were ACTUALLY erased. A dim cue that had no
-                # notes must still go to Tesseract — normalise_for_ocr stretches
-                # contrast and can rescue it, and dropping it would be lost
-                # dialogue, which is far worse than a stray `FE`.
-                if _notes and not (np.asarray(img) > 100).any():
-                    # ⚠️ STILL SAVE A PREVIEW. An earlier version of this guard
-                    # returned img_path without ever writing to it, so every
-                    # note-only cue came back with a broken thumbnail — and a
-                    # missing preview reads as "nothing was on this frame",
-                    # which is exactly the distinction img_path=None is supposed
-                    # to carry. Show the notes that WERE there.
-                    _save_ocr_preview(img_on_screen, img_path)
-                    return (pts, dur, _reinsert_music_notes('', _notes), img_path)
-
-                # ── Upscale for Tesseract ──
-                if img.height < 100:
-                    scale = max(2, 100 // img.height)
-                    img = img.resize((img.width * scale, img.height * scale),
-                                     Image.LANCZOS)
-
-                from PIL import ImageOps
-
-                # ⚠️ MUST come before the white border below, or Tesseract
-                # silently reads nothing on ~10% of cues. This path was the
-                # one missing it; _ocr_frame has always inverted.
-                img = normalise_for_ocr(img)
-
-                # ── Add white border padding ──
-                img = ImageOps.expand(img, border=20, fill=255)
-
-                # Save for monitor preview.
-                # ⭐ When notes were erased, show the ORIGINAL frame — see the
-                # note above `img_on_screen`. Otherwise the review pane would
-                # display a cue whose text says ♪ over a picture with no ♪ in
-                # it, and Tony's fastest sanity check would be reading a lie.
-                # ⚠️ Without notes this is the same image, so no extra work.
-                if _notes:
-                    _save_ocr_preview(img_on_screen, img_path)
-                else:
-                    img.save(img_path)
-
-                # ── Tesseract OCR ──
-                text = _ocr_cue(img, tess_lang, _notes)
-                return (pts, dur, text, img_path)
-            except Exception:
-                return (pts, dur, '', img_path)
+            return _decode_and_ocr_one(args, tmpdir, tess_lang)
 
         # Build args list
         all_args = [
@@ -1102,44 +907,78 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
             for i, (pts, palette, rle_data, w, h, dur) in enumerate(display_sets)
         ]
 
-        raw_results = []
-        executor = ThreadPoolExecutor(max_workers=max_workers)
-        try:
+        def _collect(use_procs):
+            """Run every cue through the pool; return the raw results.
+
+            ⚠️ Raises _PoolBroken if a worker PROCESS dies. Each future's own errors are
+            swallowed below (one bad cue must not sink the episode), so without this a
+            dead pool would hand back zero cues and report success — silently.
+            """
+            raw = []
+            done = [0]
+            if use_procs:
+                executor = _get_proc_pool(max_workers)
+                submit = lambda a: executor.submit(_proc_task, a, tmpdir, tess_lang)
+            else:
+                executor = ThreadPoolExecutor(max_workers=max_workers)
+                submit = lambda a: executor.submit(_decode_and_ocr, a)
             future_to_idx = {}
-            for args in all_args:
-                if cancel_event and cancel_event.is_set():
-                    break
-                future = executor.submit(_decode_and_ocr, args)
-                future_to_idx[future] = args[0]
+            try:
+                for args in all_args:
+                    if cancel_event and cancel_event.is_set():
+                        break
+                    future_to_idx[submit(args)] = args[0]
 
-            for future in as_completed(future_to_idx):
-                if cancel_event and cancel_event.is_set():
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    if progress_callback:
-                        progress_callback(f"OCR cancelled — {len(raw_results)} frames completed")
-                    break  # exit loop but keep partial results
+                for future in as_completed(future_to_idx):
+                    if cancel_event and cancel_event.is_set():
+                        for f in future_to_idx:
+                            f.cancel()
+                        if progress_callback:
+                            progress_callback(f"OCR cancelled — {len(raw)} frames completed")
+                        break  # exit loop but keep partial results
 
-                with completed_lock:
-                    completed_count[0] += 1
-                try:
-                    result = future.result(timeout=30)
-                    pts, dur, text, img_path = result
-                    raw_results.append(result)
+                    done[0] += 1
+                    try:
+                        result = future.result(timeout=30)
+                        if use_procs:
+                            result, stats = result
+                            for k, v in stats.items():
+                                _note_stats[k] = _note_stats.get(k, 0) + v
+                        pts, dur, text, img_path = result
+                        raw.append(result)
 
-                    if frame_callback:
-                        frame_callback(completed_count[0] - 1, total,
-                                       img_path, text or '[empty]',
-                                       _seconds_to_srt_time(pts),
-                                       _seconds_to_srt_time(pts + dur))
+                        if frame_callback:
+                            frame_callback(done[0] - 1, total,
+                                           img_path, text or '[empty]',
+                                           _seconds_to_srt_time(pts),
+                                           _seconds_to_srt_time(pts + dur))
 
-                    if progress_callback and completed_count[0] % 5 == 0:
-                        progress_callback(
-                            f"OCR: {completed_count[0]}/{total} "
-                            f"({completed_count[0]*100//total}%)")
-                except Exception:
-                    pass
-        finally:
-            executor.shutdown(wait=False)
+                        if progress_callback and done[0] % 5 == 0:
+                            progress_callback(
+                                f"OCR: {done[0]}/{total} "
+                                f"({done[0]*100//total}%)")
+                    except _BrokenProcessPool:
+                        raise _PoolBroken()
+                    except Exception:
+                        pass
+            finally:
+                if not use_procs:
+                    executor.shutdown(wait=False)
+            return raw
+
+        # ⭐ PROCESSES, not threads (2026-10-07). With threads the per-cue Python work
+        # (RLE decode, note eraser, italic check) queues on the GIL: measured on Arrow
+        # S02E05, 8 threads were only 20% faster than ONE. Each process has its own
+        # interpreter. DOCFLIX_OCR_THREADS=1 forces the old threaded path.
+        use_procs = os.environ.get('DOCFLIX_OCR_THREADS') != '1'
+        try:
+            raw_results = _collect(use_procs)
+        except _PoolBroken:
+            _drop_proc_pool()
+            reset_note_stats()
+            if progress_callback:
+                progress_callback("⚠ OCR worker process died — redoing this file on threads")
+            raw_results = _collect(False)
 
         # Sort results by timestamp and build cue list
         raw_results.sort(key=lambda r: r[0])
@@ -1197,6 +1036,267 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
         if not for_review:
             import shutil as _shutil_cleanup
             _shutil_cleanup.rmtree(tmpdir, ignore_errors=True)
+
+
+def _decode_and_ocr_one(args, tmpdir, tess_lang):
+    """Decode PGS RLE bitmap + OCR in one step. Module-level so a worker PROCESS can run it.
+
+    Moved verbatim out of ocr_bitmap_subtitle() on 2026-10-07 (it was a closure over
+    tmpdir/tess_lang, which a process pool cannot pickle). Behaviour is unchanged.
+    """
+    import numpy as np
+    from PIL import Image
+    i, pts, palette, rle_data, w, h, dur = args
+    img_path = os.path.join(tmpdir, f'frame_{i+1:05d}.bmp')
+    try:
+        # ── Sanity check ──
+        # ⚠️ A blank exit returns img_path=None, NOT the path. That is
+        # how the review pane tells "nothing was ever on this frame"
+        # apart from "there was text and OCR failed to read it" — the
+        # second is lost dialogue and must stay visible. Returning a
+        # path to a file that was never written would conflate them.
+        if w <= 0 or h <= 0 or w > 4096 or h > 4096:
+            return (pts, dur, '', None)
+        expected = w * h
+        if expected > 4096 * 4096:
+            return (pts, dur, '', None)
+
+        # ── Decode PGS RLE ──
+        pixels = bytearray(expected)
+        pp = 0
+        dp = 0
+        rle_len = len(rle_data)
+        max_iters = rle_len * 2 + expected
+        iters = 0
+        while dp < rle_len and pp < expected:
+            iters += 1
+            if iters > max_iters:
+                break
+            byte1 = rle_data[dp]; dp += 1
+            if byte1 != 0:
+                pixels[pp] = byte1; pp += 1
+            else:
+                if dp >= rle_len: break
+                byte2 = rle_data[dp]; dp += 1
+                if byte2 == 0:
+                    mod = pp % w
+                    if mod != 0: pp += w - mod
+                elif byte2 < 0x40:
+                    pp += min(byte2, expected - pp)
+                elif byte2 < 0x80:
+                    if dp >= rle_len: break
+                    byte3 = rle_data[dp]; dp += 1
+                    pp += min(((byte2 & 0x3F) << 8) | byte3, expected - pp)
+                elif byte2 < 0xC0:
+                    run_len = byte2 & 0x3F
+                    if dp >= rle_len: break
+                    color = rle_data[dp]; dp += 1
+                    run_len = min(run_len, expected - pp)
+                    pixels[pp:pp+run_len] = bytes([color]) * run_len
+                    pp += run_len
+                else:
+                    if dp + 1 >= rle_len: break
+                    byte3 = rle_data[dp]; dp += 1
+                    color = rle_data[dp]; dp += 1
+                    run_len = min(((byte2 & 0x3F) << 8) | byte3, expected - pp)
+                    pixels[pp:pp+run_len] = bytes([color]) * run_len
+                    pp += run_len
+
+        # ── Palette → grayscale image ──
+        # Use luminance AND alpha to separate text from shadow.
+        # PGS subtitles have bright text (white, lum~220) with
+        # dark shadow/outline (lum~30) behind it. Both have
+        # high alpha. Using alpha alone makes shadows appear as
+        # thick dark borders that merge characters together.
+        # Instead: composite on white bg, then invert. Bright
+        # text stays bright on white → inverts to dark. Dark
+        # shadow stays dark on white → inverts to light/white.
+        idx_arr = np.frombuffer(pixels, dtype=np.uint8)
+        pal_r = np.zeros(256, dtype=np.uint8)
+        pal_g = np.zeros(256, dtype=np.uint8)
+        pal_b = np.zeros(256, dtype=np.uint8)
+        pal_a = np.zeros(256, dtype=np.uint8)
+        for idx, (r, g, b, a) in palette.items():
+            if idx < 256:
+                pal_r[idx] = r; pal_g[idx] = g
+                pal_b[idx] = b; pal_a[idx] = a
+
+        r_arr = pal_r[idx_arr].astype(np.float32)
+        g_arr = pal_g[idx_arr].astype(np.float32)
+        b_arr = pal_b[idx_arr].astype(np.float32)
+        a_arr = pal_a[idx_arr].astype(np.float32) / 255.0
+
+        # Grayscale luminance
+        lum = 0.299 * r_arr + 0.587 * g_arr + 0.114 * b_arr
+
+        # Composite on BLACK background: 0*(1-a) + lum*a = lum*a
+        # Result: bright text stays bright, dark shadow stays dark,
+        # transparent background = black (0).
+        # ⚠️ This comment used to say "_ocr_one will then see dark
+        # corners and invert" — _ocr_one is a DIFFERENT path and does
+        # not run on these cues. Nothing inverted them, and it cost
+        # 10% of the dialogue. The inversion now happens below, in
+        # this function, just before the white border is added.
+        gray = (lum * a_arr).clip(0, 255).astype(np.uint8)
+
+        if gray.max() < 10:
+            return (pts, dur, '', None)  # truly blank — no ink at all
+
+        img = Image.fromarray(gray.reshape(h, w), mode='L')
+
+        # ── Crop to bounding box + padding ──
+        bbox = img.getbbox()
+        if bbox:
+            pad = 12
+            x1 = max(0, bbox[0] - pad)
+            y1 = max(0, bbox[1] - pad)
+            x2 = min(img.width, bbox[2] + pad)
+            y2 = min(img.height, bbox[3] + pad)
+            img = img.crop((x1, y1, x2, y2))
+
+        # Cut ♪ out before Tesseract (which cannot emit it at all) and
+        # put them back afterwards — both notes sharing a line with
+        # lyrics and cues that are nothing but notes.
+        # ⭐⭐ KEEP WHAT WAS ACTUALLY ON SCREEN, for the review pane.
+        # Tony, 2026-09-18: "the music notes aren't being put back on
+        # the bitmap like before... it was more of a comfort to be able
+        # to look at the bitmap and know immediately that the music
+        # notes belonged."
+        # The preview is his EVIDENCE that a ♪ in the text is real. Once
+        # the eraser started actually working, the saved preview became
+        # the post-erase frame and the notes vanished from it — so the
+        # text claimed a note the picture no longer showed. Tesseract
+        # gets the stripped image; the human gets the original.
+        # ⚠️ strip_notes does not mutate its input (it builds a new
+        # array), so holding this reference is safe and costs nothing.
+        img_on_screen = img
+        img, _notes = _strip_music_notes(img)
+
+        # ⚠️⚠️ NOTHING LEFT TO READ — DO NOT ASK TESSERACT.
+        # Tony, 2026-09-18: "I'm getting the 2 music notes plus the FE."
+        # A note-only cue (♪♪) has every glyph erased above, leaving a
+        # blank frame. Handed that, Tesseract at --psm 6 does not return
+        # empty — it HALLUCINATES, deterministically, and on this show it
+        # invents `FE` every time. Caught by intercepting the call: the
+        # image measured 0 dark pixels and still produced 'FE'.
+        # ⚠️ It is also frame-size dependent: the same blank content at
+        # 216x166 returned '' while 216x188 returned 'FE', which is why
+        # an isolated reproduction of the cue looked fine and the real
+        # pipeline did not. Do not trust a blank page to read as blank.
+        # ⭐ Skipping the call is also free speed on every note-only cue.
+        #
+        # ⚠️ Gate on `> 100`, the SAME threshold strip_notes uses to
+        # decide what counts as a glyph — not on max() being ~0. Erasing
+        # a note leaves an anti-aliased fringe just outside the 2px halo
+        # dilation: measured 38 surviving pixels at value <=15 on this
+        # show. A `max() < 10` test let those through and Tesseract
+        # hallucinated off 38 specks of dust. Anything at or below the
+        # glyph threshold is not text by this module's own definition.
+        # ⚠️ Only when notes were ACTUALLY erased. A dim cue that had no
+        # notes must still go to Tesseract — normalise_for_ocr stretches
+        # contrast and can rescue it, and dropping it would be lost
+        # dialogue, which is far worse than a stray `FE`.
+        if _notes and not (np.asarray(img) > 100).any():
+            # ⚠️ STILL SAVE A PREVIEW. An earlier version of this guard
+            # returned img_path without ever writing to it, so every
+            # note-only cue came back with a broken thumbnail — and a
+            # missing preview reads as "nothing was on this frame",
+            # which is exactly the distinction img_path=None is supposed
+            # to carry. Show the notes that WERE there.
+            _save_ocr_preview(img_on_screen, img_path)
+            return (pts, dur, _reinsert_music_notes('', _notes), img_path)
+
+        # ── Upscale for Tesseract ──
+        if img.height < 100:
+            scale = max(2, 100 // img.height)
+            img = img.resize((img.width * scale, img.height * scale),
+                             Image.LANCZOS)
+
+        from PIL import ImageOps
+
+        # ⚠️ MUST come before the white border below, or Tesseract
+        # silently reads nothing on ~10% of cues. This path was the
+        # one missing it; _ocr_frame has always inverted.
+        img = normalise_for_ocr(img)
+
+        # ── Add white border padding ──
+        img = ImageOps.expand(img, border=20, fill=255)
+
+        # Save for monitor preview.
+        # ⭐ When notes were erased, show the ORIGINAL frame — see the
+        # note above `img_on_screen`. Otherwise the review pane would
+        # display a cue whose text says ♪ over a picture with no ♪ in
+        # it, and Tony's fastest sanity check would be reading a lie.
+        # ⚠️ Without notes this is the same image, so no extra work.
+        if _notes:
+            _save_ocr_preview(img_on_screen, img_path)
+        else:
+            img.save(img_path)
+
+        # ── Tesseract OCR ──
+        text = _ocr_cue(img, tess_lang, _notes)
+        return (pts, dur, text, img_path)
+    except Exception:
+        return (pts, dur, '', img_path)
+
+
+# ── Process pool for OCR (see ocr_bitmap_subtitle) ──────────────────────────────
+from concurrent.futures.process import BrokenProcessPool as _BrokenProcessPool
+
+
+class _PoolBroken(Exception):
+    pass
+
+
+_proc_pool = [None, 0]          # [executor, workers]
+_proc_pool_lock = threading.Lock()
+
+
+def _proc_init():
+    """Worker start-up. ⚠️ Each process runs its own Tesseract engine; letting every
+    one also spawn OpenMP threads oversubscribes the cores (env read when libtesseract
+    first loads, which is lazily, after this)."""
+    os.environ.setdefault('OMP_THREAD_LIMIT', '1')
+
+
+def _proc_task(args, tmpdir, tess_lang):
+    """One cue in a worker process. Returns (result, note-stat counts for this cue).
+
+    ⚠️ _note_stats is per-PROCESS, so the parent would otherwise report "0 notes
+    erased" on every songful episode — the exact silent tell the summary exists for.
+    """
+    reset_note_stats()
+    r = _decode_and_ocr_one(args, tmpdir, tess_lang)
+    return r, dict(_note_stats)
+
+
+def _get_proc_pool(workers):
+    """A persistent pool, reused across episodes so engines stay warm.
+
+    ⚠️ 'spawn', never 'fork': the Suite is a threaded Tk app, and forking a process
+    that holds other threads' locks can deadlock the child.
+    """
+    import multiprocessing as _mp
+    from concurrent.futures import ProcessPoolExecutor
+    with _proc_pool_lock:
+        if _proc_pool[0] is None or _proc_pool[1] != workers:
+            if _proc_pool[0] is not None:
+                _proc_pool[0].shutdown(wait=False, cancel_futures=True)
+            _proc_pool[0] = ProcessPoolExecutor(
+                max_workers=workers, mp_context=_mp.get_context('spawn'),
+                initializer=_proc_init)
+            _proc_pool[1] = workers
+        return _proc_pool[0]
+
+
+def _drop_proc_pool():
+    with _proc_pool_lock:
+        if _proc_pool[0] is not None:
+            try:
+                _proc_pool[0].shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+        _proc_pool[0], _proc_pool[1] = None, 0
 
 
 def _seconds_to_srt_time(seconds):
