@@ -1270,10 +1270,10 @@ def detect_slant_deg(img):
     except Exception:
         return None
     dark, light = (a < 100), (a > 155)
-    ink = (dark if dark.sum() <= light.sum() else light).astype(float)
+    ink = dark if dark.sum() <= light.sum() else light
     if ink.sum() < 50:
         return None
-    rows = _np.where(ink.sum(1) > 0)[0]
+    rows = _np.where(ink.any(1))[0]
     if rows.size < 4:
         return None
     ink = ink[rows.min():rows.max() + 1]
@@ -1281,13 +1281,17 @@ def detect_slant_deg(img):
     lo, hi = _SLANT_SEARCH
     pad = int(_np.tan(_np.deg2rad(max(abs(lo), abs(hi)))) * h) + 2
     length = w + 2 * pad
+    # Vectorised 2026-10-07: shear only the INK pixels and bincount them, instead of
+    # a Python loop over every row for every angle. Verified identical (0 of 584 real
+    # Arrow cues differ). ⚠️ np.trunc matches the old int() — both round toward zero;
+    # floor would shift negative shears by one column and change the answer.
+    ys, xs = _np.nonzero(ink)
+    up = (h - 1 - ys).astype(float)
     best, best_score = None, -1.0
     for deg in range(lo, hi + 1):
         sh = _np.tan(_np.deg2rad(deg))
-        acc = _np.zeros(length)
-        for y in range(h):
-            off = pad + int(sh * (h - 1 - y))
-            acc[off:off + w] += ink[y]
+        idx = pad + _np.trunc(sh * up).astype(_np.int64) + xs
+        acc = _np.bincount(idx, minlength=length).astype(float)
         score = float((acc ** 2).sum())
         if score > best_score:
             best_score, best = score, float(deg)
@@ -1378,10 +1382,16 @@ def _ocr_cue(img, tess_lang, notes):
     file. **Structure is not behaviour.**
     """
     import pytesseract
+    from .tess_engine import image_to_string as _engine_ocr
 
     italic = looks_italic(img)
-    text = pytesseract.image_to_string(
-        img, lang=tess_lang, config='--psm 6 --oem 3').strip()
+    # ⭐ Persistent engine first (~4.5x faster, identical text — see tess_engine.py).
+    # None means the library is unavailable: fall back, never return empty.
+    text = _engine_ocr(img, tess_lang)
+    if text is None:
+        text = pytesseract.image_to_string(
+            img, lang=tess_lang, config='--psm 6 --oem 3')
+    text = text.strip()
     text = _reinsert_music_notes(_fix_ocr_text(text), notes)
     return apply_italic_tag(text, italic)
 
