@@ -21,6 +21,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+from types import SimpleNamespace
 from tkinter import ttk, filedialog, messagebox
 
 from .constants import (
@@ -3599,6 +3600,10 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # work: everything else ends at mon.destroy() and the cues live
                 # in a TEMP file, so the whole run goes with the window.
                 _ocr_kept = {'saved': False, 'loaded': False}
+                # True from the moment an OCR run starts until its results are on
+                # screen. ⚠️ Not `t.is_alive()`: _do_retry starts its thread in a
+                # LOCAL `t`, so the outer one goes stale after the first Retry.
+                _ocr_running = [False]
 
                 def _close_monitor():
                     """Close the OCR window, warning first if work would be lost.
@@ -3966,6 +3971,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 def _ocr_thread():
                     # Use current cancel_event (may be reassigned on retry)
                     _cancel = cancel_event
+                    _ocr_running[0] = True
                     # for_review=True keeps the rendered bitmaps alive and
                     # attaches 'img' to each cue, so a finished run stays
                     # reviewable — click a cue, see the image it was read from.
@@ -3973,15 +3979,20 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     # or counts these cues must go through write_srt_file /
                     # _real_cue_count. The bitmap dir is OURS to delete now —
                     # see _release_bitmaps().
-                    ocr_cues = ocr_bitmap_subtitle(
-                        video_path, stream_index, ocr_lang,
-                        progress_callback=_on_progress,
-                        frame_callback=_on_frame,
-                        cancel_event=_cancel,
-                        for_review=True)
+                    try:
+                        ocr_cues = ocr_bitmap_subtitle(
+                            video_path, stream_index, ocr_lang,
+                            progress_callback=_on_progress,
+                            frame_callback=_on_frame,
+                            cancel_event=_cancel,
+                            for_review=True)
+                    except Exception:
+                        _ocr_running[0] = False
+                        raise
                     ocr_result[0] = ocr_cues
 
                     def _finish():
+                        _ocr_running[0] = False
                         elapsed = _time.monotonic() - start_time[0]
                         elapsed_m, elapsed_s = divmod(int(elapsed), 60)
 
@@ -4224,6 +4235,40 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 t.start()
 
                 mon.protocol('WM_DELETE_WINDOW', _do_cancel)
+
+                # ── Drop the next file straight onto the OCR window ──
+                # ⭐ Tony, 2026-10-07: *"Right now I have to save, close and then
+                # drag it into the subtitle editor window to trigger the OCR."*
+                # A drop here = Close, then the same as dropping on the editor.
+                # ⚠️ Goes THROUGH _close_monitor, so the "not saved" guard still
+                # stands between a drop and losing this run.
+                # ⚠️ Deferred with after(): destroying the window a drop landed
+                # on, from inside its own drop callback, is the shape of the
+                # 2026-08-07 vanishing-window bug.
+                if HAS_DND:
+                    def _on_mon_drop(event):
+                        raw = event.data
+
+                        def _go():
+                            if _ocr_running[0]:
+                                messagebox.showinfo(
+                                    "OCR still running",
+                                    "This OCR is still running.\n\n"
+                                    "Let it finish (or Cancel OCR), then drop "
+                                    "the next file again.",
+                                    parent=mon)
+                                return
+                            _close_monitor()
+                            try:
+                                still_open = mon.winfo_exists()
+                            except tk.TclError:
+                                still_open = False
+                            if not still_open:
+                                on_drop_subtitle(SimpleNamespace(data=raw))
+                        editor.after(50, _go)
+
+                    mon.drop_target_register(DND_FILES)
+                    mon.dnd_bind('<<Drop>>', _on_mon_drop)
                 return  # monitor window handles everything asynchronously
 
             # ── Non-bitmap: progress dialog during extraction ──
