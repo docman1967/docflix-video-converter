@@ -173,6 +173,31 @@ def build_command(sources, order, out_path):
     return cmd
 
 
+_EPISODE = re.compile(r'[Ss](\d{1,2})[Ee](\d{1,3})')
+
+
+def episode_key(path):
+    """(season, episode) from a file name, or None — how a dropped .mka finds
+    its video when several episodes are loaded at once."""
+    m = _EPISODE.search(Path(path).name)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def job_summary(job):
+    """(summary text, changed?) for one file's job, without touching the window."""
+    srcs, order = job['sources'], job['order']
+    m = srcs[0]
+    type_of = {(s['sid'], t['id']): t['type'] for s in srcs for t in s['tracks']}
+    dropped = sum(1 for t in m['tracks'] if (m['sid'], t['id']) not in order)
+    added = sum(1 for k in order if k[0] != m['sid'])
+    counts = {ty: sum(1 for k in order if type_of.get(k) == ty)
+              for ty in ('video', 'audio', 'subtitles')}
+    text = (f"{counts['video']} video · {counts['audio']} audio · "
+            f"{counts['subtitles']} subtitle   —   {dropped} dropped, {added} added")
+    changed = order != [(m['sid'], t['id']) for t in m['tracks']]
+    return text, changed
+
+
 def new_file_name(main_path):
     p = Path(main_path)
     return p.with_name(f"{p.stem} (remux){p.suffix if p.suffix == '.mkv' else '.mkv'}")
@@ -207,12 +232,20 @@ def open_remux(app, path=None):
     win.deiconify()
 
     prefs = load_module_prefs(PREFS)
+    # ⭐ Batch (Tony, 2026-10-09 — after two days of one at a time): several
+    # files can be loaded at once. Each is a JOB with its own sources/order;
+    # `sources` and `order` below are always the job ON SCREEN, so every
+    # single-file path (tick, move, add, remove) works unchanged on it.
+    # The safety habit he chose one-at-a-time for is kept: each file is still
+    # looked at in the Result pane, and each is verified before it replaces.
+    jobs = []                    # [{'sources', 'order', 'state'}]
     sources = []                 # [{'sid','path','tracks','main','duration'}]
     order = []                   # [(sid, tid)] kept, in output order
     _sid = [0]
     _running = [False]
     _proc = [None]
     _q = queue.Queue()
+    _quiet = [False]             # set while the code itself selects a file row
 
     def _main():
         return sources[0] if sources and sources[0]['main'] else None
@@ -228,11 +261,18 @@ def open_remux(app, path=None):
     def _type_of(key):
         return _track(key)[1]['type']
 
+    def _cur():
+        return next((i for i, j in enumerate(jobs) if j['sources'] is sources), None)
+
+    def _show(i):
+        nonlocal sources, order
+        sources, order = jobs[i]['sources'], jobs[i]['order']
+
     frame = ttk.Frame(win, padding=8)
     frame.pack(fill='both', expand=True)
     frame.columnconfigure(0, weight=3)
     frame.columnconfigure(1, weight=2)
-    frame.rowconfigure(1, weight=1)
+    frame.rowconfigure(2, weight=1)
 
     # ── Toolbar ──
     bar = ttk.Frame(frame)
@@ -240,9 +280,27 @@ def open_remux(app, path=None):
     file_var = tk.StringVar(value="Drop a video file here, or Open…")
     _btns = []
 
+    # ── Files (only shown when more than one is loaded) ──
+    files = ttk.LabelFrame(frame, text="Files  (click one to see and change it · Delete takes it out)")
+    files.columnconfigure(0, weight=1)
+    jt = ttk.Treeview(files, columns=('st', 'file', 'sum'), show='headings',
+                      selectmode='browse', height=6)
+    jt.heading('st', text='', anchor='center')
+    jt.heading('file', text='File', anchor='w')
+    jt.heading('sum', text='Result', anchor='w')
+    jt.column('st', width=34, minwidth=30, stretch=False, anchor='center')
+    jt.column('file', width=520, minwidth=200, stretch=True)
+    jt.column('sum', width=420, minwidth=200, stretch=True)
+    jt.grid(row=0, column=0, sticky='nsew')
+    jsb = ttk.Scrollbar(files, orient='vertical', command=jt.yview)
+    jsb.grid(row=0, column=1, sticky='ns')
+    jt['yscrollcommand'] = jsb.set
+    jt.tag_configure('same', foreground='gray')
+    jt.tag_configure('bad', foreground='#b00020')
+
     # ── Left: tracks ──
     left = ttk.LabelFrame(frame, text="Tracks  (tick what stays · drop .mka / .srt / another video to add)")
-    left.grid(row=1, column=0, sticky='nsew', padx=(0, 6))
+    left.grid(row=2, column=0, sticky='nsew', padx=(0, 6))
     left.columnconfigure(0, weight=1)
     left.rowconfigure(0, weight=1)
     tree = ttk.Treeview(left, columns=('keep', 'what'), show='tree headings',
@@ -262,7 +320,7 @@ def open_remux(app, path=None):
 
     # ── Right: the result ──
     right = ttk.LabelFrame(frame, text="Result  (what will be written)")
-    right.grid(row=1, column=1, sticky='nsew')
+    right.grid(row=2, column=1, sticky='nsew')
     right.columnconfigure(0, weight=1)
     right.rowconfigure(0, weight=1)
     res = ttk.Treeview(right, columns=('n', 't', 'what'), show='headings',
@@ -286,7 +344,7 @@ def open_remux(app, path=None):
 
     # ── Bottom ──
     bot = ttk.Frame(frame)
-    bot.grid(row=2, column=0, columnspan=2, sticky='ew', pady=(8, 0))
+    bot.grid(row=3, column=0, columnspan=2, sticky='ew', pady=(8, 0))
     replace_var = tk.BooleanVar(value=bool(prefs.get('replace', False)))
     status_var = tk.StringVar(value='')
     prog = ttk.Progressbar(bot, mode='determinate', maximum=100, length=220)
@@ -321,25 +379,71 @@ def open_remux(app, path=None):
         m = _main()
         if m:
             file_var.set(str(m['path']))
-            dropped = sum(1 for t in m['tracks'] if (m['sid'], t['id']) not in order)
-            added = sum(1 for k in order if k[0] != m['sid'])
-            counts = {ty: sum(1 for k in order if _type_of(k) == ty)
-                      for ty in ('video', 'audio', 'subtitles')}
-            summary_var.set(
-                f"{counts['video']} video · {counts['audio']} audio · "
-                f"{counts['subtitles']} subtitle   —   "
-                f"{dropped} dropped, {added} added")
+            summary_var.set(job_summary({'sources': sources, 'order': order})[0])
         else:
+            file_var.set("Drop a video file here, or Open…")
             summary_var.set('')
+        _rebuild_files()
         _refresh_buttons()
 
+    def _rebuild_files():
+        if len(jobs) < 2:
+            files.grid_remove()
+            return
+        files.grid(row=1, column=0, columnspan=2, sticky='nsew', pady=(0, 6))
+        jt.delete(*jt.get_children())
+        for i, j in enumerate(jobs):
+            text, changed = job_summary(j)
+            # An added file that contributes nothing is the batch mistake worth
+            # catching at a glance: it was paired, but nothing of it is ticked.
+            idle = [s['path'].name for s in j['sources'][1:]
+                    if not any(k[0] == s['sid'] for k in j['order'])]
+            if idle:
+                text += f"   ⚠ nothing taken from {', '.join(idle)}"
+            tag = ('bad',) if j['state'] == '✖' or idle else (() if changed else ('same',))
+            jt.insert('', 'end', iid=f"j{i}", tags=tag,
+                      values=(j['state'], j['sources'][0]['path'].name,
+                              text if changed or idle else 'no change — will be skipped'))
+        c = _cur()
+        if c is not None:
+            _quiet[0] = True
+            jt.selection_set(f"j{c}")
+            jt.see(f"j{c}")
+            win.after_idle(lambda: _quiet.__setitem__(0, False))
+
+    def _on_pick(_event=None):
+        if _quiet[0] or _running[0]:
+            return
+        sel = jt.selection()
+        if sel:
+            i = int(sel[0][1:])
+            if i != _cur():
+                _show(i)
+                _rebuild()
+
+    def _drop_job(_event=None):
+        if _running[0] or len(jobs) < 2:
+            return
+        sel = jt.selection()
+        if not sel:
+            return
+        i = int(sel[0][1:])
+        jobs.pop(i)
+        _show(min(i, len(jobs) - 1))
+        _rebuild()
+
+    jt.bind('<<TreeviewSelect>>', _on_pick)
+    jt.bind('<Delete>', _drop_job)
+
+    def _to_write():
+        return [j for j in jobs if job_summary(j)[1] and j['order']]
+
     def _refresh_buttons():
-        m = _main()
-        ok = bool(m) and not _running[0]
-        changed = bool(m) and order != [(m['sid'], t['id']) for t in m['tracks']]
         for b in _btns:
             b.configure(state='normal' if (not _running[0]) else 'disabled')
-        write_btn.configure(state='normal' if (ok and changed and order) else 'disabled')
+        n = len(_to_write())
+        write_btn.configure(text="Write" if len(jobs) < 2 else f"Write All ({n})",
+                            state='normal' if (n and not _running[0]) else 'disabled')
 
     def _add_source(path, main):
         try:
@@ -379,36 +483,89 @@ def open_remux(app, path=None):
                 for t in tracks:
                     order.insert(insert_pos(order, t['type'], _type_of),
                                  (sid, t['id']))
-        _rebuild()
+
+    def _new_job(p):
+        """A new file of its own. Returns its index, or None if unreadable."""
+        nonlocal sources, order
+        keep = (sources, order)
+        sources, order = [], []
+        _add_source(p, main=True)
+        if not sources:
+            sources, order = keep
+            return None
+        jobs.append({'sources': sources, 'order': order, 'state': ''})
+        return len(jobs) - 1
+
+    def _job_for(p):
+        """The loaded file *p* belongs to, by its S01E01 — None if it has no
+        episode number, -1 if it has one that matches no loaded file."""
+        k = episode_key(p)
+        if not k:
+            return None
+        hits = [i for i, j in enumerate(jobs)
+                if episode_key(j['sources'][0]['path']) == k
+                and j['sources'][0]['path'] != p]
+        return hits[0] if len(hits) == 1 else -1
 
     def _take_paths(paths):
         if _running[0]:
             return
-        for p in paths:
-            p = Path(p)
-            if not p.is_file():
-                continue
-            ext = p.suffix.lower()
-            if not _main() and ext in VIDEO_EXTENSIONS:
-                _add_source(p, main=True)
-            elif _main() and ext in ADDABLE:
-                if any(s['path'] == p for s in sources):
-                    continue
-                _add_source(p, main=False)
-            elif not _main():
+        paths = [Path(p) for p in paths if Path(p).is_file()]
+        vids = [p for p in paths if p.suffix.lower() in VIDEO_EXTENSIONS]
+        rest = [p for p in paths if p.suffix.lower() in ADDABLE and p not in vids]
+        show = _cur()
+        if not jobs:
+            if not vids:
                 messagebox.showinfo("Remux", "Start with the video file you want to "
                                     "remux — then drop the tracks to add.", parent=win)
                 return
+            keys = [episode_key(v) for v in vids]
+            if any(k and keys.count(k) > 1 for k in keys):
+                messagebox.showinfo(
+                    "Remux", "Two of those videos are the same episode, so I can't "
+                    "tell which one you're remuxing.\n\nDrop the files to remux "
+                    "first, then the copies to take tracks from.", parent=win)
+                return
+            for v in vids:
+                i = _new_job(v)
+                if show is None and i is not None:
+                    show = i
+        else:
+            rest = vids + rest
+        mains = {j['sources'][0]['path'] for j in jobs}
+        lost = []
+        for p in rest:
+            if p in mains:
+                continue
+            i = _job_for(p)
+            if i == -1 or (i is None and len(jobs) > 1 and p in vids):
+                if p in vids and i == -1:
+                    _new_job(p)            # another episode: a file of its own
+                else:
+                    lost.append(p.name)
+                continue
+            if i is None:
+                i = show if show is not None else 0   # no episode number: this file
+            if any(s['path'] == p for s in jobs[i]['sources']):
+                continue
+            _show(i)
+            _add_source(p, main=False)
+        if jobs:
+            _show(show if show is not None and show < len(jobs) else 0)
+        _rebuild()
+        if lost:
+            messagebox.showinfo(
+                "Remux", "These don't match any file that's loaded (by S01E01), "
+                "so they weren't added:\n\n" + "\n".join(lost), parent=win)
 
     def _open():
         paths = ask_open_files(
-            parent=win, title="Open a video to remux",
+            parent=win, title="Open videos to remux",
             filetypes=[("Video files", " ".join(f"*{e}" for e in sorted(VIDEO_EXTENSIONS))),
                        ("All files", "*.*")])
         if paths:
-            sources.clear()
-            order.clear()
-            _take_paths(paths[:1])
+            _clear()
+            _take_paths(paths)
 
     def _add():
         if not _main():
@@ -418,6 +575,16 @@ def open_remux(app, path=None):
             filetypes=[("Tracks or videos", " ".join(f"*{e}" for e in sorted(ADDABLE))),
                        ("All files", "*.*")])
         _take_paths(paths or [])
+
+    def _clear():
+        nonlocal sources, order
+        if _running[0]:
+            return
+        jobs.clear()
+        sources, order = [], []
+        status_var.set('')
+        prog['value'] = 0
+        _rebuild()
 
     def _remove_added():
         sel = tree.selection()
@@ -433,13 +600,15 @@ def open_remux(app, path=None):
         _rebuild()
 
     def _english_only():
-        for s in sources:
-            for t in s['tracks']:
-                key = (s['sid'], t['id'])
-                lang = t['set'].get('lang', t['lang'])
-                if (t['type'] in ('audio', 'subtitles') and key in order
-                        and lang not in _KEEP_AS_ENGLISH):
-                    order.remove(key)
+        # Every loaded file: with a season loaded, this is the point of it.
+        for j in jobs:
+            for s in j['sources']:
+                for t in s['tracks']:
+                    key = (s['sid'], t['id'])
+                    lang = t['set'].get('lang', t['lang'])
+                    if (t['type'] in ('audio', 'subtitles') and key in j['order']
+                            and lang not in _KEEP_AS_ENGLISH):
+                        j['order'].remove(key)
         _rebuild()
 
     def _move(delta):
@@ -475,7 +644,7 @@ def open_remux(app, path=None):
 
     for txt, cmd in (("Open…", _open), ("Add Tracks…", _add),
                      ("Remove Added File", _remove_added),
-                     ("English Only", _english_only)):
+                     ("English Only", _english_only), ("Clear", _clear)):
         b = ttk.Button(bar, text=txt, command=cmd)
         b.pack(side='left', padx=(0, 6))
         _btns.append(b)
@@ -495,7 +664,7 @@ def open_remux(app, path=None):
             # ⚠️ Deferred: never do real work (dialogs, probes) inside the
             # drop callback itself — see the 2026-08-07 vanishing-window bug.
             win.after(30, lambda: _take_paths(paths))
-        for w in (win, tree, res):
+        for w in (win, tree, res, jt):
             try:
                 w.drop_target_register(DND_FILES)
                 w.dnd_bind('<<Drop>>', _on_drop)
@@ -515,30 +684,42 @@ def open_remux(app, path=None):
         side='right', padx=(0, 8))
 
     def _write():
-        m = _main()
-        if not m or not order or _running[0]:
+        todo = _to_write()
+        if not todo or _running[0]:
             return
-        if not any(_type_of(k) == 'video' for k in order):
-            if not messagebox.askyesno("Remux", "The result has no video track.\n\n"
-                                       "Write it anyway?", parent=win, default='no'):
-                return
+
+        def has_video(j):
+            tt = {(s['sid'], t['id']): t['type'] for s in j['sources'] for t in s['tracks']}
+            return any(tt.get(k) == 'video' for k in j['order'])
+        novid = [j['sources'][0]['path'].name for j in todo if not has_video(j)]
+        if novid and not messagebox.askyesno(
+                "Remux", "No video track in the result for:\n\n" + "\n".join(novid)
+                + "\n\nWrite anyway?", parent=win, default='no'):
+            return
         replace = bool(replace_var.get())
-        if replace:
-            out = m['path'].with_name(f".{m['path'].stem}.remux-tmp.mkv")
-        else:
-            out = new_file_name(m['path'])
-            if out.exists() and not messagebox.askyesno(
-                    "Remux", f"{out.name} already exists.\n\nOverwrite it?",
-                    parent=win, default='no'):
+        plan = []
+        for j in todo:
+            mp = j['sources'][0]['path']
+            out = (mp.with_name(f".{mp.stem}.remux-tmp.mkv") if replace
+                   else new_file_name(mp))
+            plan.append((j, out, build_command(j['sources'], j['order'], out),
+                         len(j['order']), j['sources'][0]['duration']))
+        if not replace:
+            there = [out.name for _, out, *_ in plan if out.exists()]
+            if there and not messagebox.askyesno(
+                    "Remux", "Already exists:\n\n" + "\n".join(there)
+                    + "\n\nOverwrite?", parent=win, default='no'):
                 return
-        cmd = build_command(sources, order, out)
+        for j in jobs:
+            j['state'] = '…' if any(p[0] is j for p in plan) else j['state']
         _running[0] = True
         _refresh_buttons()
+        _rebuild_files()
         prog['value'] = 0
         status_var.set("Writing…")
-        n_tracks = len(order)
+        total = len(plan)
 
-        def work():
+        def one(k, j, out, cmd, n_tracks, duration):
             msgs = []
             try:
                 p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
@@ -548,21 +729,21 @@ def open_remux(app, path=None):
                     line = line.strip()
                     mm = re.match(r'#GUI#progress (\d+)%', line)
                     if mm:
-                        _q.put(('prog', int(mm.group(1))))
+                        _q.put(('prog', (k, total, int(mm.group(1)))))
                     elif line.startswith(('#GUI#error', '#GUI#warning')):
                         msgs.append(line.split(' ', 1)[-1])
                 rc = p.wait()
                 if rc not in (0, 1):
                     raise RuntimeError("mkvmerge failed:\n" + "\n".join(msgs[-6:]))
-                problem = verify(out, n_tracks, m['duration'])
+                problem = verify(out, n_tracks, duration)
                 if problem:
                     raise RuntimeError(f"The new file failed its check: {problem}.\n\n"
                                        "Nothing was replaced.")
                 final = out
                 if replace:
-                    os.replace(out, m['path'])
-                    final = m['path']
-                _q.put(('done', (final, msgs)))
+                    os.replace(out, j['sources'][0]['path'])
+                    final = j['sources'][0]['path']
+                return final, msgs, None
             except Exception as e:
                 # A file that failed is never left lying around to be mistaken
                 # for a good one. (`out` is never the original: replace mode
@@ -572,41 +753,77 @@ def open_remux(app, path=None):
                         out.unlink()
                     except OSError:
                         pass
-                _q.put(('fail', str(e)))
+                return None, msgs, str(e)
             finally:
                 _proc[0] = None
+
+        def work():
+            # One after another, never in parallel: each is verified before it
+            # replaces anything, and a failure stops nothing but itself.
+            results = []
+            for k, (j, out, cmd, n_tracks, duration) in enumerate(plan):
+                if not _running[0]:
+                    break
+                r = one(k, j, out, cmd, n_tracks, duration)
+                results.append((j,) + r)
+                _q.put(('one', (j, r[2] is None)))
+            _q.put(('done', results))
 
         threading.Thread(target=work, daemon=True).start()
 
     write_btn.configure(command=_write)
+
+    def _reload(j, final):
+        """Show what's now on disk for job *j*, so the panes tell the truth."""
+        here = _cur()
+        _show(next(i for i, x in enumerate(jobs) if x is j))
+        sources.clear()
+        order.clear()
+        _add_source(final, main=True)
+        j['state'] = '✔'
+        if here is not None:
+            _show(here)
 
     def _poll():
         try:
             while True:
                 kind, val = _q.get_nowait()
                 if kind == 'prog':
-                    prog['value'] = val
-                    status_var.set(f"Writing… {val}%")
+                    k, total, pct = val
+                    prog['value'] = int((k * 100 + pct) / total)
+                    status_var.set(f"Writing… {pct}%" if total == 1
+                                   else f"Writing {k + 1} of {total}… {pct}%")
+                elif kind == 'one':
+                    j, ok = val
+                    j['state'] = '✔' if ok else '✖'
+                    _rebuild_files()
                 elif kind == 'done':
-                    final, msgs = val
                     _running[0] = False
-                    prog['value'] = 100
-                    status_var.set(f"✔ Written: {final.name}")
-                    if hasattr(app, 'add_log'):
-                        app.add_log(f"Remux written: {final}", 'SUCCESS')
-                    # Reload what's now on disk, so the panes show the truth.
-                    sources.clear()
-                    order.clear()
-                    _add_source(final, main=True)
-                    if msgs:
+                    ok = [(j, final, msgs) for j, final, msgs, err in val if not err]
+                    bad = [(j, err) for j, final, msgs, err in val if err]
+                    warn = [m for _, _, msgs, _ in val for m in msgs]
+                    for j, final, _ in ok:
+                        if hasattr(app, 'add_log'):
+                            app.add_log(f"Remux written: {final}", 'SUCCESS')
+                        if any(x is j for x in jobs):
+                            _reload(j, final)
+                    prog['value'] = 100 if ok and not bad else prog['value']
+                    if len(val) == 1 and ok:
+                        status_var.set(f"✔ Written: {ok[0][1].name}")
+                    elif len(val) == 1:
+                        status_var.set("✖ Failed")
+                    else:
+                        status_var.set(f"✔ {len(ok)} written" +
+                                       (f", ✖ {len(bad)} failed" if bad else ""))
+                    _rebuild()
+                    if bad:
+                        messagebox.showerror(
+                            "Remux", "\n\n".join(
+                                (f"{j['sources'][0]['path'].name}:\n" if len(val) > 1 else "")
+                                + err for j, err in bad), parent=win)
+                    elif warn:
                         messagebox.showinfo("Remux — written with warnings",
-                                            "\n".join(msgs[-6:]), parent=win)
-                elif kind == 'fail':
-                    _running[0] = False
-                    prog['value'] = 0
-                    status_var.set("✖ Failed")
-                    _refresh_buttons()
-                    messagebox.showerror("Remux", val, parent=win)
+                                            "\n".join(warn[-6:]), parent=win)
         except queue.Empty:
             pass
         if win.winfo_exists():
@@ -617,6 +834,7 @@ def open_remux(app, path=None):
             if not messagebox.askyesno("Remux", "A remux is being written.\n\n"
                                        "Stop it and close?", parent=win, default='no'):
                 return
+            _running[0] = False          # no further files after this one
             p = _proc[0]
             if p:
                 p.kill()

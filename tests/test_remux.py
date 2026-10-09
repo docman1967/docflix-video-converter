@@ -52,3 +52,19 @@ def test_insert_keeps_type_groups_together():
     order = [(1, 0), (1, 1), (1, 3)]
     assert R.insert_pos(order, 'audio', types.get) == 2     # after the audio, before subs
     assert R.insert_pos(order, 'subtitles', types.get) == 3
+
+
+def test_episode_key_pairs_a_track_with_its_video():
+    assert R.episode_key('/x/Breaking Bad - S05E01 - Live Free or Die.mkv') == (5, 1)
+    assert R.episode_key('Show.s1e12.commentary.eng.mka') == (1, 12)
+    assert R.episode_key('/x/Some Movie (1999).mkv') is None
+
+
+def test_job_summary_flags_an_untouched_file_as_unchanged():
+    m = dict(MAIN)
+    same = {'sources': [m], 'order': [(1, t['id']) for t in m['tracks']]}
+    text, changed = R.job_summary(same)
+    assert not changed and '0 dropped, 0 added' in text
+    added = {'sources': [m, SRT], 'order': [(1, 0), (1, 1), (1, 3), (9, 0)]}
+    text, changed = R.job_summary(added)
+    assert changed and '1 dropped, 1 added' in text and '2 subtitle' in text
