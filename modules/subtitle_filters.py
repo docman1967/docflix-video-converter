@@ -631,9 +631,18 @@ def filter_remove_hi(cues):
     Does NOT remove standalone ALL CAPS HI lines (UK style) —
     use filter_remove_caps_hi() for that.
     """
+    # ⛔ NO "UNCLOSED [ → DELETE THE LINE" RULE. There used to be one
+    # (r'^\[(?!.*\]).*$'), and an unclosed "[" is NOT proof the line is HI:
+    #   "[ think so."           — a capital I OCR'd as "["
+    #   "[Hank| Good luck!"     — a "]" OCR'd as "|", dialogue after it
+    # Both were deleted whole. Italics hid it until Remove Tags ran first;
+    # the panel's second pass then took the line, which is how Tony found
+    # it (2026-10-11): HI alone kept the line, HI + Tags removed it.
+    # Tony: "I'm not sure we need to remove the line at all... removing the
+    # line would also remove the spoken words." A stray bracket left in the
+    # text is visible and fixable; spoken words deleted are not.
     hi_patterns = [
         re.compile(r'\[.*?\]', re.DOTALL),
-        re.compile(r'^\[(?!.*\]).*$', re.MULTILINE),
         re.compile(r'\(.*?\)', re.DOTALL),
     ]
     speaker_pattern = re.compile(
