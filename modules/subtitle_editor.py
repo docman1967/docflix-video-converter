@@ -3016,7 +3016,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     # teach — Tony needs the full list reachable from here, not
                     # only the words this particular row happens to flag.
                     menu.add_separator()
-                    menu.add_command(label="Dictionary & Names…",
+                    menu.add_command(label="Dictionary, Names & Acronyms…",
                                      command=_show_dict_editor)
 
                     # ⚠️⚠️ DO NOT PUT grab_release() IN A `finally` HERE. That is
@@ -3826,7 +3826,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 ttk.Button(btn_f, text="OCR Rules",
                            command=_show_ocr_rules).pack(
                                side='left')
-                ttk.Button(btn_f, text="Dictionary & Names",
+                ttk.Button(btn_f, text="Dictionary, Names & Acronyms",
                            command=_show_dict_editor).pack(
                                side='left', padx=(6, 0))
 
@@ -5460,7 +5460,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         # ⚠️ ONE ampersand. Tk menu labels are literal — mnemonics come from
         # `underline=`, not from `&`. "Dictionary && Names..." would render the
         # double ampersand verbatim; that escaping is a Qt habit.
-        filter_menu.add_command(label="Dictionary & Names...",
+        filter_menu.add_command(label="Dictionary, Names & Acronyms...",
                                 command=_edit_dictionary)
 
         def _find_allcaps():

@@ -129,11 +129,31 @@ def _ordinary_word_checker():
     return lambda w: not spell.unknown([w])
 
 
+def is_acronym(word):
+    """True for an ALL-CAPS entry of two or more letters: LAPD, DEO, U.S.
+
+    ⭐ Tony, 2026-10-12: *"I still need access to edit the acronyms."* They were
+    always here, in the Names list — "is correct, stop flagging it" on an
+    ALL-CAPS word saves it there — but mixed in with 400-odd names, so a wrong
+    one was effectively unfindable. The window now shows them as their own
+    pane. ⚠️ Same STORAGE (custom_cap_words), split VIEW; nothing moves.
+    """
+    letters = [c for c in str(word) if c.isalpha()]
+    return len(letters) >= 2 and all(c.isupper() for c in letters)
+
+
+def split_names(cap_words):
+    """(names, acronyms) from the one stored list, order preserved."""
+    names = [w for w in cap_words if not is_acronym(w)]
+    acronyms = [w for w in cap_words if is_acronym(w)]
+    return names, acronyms
+
+
 def show_dictionary_editor(app, parent, on_change=None):
-    """The Dictionary & Names window. `on_change` re-paints the editor's rows."""
+    """The Dictionary, Names & Acronyms window. `on_change` re-paints the editor."""
     win = tk.Toplevel(parent)
-    win.title("Dictionary & Names")
-    win.geometry("760x560")
+    win.title("Dictionary, Names & Acronyms")
+    win.geometry("1020x560")
     win.resizable(True, True)
     try:
         app._center_on_main(win)
@@ -145,11 +165,15 @@ def show_dictionary_editor(app, parent, on_change=None):
     ordinary = _ordinary_word_checker()
 
     ttk.Label(win, padding=(10, 8), justify='center',
-              text="Everything “Add to Dict” and “Add as Name” has ever saved.\n"
+              text="Everything “Add to Dict”, “Add as Name” and “stop flagging "
+                   "it” has ever saved.\n"
                    "Select one or more entries and press Remove.").pack()
 
     panes = ttk.Frame(win, padding=(8, 0))
     panes.pack(fill='both', expand=True)
+    for col in range(3):
+        panes.columnconfigure(col, weight=1, uniform='pane')
+    panes.rowconfigure(0, weight=1)
 
     def _save(why):
         # ⚠️ Back up ONCE per session, before the first change — not after.
@@ -169,26 +193,30 @@ def show_dictionary_editor(app, parent, on_change=None):
                 pass          # a repaint failure must not lose the edit
         return True
 
-    def build(side, title, getter, setter, case_insensitive, risky_pane):
+    def build(col, title, getter, remove, add, risky_pane, clean=None):
         frame = ttk.LabelFrame(panes, text=title, padding=8)
-        frame.pack(side=side, fill='both', expand=True,
-                   padx=(0, 6) if side == 'left' else (6, 0))
+        frame.grid(row=0, column=col, sticky='nsew',
+                   padx=(0 if col == 0 else 4, 0 if col == 2 else 4))
         count = ttk.Label(frame, text="")
         count.pack(anchor='w')
 
+        # ⭐ Filter box a third of the old width (Tony, 2026-10-12) — three
+        # panes have to fit across, and a filter is only ever a few letters.
         bar = ttk.Frame(frame)
         bar.pack(fill='x', pady=(4, 4))
         ttk.Label(bar, text="Filter:").pack(side='left')
         fvar = tk.StringVar()
-        ent = ttk.Entry(bar, textvariable=fvar)
-        ent.pack(side='left', fill='x', expand=True, padx=(4, 0))
+        ttk.Entry(bar, textvariable=fvar, width=10).pack(side='left',
+                                                           padx=(4, 0))
 
         only_risky = tk.BooleanVar(value=False)
         if risky_pane:
             ttk.Checkbutton(frame, variable=only_risky,
-                            text="⚠ only show entries that can misfire "
-                                 "(ALL CAPS that are also real words)",
+                            text="⚠ only ones that are also real words",
                             command=lambda: repaint()).pack(anchor='w')
+
+        addbar = ttk.Frame(frame)
+        addbar.pack(side='bottom', fill='x', pady=(6, 0))
 
         lb = tk.Listbox(frame, selectmode='extended', font=('Courier', 10),
                         activestyle='none')
@@ -201,7 +229,8 @@ def show_dictionary_editor(app, parent, on_change=None):
 
         def repaint(*_):
             words = getter()
-            risky = set(risky_names(words, ordinary)) if ordinary else set()
+            risky = (set(risky_names(words, ordinary))
+                     if (ordinary and risky_pane) else set())
             pool = [w for w in words if w in risky] if (
                 risky_pane and only_risky.get()) else words
             shown[:] = filter_words(pool, fvar.get())
@@ -224,46 +253,81 @@ def show_dictionary_editor(app, parent, on_change=None):
                               f"{'y' if len(picked) == 1 else 'ies'}?\n\n{preview}",
                     parent=win):
                 return
-            setter(remove_words(getter(), picked))
+            remove(picked)
             if _save("Remove"):
-                repaint()
+                repaint_all()
 
         def do_add():
-            new, ok = add_word(getter(), addvar.get(), case_insensitive)
-            if not ok:
+            word = (clean or str.strip)(addvar.get())
+            if not word or not add(word):
                 addvar.set("")
                 return
-            setter(new)
             if _save("Add"):
                 addvar.set("")
-                repaint()
+                repaint_all()
 
-        addbar = ttk.Frame(frame)
-        addbar.pack(side='bottom', fill='x', pady=(6, 0))
         addvar = tk.StringVar()
         addent = ttk.Entry(addbar, textvariable=addvar)
         addent.pack(side='left', fill='x', expand=True)
         addent.bind('<Return>', lambda e: do_add())
-        ttk.Button(addbar, text="Add", command=do_add, width=7).pack(side='left',
-                                                                     padx=(4, 0))
+        ttk.Button(addbar, text="Add", command=do_add, width=6).pack(
+            side='left', padx=(4, 0))
         ttk.Button(addbar, text="Remove", command=do_remove,
-                   width=9).pack(side='left', padx=(4, 0))
+                   width=8).pack(side='left', padx=(4, 0))
         repaint()
         return repaint
 
-    def set_spell(v):
-        app.custom_spell_words[:] = v        # ⚠️ in place — other code holds refs
+    # ⚠️ Every list is changed IN PLACE — other code holds references to them.
+    def remove_spell(picked):
+        app.custom_spell_words[:] = remove_words(app.custom_spell_words, picked)
 
-    def set_caps(v):
-        app.custom_cap_words[:] = v
+    def add_spell(word):
+        new, ok = add_word(app.custom_spell_words, word, True)
+        app.custom_spell_words[:] = new
+        return ok
 
-    build('left', "Dictionary  (words to stop flagging)",
-          lambda: app.custom_spell_words, set_spell, True, False)
-    build('right', "Names  (protected capitalisation)",
-          lambda: app.custom_cap_words, set_caps, False, True)
+    def remove_caps(picked):
+        app.custom_cap_words[:] = remove_words(app.custom_cap_words, picked)
+
+    def remove_acronyms(picked):
+        # ⭐ An acronym taught from the OCR pane went into BOTH lists (see
+        # add_user_word). Removing it only from Names would leave it silently
+        # known to the spell checker, so take the exact-case copy out of the
+        # Dictionary too. Exact case: removing "US" must never take "us".
+        remove_caps(picked)
+        remove_spell(picked)
+
+    def add_caps(word):
+        new, ok = add_word(app.custom_cap_words, word, False)
+        app.custom_cap_words[:] = new
+        return ok
+
+    def add_name(word):
+        if is_acronym(word):
+            messagebox.showinfo(
+                "That's an acronym",
+                f"“{word}” is all capitals — add it in the Acronyms pane.",
+                parent=win)
+            return False
+        return add_caps(word)
+
+    repaints = [
+        build(0, "Dictionary  (words to stop flagging)",
+              lambda: app.custom_spell_words, remove_spell, add_spell, False),
+        build(1, "Names  (protected capitalisation)",
+              lambda: split_names(app.custom_cap_words)[0], remove_caps,
+              add_name, False),
+        build(2, "Acronyms  (always ALL CAPS)",
+              lambda: split_names(app.custom_cap_words)[1], remove_acronyms,
+              add_caps, True, clean=lambda w: w.strip().upper()),
+    ]
+
+    def repaint_all():
+        for r in repaints:
+            r()
 
     ttk.Label(win, padding=(10, 6), foreground='#666',
-              text="A backup of both lists is written to "
+              text="A backup of all three lists is written to "
                    f"{BACKUP_NAME} before your first change.").pack()
     ttk.Button(win, text="Close", command=win.destroy).pack(pady=(0, 8))
     return win

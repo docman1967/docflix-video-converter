@@ -32,15 +32,15 @@ def test_it_is_reachable_from_BOTH_the_button_row_and_the_right_click():
     for 'I am looking at this word right now'."""
     assert CODE.count('command=_show_dict_editor') == 2, (
         'expected the button AND the right-click entry')
-    assert 'text="Dictionary & Names"' in SRC, 'button missing'
-    assert 'label="Dictionary & Names…"' in SRC, 'menu entry missing'
+    assert 'text="Dictionary, Names & Acronyms"' in SRC, 'button missing'
+    assert 'label="Dictionary, Names & Acronyms…"' in SRC, 'menu entry missing'
 
 
 def test_the_menu_entry_is_offered_even_when_the_cue_teaches_nothing():
     """⛔ THE DEAD END. It must NOT sit inside the `if words/caps/ocr` block —
     the whole point is reaching the full list from a row with nothing flagged."""
     menu_fn = CODE.split('def _popup_dict_menu(event):', 1)[1].split('\n                _flag_cue', 1)[0]
-    i_entry = menu_fn.index('label="Dictionary & Names…"')
+    i_entry = menu_fn.index('label="Dictionary, Names & Acronyms…"')
     i_empty = menu_fn.index('No unknown words in this cue')
     assert i_entry > i_empty, (
         'the dictionary entry must come after the empty-case branch, '
