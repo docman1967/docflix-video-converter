@@ -400,7 +400,13 @@ def drop_recurring_words(cues, errors_by_cue, min_hits=3):
     counts = {}
     for cue in cues:
         clean = re.sub(r'<[^>]+>|\{\\[^}]+\}|♪', '', cue.get('text') or '')
-        for w in re.findall(r"[A-Za-z]+", clean):
+        # ⚠️ Hyphenated words count WHOLE as well ("Ker-rah" -> "kerrah"),
+        # because the spell scan now reports them whole — see WORD_RE. Counted
+        # only by part, a compound could never reach min_hits.
+        tokens = re.findall(r"[A-Za-z]+", clean) + [
+            m.replace('-', '') for m in re.findall(r"[A-Za-z]+(?:-[A-Za-z]+)+",
+                                                   clean)]
+        for w in tokens:
             lw = w.lower()
             counts[lw] = counts.get(lw, 0) + 1
     def _root(w):
@@ -5654,6 +5660,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
 
             from modules.spell_checker import (is_dropped_g, is_ok_contraction,
                                                iter_words, miscased_name,
+                                               settle_compounds,
                                                name_case_lut)
 
             spell = SpellChecker()
@@ -5787,7 +5794,8 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     pairs = list(iter_words(clean))
                     if pairs:
                         words = [w for w, _ in pairs]
-                        unknown = spell.unknown(words)
+                        unknown = settle_compounds(
+                            spell, spell.unknown(words), known)
                         for j in range(wi, len(words)):
                             w, _apos = pairs[j]
                             # Ignore is per-word and covers BOTH kinds — the

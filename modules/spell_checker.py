@@ -53,7 +53,39 @@ _CONTRACTION_SUFFIXES = {'s', 're', 've', 'll', 'd', 'm', 't'}
 # ⛔ Do not re-narrow this to a bare `'`. Use WORD_RE everywhere a subtitle is
 # split into words for spelling; there were three separate copies of the old
 # pattern and all three had the bug.
-WORD_RE = re.compile(r"[a-zA-Z]+(?:['’][a-zA-Z]+)?")
+#
+# ⭐ A HYPHENATED WORD IS ONE TOKEN (2026-10-11). Tony, on Supergirl: the
+# checker made no allowance for "Wi-Fi". Split at the hyphen, Kal-El became
+# "Kal" + "El", flagged separately, and NOTHING could be taught: adding
+# "Kal-El" never matched a token, and adding "Kal" is a wrong word on the
+# list. Measured on 16 Supergirl episodes: 93 flagged compounds, 20 distinct,
+# Ker-rah alone 55. Whether a compound is a misspelling is decided by
+# settle_compounds() below — it's known if taught WHOLE, or if every part is.
+WORD_RE = re.compile(
+    r"[a-zA-Z]+(?:['’][a-zA-Z]+)?(?:-[a-zA-Z]+(?:['’][a-zA-Z]+)?)*")
+
+
+def settle_compounds(spell, unknown, extra_known=()):
+    """`unknown` minus the hyphenated words that are really fine.
+
+    A compound pyspellchecker doesn't know WHOLE is still correct when every
+    part is a word: "well-known", "twenty-two", "I-I-I". Only a compound with a
+    genuinely unknown part stays flagged — and it stays flagged as the WHOLE
+    word, so "Add to dictionary" offers "Kal-El", which is what gets matched
+    next time.
+
+    ⚠️ Only ever REMOVES from `unknown`; it cannot create a flag. Same rule
+    as is_ok_contraction, and each part gets that rule too ("know-it-all's").
+    """
+    out = set(unknown)
+    for u in unknown:
+        if '-' not in u:
+            continue
+        parts = [p for p in u.split('-') if p]
+        if all(not spell.unknown([p]) or is_ok_contraction(p, spell, extra_known)
+               for p in parts):
+            out.discard(u)
+    return out
 
 # No letter-root to recover — these do not decompose.
 _IRREGULAR_CONTRACTIONS = {
@@ -347,7 +379,7 @@ def run_spell_check_scan(app, parent_window, cues, spell_error_indices):
         words = WORD_RE.findall(clean)
         if not words:
             continue
-        unknown = spell.unknown(words)
+        unknown = settle_compounds(spell, spell.unknown(words), known)
         if unknown:
             spell_error_indices.add(i)
             errors_by_cue[i] = []
@@ -453,7 +485,7 @@ def run_spell_highlight_scan(app, parent_window, cues, spell_error_indices,
         if not pairs:
             continue
         words = [w for w, _ in pairs]
-        unknown = spell.unknown(words)
+        unknown = settle_compounds(spell, spell.unknown(words), known)
         cue_words, cue_names = [], []
         for w, apos in pairs:
             if ((w.lower() in unknown or w in unknown)
