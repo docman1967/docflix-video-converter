@@ -918,7 +918,9 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
             done = [0]
             if use_procs:
                 executor = _get_proc_pool(max_workers)
-                submit = lambda a: executor.submit(_proc_task, a, tmpdir, tess_lang)
+                rules = list(_get_custom_ocr_rules())     # see _proc_task
+                submit = lambda a: executor.submit(_proc_task, a, tmpdir,
+                                                   tess_lang, rules)
             else:
                 executor = ThreadPoolExecutor(max_workers=max_workers)
                 submit = lambda a: executor.submit(_decode_and_ocr, a)
@@ -1259,12 +1261,22 @@ def _proc_init():
     os.environ.setdefault('OMP_THREAD_LIMIT', '1')
 
 
-def _proc_task(args, tmpdir, tess_lang):
+def _proc_task(args, tmpdir, tess_lang, rules=None):
     """One cue in a worker process. Returns (result, note-stat counts for this cue).
 
     ⚠️ _note_stats is per-PROCESS, so the parent would otherwise report "0 notes
     erased" on every songful episode — the exact silent tell the summary exists for.
+
+    ⚠️⚠️ `rules` IS THE PARENT'S CURRENT CUSTOM OCR RULES, handed over with every
+    cue. The workers live for the whole session, and each one cached the rules
+    the first time it ran — so a rule added in the OCR Rules window was saved,
+    reloaded in the parent, and never seen by the processes that actually apply
+    it. Tony, 2026-10-12: "[ am Supergirl." -> "I am Supergirl." didn't fire on
+    any episode. Same per-process trap as _note_stats above.
     """
+    global _custom_rules_cache
+    if rules is not None:
+        _custom_rules_cache = list(rules)
     reset_note_stats()
     r = _decode_and_ocr_one(args, tmpdir, tess_lang)
     return r, dict(_note_stats)
