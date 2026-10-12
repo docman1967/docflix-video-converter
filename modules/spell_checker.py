@@ -77,15 +77,37 @@ def settle_compounds(spell, unknown, extra_known=()):
     ⚠️ Only ever REMOVES from `unknown`; it cannot create a flag. Same rule
     as is_ok_contraction, and each part gets that rule too ("know-it-all's").
     """
+    def ok(word):
+        return (not spell.unknown([word])
+                or is_ok_contraction(word, spell, extra_known))
+
     out = set(unknown)
     for u in unknown:
         if '-' not in u:
             continue
         parts = [p for p in u.split('-') if p]
-        if all(not spell.unknown([p]) or is_ok_contraction(p, spell, extra_known)
-               for p in parts):
+        if (all(ok(p) for p in parts)
+                # ⭐ The same word written solid: "pre-emptive" is
+                # "preemptive", "zig-zagging" is "zigzagging".
+                or ok(''.join(parts))
+                # ⭐ A prefix on a real word: "bio-weapons", "un-see". Tony,
+                # 2026-10-12: "please add that." 9 of Supergirl's 38
+                # remaining compound flags were bio-/un-/pre-.
+                or (parts[0] in HYPHEN_PREFIXES and all(ok(p) for p in parts[1:]))):
             out.discard(u)
     return out
+
+
+# Prefixes that aren't words on their own but are fine before one. ⚠️ Only
+# bound forms: a prefix that's already a word ("self", "over") is covered by
+# the every-part-is-a-word rule and doesn't belong here.
+HYPHEN_PREFIXES = frozenset({
+    'bio', 'un', 'pre', 're', 'non', 'anti', 'co', 'ex', 'de', 'dis', 'mis',
+    'multi', 'semi', 'sub', 'super', 'inter', 'intra', 'post', 'mid', 'mini',
+    'micro', 'macro', 'mega', 'neo', 'pro', 'proto', 'pseudo', 'quasi',
+    'ultra', 'hyper', 'cyber', 'tele', 'trans', 'counter', 'tri', 'bi', 'uni',
+    'geo', 'eco', 'nano', 'meta', 'auto', 'retro', 'infra', 'extra',
+})
 
 # No letter-root to recover — these do not decompose.
 _IRREGULAR_CONTRACTIONS = {

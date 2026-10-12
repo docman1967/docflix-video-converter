@@ -56,3 +56,15 @@ def test_a_recurring_compound_counts_as_recurring():
     cues = [{'text': "Ker-rah!"}] * 3
     errors = {i: ["Ker-rah"] for i in range(3)}
     assert drop_recurring_words(cues, errors) == (set(), {})
+
+
+@pytest.mark.parametrize("text", [
+    "Bio-weapons.", "A bio-engineer.", "You can't un-see it.",
+    "That's pre-emptive.", "Stop zig-zagging.", "Non-stop.",
+])
+def test_a_prefix_or_solid_spelling_makes_a_compound_known(text):
+    assert _flags(text) == []
+
+
+def test_a_prefix_does_not_excuse_a_typo():
+    assert _flags("Bio-wepaons.") == ["Bio-wepaons"]
