@@ -61,8 +61,18 @@ _CONTRACTION_SUFFIXES = {'s', 're', 've', 'll', 'd', 'm', 't'}
 # list. Measured on 16 Supergirl episodes: 93 flagged compounds, 20 distinct,
 # Ker-rah alone 55. Whether a compound is a misspelling is decided by
 # settle_compounds() below — it's known if taught WHOLE, or if every part is.
+#
+# ⭐ AN ACCENTED LETTER IS A LETTER (2026-10-20). Tony, on The Flash: "my
+# fiancé died" was flagged as "fianc". The class was [a-zA-Z] from day one,
+# so é split the word: café → "caf", résumé → "r" + "sum". [^\W\d_] is "any
+# Unicode letter". fiancé/café/cliché are in the dictionary and now pass;
+# rarer ones (résumé, naïve) are flagged WHOLE, so they can be taught.
+# ⛔ Deliberately NOT accepting a word because its accent-stripped form is
+# known: OCR's classic accent error is a speck read as one ("thé" for "the"),
+# and that rule would hide exactly those.
+_L = r"[^\W\d_]"
 WORD_RE = re.compile(
-    r"[a-zA-Z]+(?:['’][a-zA-Z]+)?(?:-[a-zA-Z]+(?:['’][a-zA-Z]+)?)*")
+    rf"{_L}+(?:['’]{_L}+)?(?:-{_L}+(?:['’]{_L}+)?)*")
 
 
 def settle_compounds(spell, unknown, extra_known=()):
