@@ -4679,7 +4679,13 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         f"Subtitle stream #{stream_idx} saved back to:\n"
                         f"{os.path.basename(video_path)}",
                         parent=editor)
-                    video_source[0] = None  # clear video mode after successful save
+                    # ⚠️ Stay in video mode. Clearing it here left current_path on
+                    # the temp extract (/tmp/tmpXXXX.srt), which the remux has just
+                    # deleted: Export then opened in /tmp offering "tmpXXXX.srt",
+                    # and a SECOND Ctrl+S wrote the fix to /tmp with a green
+                    # "Saved" flash, never reaching the video (Tony, 2026-10-22).
+                    # Re-muxing again is safe: track order is preserved, so the
+                    # stream index still points at this subtitle.
 
                 except Exception as e:
                     messagebox.showerror("Error", f"Re-mux error:\n{e}", parent=editor)
@@ -4695,24 +4701,34 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 original_cues[:] = [dict(c) for c in cues]
                 _flash_saved(f"✓ Saved — {len(cues)} entries")
 
+        def _srt_save_target():
+            """(folder, filename) to offer when saving the subtitle out as an .srt.
+
+            From a video, it goes next to the video, named after it, with the
+            language of the stream being edited: "Show - S06E07 - Title.eng.srt".
+            That used to be OCR-only; a text stream exported as "Title.srt"
+            (Tony, 2026-10-22). 'und' or missing → eng, his library's default.
+            """
+            vs = video_source[0]
+            if vs:
+                ref_path = vs['path']
+                if vs.get('is_ocr'):
+                    lang = vs.get('ocr_lang')
+                else:
+                    lang = (vs.get('stream_info') or {}).get('language')
+                if not lang or lang == 'und':
+                    lang = 'eng'
+                return (str(Path(ref_path).parent),
+                        f"{Path(ref_path).stem}.{lang}.srt")
+            if current_path[0]:
+                ref_path = current_path[0]
+                return str(Path(ref_path).parent), f"{Path(ref_path).stem}.srt"
+            return '', "subtitle.srt"
+
         def do_save_as():
             if not cues:
                 return
-            if video_source[0]:
-                ref_path = video_source[0]['path']
-            elif current_path[0]:
-                ref_path = current_path[0]
-            else:
-                ref_path = None
-            out_dir = str(Path(ref_path).parent) if ref_path else ''
-            if (video_source[0] and video_source[0].get('is_ocr')
-                    and ref_path):
-                ocr_lang = video_source[0].get('ocr_lang', 'eng')
-                default_name = f"{Path(ref_path).stem}.{ocr_lang}.srt"
-            elif ref_path:
-                default_name = f"{Path(ref_path).stem}.srt"
-            else:
-                default_name = "subtitle.srt"
+            out_dir, default_name = _srt_save_target()
             out_path = ask_save_file(
                 parent=editor,
                 initialdir=out_dir,
@@ -4735,21 +4751,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                        parent=editor)
                 return
             # Use the video file path for directory/name when editing a video subtitle
-            if video_source[0]:
-                ref_path = video_source[0]['path']
-            elif current_path[0]:
-                ref_path = current_path[0]
-            else:
-                ref_path = None
-            out_dir = str(Path(ref_path).parent) if ref_path else ''
-            if (video_source[0] and video_source[0].get('is_ocr')
-                    and ref_path):
-                ocr_lang = video_source[0].get('ocr_lang', 'eng')
-                default_name = f"{Path(ref_path).stem}.{ocr_lang}.srt"
-            elif ref_path:
-                default_name = f"{Path(ref_path).stem}.srt"
-            else:
-                default_name = "subtitle.srt"
+            out_dir, default_name = _srt_save_target()
             out_path = ask_save_file(
                 parent=editor,
                 initialdir=out_dir,
