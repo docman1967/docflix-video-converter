@@ -81,6 +81,26 @@ def test_midline_colon_keeps_the_front_of_the_line(text):
     assert _run(text) == text, f"front of the line eaten: {text!r}"
 
 
+# ── 3. A time the OCR mangled is not a label ────────────────────────────────
+
+@pytest.mark.parametrize("text", [
+    "About I:00, I reckon.",            # 1 read as I: looked like label "About I"
+    "About l:00, I reckon.",
+    "About 1:O0, I reckon.",            # 0 read as O
+    "- Mick?\n- About I:00, I reckon.",
+    "About 1:00, I reckon.",
+])
+def test_ocr_mangled_time_keeps_the_front_of_the_line(text):
+    """⭐ Tony, Legends S07E03, 2026-10-22: "About 1:00, I reckon." came out of
+    OCR + filters as "00, I reckon." The digit-before-colon guard can't see a
+    1 that the OCR turned into a letter; the two digits AFTER the colon can."""
+    assert _run(text) == text, f"front of the line eaten: {text!r}"
+
+
+def test_label_followed_by_a_time_still_comes_off():
+    assert _run("RAY: 3:00 sharp.") == "3:00 sharp."
+
+
 # ── What must STILL be removed ──────────────────────────────────────────────
 
 @pytest.mark.parametrize("text,expected", [

@@ -682,6 +682,18 @@ def filter_remove_hi(cues):
         # (in the source text, not just the match) is a digit.
         # e.g. "at 3:00", "is 12:30", "at 5:00"
         colon_pos = full_match.find(':')
+        # ⚠️⚠️ A TIME THE OCR HAS MANGLED. "About 1:00" OCR'd as "About I:00"
+        # looks like the label "About I", and stripping it left "00, I reckon."
+        # (Tony, Legends S07E03, 2026-10-22). The digit-before-colon check
+        # below can't see that, because the 1 is now a letter. What gives a
+        # time away is the colon being followed DIRECTLY by two digits; a label's
+        # colon is followed by a space or the end of the line. O counts as a
+        # digit here, because "1:O0" is the same misread on the other side.
+        if colon_pos >= 0:
+            src = _speaker_source_text[0]
+            after = m.start() + colon_pos + 1
+            if re.match(r'[\dOo]{2}', src[after:after + 2]):
+                return full_match
         if colon_pos >= 0:
             before_colon = full_match[:colon_pos]
             if before_colon and before_colon.rstrip()[-1:].isdigit():
