@@ -4240,7 +4240,17 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 t = threading.Thread(target=_ocr_thread, daemon=True)
                 t.start()
 
-                mon.protocol('WM_DELETE_WINDOW', _do_cancel)
+                # The X does whatever the bottom button says right now: Cancel OCR
+                # while it runs, Close (with its "not saved" guard) once it's done.
+                # It used to be wired to _do_cancel only, so after the run the X
+                # did nothing at all (Tony, 2026-10-22).
+                def _on_mon_x():
+                    if _ocr_running[0]:
+                        _do_cancel()
+                    else:
+                        _close_monitor()
+
+                mon.protocol('WM_DELETE_WINDOW', _on_mon_x)
 
                 # ── Drop the next file straight onto the OCR window ──
                 # ⭐ Tony, 2026-10-07: *"Right now I have to save, close and then
