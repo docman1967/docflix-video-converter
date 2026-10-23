@@ -2075,10 +2075,39 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 # ── Monitor window ──
                 mon = tk.Toplevel(editor)
                 mon.title(f"OCR — {os.path.basename(video_path)}")
-                mon.geometry(scaled_geometry(mon, 800, 750))
                 mon.minsize(*scaled_minsize(mon, 650, 550))
+                # ⭐ Remember the window SIZE between files (Tony, 2026-10-23: "Each
+                # file I load, I have to resize the window so I can see all of the
+                # text"). Size only: position still centres on the main window.
+                _saved = load_module_prefs('ocr_monitor')
+                try:
+                    _w = min(int(_saved['width']), mon.winfo_screenwidth() - 40)
+                    _h = min(int(_saved['height']), mon.winfo_screenheight() - 80)
+                    mon.geometry(f"{_w}x{_h}")
+                except (KeyError, TypeError, ValueError):
+                    mon.geometry(scaled_geometry(mon, 800, 750))
                 mon.resizable(True, True)
                 app._center_on_main(mon)
+
+                # ⚠️ Saved on <Destroy>, not in _close_monitor: the window is also
+                # destroyed after Load-into-Editor and other paths, and every
+                # one of them should remember the size. The size is tracked from
+                # <Configure> because by the time <Destroy> fires the geometry is
+                # no longer reliable. A binding on a Toplevel also fires for every
+                # child widget, hence the `e.widget is mon` checks.
+                _mon_size = [None]
+
+                def _track_mon_size(e):
+                    if e.widget is mon and e.width > 1 and e.height > 1:
+                        _mon_size[0] = (e.width, e.height)
+
+                def _remember_mon_size(e):
+                    if e.widget is mon and _mon_size[0]:
+                        save_module_prefs('ocr_monitor', {'width': _mon_size[0][0],
+                                                          'height': _mon_size[0][1]})
+
+                mon.bind('<Configure>', _track_mon_size, add='+')
+                mon.bind('<Destroy>', _remember_mon_size, add='+')
 
                 main_f = ttk.Frame(mon, padding=10)
                 main_f.pack(fill='both', expand=True)
@@ -2514,7 +2543,9 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         # been bitten by before.
                         _editor_log[0] = None
 
-                mon.bind('<Destroy>', _on_mon_destroy)
+                # ⚠️ add='+': without it this REPLACED the size-remembering
+                # <Destroy> handler bound when the window was built.
+                mon.bind('<Destroy>', _on_mon_destroy, add='+')
 
                 # ── Review: edit a cue's text in place ────────────────────
                 # tree item id -> index into ocr_result[0]. Built by
