@@ -28,6 +28,7 @@ def save_preferences(app):
         'audio_codec':          app.audio_codec.get(),
         'audio_bitrate':        app.audio_bitrate.get(),
         'skip_existing':        app.skip_existing.get(),
+        'skip_stamped':         app.skip_stamped.get(),
         'delete_originals':     app.delete_originals.get(),
         'hw_decode':            app.hw_decode.get(),
         'strip_internal_subs':  app.strip_internal_subs.get(),
@@ -95,6 +96,7 @@ def load_preferences(app):
         app.audio_codec.set(prefs.get('audio_codec',       app.audio_codec.get()))
         app.audio_bitrate.set(prefs.get('audio_bitrate',   app.audio_bitrate.get()))
         app.skip_existing.set(prefs.get('skip_existing',   app.skip_existing.get()))
+        app.skip_stamped.set(prefs.get('skip_stamped',     app.skip_stamped.get()))
         app.delete_originals.set(prefs.get('delete_originals', app.delete_originals.get()))
         app.hw_decode.set(prefs.get('hw_decode',           app.hw_decode.get()))
         app.strip_internal_subs.set(prefs.get('strip_internal_subs', app.strip_internal_subs.get()))

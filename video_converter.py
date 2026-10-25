@@ -3700,6 +3700,9 @@ class VideoConverterApp:
         self.cpu_preset = tk.StringVar(value='ultrafast')
         self.gpu_preset = tk.StringVar(value='p4')
         self.skip_existing = tk.BooleanVar(value=True)
+        # Skip any source that already carries a DOCFLIX_ENCODE stamp (Tony, 2026-10-25).
+        # Same rule the hdd9 nightly uses, read from the FILE, not the catalogue.
+        self.skip_stamped = tk.BooleanVar(value=False)
         self.delete_originals = tk.BooleanVar(value=False)
         self.strip_internal_subs = tk.BooleanVar(value=False)
         self.strip_cc = tk.BooleanVar(value=False)
@@ -4453,6 +4456,8 @@ class VideoConverterApp:
         
         ttk.Checkbutton(self.check_frame, text="Delete originals after conversion",
                        variable=self.delete_originals).pack(side='left', padx=5)
+        ttk.Checkbutton(self.check_frame, text="Skip already-encoded (stamped)",
+                       variable=self.skip_stamped).pack(side='left', padx=5)
         self.two_pass_check = ttk.Checkbutton(self.check_frame, text="Two-pass encoding",
                        variable=self.two_pass, command=self.on_two_pass_change)
         self.two_pass_check.pack(side='left', padx=5)
@@ -7783,6 +7788,7 @@ class VideoConverterApp:
             'audio_bitrate':        self.audio_bitrate.get(),
             'atmos_mode':           self.atmos_mode.get(),
             'skip_existing':        self.skip_existing.get(),
+            'skip_stamped':         self.skip_stamped.get(),
             'delete_originals':     self.delete_originals.get(),
             'hw_decode':            self.hw_decode.get(),
             'gpu_index':            self.gpu_index.get(),
@@ -7929,6 +7935,7 @@ class VideoConverterApp:
             self.atmos_mode.set(prefs.get('atmos_mode',         self.atmos_mode.get()))
             self.audio_bitrate.set(prefs.get('audio_bitrate',   self.audio_bitrate.get()))
             self.skip_existing.set(prefs.get('skip_existing',   self.skip_existing.get()))
+            self.skip_stamped.set(prefs.get('skip_stamped',     self.skip_stamped.get()))
             self.delete_originals.set(prefs.get('delete_originals', self.delete_originals.get()))
             self.hw_decode.set(prefs.get('hw_decode',           self.hw_decode.get()))
             self.strip_internal_subs.set(prefs.get('strip_internal_subs', self.strip_internal_subs.get()))
@@ -9922,6 +9929,17 @@ class VideoConverterApp:
                 output_path = str(out_dir / f"{base_name}{edition_part}{output_ext}")
             else:
                 output_path = str(out_dir / f"{base_name}{suffix}{output_ext}")
+
+            # Already encoded? The stamp is read from the source file itself.
+            if self.skip_stamped.get():
+                from modules.utils import read_encode_stamp
+                stamp = read_encode_stamp(input_path)
+                if stamp:
+                    self.add_log(f"Skipping (already encoded: {stamp}): {file_info['name']}", 'WARNING')
+                    with _clk:
+                        skipped += 1
+                    self.update_file_status(i, "⏭️ Stamped")
+                    return
 
             # Check if output exists
             if skip_existing and os.path.exists(output_path):
