@@ -97,6 +97,23 @@ _NAME_TO_CODE = {name: code for code, name in SUBTITLE_LANGUAGES}
 _CODE_TO_NAME = {code: name for code, name in SUBTITLE_LANGUAGES}
 
 
+def _lang_from_title(title):
+    """A language code from a track TITLE ("English", "English SDH",
+    "French (Forced)"), or None.
+
+    ⚠️ Some releases leave the language tag empty and only name the track.
+    With "All Languages" picked there was nothing to fall back on, so those
+    came out as .und.srt — 63 English subs in one batch (Tony, 2026-10-25)."""
+    t = (title or '').strip().lower()
+    for code, name in SUBTITLE_LANGUAGES:
+        if code == 'und':
+            continue
+        n = name.lower()
+        if t == n or (t.startswith(n) and not t[len(n)].isalpha()):
+            return code
+    return None
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Completion sound
 # ═══════════════════════════════════════════════════════════════════
@@ -1031,10 +1048,12 @@ def open_sub_ripper(app):
         # Use the stream's actual language for the filename tag
         lang = _normalize_lang(stream.get('language', 'und'))
         if lang == 'und':
-            # Fall back to the selected language, or 'und' if All
+            # Untagged: trust the track's own title first ("English"), then the
+            # selected language, and only then leave it 'und'.
+            lang = _lang_from_title(stream.get('title'))
+        if not lang or lang == 'und':
             sel = opt_language.get()
-            if sel != _ALL_LANGUAGES:
-                lang = _NAME_TO_CODE.get(sel, 'und')
+            lang = _NAME_TO_CODE.get(sel, 'und') if sel != _ALL_LANGUAGES else 'und'
 
         if cls == 'forced':
             tag = f".{lang}.forced"
