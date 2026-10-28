@@ -26,7 +26,7 @@ from .subtitle_filters import (
     filter_remove_music_notes, filter_fix_music_notes, filter_fix_caps,
     filter_remove_tags, filter_remove_ads,
     filter_remove_offscreen_quotes,
-    filter_remove_leading_dashes,
+    filter_remove_leading_dashes, filter_fix_whitespace,
     filter_remove_duplicates, filter_merge_duplicates, filter_merge_short,
     filter_collapse_paint_on,
     # Names database (optional)
@@ -659,6 +659,7 @@ def open_batch_filter(app):
             ('fix_music',      "Fix Music Notes  ♪ (OCR)",        filter_fix_music_notes),
             ('fix_ocr',        "Fix OCR Errors  '' | 0 (OCR)",    filter_fix_ocr),
             ('remove_dashes',  "Remove Leading Dashes  -",        filter_remove_leading_dashes),
+            ('fix_whitespace', "Fix Whitespace  (no-break spaces)", filter_fix_whitespace),
             ('remove_caps_hi', "Remove ALL CAPS HI (UK style)",   filter_remove_caps_hi),
             ('remove_quotes',  "Remove Off-Screen Quotes ' ' (UK style)", filter_remove_offscreen_quotes),
             ('remove_dupes',   "Remove Duplicates",               filter_remove_duplicates),

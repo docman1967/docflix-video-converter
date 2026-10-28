@@ -1441,6 +1441,30 @@ def filter_remove_speaker_labels(cues):
     return result
 
 
+# Spaces that look like spaces but aren't: no-break (U+00A0), figure (U+2007),
+# narrow no-break (U+202F), and tabs. Seen 2026-10-28 in web-sourced subs
+# (Librarians: The Next Chapter, NCIS: New Orleans, Blood, Sex & Royalty) where
+# EVERY space was U+00A0 and long runs of them padded lines out to fake
+# on-screen positioning, so lines showed big gaps and wrapped oddly.
+_ODD_SPACES = re.compile(r'[   \t]')
+
+
+def filter_fix_whitespace(cues):
+    """Turn no-break/odd spaces into plain spaces, collapse runs, trim lines.
+
+    Removes lines left blank by padding, and cues left empty. Words are never
+    touched, only the space between them.
+    """
+    result = []
+    for cue in cues:
+        text = _ODD_SPACES.sub(' ', cue['text'])
+        lines = [re.sub(r' {2,}', ' ', line).strip() for line in text.split('\n')]
+        text = '\n'.join(line for line in lines if line)
+        if text:
+            result.append({**cue, 'text': text})
+    return result
+
+
 def filter_remove_leading_dashes(cues):
     """Remove leading dashes from each line of subtitle text."""
     result = []

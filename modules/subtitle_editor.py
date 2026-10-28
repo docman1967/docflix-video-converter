@@ -53,7 +53,7 @@ from .subtitle_filters import (
     filter_remove_tags, filter_remove_ads,
     filter_fix_ocr,
     filter_remove_offscreen_quotes,
-    filter_remove_leading_dashes,
+    filter_remove_leading_dashes, filter_fix_whitespace,
     filter_remove_duplicates, filter_merge_duplicates, filter_merge_short,
     filter_reduce_lines, filter_collapse_paint_on,
     shift_timestamps, stretch_timestamps, two_point_sync,
@@ -4981,6 +4981,8 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                                 command=lambda: apply_filter(filter_fix_ocr, "Fix OCR Errors"))
         filter_menu.add_command(label="Remove Leading Dashes  -",
                                 command=lambda: apply_filter(filter_remove_leading_dashes, "Remove Leading Dashes"))
+        filter_menu.add_command(label="Fix Whitespace  (no-break / padded spaces)",
+                                command=lambda: apply_filter(filter_fix_whitespace, "Fix Whitespace"))
 
         def _show_caps_hi_preview():
             """Show preview window of cues to be removed by ALL CAPS HI filter."""
