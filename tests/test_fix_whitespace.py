@@ -33,3 +33,14 @@ def test_padding_only_line_is_dropped_and_empty_cue_removed():
 def test_clean_cue_is_untouched():
     c = cue("Nothing odd here.\nSecond line.")
     assert filter_fix_whitespace([c]) == [c]
+
+
+def test_extractor_panel_lists_and_wires_every_filter():
+    # 2026-10-28: Fix Whitespace shipped in the editor and Batch Filter but not
+    # the Sub Extractor / Whisper panel, which keeps its OWN list. A key in
+    # FILTER_DEFS with no function (or vice versa) is exactly that miss.
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from modules.subtitle_filter_panel import FILTER_DEFS, _func_map
+    keys = [k for k, _ in FILTER_DEFS]
+    assert 'fix_whitespace' in keys
+    assert set(keys) == set(_func_map(object()))

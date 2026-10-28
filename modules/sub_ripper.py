@@ -1606,6 +1606,24 @@ def open_sub_ripper(app):
     # Force Tk to render all widgets
     win.update_idletasks()
 
+    # ⚠️ The fixed 920x720 above no longer fits: the options row (tracks,
+    # Format, Overwrite, OCR, Parallel/Jobs, Filters) is one horizontal strip
+    # and outgrew it, so Parallel and Filters opened clipped (Tony, 2026-10-28).
+    # Grow to what the widgets actually ask for, never past the screen, and
+    # never shrink below the default.
+    try:
+        need_w, need_h = win.winfo_reqwidth(), win.winfo_reqheight()
+        cur_w, cur_h = win.winfo_width(), win.winfo_height()
+        if need_w > cur_w or need_h > cur_h:
+            new_w = min(max(need_w, cur_w), win.winfo_screenwidth() - 80)
+            new_h = min(max(need_h, cur_h), win.winfo_screenheight() - 80)
+            x = max(0, win.winfo_x() - (new_w - cur_w) // 2)
+            y = max(0, win.winfo_y() - (new_h - cur_h) // 2)
+            win.geometry(f'{new_w}x{new_h}+{x}+{y}')
+            win.minsize(min(need_w, new_w), win.minsize()[1])
+    except Exception:
+        pass
+
     _log("Docflix Sub Extractor ready — add video files and select "
          "subtitle types to extract", 'INFO')
     _log("Supports embedded subtitle streams, closed captions (CC), "
