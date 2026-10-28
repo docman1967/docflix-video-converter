@@ -8580,11 +8580,27 @@ class VideoConverterApp:
             self.add_log("No finished files to clear.", 'INFO')
             return
 
-        # Remove in reverse order so indices stay valid
-        items = self.file_tree.get_children()
-        for i in reversed(remove_indices):
-            self.file_tree.delete(items[i])
-            del self.files[i]
+        # ⚠️ Mid-batch, the workers hand out files by POSITION (_batch_next).
+        # Deleting finished rows above that pointer slides every waiting file up,
+        # so without pulling the pointer back by the same count the batch silently
+        # SKIPS that many files (2026-10-28). Running lanes find their own rows by
+        # identity (_row_of), so they need no adjustment. Hold the batch lock so a
+        # worker can't take the next file halfway through the delete.
+        lock = getattr(self, '_batch_lock', None) if self.is_converting else None
+        if lock:
+            lock.acquire()
+        try:
+            # Remove in reverse order so indices stay valid
+            items = self.file_tree.get_children()
+            for i in reversed(remove_indices):
+                self.file_tree.delete(items[i])
+                del self.files[i]
+            if lock:
+                nxt = getattr(self, '_batch_next', 0)
+                self._batch_next = nxt - sum(1 for i in remove_indices if i < nxt)
+        finally:
+            if lock:
+                lock.release()
 
         self.add_log(f"Cleared {len(remove_indices)} finished file(s) from queue.", 'INFO')
 
@@ -9938,7 +9954,7 @@ class VideoConverterApp:
                     self.add_log(f"Skipping (already encoded: {stamp}): {file_info['name']}", 'WARNING')
                     with _clk:
                         skipped += 1
-                    self.update_file_status(i, "⏭️ Stamped")
+                    self.update_file_status(self._row_of(file_info, i), "⏭️ Stamped")
                     return
 
             # Check if output exists
@@ -9946,11 +9962,11 @@ class VideoConverterApp:
                 self.add_log(f"Skipping (exists): {file_info['name']}", 'WARNING')
                 with _clk:
                     skipped += 1
-                self.update_file_status(i, "⏭️ Skipped")
+                self.update_file_status(self._row_of(file_info, i), "⏭️ Skipped")
                 return
 
             # Update UI
-            self.update_file_status(i, "⏳ Converting")
+            self.update_file_status(self._row_of(file_info, i), "⏳ Converting")
             self.root.after(0, lambda p=input_path: self.status_label.configure(
                 text=f"Converting: {os.path.basename(p)}"
             ))
@@ -10029,7 +10045,7 @@ class VideoConverterApp:
                             self.add_log(f"  • {issue}", 'ERROR')
                         with _clk:
                             failed += 1
-                        self.update_file_status(i, '⚠️ Verify Failed')
+                        self.update_file_status(self._row_of(file_info, i), '⚠️ Verify Failed')
                         return
 
                 # Strip MKV Tag elements (Global tags + per-track Tags
@@ -10053,9 +10069,9 @@ class VideoConverterApp:
                 # Show actual output file size
                 try:
                     actual_size = format_size(Path(output_path).stat().st_size)
-                    self.update_file_status(i, f'✅ {actual_size}')
+                    self.update_file_status(self._row_of(file_info, i), f'✅ {actual_size}')
                 except Exception:
-                    self.update_file_status(i, '✅ Done')
+                    self.update_file_status(self._row_of(file_info, i), '✅ Done')
 
                 if delete_orig:
                     try:
@@ -10066,11 +10082,11 @@ class VideoConverterApp:
                         self.add_log(f"Failed to delete original: {e}", 'ERROR')
             else:
                 if engine.is_stopped:
-                    self.update_file_status(i, '⏹️ Stopped')
+                    self.update_file_status(self._row_of(file_info, i), '⏹️ Stopped')
                 else:
                     with _clk:
                         failed += 1
-                    self.update_file_status(i, '❌ Failed')
+                    self.update_file_status(self._row_of(file_info, i), '❌ Failed')
 
             # Update overall progress
             total = len(self.files)
@@ -10111,7 +10127,9 @@ class VideoConverterApp:
         _lane_fps = {}    # id(engine) -> current file fps
 
         def _par_progress(eng, pct, fps=None):
-            self.update_file_status(getattr(eng, 'ui_index', 0), f"⏳ {int(pct)}%")
+            self.update_file_status(self._row_of(getattr(eng, 'ui_file', None),
+                                                 getattr(eng, 'ui_index', 0)),
+                                    f"⏳ {int(pct)}%")
             _lane_frac[id(eng)] = max(0.0, min(1.0, pct / 100.0))
             if fps is not None:
                 _lane_fps[id(eng)] = fps
@@ -10150,8 +10168,10 @@ class VideoConverterApp:
                         return
                     idx = self._batch_next
                     self._batch_next += 1
+                    _fi = self.files[idx]
                 engine.ui_index = idx
-                _do_file(idx, self.files[idx], engine)
+                engine.ui_file = _fi
+                _do_file(idx, _fi, engine)
 
         _threads = [threading.Thread(target=_worker, args=(e,), daemon=True)
                     for e in self._engines]
@@ -10236,13 +10256,34 @@ class VideoConverterApp:
                     self.add_log(f"Renamed {renamed} of {len(renamed_candidates)} file(s)", 'SUCCESS')
             self.root.after(500, _ask_rename)
     
+    def _row_of(self, file_info, fallback):
+        """Current row of a queued file, found by IDENTITY, not remembered position.
+
+        ⚠️ A batch used to remember each file as "row N". Clear Finished deletes
+        rows above the running ones, so every position slid: progress and the
+        final ✅ landed on OTHER files, and _batch_next skipped waiting files
+        outright (Tony, 2026-10-28: four rows "encoding", two real). Returns -1
+        if the file is no longer queued, which update_file_status ignores.
+        """
+        if file_info is None:
+            return fallback
+        for k, f in enumerate(self.files):
+            if f is file_info:
+                return k
+        return -1
+
     def update_file_status(self, index, status):
         """Update status of a file in both the tree and the files list."""
         # Update the data model so batch ETA can scan by status
         if 0 <= index < len(self.files):
             self.files[index]['status'] = status
+        else:
+            return   # row gone (cleared) — nothing to update
         def _update():
-            item = self.file_tree.get_children()[index]
+            rows = self.file_tree.get_children()
+            if not (0 <= index < len(rows)):
+                return
+            item = rows[index]
             values = list(self.file_tree.item(item, 'values'))
             values[4] = status  # status is column index 4
             self.file_tree.item(item, values=values)
