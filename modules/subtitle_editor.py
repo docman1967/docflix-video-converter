@@ -1123,7 +1123,8 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             correct in caps, it is correct in BOTH places, and one list cannot
             disagree with itself. See add_user_word().
             """
-            return getattr(app, 'custom_cap_words', ()) or ()
+            return (list(getattr(app, 'custom_cap_words', ()) or ())
+                    + list(ignored_caps))
 
         editor = tk.Toplevel(app.root)
         editor.withdraw()
@@ -1285,6 +1286,33 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
         # Load is the boundary that actually matches "different file, different
         # meaning", and it is where every other per-file flag already resets.
         temp_cap_words = []
+
+        # ── Ignored in this file ─────────────────────────────────────────────
+        # Tony, 2026-10-30: ignore a word without teaching the dictionary.
+        # Scoped like temp_cap_words: cleared on load, not on save. Same rule as
+        # the OCR pane's "Ignore in this episode".
+        # ⚠️ Not added to temp_cap_words or extra_known. Those mean "this is a
+        # NAME": Fix ALL CAPS would capitalise the word, and name_case_lut would
+        # start flagging its lowercase form.
+        # ⚠️ Spell is lowercase and case-insensitive; caps is case-sensitive,
+        # for the reason given at scan_allcaps_words.
+        ignored_spell = set()
+        ignored_caps = set()
+
+        def _drop_ignored_spell():
+            """Remove ignored words from the live scan results, in place."""
+            if not ignored_spell:
+                return
+            for i in list(spell_error_words):
+                keep = [w for w in spell_error_words[i]
+                        if w.lower() not in ignored_spell]
+                if keep:
+                    spell_error_words[i] = keep
+                else:
+                    del spell_error_words[i]
+                    # ⚠️ A wrong-case name on the same cue is still a real flag.
+                    if not spell_name_fixes.get(i):
+                        spell_error_indices.discard(i)
 
         def _rebuild_stats():
             """Repaint the status bar. ONE definition, called from every path.
@@ -1537,6 +1565,8 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             # Per-file character names die with the file they belonged to.
             # "Grace" is a character here and a noun in the next episode.
             temp_cap_words.clear()
+            ignored_spell.clear()
+            ignored_caps.clear()
             current_path[0] = source_path
             editor.title(title)
             # If a waveform is already up, it belongs to the PREVIOUS file's
@@ -8312,6 +8342,17 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 pass            # advisory feature; never lose the edit session
             refresh_tree(cues)
 
+        def _ignore_from_tree(word):
+            """Stop flagging *word* in this file. Nothing is saved anywhere.
+
+            ⚠️ Into BOTH sets: NASA is flagged by the spell scan and the caps
+            scan, and clearing one would leave the row lit, reading as a broken
+            menu item.
+            """
+            ignored_caps.add(word)
+            ignored_spell.add(word.lower())
+            refresh_tree(cues)
+
         def _apply_fix_from_tree(idx, bad, good):
             """Change one word in one cue, from the editor's right-click menu.
 
@@ -8413,20 +8454,26 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 for w in (spell_error_words.get(idx) or [])[:4]:
                     entries.append((f'Add "{w}" to dictionary', w, False))
                     entries.append((f'Add "{w}" as a name', w, True))
+                    entries.append((f'Ignore "{w}" in this file', w, None))
                 caps_now = scan_allcaps_words([cue], _known_caps())[1].get(0) or ()
                 for w in sorted(caps_now):
                     entries.append((f'"{w}" is correct — stop flagging it',
                                     w, True))
+                    # ⚠️ NASA is flagged by BOTH scans, so offer its Ignore once.
+                    if w not in (spell_error_words.get(idx) or [])[:4]:
+                        entries.append((f'Ignore "{w}" in this file', w, None))
                 if entries or _fix_entries:
                     # ⚠️ Inserted in REVERSE at index 0, so the visible order
                     # matches `entries`. insert_command(0, ...) puts each new
                     # item above the last one.
                     ctx_menu.insert_separator(0)
                     _ctx_dynamic[0] = 1
-                    for label, w, as_name in reversed(entries):
+                    for label, w, how in reversed(entries):
                         ctx_menu.insert_command(
                             0, label=label,
-                            command=lambda w=w, n=as_name: _teach_from_tree(w, n))
+                            command=(lambda w=w: _ignore_from_tree(w))
+                            if how is None else
+                            (lambda w=w, n=how: _teach_from_tree(w, n)))
                         _ctx_dynamic[0] += 1
                     # ⚠️ Added LAST so they end up ABOVE the teach entries —
                     # same reverse-insert trick, one level out.
@@ -8734,6 +8781,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 rescan_spell_state(app, editor, cues, spell_error_indices,
                                    spell_error_words, spell_name_fixes,
                                    temp_cap_words)
+                _drop_ignored_spell()
             for i, cue in enumerate(cues):
                 display = cue['text'].replace('\n', ' \\n ')
                 ts = f"{cue['start']} → {cue['end']}"

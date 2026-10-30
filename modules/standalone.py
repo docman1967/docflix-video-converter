@@ -65,6 +65,11 @@ class StandaloneContext:
         self.use_names_db = prefs.get('use_names_db', False)
         self.custom_spell_words = prefs.get('custom_spell_words', [])
         self.custom_ad_patterns = prefs.get('custom_ad_patterns', [])
+        # Subtitle Editor highlight modes. ⚠️ Tony, 2026-10-30: they only ever
+        # persisted from the main app. The editor set these and called
+        # save_preferences, and this class neither loaded nor wrote them.
+        self.sub_caps_highlight = bool(prefs.get('sub_caps_highlight', False))
+        self.sub_spell_highlight = bool(prefs.get('sub_spell_highlight', False))
         # Canonical name is custom_replacements — the same attribute the main
         # app, batch filter, and editor UI all use. (The legacy standalone key
         # was search_replace_pairs; still read it as a fallback for old files.)
@@ -99,6 +104,11 @@ class StandaloneContext:
                 # missing. Adopt main's value only when we have none of our own.
                 if 'use_names_db' not in prefs and 'use_names_db' in _main:
                     self.use_names_db = bool(_main['use_names_db'])
+                # ⚠️ Same rule, own value first. A running main app rewrites its
+                # whole prefs file from memory, so main's copy can be stale.
+                for key in ('sub_caps_highlight', 'sub_spell_highlight'):
+                    if key not in prefs and key in _main:
+                        setattr(self, key, bool(_main[key]))
         except Exception:
             pass
 
@@ -150,6 +160,10 @@ class StandaloneContext:
             self, 'custom_spell_words', [])
         prefs['custom_ad_patterns'] = getattr(
             self, 'custom_ad_patterns', [])
+        prefs['sub_caps_highlight'] = bool(
+            getattr(self, 'sub_caps_highlight', False))
+        prefs['sub_spell_highlight'] = bool(
+            getattr(self, 'sub_spell_highlight', False))
         # Write the canonical key, and mirror to the legacy search_replace_pairs
         # key so the main app's standalone-file sync keeps finding it.
         prefs['custom_replacements'] = getattr(
@@ -182,6 +196,10 @@ class StandaloneContext:
                 self, 'custom_replacements', [])
             # Same setting, both stores — see the note in the load path.
             _main['use_names_db'] = bool(getattr(self, 'use_names_db', False))
+            _main['sub_caps_highlight'] = bool(
+                getattr(self, 'sub_caps_highlight', False))
+            _main['sub_spell_highlight'] = bool(
+                getattr(self, 'sub_spell_highlight', False))
             _main_path.parent.mkdir(parents=True, exist_ok=True)
             _main_path.write_text(json.dumps(_main, indent=2))
         except Exception:
