@@ -960,6 +960,162 @@ PROPER_NOUNS = {
 }
 
 
+_dict_capital_only_cache = None
+
+
+def _dict_capital_only():
+    """Lowercased words the system dictionary only knows capitalised.
+
+    Safe by construction: "fahrenheit" qualifies, "china" and "turkey" do not,
+    because the dictionary also lists them lowercase.
+    """
+    global _dict_capital_only_cache
+    if _dict_capital_only_cache is None:
+        found = set()
+        for dict_path in _DICT_PATHS:
+            if os.path.isfile(dict_path):
+                with open(dict_path, encoding='utf-8', errors='ignore') as f:
+                    words = [w.strip() for w in f]
+                lower = {w for w in words if w.islower()}
+                found = {w.lower() for w in words
+                         if w[:1].isupper() and w.isalpha()
+                         and len(w) >= 4 and w.lower() not in lower}
+                break
+        _dict_capital_only_cache = found
+    return _dict_capital_only_cache
+
+
+def _measure_case_damage(cues):
+    """Has an earlier pass damaged this file's mixed-case text?
+
+    ⚠️ The file-level vote is what makes the repair safe to run on anything.
+    Clean subtitles get neither repair. Two signatures:
+      caps_on_continuation  every cue start capitalised, mid-sentence
+      lowered_starts        sentence starts left lowercase
+    """
+    cont_caps = cont_total = start_low = start_total = 0
+    prev = ''
+    for cue in cues:
+        text = re.sub(r'<[^>]+>|\{[^}]+\}', '', cue.get('text') or '').strip()
+        first = next((l for l in text.split('\n') if not _is_label_line(l)), '')
+        m = re.match(r"[-\s\"'“]*([A-Za-z])", first)
+        alpha = re.sub(r'[^a-zA-Z]', '', text)
+        shouting = alpha and sum(c.isupper() for c in alpha) / len(alpha) >= 0.6
+        if m and prev and not shouting:
+            if _ends_sentence(prev):
+                start_total += 1
+                start_low += m.group(1).islower()
+            elif prev.rstrip()[-1:].isalpha() or prev.rstrip()[-1:] == ',':
+                cont_total += 1
+                cont_caps += m.group(1).isupper()
+        prev = text.rsplit('\n', 1)[-1] if text else prev
+    return {
+        'caps_on_continuation': cont_total >= 20 and cont_caps / cont_total >= 0.8,
+        'lowered_starts': start_total >= 20 and start_low / start_total >= 0.3,
+    }
+
+
+def _title_phrase(phrase):
+    """str.title(), minus its "World War Ii" and "Father'S Day"."""
+    return re.sub(r"\bIi\b", "II", phrase.title()).replace("'S", "'s")
+
+
+def _is_label_line(line):
+    """A line that is only a speaker label: "(Marc Summers)"."""
+    return bool(re.fullmatch(r"\s*\([^()\n]{1,40}\)\s*", line.rsplit('\n', 1)[-1]))
+
+
+# ⚠️ Ordinary words the proper-noun list used to capitalise EVERYWHERE. Tony,
+# 2026-10-30, on a food show: "visit a Place", "Apple pie". They now need an
+# anchor, through the same path as an ambiguous custom name.
+# "Wilshire Boulevard" and "Lake Michigan" still work; "the road" stays lowercase.
+_CONTEXT_PROPER = {
+    'street', 'avenue', 'road', 'drive', 'lane', 'boulevard', 'court', 'place',
+    'terrace', 'highway', 'parkway', 'plaza', 'bridge', 'park', 'lake', 'river',
+    'mountain', 'island', 'north', 'south', 'east', 'west', 'jersey', 'queens',
+    'apple', 'gen', 'col', 'rev', 'prof', 'dept',
+}
+_NATIONALITY_WORDS = {
+    'american', 'roman', 'french', 'german', 'italian', 'spanish', 'english',
+    'irish', 'scottish', 'british', 'chinese', 'japanese', 'russian', 'mexican',
+    'canadian', 'indian', 'korean', 'greek', 'dutch', 'european', 'african',
+    'asian', 'australian', 'brazilian', 'soviet',
+}
+# A month that is also a word needs its own evidence: "in may", "may 5".
+_CONTEXT_MONTHS = {'may', 'march', 'august'}
+_MONTH_CONTEXT = re.compile(
+    r"\b(in|of|since|until|by|early|late|mid|from|through|last|next) "
+    r"(may|march|august)\b|\b(may|march|august)(?= \d)", re.IGNORECASE)
+# Not in the dictionary as capital-only, but reviewed against real subtitles.
+_EXTRA_PROPER = {
+    'soviet', 'soviets', 'pacific', 'atlantic', 'roman', 'romans',
+    'new orleans', 'los angeles', 'san francisco', 'las vegas', 'new england',
+    'soviet union', 'united states', 'united kingdom', 'roman empire',
+    'first world war', 'second world war', 'world war i', 'world war ii',
+    'civil war', 'north america', 'south america', 'north carolina',
+    'south carolina', 'north dakota', 'south dakota', 'west virginia',
+    "mother's day", "father's day", 'new mexico', 'new hampshire',
+}
+_EXTRA_ACRONYMS = {
+    'fda', 'usda', 'bbq', 'pvc', 'cnc', 'mri', 'lcd', 'gps', 'hiv', 'dvd',
+    'atm', 'atms', 'nfl', 'nba', 'mlb', 'nhl', 'mtv', 'hbo', 'cnn', 'ibm',
+    'nascar', 'pbs', 'cbs', 'nbc', 'bmw', 'ufo', 'ufos', 'cpr', 'suv', 'suvs',
+    'llc', 'ncis', 'fsb', 'doj', 'ied', 'vip', 'vips',
+}
+# Dotted acronyms are one token. The dot inside "p.d." is not a sentence end.
+_DOTTED = re.compile(r"(?<![\w.])((?:[A-Za-z]\.){2,}[A-Za-z]?)(s\b)?")
+_DOTTED_KEEP_LOWER = {'a.m.', 'p.m.', 'e.g.', 'i.e.', 'a.m', 'p.m'}
+# "U.S. Navy" and the like: ordinary words that stay capitalised after an acronym.
+_AFTER_DOTTED_KEEP = {
+    'navy', 'army', 'air', 'marines', 'marine', 'coast', 'open', 'senate',
+    'mint', 'postal', 'supreme', 'treasury', 'capitol', 'congress',
+}
+_ENDS_DOTTED = re.compile(r"(?:^|[^\w.])(?:[A-Za-z]\.){2,}[\"'\u201d\u2019]?\s*$")
+_ENDS_SENTENCE = re.compile(r"[.!?]+[\"'\u201d\u2019]?\s*$")
+
+
+def _ends_sentence(text):
+    """True if *text* finishes a sentence.
+
+    ⚠️ A trailing dotted acronym does not count. "made in the U.S.\nand sold"
+    is the common case; the rarer real sentence end loses one capital, which is
+    a smaller error than capitalising every word after every acronym.
+    """
+    return bool(_ENDS_SENTENCE.search(text)) and not _ENDS_DOTTED.search(text)
+
+
+def _fix_dotted(text):
+    """p.d. -> P.D.; l.e.d.s -> L.E.D.s; and "u.s. Was" -> "U.S. was".
+
+    a.m., p.m., e.g. and i.e. keep their lowercase. Only an ordinary dictionary
+    word loses its capital, so "T.G.I. Friday's" and "U.S. Navy"-style names
+    that the proper-noun pass already knows are left alone.
+    """
+    common = _common_words()
+
+    def _up(m):
+        tok, plural = m.group(1), m.group(2) or ''
+        if tok.lower() in _DOTTED_KEEP_LOWER:
+            return tok.lower() + plural
+        # L.E.D.S -> L.E.D.s. U.S.S. and friends end in a dot, so never land here.
+        if not plural and tok[-1] in 'sS' and tok.lower() != 'u.s.s':
+            return tok[:-1].upper() + 's'
+        return tok.upper() + plural
+
+    text = _DOTTED.sub(_up, text)
+
+    def _low(m):
+        word = m.group(2)
+        low = word.lower()
+        if (low in common and low not in PROPER_NOUNS
+                and low not in _EXTRA_PROPER and low not in _AFTER_DOTTED_KEEP
+                and not (_names_db_loaded and word in _names_db)):
+            return m.group(1) + low
+        return m.group(0)
+
+    return re.sub(r"((?<![\w.])(?:[A-Za-z]\.){2,}[ \n])([A-Z][a-z'’]+)", _low, text)
+
+
 def filter_fix_caps(cues, custom_names=None, use_names_db=False):
     """Convert ALL CAPS subtitles to proper sentence case.
 
@@ -987,12 +1143,53 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
     # Sir, Let. "the Alden house" would become "The Alden house". Only a list
     # Tony curated himself is safe here.
     custom_global, custom_contextual = _split_custom_names(custom_names)
-    all_proper = set(PROPER_NOUNS)
+    # ⚠️ custom_contextual must not be aliased: a word he taught is his to scope.
+    taught_contextual = {n.lower() for n in custom_contextual}
+    custom_contextual = list(custom_contextual) + sorted(
+        w.capitalize() for w in _CONTEXT_PROPER
+        - {n.lower() for n in custom_global}
+        - {n.lower() for n in custom_contextual})
+    all_proper = (set(PROPER_NOUNS) | _EXTRA_PROPER | _dict_capital_only()) \
+        - _CONTEXT_PROPER - _CONTEXT_MONTHS
     all_proper.update(w.lower() for w in custom_global)
     use_names = use_names_db and _names_db_loaded
 
     sorted_nouns = sorted(all_proper, key=len, reverse=True)
     phrases = [n for n in sorted_nouns if ' ' in n]
+
+    def _proper_pass(text):
+        """Phrases, acronyms, proper nouns, months and dotted acronyms."""
+        # ⚠️ Word-bounded: unbounded, "world war i" ate "world war in".
+        for phrase in phrases:
+            pattern = re.compile(
+                r"(?<![\w'’])" + re.escape(phrase) + r"(?!\w)", re.IGNORECASE)
+            text = pattern.sub(_title_phrase(phrase), text)
+
+        # ⚠️ 'ad' removed 2026-10-30: "a new ad" came out "a new AD". A.D. is
+        # handled as a dotted acronym.
+        _ALLCAPS_ABBREVS = {
+            'fbi', 'cia', 'nsa', 'dea', 'atf', 'nypd', 'lapd',
+            'nasa', 'nato', 'un', 'eu', 'uk', 'usa', 'tv', 'dna',
+            'ceo', 'cfo', 'cto', 'phd', 'md', 'dj', 'pc', 'id',
+            'ok', 'bc', 'ac', 'dc', 'hq',
+        } | _EXTRA_ACRONYMS
+
+        def _cap_word(m):
+            word = m.group(0)
+            lower = word.lower()
+            if lower in _ALLCAPS_ABBREVS:
+                return lower.upper()
+            if lower in all_proper:
+                return word.capitalize()
+            if use_names and word.capitalize() in _names_db:
+                return word.capitalize()
+            return word
+
+        text = re.sub(r'\b[a-zA-Z]+\b', _cap_word, text)
+        text = _MONTH_CONTEXT.sub(
+            lambda m: m.group(0)[:-len(m.group(2) or m.group(3))]
+            + (m.group(2) or m.group(3)).capitalize(), text)
+        return _fix_dotted(text)
 
     def fix_case(text, cap_first=True):
         alpha = re.sub(r'[^a-zA-Z]', '', text)
@@ -1012,9 +1209,8 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
                 is_first_line = (idx == 0)
                 prev_ended_sentence = (
                     idx > 0 and capped_lines
-                    and re.search(
-                        r'[.!?]["\'\u201d\u2019]?\s*$',
-                        capped_lines[-1]))
+                    and (_ends_sentence(capped_lines[-1])
+                         or _is_label_line(capped_lines[-1])))
                 starts_with_dash = line.startswith('-')
 
                 should_cap = starts_with_dash or prev_ended_sentence
@@ -1023,8 +1219,8 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
 
                 if should_cap:
                     line = re.sub(
-                        r'^(-\s*)?([a-z])',
-                        lambda m: (m.group(1) or '') + m.group(2).upper(),
+                        r'^(-\s*)?((?:<[^>]+>|\{[^}]+\}|\()*)([a-z])',
+                        lambda m: (m.group(1) or '') + m.group(2) + m.group(3).upper(),
                         line)
             capped_lines.append(line)
         text = '\n'.join(capped_lines)
@@ -1033,34 +1229,14 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
             r'([.!?]["\'\u201d\u2019]?[\s]+)([a-z])',
             lambda m: m.group(1) + m.group(2).upper(), text)
 
-        text = re.sub(r"\bi\b", "I", text)
+        # ⚠️ Not the "i" in a tag (<i>) or in i.e.
+        text = re.sub(r"(?<![<\/.\w])i(?![>.\w'’]|\.[a-z])|(?<![<\/.\w])i(?=\.(?:\s|$))",
+                      "I", text)
         text = re.sub(
             r"\bi'(m|ll|ve|d|s)\b",
             lambda m: "I'" + m.group(1), text)
 
-        for phrase in phrases:
-            pattern = re.compile(re.escape(phrase), re.IGNORECASE)
-            text = pattern.sub(phrase.title(), text)
-
-        _ALLCAPS_ABBREVS = {
-            'fbi', 'cia', 'nsa', 'dea', 'atf', 'nypd', 'lapd',
-            'nasa', 'nato', 'un', 'eu', 'uk', 'usa', 'tv', 'dna',
-            'ceo', 'cfo', 'cto', 'phd', 'md', 'dj', 'pc', 'id',
-            'ok', 'ad', 'bc', 'ac', 'dc', 'hq',
-        }
-
-        def _cap_word(m):
-            word = m.group(0)
-            lower = word.lower()
-            if lower in _ALLCAPS_ABBREVS:
-                return lower.upper()
-            if lower in all_proper:
-                return word.capitalize()
-            if use_names and word.capitalize() in _names_db:
-                return word.capitalize()
-            return word
-
-        text = re.sub(r'\b[a-zA-Z]+\b', _cap_word, text)
+        text = _proper_pass(text)
         return text
 
     def apply_custom_names(text):
@@ -1073,7 +1249,8 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
             return text
         custom_phrases = [n for n in custom_global if ' ' in n]
         for phrase in custom_phrases:
-            pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+            pattern = re.compile(
+                r"(?<![\w'’])" + re.escape(phrase) + r"(?!\w)", re.IGNORECASE)
             text = pattern.sub(phrase.title(), text)
         # ⚠️ Keys are NORMALISED (curly -> straight) so a name stored as
         # "O'Brien" still matches text written "O’Brien", and vice versa. The
@@ -1159,7 +1336,7 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
             text = re.sub(r"\b[a-zA-Z]+(?:['’][a-zA-Z]+)*", _cap_custom, text)
         return text
 
-    def apply_contextual_names(text):
+    def apply_contextual_names(text, repairing=True):
         """Capitalise an ambiguous custom name only when an anchor proves it.
 
         Two anchors, both of which do the disambiguating so we never have to
@@ -1183,9 +1360,13 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
         lowercase. A rule that capitalised those too would be wrong more often
         than right.
         """
-        if not custom_contextual:
+        # ⚠️ The built-in words only touch a cue this pass is already repairing.
+        # On clean text "the north" was the author's call, not ours.
+        scope = [n for n in custom_contextual
+                 if repairing or n.lower() in taught_contextual]
+        if not scope:
             return text
-        names = '|'.join(re.escape(n.lower()) for n in custom_contextual)
+        names = '|'.join(re.escape(n.lower()) for n in scope)
         canon = {n.lower(): n for n in custom_contextual}
 
         def _anchored(m):
@@ -1209,6 +1390,11 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
         # word would anchor the one after it.
         def _anchored_left(m):
             prev, gap, word = m.group(1), m.group(2), m.group(3)
+            # ⚠️ "Hudson River" yes, "Roman road" and "American west" no. A
+            # nationality describes the word; it doesn't name it.
+            if (word.lower() in _CONTEXT_PROPER
+                    and prev.lower() in _NATIONALITY_WORDS):
+                return m.group(0)
             if prev in _names_db or prev.lower() in all_proper:
                 return prev + gap + canon[word.lower()]
             return m.group(0)
@@ -1222,16 +1408,62 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
                       text, flags=re.IGNORECASE)
         return text
 
+    def _repair_mixed(text, prev_ended):
+        """A cue that isn't shouting, in a file an earlier pass damaged."""
+        lines = text.split('\n')
+        if not prev_ended and damage['caps_on_continuation']:
+            m = re.match(r"(\s*(?:<[^>]+>|\{[^}]+\})*)([A-Z][a-z'’]+)(.*)",
+                         lines[0], re.DOTALL)
+            if m and _lowerable_start(m.group(2), lines[0]):
+                lines[0] = m.group(1) + m.group(2).lower() + m.group(3)
+        if damage['lowered_starts']:
+            for i, line in enumerate(lines):
+                starts = (prev_ended if i == 0
+                          else _ends_sentence(lines[i - 1])
+                          or _is_label_line(lines[i - 1]))
+                if starts or _is_label_line(line):
+                    lines[i] = re.sub(
+                        r"^(-\s*)?((?:<[^>]+>|\{[^}]+\}|\()*)([a-z])",
+                        lambda m: (m.group(1) or '') + m.group(2)
+                        + m.group(3).upper(), line)
+        text = '\n'.join(lines)
+        text = re.sub(r"(?<![<\/.\w])i(?=['’](?:m|ll|ve|d|s)\b|\s|[,.!?]|$)", "I", text)
+        return _proper_pass(text)
+
+    def _lowerable_start(word, line):
+        low = word.lower()
+        return (low in _common_words() and low not in all_proper
+                and not (use_names and word in _names_db)
+                and word not in ('I', "I'm", "I've", "I'll", "I'd")
+                and not re.match(r"[A-Z][a-z'’]+ [A-Z][a-z'’]+", line)
+                and not re.match(r"[A-Za-z'’. -]{1,30}:", line))
+
+    damage = _measure_case_damage(cues)
+    # ⚠️ "IED." and "No, I..." read as shouting, and lowering them is damage. In
+    # a long file that is otherwise cased, a cue this short is left alone.
+    shouted = sum(1 for c in cues if fix_case(c['text']) != c['text'])
+    mostly_cased = (len(cues) >= 50 and shouted / len(cues) < 0.05
+                    and not any(damage.values()))
+
     result = []
     prev_text = ''
     for cue in cues:
         text = cue['text']
         prev_ended_sentence = (
-            not prev_text
-            or bool(re.search(
-                r'[.!?]["\'\u201d\u2019]?\s*$', prev_text)))
-        text = fix_case(text, cap_first=prev_ended_sentence)
-        if prev_ended_sentence:
+            not prev_text or _ends_sentence(prev_text)
+            or _is_label_line(prev_text))
+        was_shouting = fix_case(text) != text
+        if (was_shouting and mostly_cased
+                and len(re.findall(r"[A-Za-z'’.-]+", text)) <= 3):
+            was_shouting = False
+        else:
+            text = fix_case(text, cap_first=prev_ended_sentence)
+        if not was_shouting and any(damage.values()):
+            text = _repair_mixed(text, prev_ended_sentence)
+        # ⚠️ Only a cue this pass just lowered. A cue that was already mixed
+        # case belongs to whoever cased it: on clean files this used to
+        # capitalise "look, a package." after a line ending "..."
+        elif was_shouting and prev_ended_sentence:
             text = re.sub(
                 r'^(-\s*)?([a-z])',
                 lambda m: (m.group(1) or '') + m.group(2).upper(), text)
@@ -1239,7 +1471,8 @@ def filter_fix_caps(cues, custom_names=None, use_names_db=False):
         # ⚠️ LAST, and it matters — see apply_contextual_names. The anchor test
         # asks whether the NEXT word is already a known capitalised name, which
         # is only true once fix_case and apply_custom_names have run.
-        text = apply_contextual_names(text)
+        text = apply_contextual_names(
+            text, repairing=was_shouting or any(damage.values()))
         prev_text = text
         result.append({**cue, 'text': text})
     return result
