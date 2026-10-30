@@ -4485,6 +4485,8 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
             )
             if not path:
                 return
+            if not _ok_to_replace_work("opening another file"):
+                return
             ext = Path(path).suffix.lower()
             if ext in VIDEO_EXTENSIONS or ext == '.idx':
                 load_video_subtitle(path)
@@ -4558,11 +4560,25 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 _last_drop[0] = path
                 _trace(f"drop -> {path!r} (ext={ext}, branch="
                        f"{'video' if (ext in VIDEO_EXTENSIONS or ext == '.idx') else 'subtitle'})")
-                if ext in VIDEO_EXTENSIONS or ext == '.idx':
-                    load_video_subtitle(path)
+
+                def _load_dropped():
+                    if not _ok_to_replace_work("opening another file"):
+                        return
+                    if ext in VIDEO_EXTENSIONS or ext == '.idx':
+                        load_video_subtitle(path)
+                    else:
+                        video_source[0] = None  # clear video mode
+                        load_file(path)
+
+                # ⚠️ Tony, 2026-10-30: dragging a second file in threw away the
+                # unsaved edits with no warning; only closing the window asked.
+                # ⚠️ Deferred when a question is coming: a modal dialog inside
+                # the drop callback would leave the file manager waiting on an
+                # unfinished drag, the same shape as the 2026-08-07 bug.
+                if cues and _has_unsaved_changes():
+                    editor.after(50, _load_dropped)
                 else:
-                    video_source[0] = None  # clear video mode
-                    load_file(path)
+                    _load_dropped()
 
         # ── Register drag-and-drop on the editor window ──
         if HAS_DND:
@@ -4781,6 +4797,9 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                 return
             with open(out_path, 'w', encoding='utf-8') as f:
                 f.write(write_srt(cues))
+            # ⚠️ Without this, the unsaved-changes prompt still fired after a
+            # successful Save As.
+            original_cues[:] = [dict(c) for c in cues]
             current_path[0] = out_path
             editor.title(f"Docflix Subtitle Editor — {os.path.basename(out_path)}")
             app.add_log(f"Subtitle saved as: {out_path}", 'SUCCESS')
@@ -8813,17 +8832,36 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     return True
             return False
 
+        def _ok_to_replace_work(doing_what):
+            """Ask about unsaved edits. True means the caller may carry on.
+
+            ⚠️ Yes only counts if the save really happened. do_save_file() can
+            return without saving (Cancel in the OCR save dialog, a failed
+            re-mux), and carrying on then loses the work the user just asked to
+            keep. So re-check rather than trust the call.
+            """
+            if not (cues and _has_unsaved_changes()):
+                return True
+            result = messagebox.askyesnocancel(
+                "Unsaved Changes",
+                "You have unsaved changes.\n\n"
+                f"Would you like to save before {doing_what}?",
+                parent=editor)
+            if result is None:
+                return False
+            if not result:
+                return True
+            try:
+                do_save_file()
+            except Exception as e:
+                messagebox.showerror("Save Error",
+                    f"Failed to save:\n{e}", parent=editor)
+                return False
+            return not _has_unsaved_changes()
+
         def on_editor_close():
-            if cues and _has_unsaved_changes():
-                result = messagebox.askyesnocancel(
-                    "Unsaved Changes",
-                    "You have unsaved changes.\n\n"
-                    "Would you like to save before closing?",
-                    parent=editor)
-                if result is None:
-                    return  # Cancel — don't close
-                if result:
-                    do_save_file()  # Save first
+            if not _ok_to_replace_work("closing"):
+                return
             timeline.cleanup()
             if video_source[0] and video_source[0].get('temp_srt'):
                 try:
