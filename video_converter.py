@@ -3722,6 +3722,9 @@ class VideoConverterApp:
 
         # Metadata cleanup settings
         self.strip_chapters = tk.BooleanVar(value=False)
+        # Attach a same-named subtitle sitting beside a video when it's added.
+        # Tony, 2026-10-31: he edits subtitles WHILE the batch encodes.
+        self.auto_mux_external_subs = tk.BooleanVar(value=True)
         self.strip_metadata_tags = tk.BooleanVar(value=False)
         self.set_track_metadata = tk.BooleanVar(value=False)
         self.meta_video_lang = tk.StringVar(value='und')
@@ -3848,6 +3851,10 @@ class VideoConverterApp:
 
         settings_menu.add_command(label="Default Settings...",
                                   command=self.show_default_settings)
+        settings_menu.add_separator()
+        settings_menu.add_checkbutton(label="Mux External Subtitles Automatically",
+                                      variable=self.auto_mux_external_subs,
+                                      command=self.on_auto_mux_change)
         settings_menu.add_separator()
         settings_menu.add_command(label="Reset to Defaults",
                                   command=self.reset_preferences)
@@ -4123,6 +4130,20 @@ class VideoConverterApp:
                 return 'auto'
         v = (var.get() or 'Auto').strip().rstrip('%')
         return 'auto' if v.lower() in ('', 'auto', 'none') else v
+
+    def on_auto_mux_change(self):
+        """Persist this one setting.
+
+        ⚠️ Not save_preferences(): that also writes the current panel, and the
+        nightly encode reads its settings from this file.
+        """
+        try:
+            path = self._prefs_path()
+            prefs = json.loads(path.read_text()) if path.exists() else {}
+            prefs['auto_mux_external_subs'] = self.auto_mux_external_subs.get()
+            path.write_text(json.dumps(prefs, indent=2))
+        except Exception as e:
+            self.add_log(f"Could not save the external subtitle setting: {e}", 'WARNING')
 
     def on_ui_scale_change(self, event=None):
         """Persist the UI-Scale override. Scaling is applied at startup before any widgets
@@ -7087,7 +7108,10 @@ class VideoConverterApp:
         # Associate subtitle files (fast, no probing)
         attached = 0
         unmatched_subs = []
-        if sub_paths:
+        if sub_paths and not self.auto_mux_external_subs.get():
+            self.add_log(f"Left {len(sub_paths)} subtitle file(s) unattached "
+                         "(Settings: Mux External Subtitles Automatically is off).", 'INFO')
+        elif sub_paths:
             for sub_path in sub_paths:
                 if self._associate_external_sub(sub_path):
                     attached += 1
@@ -7803,6 +7827,7 @@ class VideoConverterApp:
             'default_output_folder': str(self.output_dir) if self.output_dir else '',
             'recent_folders':        self.recent_folders,
             'strip_chapters':        self.strip_chapters.get(),
+            'auto_mux_external_subs': self.auto_mux_external_subs.get(),
             'strip_metadata_tags':   self.strip_metadata_tags.get(),
             'set_track_metadata':    self.set_track_metadata.get(),
             'meta_video_lang':       self.meta_video_lang.get(),
@@ -7942,6 +7967,7 @@ class VideoConverterApp:
             self.strip_cc.set(prefs.get('strip_cc', self.strip_cc.get()))
             self.two_pass.set(prefs.get('two_pass',             self.two_pass.get()))
             self.strip_chapters.set(prefs.get('strip_chapters', self.strip_chapters.get()))
+            self.auto_mux_external_subs.set(bool(prefs.get('auto_mux_external_subs', True)))
             self.strip_metadata_tags.set(prefs.get('strip_metadata_tags', self.strip_metadata_tags.get()))
             self.set_track_metadata.set(prefs.get('set_track_metadata', self.set_track_metadata.get()))
             self.meta_video_lang.set(prefs.get('meta_video_lang', self.meta_video_lang.get()))
@@ -8080,6 +8106,7 @@ class VideoConverterApp:
         self.notify_sound.set(False)
         self.notify_sound_file.set('complete')
         self.strip_chapters.set(False)
+        self.auto_mux_external_subs.set(True)
         self.strip_metadata_tags.set(False)
         self.set_track_metadata.set(False)
         self.meta_video_lang.set('und')
@@ -8727,6 +8754,8 @@ class VideoConverterApp:
 
     def _offer_subtitle_association(self):
         """Check for subtitle files in the working directory and offer to attach them."""
+        if not self.auto_mux_external_subs.get():
+            return
         try:
             sub_files = []
             for filepath in sorted(Path(self.working_dir).rglob('*')):
