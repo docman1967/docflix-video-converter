@@ -3852,10 +3852,6 @@ class VideoConverterApp:
         settings_menu.add_command(label="Default Settings...",
                                   command=self.show_default_settings)
         settings_menu.add_separator()
-        settings_menu.add_checkbutton(label="Mux External Subtitles Automatically",
-                                      variable=self.auto_mux_external_subs,
-                                      command=self.on_auto_mux_change)
-        settings_menu.add_separator()
         settings_menu.add_command(label="Reset to Defaults",
                                   command=self.reset_preferences)
 
@@ -4130,20 +4126,6 @@ class VideoConverterApp:
                 return 'auto'
         v = (var.get() or 'Auto').strip().rstrip('%')
         return 'auto' if v.lower() in ('', 'auto', 'none') else v
-
-    def on_auto_mux_change(self):
-        """Persist this one setting.
-
-        ⚠️ Not save_preferences(): that also writes the current panel, and the
-        nightly encode reads its settings from this file.
-        """
-        try:
-            path = self._prefs_path()
-            prefs = json.loads(path.read_text()) if path.exists() else {}
-            prefs['auto_mux_external_subs'] = self.auto_mux_external_subs.get()
-            path.write_text(json.dumps(prefs, indent=2))
-        except Exception as e:
-            self.add_log(f"Could not save the external subtitle setting: {e}", 'WARNING')
 
     def on_ui_scale_change(self, event=None):
         """Persist the UI-Scale override. Scaling is applied at startup before any widgets
@@ -7110,7 +7092,7 @@ class VideoConverterApp:
         unmatched_subs = []
         if sub_paths and not self.auto_mux_external_subs.get():
             self.add_log(f"Left {len(sub_paths)} subtitle file(s) unattached "
-                         "(Settings: Mux External Subtitles Automatically is off).", 'INFO')
+                         "(Default Settings: Mux external subtitles automatically is off).", 'INFO')
         elif sub_paths:
             for sub_path in sub_paths:
                 if self._associate_external_sub(sub_path):
@@ -7702,10 +7684,10 @@ class VideoConverterApp:
         def on_player_changed(*args):
             if v_player.get() == 'Custom...':
                 custom_frame.grid()
-                dlg.geometry("640x420")
+                dlg.geometry("640x460")
             else:
                 custom_frame.grid_remove()
-                dlg.geometry("640x380")
+                dlg.geometry("640x420")
 
         v_player.trace_add('write', on_player_changed)
         # Set initial state
@@ -7737,8 +7719,14 @@ class VideoConverterApp:
                        self.preview_sound()
                    )).pack(side='left', padx=2)
 
+        # ── External Subtitles ──
+        ttk.Label(f, text="External Subtitles:").grid(row=8, column=0, sticky='w', **pad)
+        v_auto_mux = tk.BooleanVar(value=self.auto_mux_external_subs.get())
+        ttk.Checkbutton(f, text="Mux external subtitles automatically",
+                        variable=v_auto_mux).grid(row=8, column=1, sticky='w', **pad)
+
         # Adjust dialog height for all content
-        dlg.geometry("640x380")
+        dlg.geometry("640x420")
 
         # ── Buttons ──
         btn_frame = ttk.Frame(dlg, padding=(16, 0, 16, 12))
@@ -7780,6 +7768,8 @@ class VideoConverterApp:
             # Notification
             self.notify_sound.set(v_notify.get())
             self.notify_sound_file.set(v_sound_file.get())
+
+            self.auto_mux_external_subs.set(v_auto_mux.get())
 
             # Persist to prefs file
             self.save_preferences()

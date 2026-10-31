@@ -1,5 +1,4 @@
-"""Settings: Mux External Subtitles Automatically (Tony, 2026-10-31)."""
-import json
+"""Default Settings: Mux external subtitles automatically (Tony, 2026-10-31)."""
 import os
 import sys
 import tempfile
@@ -56,13 +55,3 @@ def test_on_still_offers_the_folder_prompt():
         with mock.patch('video_converter.messagebox.askyesno', return_value=False) as ask:
             App._offer_subtitle_association(a)
         ask.assert_called_once()
-
-
-def test_toggle_saves_only_its_own_key():
-    with tempfile.TemporaryDirectory() as d:
-        p = Path(d, 'prefs.json')
-        p.write_text(json.dumps({'video_mode': 'both', 'gpu_index': 1}))
-        a = fake_app(False, d, prefs=p)
-        App.on_auto_mux_change(a)
-        assert json.loads(p.read_text()) == {
-            'video_mode': 'both', 'gpu_index': 1, 'auto_mux_external_subs': False}
