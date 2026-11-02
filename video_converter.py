@@ -6936,7 +6936,12 @@ class VideoConverterApp:
         video_paths = []
         sub_paths = []
         for path_str in paths:
-            path = Path(path_str.strip())
+            # Don't strip: a folder name can really end in a space
+            # ("Devotion Obedience or Betrayal "), and stripping it points at
+            # a folder that doesn't exist.
+            if not path_str:
+                continue
+            path = Path(path_str)
             if path.is_dir():
                 for filepath in sorted(path.rglob('*')):
                     if any(part.startswith('.') for part in filepath.relative_to(path).parts):
