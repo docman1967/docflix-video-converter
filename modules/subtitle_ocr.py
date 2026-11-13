@@ -1519,6 +1519,38 @@ def _is_single_line(img):
     return span < 2.2 * max(stem, 1)
 
 
+_OCR_JUNK = re.compile(r'[\\|@®©~{}\[\]=_]')
+
+
+def _looks_broken(img, text):
+    """Does this read look wrong for this picture? Empty, junk characters, or a line
+    count that contradicts the bitmap (one line on screen read as several, or several
+    on screen read as one — the dropped-second-line case)."""
+    if not text:
+        return True
+    if _OCR_JUNK.search(text.replace('<i>', '').replace('</i>', '')):
+        return True
+    one_line = _is_single_line(img)
+    lines = text.count('\n') + 1
+    return (one_line and lines > 1) or (not one_line and lines == 1)
+
+
+def _shrink_and_binarise(img, line_px=40):
+    """Scale so one line of ink is ~line_px tall (Tesseract reads big text badly), then
+    threshold at 128 so the disc's soft grey outline ring becomes plain background."""
+    import numpy as np
+    from PIL import Image
+    ink = np.asarray(img.convert('L')) < 128
+    rows = np.flatnonzero(ink.any(axis=1))
+    if rows.size:
+        per_line = (rows[-1] - rows[0] + 1) / (1 if _is_single_line(img) else 2)
+        f = min(1.0, line_px / per_line)
+        if f < 0.98:
+            img = img.resize((max(1, int(img.width * f)), max(1, int(img.height * f))),
+                             Image.LANCZOS)
+    return img.convert('L').point(lambda v: 0 if v < 128 else 255)
+
+
 def _ocr_cue(img, tess_lang, notes):
     """Tesseract + the whole post-processing chain for one cue. ONE copy, two callers.
 
@@ -1546,14 +1578,22 @@ def _ocr_cue(img, tess_lang, notes):
 
     italic = looks_italic(img)
 
-    def _read(psm):
+    def _read_img(im, psm):
         # ⭐ Persistent engine first (~4.5x faster, identical text — see tess_engine.py).
         # None means the library is unavailable: fall back, never return empty.
-        out = _engine_ocr(img, tess_lang, psm)
+        out = _engine_ocr(im, tess_lang, psm)
         if out is None:
             out = pytesseract.image_to_string(
-                img, lang=tess_lang, config=f'--psm {psm} --oem 3')
+                im, lang=tess_lang, config=f'--psm {psm} --oem 3')
         return out.strip()
+
+    def _read_best(im):
+        if _is_single_line(im):
+            return _read_img(im, 7) or _read_img(im, 6)
+        return _read_img(im, 6)
+
+    def _read(psm):
+        return _read_img(img, psm)
 
     # ⭐ ONE LINE ON SCREEN → READ IT AS ONE LINE (--psm 7). Tony, 2026-11-13, The Chosen
     # S01E01: a thin anti-aliased disc font broke --psm 6's block layout analysis. Clean,
@@ -1562,10 +1602,20 @@ def _ocr_cue(img, tess_lang, notes):
     # same images right: ~40 of 396 single-line cues fixed in one episode.
     # ⚠️ Fail SAFE: anything not clearly one line keeps --psm 6, and a --psm 7 read that
     # comes back empty falls back to --psm 6 (it lost "- Well, do your job." outright).
-    if _is_single_line(img):
-        text = _read(7) or _read(6)
-    else:
-        text = _read(6)
+    text = _read_best(img)
+
+    # ⭐ RESCUE, NOT REPLACE. Same episode, a second failure: clean bitmaps ("- How can I?",
+    # "40 days.", "- Papa?") read as NOTHING in either mode, an italic "I see him." read
+    # as three lines of garbage, and two-line cues lost their second line. Shrinking the
+    # cue to ~40 px per line and thresholding away the disc's grey outline ring read them
+    # all. But applied to EVERY cue it changed 12 of Star Trek: Enterprise's 576 good
+    # reads, half for the worse ("I see it" → "I seeit", "Oh!" → "On!") — so it only
+    # runs when the first read looks broken, and only wins if it doesn't look broken too.
+    # Measured: The Chosen S01E01 16 cues rescued, 0 worse; Enterprise S01E14 0 changed.
+    if _looks_broken(img, _fix_ocr_text(text)):
+        alt = _read_best(_shrink_and_binarise(img))
+        if alt and not _looks_broken(img, _fix_ocr_text(alt)):
+            text = alt
     text = _reinsert_music_notes(_fix_ocr_text(text), notes)
     return apply_italic_tag(text, italic)
 

@@ -74,3 +74,43 @@ def test_two_lines_are_not_one(text, spacing):
 
 def test_blank_image_is_not_a_line():
     assert not _is_single_line(Image.new("L", (300, 80), 255))
+
+
+# ── the rescue: only when the first read looks broken (Tony, 2026-11-13) ─────────────
+# Same episode, second failure: clean bitmaps read as NOTHING ("- How can I?", "40
+# days."), an italic line as garbage, two-line cues missing their second line. Shrink
+# + threshold read them; applied to every cue it worsened half of 12 changed Enterprise
+# reads, so it is a rescue, gated by _looks_broken.
+
+from modules.subtitle_ocr import _looks_broken, _shrink_and_binarise   # noqa: E402
+
+
+def test_empty_read_is_broken():
+    assert _looks_broken(_cue("- How can I?"), "")
+
+
+def test_junk_characters_are_broken():
+    assert _looks_broken(_cue("- Mary..."), "- Mary. B®")
+
+
+def test_one_line_read_as_several_is_broken():
+    assert _looks_broken(_cue("- I'm scared."), "I'm\nscare")
+
+
+def test_two_lines_read_as_one_is_broken():
+    """The dropped-second-line case."""
+    img = _cue("to stop Shabbat fishing,\nwhich was already our law,")
+    assert _looks_broken(img, "to stop Shabbat fishing,")
+
+
+def test_a_good_read_is_left_alone():
+    assert not _looks_broken(_cue("- I'm scared."), "- I'm scared.")
+    two = _cue("- You should be sleeping, little one.\n- I can't sleep.")
+    assert not _looks_broken(two, "- You should be sleeping, little one.\n- I can't sleep.")
+
+
+def test_shrink_and_binarise_is_two_tone_and_smaller():
+    img = _cue("- Stoic, huh?")
+    out = _shrink_and_binarise(img)
+    assert set(out.getdata()) <= {0, 255}
+    assert out.height < img.height
