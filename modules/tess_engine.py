@@ -81,8 +81,12 @@ def _checkin(lang, api):
         _idle.setdefault(lang, []).append(api)
 
 
-def image_to_string(img, lang):
-    """OCR a PIL image at --psm 6 --oem 3. Returns None if the engine is unavailable."""
+def image_to_string(img, lang, psm=6):
+    """OCR a PIL image at --psm <psm> --oem 3 (6 unless told otherwise).
+    Returns None if the engine is unavailable.
+
+    The mode is set on EVERY call: engines are pooled, so one left at 7 by the last
+    caller would otherwise read the next block as a single line."""
     import numpy as np
     api = _checkout(lang)
     if api is None:
@@ -90,6 +94,7 @@ def image_to_string(img, lang):
     try:
         arr = np.ascontiguousarray(np.asarray(img.convert("L"), dtype=np.uint8))
         h, w = arr.shape
+        _lib.TessBaseAPISetPageSegMode(api, psm)
         _lib.TessBaseAPISetImage(api, arr.ctypes.data, w, h, 1, w)
         p = _lib.TessBaseAPIGetUTF8Text(api)
         text = ctypes.string_at(p).decode("utf-8", "replace") if p else ""

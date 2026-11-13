@@ -1471,6 +1471,54 @@ def _repair_sdh_brackets(text):
     return '\n'.join(out)
 
 
+def _is_single_line(img):
+    """True when the cue image holds exactly one line of text. Fails SAFE: unsure → False.
+
+    TWO independent tests, and BOTH must say "one line":
+    1. GAP — the longest blank run of rows inside the ink's vertical span, relative to
+       that span. Between two lines it is a real gap; inside one line it is only the
+       space above a dot or under an apostrophe.
+    2. HEIGHT — the span against the tallest unbroken vertical stroke in any column
+       (the stem of an I, l, d, k). No stroke crosses the gap between two lines, so the
+       stem measures ONE line's height whatever the leading.
+    ⚠️ The gap test alone is not enough: with tight leading a descender bridges the
+       lines and two lines read as one gap-free block (synthetic "- Okay." ×2 at 2 px
+       leading: gap 0.011, but span/stem 2.6). A two-line cue mistaken for one would be
+       handed to --psm 7, which expects one line — that is the failure that matters.
+    ⚠️ Not a row-density count either: rows holding only an apostrophe or a full stop
+       fall under any density cut and split one line into "several".
+    Calibrated on The Chosen S01E01 (627 cues): one line gap ≤ 0.08 and span/stem
+    ≤ 1.93 (two outliers to 2.36); two lines gap ≥ 0.10 and span/stem ≥ 2.61.
+    Synthetic two-line worst case 2.45. Cut-offs 0.07 and 2.2 — the outliers simply
+    stay on --psm 6, today's behaviour.
+    """
+    import numpy as np
+    ink = np.asarray(img.convert('L')) < 128
+    rows = np.flatnonzero(ink.any(axis=1))
+    if rows.size == 0:
+        return False
+    block = ink[rows[0]:rows[-1] + 1]
+    span = block.shape[0]
+
+    longest = run = 0
+    for has_ink in block.any(axis=1):
+        run = 0 if has_ink else run + 1
+        longest = max(longest, run)
+    if longest >= 0.07 * span:
+        return False
+
+    # Tallest vertical run of ink in any column.
+    edge = np.zeros((1, block.shape[1]), np.int8)
+    d = np.diff(np.vstack([edge, block.astype(np.int8), edge]), axis=0)
+    starts_r, starts_c = np.nonzero(d == 1)
+    ends_r, ends_c = np.nonzero(d == -1)
+    # np.nonzero walks row-major; sort both by column so each start meets its own end.
+    so = np.lexsort((starts_r, starts_c))
+    eo = np.lexsort((ends_r, ends_c))
+    stem = int((ends_r[eo] - starts_r[so]).max())
+    return span < 2.2 * max(stem, 1)
+
+
 def _ocr_cue(img, tess_lang, notes):
     """Tesseract + the whole post-processing chain for one cue. ONE copy, two callers.
 
@@ -1497,13 +1545,27 @@ def _ocr_cue(img, tess_lang, notes):
     from .tess_engine import image_to_string as _engine_ocr
 
     italic = looks_italic(img)
-    # ⭐ Persistent engine first (~4.5x faster, identical text — see tess_engine.py).
-    # None means the library is unavailable: fall back, never return empty.
-    text = _engine_ocr(img, tess_lang)
-    if text is None:
-        text = pytesseract.image_to_string(
-            img, lang=tess_lang, config='--psm 6 --oem 3')
-    text = text.strip()
+
+    def _read(psm):
+        # ⭐ Persistent engine first (~4.5x faster, identical text — see tess_engine.py).
+        # None means the library is unavailable: fall back, never return empty.
+        out = _engine_ocr(img, tess_lang, psm)
+        if out is None:
+            out = pytesseract.image_to_string(
+                img, lang=tess_lang, config=f'--psm {psm} --oem 3')
+        return out.strip()
+
+    # ⭐ ONE LINE ON SCREEN → READ IT AS ONE LINE (--psm 7). Tony, 2026-11-13, The Chosen
+    # S01E01: a thin anti-aliased disc font broke --psm 6's block layout analysis. Clean,
+    # perfectly legible single lines came back split ("I'm / scare"), doubled ("- Adonai's
+    # / Adonai's words."), cut short ('"Fea') or as a page of garbage. --psm 7 read the
+    # same images right: ~40 of 396 single-line cues fixed in one episode.
+    # ⚠️ Fail SAFE: anything not clearly one line keeps --psm 6, and a --psm 7 read that
+    # comes back empty falls back to --psm 6 (it lost "- Well, do your job." outright).
+    if _is_single_line(img):
+        text = _read(7) or _read(6)
+    else:
+        text = _read(6)
     text = _reinsert_music_notes(_fix_ocr_text(text), notes)
     return apply_italic_tag(text, italic)
 
