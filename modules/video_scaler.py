@@ -201,6 +201,37 @@ def _detect_gpu_backends_quick():
     return backends
 
 
+_LIBPLACEBO_OK = None
+
+
+def _libplacebo_available():
+    """Can ffmpeg tone-map on the GPU (libplacebo over Vulkan)? Probed once with a tiny
+    10-bit test clip, then cached. False → the CPU zscale/tonemap chain is used instead."""
+    global _LIBPLACEBO_OK
+    if _LIBPLACEBO_OK is None:
+        try:
+            r = subprocess.run(
+                ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-init_hw_device', 'vulkan=vk',
+                 '-filter_hw_device', 'vk', '-f', 'lavfi',
+                 '-i', 'testsrc2=s=64x64:d=0.1,format=yuv420p10le',
+                 '-vf', 'hwupload,libplacebo=format=yuv420p:colorspace=bt709,hwdownload,format=yuv420p',
+                 '-f', 'null', '-'],
+                capture_output=True, timeout=20)
+            _LIBPLACEBO_OK = (r.returncode == 0)
+        except Exception:
+            _LIBPLACEBO_OK = False
+    return _LIBPLACEBO_OK
+
+
+def _libplacebo_tonemap_filter(target_w, target_h):
+    """HDR → SDR (BT.709) tone map AND resize in one GPU pass. Frames come in on the GPU
+    (Vulkan decode) and come back to system memory for the encoder. Also reads Dolby Vision
+    RPU data when present. ~2.4x faster than the CPU chain on 4K HDR (S04E02, 2026-11-14)."""
+    return (f'libplacebo=w={target_w}:h={target_h}:colorspace=bt709:color_primaries=bt709:'
+            'color_trc=bt709:range=tv:format=yuv420p:tonemapping=auto,'
+            'hwdownload,format=yuv420p')
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Scale filter builder
 # ═══════════════════════════════════════════════════════════════════
@@ -1399,8 +1430,10 @@ def open_video_scaler(app):
     # Processing
     # ═══════════════════════════════════════════════════════════════
 
-    def _build_cmd(f):
+    def _build_cmd(f, gpu=None, cpu_tonemap=False):
         """Build ffmpeg command for scaling a single file.
+        gpu = CUDA device index the job is pinned to (the Vulkan tone-map uses the same card).
+        cpu_tonemap = force the CPU tone-map chain (the retry when the GPU one fails).
         Returns (cmd_list, output_path) or (None, None).
         """
         input_path = f['path']
@@ -1452,9 +1485,19 @@ def open_video_scaler(app):
 
         # HDR → SDR tone mapping requested and file is actually HDR?
         do_tonemap = opt_hdr_to_sdr.get() and bool(f.get('hdr'))
+        # ...on the GPU when we can: decode + tone map + resize all in libplacebo (Vulkan).
+        # NVIDIA only (Vulkan index N = CUDA index N on this box, checked 2026-11-14).
+        gpu_tonemap = (do_tonemap and bid == 'nvenc' and not cpu_tonemap
+                       and _libplacebo_available())
 
         # Build command
         cmd = ['ffmpeg', '-y']
+
+        if gpu_tonemap:
+            _dev = gpu[0] if isinstance(gpu, (list, tuple)) else gpu
+            vk = 'vulkan=vk' + (f':{_dev}' if _dev is not None else '')
+            cmd.extend(['-init_hw_device', vk, '-hwaccel', 'vulkan', '-hwaccel_device', 'vk',
+                        '-hwaccel_output_format', 'vulkan'])
 
         # HW accel for GPU decode — disabled when tone mapping because
         # the zscale/tonemap filters require CPU (system memory) frames
@@ -1475,7 +1518,9 @@ def open_video_scaler(app):
         # (which may deliver padded frames for cropped H.264 content)
         scale_vf = _build_scale_filter(target_w, target_h, bid if bid != 'cpu' and not do_tonemap else None)
 
-        if do_tonemap:
+        if gpu_tonemap:
+            cmd.extend(['-vf', f'{_libplacebo_tonemap_filter(target_w, target_h)},setsar=1:1'])
+        elif do_tonemap:
             # HDR → SDR tone mapping filter chain (CPU filters):
             #   zscale  — convert to linear light in BT.2020
             #   tonemap — compress HDR luminance to SDR range
@@ -1558,8 +1603,9 @@ def open_video_scaler(app):
         cmd.append(out_path)
         return cmd, out_path
 
-    def _process_one(i, f, gpu=None):
-        """Process a single file. Returns True on success. gpu = CUDA device index to pin to."""
+    def _process_one(i, f, gpu=None, cpu_tonemap=False):
+        """Process a single file. Returns True on success. gpu = CUDA device index to pin to.
+        cpu_tonemap = skip the GPU tone map (set on the automatic retry after it fails)."""
         if stop_flag[0]:
             return False
 
@@ -1587,7 +1633,10 @@ def open_video_scaler(app):
         _update_progress(0.0, f"File {i + 1}/{len(files)}: {f['name']}")
 
         try:
-            cmd, out_path = _build_cmd(f)
+            cmd, out_path = _build_cmd(f, gpu, cpu_tonemap)
+            gpu_tonemap = 'libplacebo' in ' '.join(cmd or [])
+            if gpu_tonemap:
+                _log("  HDR → SDR on the GPU (libplacebo)", 'INFO')
             if cmd is None:
                 win.after(0, lambda: _update_status(i, 'Skipped'))
                 return True
@@ -1712,13 +1761,18 @@ def open_video_scaler(app):
                     _log(f"  Failed: empty output", 'ERROR')
                     return False
             else:
-                win.after(0, lambda: _update_status(i, 'Failed'))
-                _log(f"  Failed: ffmpeg returned {proc.returncode}", 'ERROR')
                 if os.path.isfile(out_path):
                     try:
                         os.remove(out_path)
                     except OSError:
                         pass
+                if gpu_tonemap:
+                    # GPU tone map failed (driver, odd codec Vulkan can't decode...) - the CPU
+                    # chain is slower but proven, so redo the file that way rather than fail it.
+                    _log(f"  GPU HDR → SDR failed (ffmpeg {proc.returncode}); retrying on the CPU", 'WARNING')
+                    return _process_one(i, f, gpu, cpu_tonemap=True)
+                win.after(0, lambda: _update_status(i, 'Failed'))
+                _log(f"  Failed: ffmpeg returned {proc.returncode}", 'ERROR')
                 return False
 
         except Exception as e:
