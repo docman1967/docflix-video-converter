@@ -2467,6 +2467,17 @@ class VideoConverter:
         return ok
 
     def convert_file(self, input_path, output_path, settings):
+        """Convert one file. If the GPU HDR→SDR tone map (libplacebo) was used and the
+        encode failed, redo it once with the proven CPU tone map (2026-11-14)."""
+        self._used_gpu_tonemap = False
+        ok = self._convert_file_once(input_path, output_path, settings)
+        if not ok and self._used_gpu_tonemap and not self.is_stopped:
+            self.log("GPU HDR → SDR failed; retrying with the CPU tonemap", 'WARNING')
+            ok = self._convert_file_once(input_path, output_path,
+                                         {**settings, '_cpu_tonemap': True})
+        return ok
+
+    def _convert_file_once(self, input_path, output_path, settings):
         """
         Convert a single video file
 
@@ -2536,7 +2547,17 @@ class VideoConverter:
             # automatically transfer to system memory for zscale/tonemap.
             effective_hw = hw_decode and not has_burn_in
 
-            if has_burn_in and hw_decode:
+            # HDR → SDR on the GPU (same as Rescale, aec6d4c): Vulkan decode, then libplacebo
+            # resizes + tone maps in one pass and hands frames back to system memory, so
+            # burn-in subtitles still work after it. NVENC only; Vulkan index N = CUDA index N.
+            from modules.video_scaler import _libplacebo_available, _libplacebo_tonemap_filter
+            gpu_tonemap = (hdr_to_sdr and encoder == 'nvenc'
+                           and transcode_mode in ('video', 'both')
+                           and not settings.get('_cpu_tonemap')
+                           and _libplacebo_available())
+            self._used_gpu_tonemap = gpu_tonemap
+
+            if has_burn_in and hw_decode and not gpu_tonemap:
                 self.log("Hardware decode disabled: burn-in subtitles require CPU filter pipeline", 'WARNING')
             if len(burn_in_subs) > 1:
                 self.log("Warning: only the first burn-in subtitle will be rendered", 'WARNING')
@@ -2650,7 +2671,11 @@ class VideoConverter:
             def _build_base_cmd():
                 """Build the common part of the ffmpeg command."""
                 c = ['ffmpeg', '-y']
-                if effective_hw and is_gpu and backend and transcode_mode in ['video', 'both'] and video_enc_name not in (None, 'copy'):
+                if gpu_tonemap and video_enc_name not in (None, 'copy'):
+                    vk = 'vulkan=vk' + (f':{self.gpu}' if self.gpu is not None else '')
+                    c.extend(['-init_hw_device', vk, '-hwaccel', 'vulkan', '-hwaccel_device', 'vk',
+                              '-hwaccel_output_format', 'vulkan'])
+                elif effective_hw and is_gpu and backend and transcode_mode in ['video', 'both'] and video_enc_name not in (None, 'copy'):
                     c.extend(backend['hwaccel'])
                 c.extend(['-i', input_path])
                 # Add external embed subtitle inputs
@@ -2686,6 +2711,7 @@ class VideoConverter:
                             RESOLUTION_MAP, _build_scale_filter, _probe_video_info)
 
                         vf_parts = []
+                        gpu_tm_size = None   # (w, h) for libplacebo when scaling on the GPU path
 
                         # ── Resolution scaling (before tonemap for performance) ──
                         # Scale FIRST so the heavy tonemap runs on smaller frames.
@@ -2714,6 +2740,9 @@ class VideoConverter:
                                         target_h += 1
                                     if src_w == target_w and src_h == target_h:
                                         self.log(f"Source already {src_w}×{src_h} — skipping scale", 'INFO')
+                                    elif gpu_tonemap:
+                                        gpu_tm_size = (target_w, target_h)
+                                        self.log(f"Scaling: {src_w}×{src_h} → {target_w}×{target_h} ({scale_resolution}, GPU)", 'INFO')
                                     else:
                                         if hdr_to_sdr or not effective_hw:
                                             scale_vf = _build_scale_filter(target_w, target_h, None)
@@ -2726,7 +2755,10 @@ class VideoConverter:
 
                         # ── HDR → SDR tonemapping (after scale for performance) ──
                         # Tonemapping on 1080p frames is ~4× faster than on 4K.
-                        if hdr_to_sdr:
+                        if gpu_tonemap:
+                            vf_parts.append(_libplacebo_tonemap_filter(*(gpu_tm_size or ())))
+                            self.log("HDR → SDR on the GPU (libplacebo)", 'INFO')
+                        elif hdr_to_sdr:
                             vf_parts.append(
                                 'zscale=t=linear:npl=100,format=gbrpf32le,'
                                 'tonemap=hable:desat=0,'
@@ -2865,9 +2897,10 @@ class VideoConverter:
             def _add_audio_args(c):
                 """Add audio encoding arguments — PER TRACK.
 
-                ⚠️ THIS IS THE THIRD COPY of this logic (the others are in
-                modules/converter.py and modules/media_processor.py) and it is the
-                one the main multi-GPU batch path actually uses. When changing
+                ⚠️ THIS IS THE SECOND COPY of this logic (the other is in
+                modules/media_processor.py; a third, modules/converter.py, was
+                quarantined 2026-11-14) and it is the one the main multi-GPU batch
+                path actually uses. When changing
                 audio behaviour, grep the whole tree for the log text -- fixing
                 only modules/ leaves Tony's primary workflow untouched, which is
                 exactly what happened on 2026-08-17.
@@ -3328,7 +3361,9 @@ class VideoConverter:
             # ── Log what we're about to do ──
             self.log(f"Video codec: {video_enc_name}", 'INFO')
             self.log(f"Mode: {mode}" + (" (two-pass)" if use_two_pass else " (GPU multipass)" if use_gpu_multipass else ""), 'INFO')
-            if hw_decode and is_gpu and backend:
+            if gpu_tonemap:
+                self.log("Hardware decode: vulkan enabled (GPU HDR → SDR)", 'INFO')
+            elif hw_decode and is_gpu and backend:
                 self.log(f"Hardware decode: {backend['hwaccel'][1]} enabled", 'INFO')
 
             import tempfile
@@ -3448,10 +3483,10 @@ class VideoConverter:
         # and produces NO output file. A negative map subtracts from whatever
         # the mapping already selected, so every -map path is left alone.
         #
-        # ⚠️ THIS IS A SECOND COPY. modules/converter.py has a near-identical
-        # _run_process, and the GUI calls THIS one — patching only the module
-        # copy looked correct, passed every headless test, and did nothing at
-        # all when Tony ran the app. If you change one, change both.
+        # This is the LIVE _run_process. (modules/converter.py had a near-identical
+        # copy that the GUI never called — patching only that one looked correct,
+        # passed every headless test, and did nothing when Tony ran the app. It was
+        # quarantined to _quarantine/ on 2026-11-14 so that can't happen again.)
         from modules.utils import exclude_unreadable_subs
         cmd = exclude_unreadable_subs(cmd, input_path, self.log)
         try:
@@ -9688,7 +9723,7 @@ class VideoConverterApp:
             if scale_res and scale_res != 'Original':
                 self.add_log(f"Target Resolution: {scale_res}", 'INFO')
             if self.hdr_to_sdr.get():
-                self.add_log("HDR → SDR: enabled (tonemap hable)", 'INFO')
+                self.add_log("HDR → SDR: enabled (GPU libplacebo on NVIDIA, else CPU hable)", 'INFO')
 
         # Log audio settings (if applicable)
         if mode in ['audio', 'both']:

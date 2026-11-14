@@ -223,11 +223,12 @@ def _libplacebo_available():
     return _LIBPLACEBO_OK
 
 
-def _libplacebo_tonemap_filter(target_w, target_h):
+def _libplacebo_tonemap_filter(target_w=None, target_h=None):
     """HDR → SDR (BT.709) tone map AND resize in one GPU pass. Frames come in on the GPU
     (Vulkan decode) and come back to system memory for the encoder. Also reads Dolby Vision
     RPU data when present. ~2.4x faster than the CPU chain on 4K HDR (S04E02, 2026-11-14)."""
-    return (f'libplacebo=w={target_w}:h={target_h}:colorspace=bt709:color_primaries=bt709:'
+    size = f'w={target_w}:h={target_h}:' if target_w and target_h else ''   # None = keep size
+    return (f'libplacebo={size}colorspace=bt709:color_primaries=bt709:'
             'color_trc=bt709:range=tv:format=yuv420p:tonemapping=auto,'
             'hwdownload,format=yuv420p')
 
