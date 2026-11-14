@@ -44,8 +44,9 @@ delete it — a wrong map is worse than no map.
         It is not. Deleting it breaks the fast AI upscaler.
 
     EXTRACTED BUT NOT YET WIRED UP — real work in progress, not dead code
-    converter.py         — VideoConverter engine, 1,100+ lines and
-        complete-looking; video_converter.py still uses its own copy
+    (converter.py — the extracted VideoConverter engine — was moved to
+        _quarantine/ on 2026-11-14: never wired up, drifted from the live copy
+        in video_converter.py, and doubled every fix. See _quarantine/README.md.)
     preferences.py       — save/load/reset; in practice superseded by
         VideoConverterApp.save_preferences (video_converter.py:7961)
     app.py               — Main VideoConverterApp GUI (not started)

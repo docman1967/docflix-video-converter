@@ -73,7 +73,9 @@ MODULE_DUNDERS = {
 # in-progress refactoring work, not corpses:
 #
 #   modules/converter.py    1,100+ lines, a complete-looking VideoConverter
-#                           extraction that simply is not wired up yet.
+#                           extraction that was never wired up. (Quarantined to
+#                           _quarantine/ 2026-11-14 at Tony's call: it had drifted
+#                           and doubled every fix. Not deleted.)
 #   modules/preferences.py  the same, for save/load/reset_preferences.
 #
 # And the sweep that produced this list also called torch_upscale_worker.py an
