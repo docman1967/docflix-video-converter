@@ -633,6 +633,36 @@ def _ocr_overlay_approach(filepath, stream_index, language, tess_lang,
     return cues
 
 
+def pgs_durations(show_pts, clear_pts):
+    """How long each PGS subtitle stays on screen, from the disc's own events.
+
+    A cue ends at whichever comes first after it starts: the disc's clear
+    (a PCS with zero objects) or the next subtitle replacing it.
+
+    ⚠️ 2026-11-15: this used to be "next subtitle's start, capped at 10 s", and the
+    clears were never read. So every line lingered through pauses until the next one
+    (Stranger Things: 87% of cues ran into the next, 939 sat exactly 10 s;
+    "See you tomorrow." was 1.7 s on the disc and 10 s in the SRT). Starts were always
+    right, which is why it looked fine while people talked.
+    The old rule is kept only as the fallback for a cue with no clear before the next one.
+    """
+    import bisect
+    clears = sorted(clear_pts)
+    durs = []
+    for i, start in enumerate(show_pts):
+        nxt = show_pts[i + 1] if i + 1 < len(show_pts) else None
+        k = bisect.bisect_right(clears, start + 0.0005)
+        clear = clears[k] if k < len(clears) else None
+        if clear is not None and (nxt is None or clear <= nxt):
+            dur = clear - start
+        elif nxt is not None:
+            dur = min(nxt - start, 10.0)   # no clear: the old rule
+        else:
+            dur = 3.0
+        durs.append(max(0.5, min(dur, 15.0)))
+    return durs
+
+
 def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                         progress_callback=None, frame_callback=None,
                         cancel_event=None, for_review=False):
@@ -785,6 +815,7 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
         obj_width = 0
         obj_height = 0
         display_sets = []  # (pts, palette_dict, rle_bytes, width, height)
+        clear_pts = []     # PCS with zero composition objects = "take it off screen"
         seg_count = 0
 
         while pos + 13 <= sup_len:
@@ -808,6 +839,11 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
 
             if seg_type == 0x16:  # PCS — Presentation Composition
                 current_pts = pts_sec
+                # Byte 10 is the composition object count. 0 = the screen is
+                # cleared. (A PCS with no ODS but objects > 0 is a palette
+                # update/fade, NOT an end, so "no bitmap" alone can't be used.)
+                if len(seg_data) >= 11 and seg_data[10] == 0:
+                    clear_pts.append(pts_sec)
                 obj_data_buf = bytearray()
                 obj_width = 0
                 obj_height = 0
@@ -866,13 +902,9 @@ def ocr_bitmap_subtitle(filepath, stream_index, language='eng',
                 progress_callback("No subtitle images found in PGS stream")
             return []
 
-        # Calculate durations from gaps between display sets
-        for i in range(len(display_sets)):
-            if i + 1 < len(display_sets):
-                dur = min(display_sets[i + 1][0] - display_sets[i][0], 10.0)
-            else:
-                dur = 3.0
-            dur = max(0.5, min(dur, 15.0))
+        # Durations: each cue ends at the disc's own clear (see pgs_durations)
+        durs = pgs_durations([d[0] for d in display_sets], clear_pts)
+        for i, dur in enumerate(durs):
             display_sets[i] = display_sets[i] + (dur,)
 
         if progress_callback:
