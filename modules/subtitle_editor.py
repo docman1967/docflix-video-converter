@@ -2780,8 +2780,31 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                         pass        # advisory feature; never lose the review
                     _rebuild_cue_tree(select_cue=cue_idx)
 
-                def _ignore_word(word, cue_idx):
+                def _ignore_everywhere(word):
+                    """Silence *word* in ALL THREE detectors for this review.
+
+                    ⭐ Tony, 2026-11-18: *"If I wanted to ignore YOLO I would
+                    have to select ignore twice for the same line."* YOLO is
+                    both ALL CAPS and not in the dictionary, so the row read
+                    "CAPS · sp: YOLO" and the menu offered it twice. Each
+                    "Ignore" only cleared its own detector, leaving the other
+                    flag standing. Intermittent because only a word that two
+                    detectors BOTH dislike gets two menu entries.
+
+                    "Ignore in this episode" means "stop showing me this
+                    word", whichever menu he reached it from.
+
+                    ⚠️ Each set keeps its own case rule. The caps set gets the
+                    EXACT form, so ignoring "shield" still never silences
+                    "SHIELD"; the caps scan only flags upper-case forms, so the
+                    exact add is inert for a lower-case word.
+                    """
                     review_ignore.add(word.lower())
+                    review_caps_ignore.add(word)
+                    review_ocr_ignore.add(word.lower())
+
+                def _ignore_word(word, cue_idx):
+                    _ignore_everywhere(word)
                     _rebuild_cue_tree(select_cue=cue_idx)
 
                 def _teach_caps(word, cue_idx):
@@ -2804,7 +2827,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     _rebuild_cue_tree(select_cue=cue_idx)
 
                 def _ignore_caps(word, cue_idx):
-                    review_caps_ignore.add(word)
+                    _ignore_everywhere(word)
                     _rebuild_cue_tree(select_cue=cue_idx)
 
                 def _teach_ocr_name(word, cue_idx):
@@ -2834,7 +2857,7 @@ def open_standalone_subtitle_editor(app, auto_video=None, auto_stream=None, auto
                     _rebuild_cue_tree(select_cue=cue_idx)
 
                 def _ignore_ocr(word, cue_idx):
-                    review_ocr_ignore.add(word.lower())
+                    _ignore_everywhere(word)
                     _rebuild_cue_tree(select_cue=cue_idx)
 
                 def _apply_fix(bad, good, cue_idx, item):
